@@ -27,6 +27,14 @@ ShellRoot {
         function clipboard(): void { launcher.open(";") }
     }
     property string openPop: ""      // only one dropdown open at a time
+    property var openBar: null       // …and only on the monitor whose pill was clicked
+    // one shared click-outside grab covering every monitor's bar + dropdowns
+    property var grabWins: []
+    HyprlandFocusGrab {
+        windows: root.grabWins
+        active: root.openPop !== ""
+        onCleared: root.openPop = ""
+    }
 
     // ---------- appearance (live-reloaded from ~/.config/sea-shell/appearance.json) ----------
     property real cfgRadius: 14
@@ -371,6 +379,7 @@ ShellRoot {
         signal clicked()
         signal rightClicked()
         signal scrolled(real dy)
+        property var owner: null
         readonly property bool open: root.openPop === key && key !== ""
         implicitHeight: 26; implicitWidth: pr.implicitWidth + 20
         radius: height/2
@@ -382,7 +391,7 @@ ShellRoot {
             Text { anchors.verticalCenter: parent.verticalCenter; text: pill.value; color: theme.text; visible: text!==""; font.pixelSize: 13; font.family: root.cfgFont } }
         MouseArea { id: pm; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
             acceptedButtons: Qt.LeftButton | Qt.RightButton
-            onClicked: (e)=>{ if(e.button===Qt.RightButton){ pill.rightClicked(); return } if(pill.key!=="") root.openPop = pill.open ? "" : pill.key; else pill.clicked() }
+            onClicked: (e)=>{ if(e.button===Qt.RightButton){ pill.rightClicked(); return } if(pill.key!==""){ root.openBar = pill.owner; root.openPop = pill.open ? "" : pill.key } else pill.clicked() }
             onWheel: (w)=> pill.scrolled(w.angleDelta.y) }
     }
 
@@ -408,11 +417,15 @@ ShellRoot {
         Region { id: sideRegion; item: dw.sidecar }
         readonly property point hp: (dw.visible && dw.host) ? dw.host.mapToGlobal(Qt.point(0, 0)) : Qt.point(-9999, -9999)
         readonly property int sw: dw.screen ? dw.screen.width : 1920
+        // mapToGlobal speaks virtual-desktop coordinates; this surface is monitor-local,
+        // so subtract the screen's global offset or cards drift on non-origin monitors
+        readonly property int scrX: dw.screen ? dw.screen.x : 0
+        readonly property int scrY: dw.screen ? dw.screen.y : 0
         Rectangle {
             id: cardBg
             width: dw.cardW; height: dw.cardH
-            x: Math.max(8, Math.min(dw.sw - width - 8, dw.hp.x + (dw.host ? dw.host.width/2 : 0) - width/2))
-            y: dw.hp.y + (dw.host ? dw.host.height : 0) + 8
+            x: Math.max(8, Math.min(dw.sw - width - 8, dw.hp.x - dw.scrX + (dw.host ? dw.host.width/2 : 0) - width/2))
+            y: dw.hp.y - dw.scrY + (dw.host ? dw.host.height : 0) + 8
             radius: root.cfgRadius; color: theme.a(theme.bg, root.dropOpacity)
             border.width: 1; border.color: theme.a(theme.iris,0.34)
         }
@@ -477,7 +490,7 @@ ShellRoot {
                 }
 
                 // ---------- CENTER: media (click → full player dropdown) ----------
-                Pill {
+                Pill { owner: bar
                     id: mprisPill
                     anchors { horizontalCenter: parent.horizontalCenter; verticalCenter: parent.verticalCenter }
                     visible: root.player !== null
@@ -493,8 +506,8 @@ ShellRoot {
                     onRightClicked: { if(root.player) root.player.togglePlaying() }
                     onScrolled: (dy)=>{ if(!root.player) return; if(dy>0) root.player.next(); else root.player.previous() }
                 }
-                Drop {
-                    id: mprisDrop; host: mprisPill; visible: root.openPop === "mpris"
+                Drop { screen: bar.screen
+                    id: mprisDrop; host: mprisPill; visible: root.openPop === "mpris" && root.openBar === bar
                     cardW: 380; cardH: mprCol.implicitHeight + 32
                     sidecar: root.lyricsOpen ? lyrPanel : null           // clicks land on the panel only while it's open
                     onVisibleChanged: if (visible && root.lyricsOpen) root.fetchLyrics()   // track may have changed while closed
@@ -647,8 +660,8 @@ ShellRoot {
                     spacing: 9
 
                     // ---- WEATHER dropdown (its pill is declared after the tray, below) ----
-                    Drop {
-                        id: wxDrop; host: wxPill; visible: root.openPop === "wx"
+                    Drop { screen: bar.screen
+                        id: wxDrop; host: wxPill; visible: root.openPop === "wx" && root.openBar === bar
                         cardW: 250; cardH: wxCol.implicitHeight + 32
                         Column { id: wxCol; anchors.fill: wxDrop.card; anchors.margins: 14; spacing: 8
                             Row { width: parent.width; spacing: 10
@@ -697,14 +710,14 @@ ShellRoot {
                                             if (e.button===Qt.LeftButton) { trayItem.modelData.activate(); return }
                                             // one shared menu window → opening a 2nd icon replaces it, same icon toggles
                                             if (root.openPop==="tray" && bar.trayHost===trayItem) { root.openPop=""; return }
-                                            bar.trayHost = trayItem; bar.trayMenuSel = trayItem.modelData; root.openPop = "tray" } }
+                                            bar.trayHost = trayItem; bar.trayMenuSel = trayItem.modelData; root.openBar = bar; root.openPop = "tray" } }
                                 } } } }
 
                     // ---- shared tray menu: ONE blurable layer-surface Drop (sea-shell:drop),
                     // part of the openPop single-dropdown system so the focus grab dismisses it ----
-                    Drop {
+                    Drop { screen: bar.screen
                         id: trayDrop; host: bar.trayHost
-                        visible: root.openPop === "tray" && bar.trayHost !== null
+                        visible: root.openPop === "tray" && root.openBar === bar && bar.trayHost !== null
                         cardW: 230; cardH: Math.max(30, tmCol.implicitHeight + 12)
                         QsMenuOpener { id: trayMenu; menu: bar.trayMenuSel ? bar.trayMenuSel.menu : null }
                         Column { id: tmCol; anchors.fill: trayDrop.card; anchors.margins: 6; spacing: 1
@@ -721,20 +734,20 @@ ShellRoot {
                                         onClicked: { if(!modelData.hasChildren){ modelData.triggered(); root.openPop="" } } } } } } }
 
                     // ---- WEATHER pill (placed after the tray) ----
-                    Pill { id: wxPill; anchors.verticalCenter: parent.verticalCenter; key: "wx"
+                    Pill { owner: bar; id: wxPill; anchors.verticalCenter: parent.verticalCenter; key: "wx"
                         visible: root.wxTemp!==""; icon: root.wxIcon(root.wxCond); value: root.wxTemp; accent: theme.frost }
 
                     // ---- CLIPBOARD (opens the launcher in clipboard mode) ----
-                    Pill { anchors.verticalCenter: parent.verticalCenter; icon: "content_paste"; accent: theme.frost
+                    Pill { owner: bar; anchors.verticalCenter: parent.verticalCenter; icon: "content_paste"; accent: theme.frost
                         onClicked: { root.openPop = ""; launcher.open(";") } }
 
                     // ---- NOTIFICATION CENTER (bell + badge) ----
-                    Pill { id: bellPill; anchors.verticalCenter: parent.verticalCenter; key: "notif"
+                    Pill { owner: bar; id: bellPill; anchors.verticalCenter: parent.verticalCenter; key: "notif"
                         icon: root.notes.length>0 ? "notifications" : "notifications_none"
                         accent: root.notes.length>0 ? theme.iris : theme.frost
                         value: root.notes.length>0 ? String(root.notes.length) : "" }
-                    Drop {
-                        id: notifDrop; host: bellPill; visible: root.openPop === "notif"
+                    Drop { screen: bar.screen
+                        id: notifDrop; host: bellPill; visible: root.openPop === "notif" && root.openBar === bar
                         cardW: 340; cardH: Math.min(440, notifCol.implicitHeight + 32)
                         Column { id: notifCol; anchors.fill: notifDrop.card; anchors.margins: 12; spacing: 8
                             Row { width: parent.width
@@ -757,11 +770,11 @@ ShellRoot {
                                                 Text { width: parent.width; visible: modelData.body!==""; text: modelData.body; color: theme.sub; font.pixelSize: 11; font.family: root.cfgFont; wrapMode: Text.WordWrap; maximumLineCount: 3; elide: Text.ElideRight; textFormat: Text.PlainText } } } } } } } }
 
                     // ---- WIFI ----
-                    Pill { id: wifiPill; anchors.verticalCenter: parent.verticalCenter; key: "wifi"
+                    Pill { owner: bar; id: wifiPill; anchors.verticalCenter: parent.verticalCenter; key: "wifi"
                         icon: root.wifiOn ? "wifi" : "wifi_off"; accent: root.wifiOn ? theme.frost : theme.bad
-                        value: root.wifiOn ? root.ssid : "off" }
-                    Drop {
-                        id: wifiDrop; host: wifiPill; visible: root.openPop === "wifi"
+                        }   // icon-only: SSID lives in the dropdown
+                    Drop { screen: bar.screen
+                        id: wifiDrop; host: wifiPill; visible: root.openPop === "wifi" && root.openBar === bar
                         cardW: 270; cardH: wifiCol.implicitHeight + 32
                         onVisibleChanged: if(!visible) root.wifiPwFor = ""
                         Column { id: wifiCol; anchors.fill: wifiDrop.card; anchors.margins: 12; spacing: 6
@@ -793,14 +806,14 @@ ShellRoot {
                             Text { visible: root.wifiList.length===0; text: "scanning…"; color: theme.faint; font.pixelSize: 11; font.family: root.cfgFont } } }
 
                     // ---- BLUETOOTH ----
-                    Pill { id: btPill; anchors.verticalCenter: parent.verticalCenter
+                    Pill { owner: bar; id: btPill; anchors.verticalCenter: parent.verticalCenter
                         visible: root.btAdapter !== null
                         key: root.btAdapter ? "bt" : ""
                         icon: (!root.btAdapter || !root.btAdapter.enabled) ? "bluetooth_disabled" : (root.btActive ? "bluetooth_connected" : (root.btAdapter.discovering ? "bluetooth_searching" : "bluetooth"))
                         accent: root.btActive ? theme.iris : ((root.btAdapter && root.btAdapter.enabled) ? theme.frost : theme.faint)
                         value: root.btActive ? root.btName(root.btActive) : "" }
-                    Drop {
-                        id: btDrop; host: btPill; visible: root.openPop === "bt"
+                    Drop { screen: bar.screen
+                        id: btDrop; host: btPill; visible: root.openPop === "bt" && root.openBar === bar
                         cardW: 280; cardH: btCol.implicitHeight + 32
                         Column { id: btCol; anchors.fill: btDrop.card; anchors.margins: 12; spacing: 7
                             Row { width: parent.width; height: 22
@@ -829,7 +842,7 @@ ShellRoot {
                             Text { visible: root.btDevices.length===0; text: (root.btAdapter&&root.btAdapter.enabled)?"tap search to scan…":"bluetooth is off"; color: theme.faint; font.pixelSize: 11; font.family: root.cfgFont } } }
 
                     // ---- VOLUME ----
-                    Pill { id: volPill; anchors.verticalCenter: parent.verticalCenter; key: "vol"
+                    Pill { owner: bar; id: volPill; anchors.verticalCenter: parent.verticalCenter; key: "vol"
                         readonly property var au: Pipewire.defaultAudioSink ? Pipewire.defaultAudioSink.audio : null
                         readonly property int vol: au ? Math.round(au.volume*100) : 0
                         icon: !au||au.muted ? "volume_off" : vol<34?"volume_mute":vol<67?"volume_down":"volume_up"
@@ -837,8 +850,8 @@ ShellRoot {
                         value: au ? (au.muted?"muted":vol+"%") : "—"
                         onRightClicked: { if(au) au.muted = !au.muted }
                         onScrolled: (dy)=>{ if(!au) return; au.muted=false; au.volume=Math.max(0,Math.min(1,au.volume+(dy>0?0.05:-0.05))) } }
-                    Drop {
-                        id: volDrop; host: volPill; visible: root.openPop === "vol"
+                    Drop { screen: bar.screen
+                        id: volDrop; host: volPill; visible: root.openPop === "vol" && root.openBar === bar
                         cardW: 280; cardH: volCol.implicitHeight + 32
                         Column { id: volCol; anchors.fill: volDrop.card; anchors.margins: 12; spacing: 9
                             Row { width: parent.width; spacing: 9
@@ -859,7 +872,7 @@ ShellRoot {
                                     MouseArea { id: sm; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: Pipewire.preferredDefaultAudioSink = modelData } } } } }
 
                     // ---- BATTERY ----
-                    Pill { id: batPill; anchors.verticalCenter: parent.verticalCenter
+                    Pill { owner: bar; id: batPill; anchors.verticalCenter: parent.verticalCenter
                         readonly property var dev: UPower.displayDevice
                         readonly property bool charging: !UPower.onBattery
                         readonly property int pct: dev ? Math.round(dev.percentage*100) : 0
@@ -867,8 +880,8 @@ ShellRoot {
                         key: visible ? "bat" : ""
                         icon: charging?"battery_charging_full":pct>=90?"battery_full":pct>=60?"battery_5_bar":pct>=35?"battery_3_bar":pct>=15?"battery_1_bar":"battery_alert"
                         value: pct+"%"; accent: charging?theme.good:pct<=20?theme.bad:theme.frost }
-                    Drop {
-                        id: batDrop; host: batPill; visible: root.openPop === "bat"
+                    Drop { screen: bar.screen
+                        id: batDrop; host: batPill; visible: root.openPop === "bat" && root.openBar === bar
                         cardW: 220; cardH: batCol.implicitHeight + 32
                         Column { id: batCol; anchors.fill: batDrop.card; anchors.margins: 12; spacing: 6
                             Text { text: "power profile"; color: theme.iris; font.pixelSize: 11; font.family: root.cfgFont; font.bold: true }
@@ -882,10 +895,10 @@ ShellRoot {
                                     MouseArea { id: bm; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.setProfile(modelData.k) } } } } }
 
                     // ---- CLOCK ----
-                    Pill { id: clockPill; anchors.verticalCenter: parent.verticalCenter; key: "cal"; icon: "schedule"
+                    Pill { owner: bar; id: clockPill; anchors.verticalCenter: parent.verticalCenter; key: "cal"; icon: "schedule"
                         value: Qt.formatDateTime(clock.date,"ddd d MMM · HH:mm"); accent: theme.iris }
-                    Drop {
-                        id: calDrop; host: clockPill; visible: root.openPop === "cal"
+                    Drop { screen: bar.screen
+                        id: calDrop; host: clockPill; visible: root.openPop === "cal" && root.openBar === bar
                         cardW: 250; cardH: calCol.implicitHeight + 32
                         Column { id: calCol; anchors.fill: calDrop.card; anchors.margins: 14; spacing: 10
                             property var dt: clock.date
@@ -906,9 +919,9 @@ ShellRoot {
                                         Text { anchors.centerIn: parent; text: parent.modelData; color: parent.isToday ? theme.bg : theme.text; font.pixelSize: 12; font.family: root.cfgFont; font.bold: parent.isToday } } } } } }
 
                     // ---- POWER (very end) ----
-                    Pill { id: pwrPill; anchors.verticalCenter: parent.verticalCenter; key: "pwr"; icon: "power_settings_new"; accent: theme.bad }
-                    Drop {
-                        id: pwrDrop; host: pwrPill; visible: root.openPop === "pwr"
+                    Pill { owner: bar; id: pwrPill; anchors.verticalCenter: parent.verticalCenter; key: "pwr"; icon: "power_settings_new"; accent: theme.bad }
+                    Drop { screen: bar.screen
+                        id: pwrDrop; host: pwrPill; visible: root.openPop === "pwr" && root.openBar === bar
                         cardW: 210; cardH: pwrCol.implicitHeight + 28
                         property string confirmL: ""          // reboot/shutdown ask for a second click
                         property string who: ""
@@ -926,7 +939,7 @@ ShellRoot {
                             Item { width: 1; height: 2 }
                             Repeater { model: [{i:"lock",l:"lock",c:"loginctl lock-session",col:theme.frost},
                                                {i:"bedtime",l:"suspend",c:"systemctl suspend",col:theme.frost},
-                                               {i:"logout",l:"log out",c:"hyprctl dispatch exit",col:theme.frost},
+                                               {i:"logout",l:"log out",c:"uwsm check is-active >/dev/null 2>&1 && uwsm stop || hyprctl dispatch exit",col:theme.frost},
                                                {i:"restart_alt",l:"reboot",c:"systemctl reboot",col:theme.warn,danger:true},
                                                {i:"power_settings_new",l:"shut down",c:"systemctl poweroff",col:theme.bad,danger:true}]
                                 delegate: Rectangle { required property var modelData
@@ -946,12 +959,9 @@ ShellRoot {
                 }
             }
 
-            // click anywhere outside the bar / open dropdown → close it
-            HyprlandFocusGrab {
-                windows: [bar, wxDrop, wifiDrop, btDrop, volDrop, batDrop, calDrop, pwrDrop, notifDrop, mprisDrop, trayDrop]
-                active: root.openPop !== ""
-                onCleared: root.openPop = ""
-            }
+            // register this bar's windows with the ONE shared focus grab at root —
+            // a grab per bar fights the other monitors' grabs and insta-closes dropdowns
+            Item { Component.onCompleted: { root.grabWins = root.grabWins.concat([bar, wxDrop, wifiDrop, btDrop, volDrop, batDrop, calDrop, pwrDrop, notifDrop, mprisDrop, trayDrop]) } }
         }
     }
 

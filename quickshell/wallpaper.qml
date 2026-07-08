@@ -48,10 +48,11 @@ ShellRoot {
                 "mpvpaper -o 'no-audio --loop-file=inf --panscan=1.0' '*' '" + p + "' & disown; " +
                 "else notify-send 'sea-shell' 'Animated wallpapers need mpvpaper: pacman -S mpvpaper'; fi"]);
         } else {
-            // static: swww → hyprpaper → mpvpaper (mpv can show a still) fallback
+            // static: swww (or its awww fork) → hyprpaper → mpvpaper (mpv can show a still) fallback
             Quickshell.execDetached(["sh", "-c",
                 "pkill -x mpvpaper 2>/dev/null; " +
-                "if command -v swww >/dev/null; then swww query >/dev/null 2>&1 || { swww-daemon & sleep 0.4; }; swww img '" + p + "' --transition-type grow --transition-fps 60; " +
+                "SW=$(command -v swww || command -v awww); SWD=$(command -v swww-daemon || command -v awww-daemon); " +
+                "if [ -n \"$SW\" ]; then \"$SW\" query >/dev/null 2>&1 || { \"$SWD\" & sleep 0.4; }; \"$SW\" img '" + p + "' --transition-type grow --transition-fps 60; " +
                 "elif command -v hyprpaper >/dev/null; then killall hyprpaper 2>/dev/null; hyprpaper & sleep 0.3; hyprctl hyprpaper preload '" + p + "'; hyprctl hyprpaper wallpaper ',\"" + p + "\"'; " +
                 "elif command -v mpvpaper >/dev/null; then mpvpaper -o 'no-audio --image-display-duration=inf --panscan=1.0' '*' '" + p + "' & disown; " +
                 "else notify-send 'sea-shell' 'Install a wallpaper daemon: pacman -S swww  (or hyprpaper / mpvpaper)'; fi"]);

@@ -94,10 +94,13 @@ check_deps() {
   done
   # used by the bar / launcher / keybinds — everything still works without them,
   # just with that feature missing
-  for d in grim slurp wl-copy cliphist fd playerctl brightnessctl swww hyprlock hypridle; do
+  for d in grim slurp wl-copy cliphist fd playerctl brightnessctl hyprlock hypridle; do
     command -v "$d" >/dev/null 2>&1 || optional+=("$d")
   done
-  [ -x /usr/lib/hyprpolkitagent ] || command -v hyprpolkitagent >/dev/null 2>&1 || optional+=("hyprpolkitagent")
+  # static wallpapers want swww (or its awww fork); animated ones want mpvpaper
+  command -v swww >/dev/null 2>&1 || command -v awww >/dev/null 2>&1 || optional+=("swww")
+  command -v mpvpaper >/dev/null 2>&1 || optional+=("mpvpaper")
+  [ -x /usr/lib/hyprpolkitagent/hyprpolkitagent ] || command -v hyprpolkitagent >/dev/null 2>&1 || optional+=("hyprpolkitagent")
   [ ${#missing[@]} -gt 0 ] && warn "REQUIRED but not on PATH: ${missing[*]}"
   [ ${#optional[@]} -gt 0 ] && warn "optional, some features off without them: ${optional[*]}"
   [ ${#optional[@]} -gt 0 ] && info "grab them all:  sudo pacman -S ${optional[*]}"
@@ -114,13 +117,8 @@ hypr_block() {
 source = $1/keybinds.conf
 exec-once = qs -c sea-shell
 exec-once = sh -c 'command -v hypridle >/dev/null && exec hypridle'
-exec-once = sh -c '[ -x /usr/lib/hyprpolkitagent ] && exec /usr/lib/hyprpolkitagent'"
-  # wallpaper restore at login (only when swww is available)
-  if command -v swww >/dev/null 2>&1; then
-    block="$block
-exec-once = swww-daemon
-exec-once = sh -c 'sleep 1; [ -f $DATA_DIR/sea-wall.png ] && swww img $DATA_DIR/sea-wall.png'"
-  fi
+exec-once = sh -c '[ -x /usr/lib/hyprpolkitagent/hyprpolkitagent ] && exec /usr/lib/hyprpolkitagent/hyprpolkitagent'
+exec-once = sh -c 'sleep 0.5; exec ~/.config/quickshell/sea-shell/sea-wallpaper-restore.sh'"
   printf '%s' "$block"
 }
 
@@ -187,10 +185,10 @@ set_wallpaper() {
   fi
   local IM; IM="$(command -v magick || command -v convert)"
   "$IM" -size 3840x2160 gradient:'#12507a-#0a1420' "$out" && ok "wallpaper → $out"
-  if command -v swww >/dev/null 2>&1; then
-    pgrep -x swww-daemon >/dev/null || swww-daemon 2>/dev/null &
-    sleep 0.5; swww img "$out" 2>/dev/null && ok "set via swww (and restored on every login)"
-  else warn "no swww — wallpaper generated but install 'swww' for it to apply + restore on login"; fi
+  printf '%s' "$out" > "$DATA_DIR/wallpaper"
+  if "$SCRIPT_DIR/quickshell/sea-wallpaper-restore.sh" 2>/dev/null; then
+    ok "wallpaper set (and restored on every login)"
+  else warn "install 'swww' (or awww) for the wallpaper to apply + restore on login"; fi
 }
 
 do_uninstall() {

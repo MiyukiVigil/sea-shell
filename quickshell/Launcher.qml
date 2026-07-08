@@ -117,9 +117,9 @@ Scope {
         {l:"Suspend",         s:"systemctl suspend",        i:"bedtime",            c:"systemctl suspend"},
         {l:"Reboot",          s:"systemctl reboot",         i:"restart_alt",        c:"systemctl reboot", warn:true},
         {l:"Shut down",       s:"systemctl poweroff",       i:"mode_off_on",        c:"systemctl poweroff", warn:true},
-        {l:"Log out",         s:"hyprctl dispatch exit",    i:"logout",             c:"hyprctl dispatch exit", warn:true},
+        {l:"Log out",         s:"uwsm check is-active >/dev/null 2>&1 && uwsm stop || hyprctl dispatch exit",    i:"logout",             c:"uwsm check is-active >/dev/null 2>&1 && uwsm stop || hyprctl dispatch exit", warn:true},
         {l:"Reload Hyprland", s:"hyprctl reload",           i:"refresh",            c:"hyprctl reload"},
-        {l:"Restart bar",     s:"quickshell sea-shell",      i:"replay",             c:"pkill -f 'qs -c sea-shell'; sleep 0.3; hyprctl dispatch exec 'qs -c sea-shell'"}
+        {l:"Restart bar",     s:"quickshell sea-shell",      i:"replay",             c:"pkill -xf 'qs -c sea-shell'; sleep 0.3; hyprctl dispatch exec 'qs -c sea-shell'"}
     ]
 
     // ---------- async file search (~ mode, debounced) ----------

@@ -15,7 +15,7 @@ import QtQuick.Layouts
 ShellRoot {
     id: root
     property string repo: Qt.resolvedUrl(".").toString().replace("file://", "").replace(/\/$/, "")
-    property int tab: 0
+    property int tab: 9
     function run(cmd) { Quickshell.execDetached(["sh", "-c", cmd]) }
     onTabChanged: {
         if (tab === 7) kbProc.running = true          // keybinds: refresh binds
@@ -314,41 +314,7 @@ ShellRoot {
             }
         }
     }
-    function rescanWifi() { run("nmcli dev wifi rescan 2>/dev/null"); wifiScan.running = true; savedScan.running = true; infoScan.running = true }
-
-    // saved (known) wifi connections — for the forget button + "saved" tag
-    property var savedCons: []
-    Process { id: savedScan; running: true
-        command: ["sh","-c","nmcli -t -f NAME,TYPE con show 2>/dev/null | awk -F: '$2==\"802-11-wireless\"{print $1}'"]
-        stdout: StdioCollector { id: savedOut; onStreamFinished: root.savedCons = savedOut.text.trim() ? savedOut.text.trim().split("\n") : [] } }
-    function wifiForget(ssid) {
-        var e = ssid.replace(/'/g, "");
-        root.wifiMsg = "forgot “" + e + "”";
-        run("nmcli con delete id '" + e + "' 2>/dev/null"); wifiRefresh.start();
-    }
-    // active connection details (ip · gateway · dns)
-    property var netInfo: ({ dns: [] })
-    Process { id: infoScan; running: true
-        command: ["sh","-c","dev=$(nmcli -t -f DEVICE,TYPE,STATE dev status 2>/dev/null | awk -F: '$2==\"wifi\" && $3==\"connected\"{print $1; exit}'); [ -z \"$dev\" ] && exit 0; printf 'iface=%s\\n' \"$dev\"; nmcli -t -f IP4.ADDRESS,IP4.GATEWAY,IP4.DNS dev show \"$dev\" 2>/dev/null"]
-        stdout: StdioCollector { id: infoOut; onStreamFinished: {
-            var o = { dns: [] };
-            infoOut.text.split("\n").forEach(l => {
-                if (l.indexOf("iface=") === 0) o.iface = l.slice(6);
-                else if (l.indexOf("IP4.ADDRESS") === 0) o.ip = l.split(":")[1] || "";
-                else if (l.indexOf("IP4.GATEWAY") === 0) o.gw = l.split(":")[1] || "";
-                else if (l.indexOf("IP4.DNS") === 0) o.dns.push(l.split(":")[1] || "");
-            });
-            root.netInfo = o;
-        } } }
-    // hidden network join
-    property bool hidOpen: false
-    function wifiJoinHidden(ssid, pw) {
-        if (!ssid.length) return;
-        var e = ssid.replace(/'/g, ""), p = pw.replace(/'/g, "'\\''");
-        root.wifiMsg = "connecting to hidden “" + e + "”…"; root.hidOpen = false;
-        wifiJoin.command = ["sh","-c","nmcli dev wifi connect '" + e + "'" + (pw.length ? " password '" + p + "'" : "") + " hidden yes 2>&1"];
-        wifiJoin.running = true;
-    }
+    function rescanWifi() { run("nmcli dev wifi rescan 2>/dev/null"); wifiScan.running = true }
     // connecting: open networks join directly; secured ones expand an INLINE password
     // row (a spawned terminal would sit behind this overlay's exclusive keyboard grab)
     property string wifiPwFor: ""     // ssid awaiting its password
@@ -450,7 +416,7 @@ ShellRoot {
             RowLayout {
                 anchors.fill: parent; anchors.leftMargin: 13; anchors.rightMargin: 13; spacing: 10
                 Sym { text: parent.parent.parent.icon; sz: 19; color: parent.parent.parent.tint }
-                Text { text: parent.parent.parent.label; color: theme.text; font.pixelSize: 13; font.family: "monospace"; elide: Text.ElideRight; Layout.fillWidth: true }
+                Text { text: parent.parent.parent.label; color: theme.text; font.pixelSize: 13; font.family: "monospace"; Layout.fillWidth: true }
             }
             MouseArea {
                 id: rma; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
@@ -741,30 +707,6 @@ ShellRoot {
                                 Sym { text: "refresh"; sz: 17; color: theme.sub
                                     MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.rescanWifi() } }
                             }
-                            // active connection details
-                            Rectangle {
-                                visible: !!root.netInfo.ip
-                                Layout.fillWidth: true; implicitHeight: netCol.implicitHeight + 16; radius: 8
-                                color: theme.a(theme.iris, 0.08); border.width: 1; border.color: theme.a(theme.iris, 0.25)
-                                ColumnLayout {
-                                    id: netCol; anchors.fill: parent; anchors.margins: 10; spacing: 3
-                                    Repeater {
-                                        model: [
-                                            { k: "ip",      v: root.netInfo.ip || "" },
-                                            { k: "gateway", v: root.netInfo.gw || "" },
-                                            { k: "dns",     v: (root.netInfo.dns || []).join("  ·  ") },
-                                            { k: "iface",   v: root.netInfo.iface || "" }
-                                        ]
-                                        delegate: RowLayout {
-                                            required property var modelData
-                                            visible: modelData.v !== ""
-                                            Layout.fillWidth: true; spacing: 8
-                                            Text { text: modelData.k; color: theme.faint; font.pixelSize: 10; font.family: "monospace"; Layout.preferredWidth: 56 }
-                                            Text { text: modelData.v; color: theme.sub; font.pixelSize: 11; font.family: "monospace"; elide: Text.ElideRight; Layout.fillWidth: true }
-                                        }
-                                    }
-                                }
-                            }
                             ColumnLayout {
                                 Layout.fillWidth: true; spacing: 6
                                 Repeater {
@@ -782,32 +724,22 @@ ShellRoot {
                                         ColumnLayout {
                                             anchors { fill: parent; leftMargin: 12; rightMargin: 12; topMargin: 4; bottomMargin: 6 }
                                             spacing: 2
-                                            Item {
-                                                Layout.fillWidth: true; implicitHeight: 30
-                                                // base click zone UNDER the icon buttons
+                                            RowLayout {
+                                                Layout.fillWidth: true; implicitHeight: 30; spacing: 9
+                                                Sym {
+                                                    text: modelData.signal > 66 ? "signal_wifi_4_bar" : modelData.signal > 33 ? "network_wifi_3_bar" : "network_wifi_1_bar"
+                                                    sz: 17; color: modelData.active ? theme.iris : theme.frost
+                                                }
+                                                Text { text: modelData.ssid; color: theme.text; font.pixelSize: 12; font.family: "monospace"; elide: Text.ElideRight; Layout.fillWidth: true }
+                                                Text { visible: modelData.active && wma.containsMouse; text: "disconnect"; color: theme.bad; font.pixelSize: 10; font.family: "monospace" }
+                                                Sym { text: "lock"; sz: 13; color: theme.faint; visible: modelData.secure }
+                                                Sym { text: "check"; sz: 15; color: theme.good; visible: modelData.active }
                                                 MouseArea { id: wma; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
                                                     onClicked: {
                                                         if (modelData.active) { root.wifiDisconnect(modelData.ssid); return }
                                                         if (wrow.asking) { root.wifiPwFor = ""; return }
                                                         root.wifiConnect(modelData.ssid, modelData.secure)
                                                     } }
-                                                RowLayout {
-                                                    anchors.fill: parent; spacing: 9
-                                                    readonly property bool saved: root.savedCons.indexOf(modelData.ssid) >= 0
-                                                    Sym {
-                                                        text: modelData.signal > 66 ? "signal_wifi_4_bar" : modelData.signal > 33 ? "network_wifi_3_bar" : "network_wifi_1_bar"
-                                                        sz: 17; color: modelData.active ? theme.iris : theme.frost
-                                                    }
-                                                    Text { text: modelData.ssid; color: theme.text; font.pixelSize: 12; font.family: "monospace"; elide: Text.ElideRight; Layout.fillWidth: true }
-                                                    Text { text: modelData.signal + "%"; color: theme.faint; font.pixelSize: 10; font.family: "monospace" }
-                                                    // forget (saved networks) — its own hitbox, sits above the row's click zone
-                                                    Sym { visible: wma.containsMouse && parent.saved; text: "delete"; sz: 15; color: fgm.containsMouse ? theme.bad : theme.faint
-                                                        MouseArea { id: fgm; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
-                                                            onClicked: root.wifiForget(modelData.ssid) } }
-                                                    Sym { visible: modelData.active && wma.containsMouse; text: "link_off"; sz: 15; color: theme.bad }
-                                                    Sym { text: "lock"; sz: 13; color: theme.faint; visible: modelData.secure && !wma.containsMouse }
-                                                    Sym { text: "check"; sz: 15; color: theme.good; visible: modelData.active && !wma.containsMouse }
-                                                }
                                             }
                                             // inline password row (secured networks)
                                             RowLayout {
@@ -838,48 +770,10 @@ ShellRoot {
                                     }
                                 }
                                 Text { visible: root.wifiList.length === 0; text: root.wifiRadio ? "scanning…" : "wi-fi is off"; color: theme.faint; font.pixelSize: 11; font.family: "monospace" }
-                                // join a hidden network
-                                Rectangle {
-                                    Layout.fillWidth: true; implicitHeight: root.hidOpen ? 78 : 34; radius: 8; clip: true
-                                    Behavior on implicitHeight { NumberAnimation { duration: 110; easing.type: Easing.OutCubic } }
-                                    color: theme.a(theme.line, 0.3); border.width: 1; border.color: root.hidOpen ? theme.iris : theme.a(theme.iris, 0.12)
-                                    ColumnLayout {
-                                        anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 12; anchors.topMargin: 4; anchors.bottomMargin: 6; spacing: 4
-                                        Item {
-                                            Layout.fillWidth: true; implicitHeight: 26
-                                            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
-                                                onClicked: { root.hidOpen = !root.hidOpen; if (root.hidOpen) hidSsid.forceActiveFocus() } }
-                                            RowLayout { anchors.fill: parent; spacing: 9
-                                                Sym { text: "visibility_off"; sz: 16; color: theme.frost }
-                                                Text { text: "join a hidden network…"; color: theme.sub; font.pixelSize: 12; font.family: "monospace"; Layout.fillWidth: true }
-                                                Sym { text: root.hidOpen ? "expand_less" : "expand_more"; sz: 16; color: theme.faint } }
-                                        }
-                                        RowLayout {
-                                            visible: root.hidOpen; Layout.fillWidth: true; spacing: 8
-                                            Rectangle { Layout.fillWidth: true; implicitHeight: 28; radius: 7
-                                                color: theme.a(theme.bg, 0.8); border.width: 1; border.color: theme.a(theme.iris, 0.4)
-                                                TextInput { id: hidSsid; anchors { fill: parent; leftMargin: 9; rightMargin: 9 }
-                                                    verticalAlignment: TextInput.AlignVCenter; color: theme.text; font.pixelSize: 12; font.family: "monospace"; clip: true
-                                                    Text { text: "ssid"; visible: hidSsid.text===""; color: theme.faint; font.pixelSize: 11; font.family: "monospace"; anchors.verticalCenter: parent.verticalCenter } } }
-                                            Rectangle { Layout.fillWidth: true; implicitHeight: 28; radius: 7
-                                                color: theme.a(theme.bg, 0.8); border.width: 1; border.color: theme.a(theme.iris, 0.4)
-                                                TextInput { id: hidPw; anchors { fill: parent; leftMargin: 9; rightMargin: 9 }
-                                                    verticalAlignment: TextInput.AlignVCenter; color: theme.text; font.pixelSize: 12; font.family: "monospace"; echoMode: TextInput.Password; clip: true
-                                                    Text { text: "password (blank if open)"; visible: hidPw.text===""; color: theme.faint; font.pixelSize: 11; font.family: "monospace"; anchors.verticalCenter: parent.verticalCenter }
-                                                    Keys.onReturnPressed: { root.wifiJoinHidden(hidSsid.text, hidPw.text); hidSsid.text=""; hidPw.text="" } } }
-                                            Rectangle { implicitWidth: 56; implicitHeight: 28; radius: 7
-                                                color: hjm.containsMouse ? theme.iris : theme.a(theme.iris, 0.25); border.width: 1; border.color: theme.iris
-                                                Text { anchors.centerIn: parent; text: "join"; font.pixelSize: 11; font.family: "monospace"; font.bold: true
-                                                    color: hjm.containsMouse ? theme.bg : theme.frost }
-                                                MouseArea { id: hjm; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
-                                                    onClicked: { root.wifiJoinHidden(hidSsid.text, hidPw.text); hidSsid.text=""; hidPw.text="" } } }
-                                        }
-                                    }
-                                }
-                                Text { visible: root.wifiMsg !== ""; Layout.fillWidth: true; wrapMode: Text.Wrap; text: root.wifiMsg
+                                Text { visible: root.wifiMsg !== ""; text: root.wifiMsg
                                     color: root.wifiMsg.indexOf("✓") >= 0 ? theme.good : root.wifiMsg.indexOf("wrong") >= 0 ? theme.bad : theme.sub
                                     font.pixelSize: 11; font.family: "monospace" }
-                                Text { Layout.fillWidth: true; wrapMode: Text.Wrap; text: "click to connect / disconnect · the trash icon forgets a saved network · secured ones ask inline"
+                                Text { text: "click a secured network → password field opens right here · click the active one to disconnect"
                                     color: theme.faint; font.pixelSize: 10; font.family: "monospace"; Layout.topMargin: 4 }
                             }
                         }
@@ -1013,8 +907,8 @@ ShellRoot {
                                 Row2 { icon: "terminal"; label: "Terminal"; cmd: "kitty & disown"; quitAfter: true }
                                 Row2 { icon: "wallpaper"; label: "Wallpapers"; cmd: "qs -p " + root.repo + "/wallpaper.qml & disown"; quitAfter: true }
                                 Row2 { icon: "content_paste"; label: "Clipboard history"; cmd: "qs -c sea-shell ipc call launcher clipboard"; quitAfter: true }
-                                Row2 { icon: "photo_camera"; label: "Screenshot region"; cmd: "sleep 0.2; grim -g \"$(slurp)\" - | wl-copy"; quitAfter: true }
-                                Row2 { icon: "keyboard"; label: "Keybinds editor"; cmd: "qs -p " + root.repo + "/keybinds.qml & disown"; quitAfter: true }
+                                Row2 { icon: "photo_camera"; label: "Screenshot → clipboard"; cmd: "sleep 0.2; grim -g \"$(slurp)\" - | wl-copy"; quitAfter: true }
+                                Row2 { icon: "keyboard"; label: "Keybinds — search · rebind"; cmd: "qs -p " + root.repo + "/keybinds.qml & disown"; quitAfter: true }
                                 Row2 { icon: "edit_note"; label: "Edit keybinds"; cmd: "xdg-open \"$(dirname \"$(readlink -f ~/.config/quickshell/sea-shell)\")/hypr/keybinds.conf\" & disown"; quitAfter: true }
                                 Row2 { icon: "settings"; label: "Edit configs"; cmd: "kitty --directory " + root.repo + "/.. & disown"; quitAfter: true }
                             }
@@ -1102,7 +996,7 @@ ShellRoot {
                                     }
                                 }
                             }
-                            Text { Layout.fillWidth: true; elide: Text.ElideRight; text: root.kbShown.length + "/" + root.kbBinds.length + " binds · rebinds rewrite keybinds.conf + reload hyprland"
+                            Text { text: root.kbShown.length + "/" + root.kbBinds.length + " binds · rebinds rewrite keybinds.conf + reload hyprland"
                                 color: theme.faint; font.pixelSize: 10; font.family: "monospace" }
                         }
 
@@ -1229,7 +1123,7 @@ ShellRoot {
                                 Row2 { icon: "wallpaper"; label: "Edit lock screen"; cmd: "xdg-open ~/.config/hypr/hyprlock.conf & disown"; quitAfter: true }
                                 Row2 { icon: "restart_alt"; label: "Restart idle daemon"; cmd: "pkill -x hypridle; sleep 0.3; hyprctl dispatch exec hypridle" }
                             }
-                            Text { Layout.fillWidth: true; wrapMode: Text.Wrap; text: "timeout edits apply after restarting the idle daemon"; color: theme.faint; font.pixelSize: 10; font.family: "monospace" }
+                            Text { text: "timeout edits apply after restarting the idle daemon"; color: theme.faint; font.pixelSize: 10; font.family: "monospace" }
                         }
 
                         // ================= POWER =================

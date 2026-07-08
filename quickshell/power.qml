@@ -31,7 +31,7 @@ ShellRoot {
     property var actions: [
         {i:"lock",       l:"Lock",      k:Qt.Key_L, c:"loginctl lock-session",  col:theme.frost},
         {i:"bedtime",    l:"Suspend",   k:Qt.Key_S, c:"systemctl suspend",      col:theme.frost},
-        {i:"logout",     l:"Log out",   k:Qt.Key_O, c:"hyprctl dispatch exit",  col:theme.frost},
+        {i:"logout",     l:"Log out",   k:Qt.Key_O, c:"uwsm check is-active >/dev/null 2>&1 && uwsm stop || hyprctl dispatch exit",  col:theme.frost},
         {i:"restart_alt",l:"Reboot",    k:Qt.Key_R, c:"systemctl reboot",       col:theme.warn, danger:true},
         {i:"power_settings_new", l:"Shut down", k:Qt.Key_P, c:"systemctl poweroff", col:theme.bad, danger:true}
     ]

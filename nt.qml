@@ -15,7 +15,7 @@ import QtQuick.Layouts
 ShellRoot {
     id: root
     property string repo: Qt.resolvedUrl(".").toString().replace("file://", "").replace(/\/$/, "")
-    property int tab: 0
+    property int tab: 2
     function run(cmd) { Quickshell.execDetached(["sh", "-c", cmd]) }
     onTabChanged: {
         if (tab === 7) kbProc.running = true          // keybinds: refresh binds
@@ -876,10 +876,10 @@ ShellRoot {
                                         }
                                     }
                                 }
-                                Text { visible: root.wifiMsg !== ""; Layout.fillWidth: true; wrapMode: Text.Wrap; text: root.wifiMsg
+                                Text { visible: root.wifiMsg !== ""; text: root.wifiMsg
                                     color: root.wifiMsg.indexOf("✓") >= 0 ? theme.good : root.wifiMsg.indexOf("wrong") >= 0 ? theme.bad : theme.sub
                                     font.pixelSize: 11; font.family: "monospace" }
-                                Text { Layout.fillWidth: true; wrapMode: Text.Wrap; text: "click to connect / disconnect · the trash icon forgets a saved network · secured ones ask inline"
+                                Text { text: "click to connect / disconnect · 󰩹 forgets a saved network · secured ones ask for the password inline"
                                     color: theme.faint; font.pixelSize: 10; font.family: "monospace"; Layout.topMargin: 4 }
                             }
                         }
@@ -1102,7 +1102,7 @@ ShellRoot {
                                     }
                                 }
                             }
-                            Text { Layout.fillWidth: true; elide: Text.ElideRight; text: root.kbShown.length + "/" + root.kbBinds.length + " binds · rebinds rewrite keybinds.conf + reload hyprland"
+                            Text { text: root.kbShown.length + "/" + root.kbBinds.length + " binds · rebinds rewrite keybinds.conf + reload hyprland"
                                 color: theme.faint; font.pixelSize: 10; font.family: "monospace" }
                         }
 
@@ -1229,7 +1229,7 @@ ShellRoot {
                                 Row2 { icon: "wallpaper"; label: "Edit lock screen"; cmd: "xdg-open ~/.config/hypr/hyprlock.conf & disown"; quitAfter: true }
                                 Row2 { icon: "restart_alt"; label: "Restart idle daemon"; cmd: "pkill -x hypridle; sleep 0.3; hyprctl dispatch exec hypridle" }
                             }
-                            Text { Layout.fillWidth: true; wrapMode: Text.Wrap; text: "timeout edits apply after restarting the idle daemon"; color: theme.faint; font.pixelSize: 10; font.family: "monospace" }
+                            Text { text: "timeout edits apply after restarting the idle daemon"; color: theme.faint; font.pixelSize: 10; font.family: "monospace" }
                         }
 
                         // ================= POWER =================
