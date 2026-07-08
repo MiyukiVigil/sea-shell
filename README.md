@@ -2,6 +2,11 @@
 
 A Hyprland rice by MiyukiVigil — a shell, by the sea. (yes.)
 
+<!-- hosted on the site, not in the repo — clones stay lean -->
+![sea-shell — the player dropdown with synced lyrics and the bit-perfect badge, over an animated whale wallpaper](https://seashell.miyukivigil.tech/images/showcase.webp)
+
+**[seashell.miyukivigil.tech](https://seashell.miyukivigil.tech)**
+
 Built for: **CachyOS · Hyprland 0.55 · Quickshell 0.3 · kitty · fish · starship**.
 No external launcher needed — the app launcher, clipboard picker, power menu and
 control center are all native Quickshell.
