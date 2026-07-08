@@ -345,7 +345,7 @@ ShellRoot {
     function wifiJoinHidden(ssid, pw) {
         if (!ssid.length) return;
         var e = ssid.replace(/'/g, ""), p = pw.replace(/'/g, "'\\''");
-        root.wifiMsg = "connecting to hidden “" + e + "”…"; root.hidOpen = false;
+        root.wifiMsg = "connecting to hidden “" + e + "”…"; root.hidOpen = false; root.wifiRetry = "";
         wifiJoin.command = ["sh","-c","nmcli dev wifi connect '" + e + "'" + (pw.length ? " password '" + p + "'" : "") + " hidden yes 2>&1"];
         wifiJoin.running = true;
     }
@@ -357,17 +357,24 @@ ShellRoot {
     Process { running: true; command: ["sh","-c","nmcli radio wifi"]
         stdout: StdioCollector { id: wrOut; onStreamFinished: root.wifiRadio = wrOut.text.trim() === "enabled" } }
     function setWifiRadio(on) { root.wifiRadio = on; root.wifiMsg = on ? "" : "wi-fi off"; run("nmcli radio wifi " + (on ? "on" : "off")); wifiRefresh.start() }
+    property string wifiRetry: ""     // ssid whose saved profile we're trying before prompting
     function wifiConnect(ssid, secure) {
         var e = ssid.replace(/'/g, "");
+        if (secure && root.savedCons.indexOf(ssid) >= 0) {
+            // known network → reconnect with the STORED password; prompt only on failure
+            root.wifiMsg = "connecting…"; root.wifiRetry = ssid;
+            wifiJoin.command = ["sh","-c","nmcli con up id '" + e + "' 2>&1"];
+            wifiJoin.running = true; return;
+        }
         if (secure) { root.wifiPwFor = ssid; root.wifiMsg = ""; return }
-        root.wifiMsg = "connecting…";
+        root.wifiMsg = "connecting…"; root.wifiRetry = "";
         wifiJoin.command = ["sh","-c","nmcli dev wifi connect '" + e + "' 2>&1"];
         wifiJoin.running = true;
     }
     function wifiJoinPw(ssid, pw) {
         if (!pw.length) return;
         var e = ssid.replace(/'/g, ""), p = pw.replace(/'/g, "'\\''");
-        root.wifiMsg = "connecting…"; root.wifiPwFor = "";
+        root.wifiMsg = "connecting…"; root.wifiPwFor = ""; root.wifiRetry = "";
         wifiJoin.command = ["sh","-c","nmcli dev wifi connect '" + e + "' password '" + p + "' 2>&1"];
         wifiJoin.running = true;
     }
@@ -379,7 +386,14 @@ ShellRoot {
     Process { id: wifiJoin
         stdout: StdioCollector { id: wjOut; onStreamFinished: {
             var t = wjOut.text.trim();
-            root.wifiMsg = t.indexOf("successfully") >= 0 ? "connected ✓"
+            var ok = t.indexOf("successfully") >= 0;
+            if (!ok && root.wifiRetry !== "") {           // stored secret failed → ask inline
+                root.wifiPwFor = root.wifiRetry; root.wifiRetry = "";
+                root.wifiMsg = "saved password didn't work — enter it again";
+                wifiRefresh.start(); return;
+            }
+            root.wifiRetry = "";
+            root.wifiMsg = ok ? "connected ✓"
                          : t.indexOf("Secrets were required") >= 0 || t.indexOf("password") >= 0 ? "wrong password — try again"
                          : t.split("\n")[0].slice(0, 64);
             wifiRefresh.start();

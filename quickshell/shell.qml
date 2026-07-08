@@ -107,10 +107,23 @@ ShellRoot {
     }
     Timer { interval: 8000; running: true; repeat: true; triggeredOnStart: true; onTriggered: wifiScan.running = true }
     property string wifiPwFor: ""     // ssid awaiting an inline password
-    // secured → reveal the inline password field; open networks connect straight away.
+    property string wifiRetry: ""     // ssid whose saved profile we're trying first
+    // known networks reconnect with their STORED password (`nmcli con up`); the
+    // inline field only appears for new networks or when the saved secret fails.
+    Process { id: wifiUp
+        stdout: StdioCollector { id: wupOut; onStreamFinished: {
+            var ok = wupOut.text.indexOf("successfully") >= 0;
+            if (!ok && root.wifiRetry !== "") root.wifiPwFor = root.wifiRetry;   // no/bad profile → ask
+            else root.wifiPwFor = "";
+            root.wifiRetry = ""; wifiRefresh.start();
+        } } }
     function wifiConnect(s, secure) {
         var e = s.replace(/'/g,"");
-        if (secure) { root.wifiPwFor = s; return; }   // ask for a password inline (empty = try saved creds)
+        if (secure) {
+            root.wifiRetry = s;
+            wifiUp.command = ["sh","-c","nmcli con up id '"+e+"' 2>&1"];
+            wifiUp.running = true; return;
+        }
         Quickshell.execDetached(["sh","-c","nmcli dev wifi connect '"+e+"' || notify-send 'sea-shell' 'Could not join "+e+"'"]);
         root.wifiPwFor = ""; wifiRefresh.start();
     }
