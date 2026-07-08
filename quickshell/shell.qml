@@ -28,11 +28,19 @@ ShellRoot {
     }
     property string openPop: ""      // only one dropdown open at a time
     property var openBar: null       // …and only on the monitor whose pill was clicked
-    // one shared click-outside grab covering every monitor's bar + dropdowns
+    // one shared click-outside grab covering every monitor's bar + dropdowns.
+    // Screenshot tools "pin" the shell first — slurp/grim steal focus, and without
+    // the hold the dropdown being screenshotted would close before the capture.
     property var grabWins: []
+    property bool grabHold: false
+    IpcHandler {
+        target: "shell"
+        function pin(): void { root.grabHold = true }
+        function unpin(): void { root.grabHold = false }
+    }
     HyprlandFocusGrab {
         windows: root.grabWins
-        active: root.openPop !== ""
+        active: root.openPop !== "" && !root.grabHold
         onCleared: root.openPop = ""
     }
 
@@ -225,6 +233,44 @@ ShellRoot {
         onTriggered: root.mprisPos = (root.player && root.player.positionSupported) ? root.player.position : 0 }
     function fmtTime(s) { s = Math.max(0, Math.floor(s||0)); var m = Math.floor(s/60); var ss = s%60; return m + ":" + (ss<10?"0":"") + ss }
 
+    // ---------- bit-perfect quality readout ----------
+    // Players like SONE (TIDAL) in bit-perfect mode bypass pipewire and open the DAC
+    // directly via ALSA — the kernel's hw_params then holds the TRUE stream format.
+    // We report the first RUNNING playback substream not owned by pipewire.
+    property string hqInfo: ""
+    Process { id: hqProc
+        command: ["sh","-c","for d in /proc/asound/card*/pcm*p/sub*; do [ -f \"$d/status\" ] || continue; grep -q RUNNING \"$d/status\" 2>/dev/null || continue; pid=$(awk '/owner_pid/{print $3}' \"$d/status\"); comm=$(cat /proc/$pid/comm 2>/dev/null); case \"$comm\" in pipewire*|wireplumber*) continue;; esac; awk -v c=\"$comm\" '/^format:/{f=$2}/^rate:/{r=$2}END{if(f&&r)printf \"%s|%s|%s\", f, r, c}' \"$d/hw_params\"; break; done"]
+        stdout: StdioCollector { id: hqOut; onStreamFinished: {
+            var t = hqOut.text.trim();
+            if (!t) { root.hqInfo = ""; return }
+            var p = t.split("|"); var fmt = p[0] || ""; var rate = parseInt(p[1]) || 0;
+            var bits = fmt.indexOf("S16")===0 ? "16" : fmt.indexOf("S24")===0 ? "24" : fmt.indexOf("S32")===0 ? "32" : fmt.indexOf("F32")===0 ? "32" : "";
+            root.hqInfo = (bits && rate) ? bits + "-bit · " + (Math.round(rate/100)/10) + " kHz · bit-perfect" : "";
+        } } }
+    Timer { interval: 2000; running: root.openPop === "mpris"; repeat: true; triggeredOnStart: true; onTriggered: hqProc.running = true }
+
+    // ambient visualizer for bit-perfect playback — pipewire can't see the stream
+    // (that's the point of exclusive mode), so cava would sit at zero. Layered sines
+    // + smoothing give a living wave while the track plays; purely decorative.
+    property var fakeBars: []
+    Timer {
+        interval: 66; repeat: true
+        running: root.openPop === "mpris" && root.hqInfo !== "" && root.player !== null && root.player.isPlaying
+        onTriggered: {
+            var t = Date.now() / 1000, prev = root.fakeBars, out = [];
+            for (var i = 0; i < 22; i++) {
+                var target = 34 + 26 * Math.sin(t * 2.3 + i * 0.52)
+                                + 20 * Math.sin(t * 3.9 + i * 1.31 + 1.7)
+                                + 16 * Math.random();
+                var p = prev.length === 22 ? prev[i] : 0;
+                out.push(Math.max(4, Math.min(100, 0.55 * p + 0.45 * target)));
+            }
+            root.fakeBars = out;
+        }
+    }
+    // what the dropdown actually draws: real cava, or the ambient wave in bit-perfect mode
+    readonly property var vizBars: root.hqInfo !== "" ? root.fakeBars : root.cavaValues
+
     // ---------- lyrics (lrclib.net — free, keyless; synced LRC when available) ----------
     property bool lyricsOpen: false
     property var lyrics: []              // [{t: seconds, l: line}] when synced
@@ -279,8 +325,10 @@ ShellRoot {
     property var cavaValues: []
     Process {
         id: cavaProc
-        running: root.openPop === "mpris"
-        command: ["sh","-c","printf '[general]\\nframerate=60\\nbars=22\\nsleep_timer=1\\n[input]\\nmethod=pipewire\\nsource=auto\\n[output]\\nchannels=mono\\nmethod=raw\\nraw_target=/dev/stdout\\ndata_format=ascii\\nascii_max_range=100\\n[smoothing]\\nnoise_reduction=0.45' | cava -p /dev/stdin"]
+        running: root.openPop === "mpris" && root.hqInfo === ""   // no point capturing silence in bit-perfect mode
+        // bash process substitution + exec → quickshell owns cava directly and can
+        // actually kill it (piping into `cava -p /dev/stdin` leaked a cava per open)
+        command: ["bash","-c","exec cava -p <(printf '[general]\\nframerate=60\\nbars=22\\nsleep_timer=1\\n[input]\\nmethod=pipewire\\nsource=auto\\n[output]\\nchannels=mono\\nmethod=raw\\nraw_target=/dev/stdout\\ndata_format=ascii\\nascii_max_range=100\\n[smoothing]\\nnoise_reduction=0.45')"]
         stdout: SplitParser { onRead: data => { root.cavaValues = data.split(";").filter(s => s !== "").map(v => parseInt(v,10)||0) } }
     }
 
@@ -536,17 +584,22 @@ ShellRoot {
                             Column { anchors.verticalCenter: parent.verticalCenter; width: parent.width - 97; spacing: 3
                                 Text { width: parent.width; text: root.player ? (root.player.trackTitle||"—") : "—"; color: theme.text; font.pixelSize: 15; font.family: root.cfgFont; font.bold: true; elide: Text.ElideRight; maximumLineCount: 2; wrapMode: Text.Wrap }
                                 Text { width: parent.width; visible: text!==""; text: root.player ? (root.player.trackArtist||"") : ""; color: theme.sub; font.pixelSize: 12; font.family: root.cfgFont; elide: Text.ElideRight }
-                                Text { width: parent.width; visible: text!==""; text: root.player ? (root.player.trackAlbum||"") : ""; color: theme.faint; font.pixelSize: 10; font.family: root.cfgFont; elide: Text.ElideRight } } }
+                                Text { width: parent.width; visible: text!==""; text: root.player ? (root.player.trackAlbum||"") : ""; color: theme.faint; font.pixelSize: 10; font.family: root.cfgFont; elide: Text.ElideRight }
+                                // gold badge: only appears for direct-ALSA (bit-perfect) playback, e.g. SONE
+                                Row { spacing: 5; visible: root.hqInfo !== ""
+                                    Sym { anchors.verticalCenter: parent.verticalCenter; text: "verified"; sz: 13; color: theme.warn }
+                                    Text { anchors.verticalCenter: parent.verticalCenter; text: root.hqInfo
+                                        color: theme.warn; font.pixelSize: 10; font.family: root.cfgFont; font.bold: true } } } }
 
                         // cava visualizer
                         Item { width: parent.width; height: 38
                             Row { anchors.fill: parent; spacing: 3
-                                Repeater { model: root.cavaValues.length
+                                Repeater { model: root.vizBars.length
                                     delegate: Rectangle { required property int index
-                                        width: (mprCol.width - (root.cavaValues.length-1)*3) / Math.max(1, root.cavaValues.length)
-                                        height: Math.max(2, (root.cavaValues[index]||0)/100*38); anchors.bottom: parent.bottom
-                                        radius: 2; color: theme.a(theme.iris, 0.55 + 0.4*((root.cavaValues[index]||0)/100)) } } }
-                            Text { anchors.centerIn: parent; visible: root.cavaValues.length===0; text: "…"; color: theme.faint; font.pixelSize: 12; font.family: root.cfgFont } }
+                                        width: (mprCol.width - (root.vizBars.length-1)*3) / Math.max(1, root.vizBars.length)
+                                        height: Math.max(2, (root.vizBars[index]||0)/100*38); anchors.bottom: parent.bottom
+                                        radius: 2; color: theme.a(theme.iris, 0.55 + 0.4*((root.vizBars[index]||0)/100)) } } }
+                            Text { anchors.centerIn: parent; visible: root.vizBars.length===0; text: "…"; color: theme.faint; font.pixelSize: 12; font.family: root.cfgFont } }
 
                         // seekable progress
                         Column { width: parent.width; spacing: 4; visible: root.player && root.player.length>0
@@ -666,16 +719,19 @@ ShellRoot {
                         Column { id: wxCol; anchors.fill: wxDrop.card; anchors.margins: 14; spacing: 8
                             Row { width: parent.width; spacing: 10
                                 Sym { anchors.verticalCenter: parent.verticalCenter; text: root.wxIcon(root.wxCond); sz: 30; color: theme.frost }
-                                Column { anchors.verticalCenter: parent.verticalCenter; spacing: 1
+                                Column { anchors.verticalCenter: parent.verticalCenter; spacing: 1; width: parent.width - 40
                                     Text { text: root.wxTemp; color: theme.text; font.pixelSize: 20; font.family: root.cfgFont; font.bold: true }
-                                    Text { text: root.wxCond; color: theme.sub; font.pixelSize: 11; font.family: root.cfgFont } } }
+                                    Text { width: parent.width; text: root.wxCond; color: theme.sub; font.pixelSize: 11; font.family: root.cfgFont
+                                        wrapMode: Text.Wrap; maximumLineCount: 2; elide: Text.ElideRight } } }
                             Rectangle { width: parent.width; height: 1; color: theme.a(theme.line,0.7) }
                             Repeater { model: [{i:"thermostat",l:"feels like",v:root.wxFeels},{i:"humidity_percentage",l:"humidity",v:root.wxHumid},{i:"air",l:"wind",v:root.wxWind}]
-                                delegate: Row { required property var modelData; width: parent.width; spacing: 8
-                                    Sym { anchors.verticalCenter: parent.verticalCenter; text: modelData.i; sz: 15; color: theme.iris }
-                                    Text { anchors.verticalCenter: parent.verticalCenter; text: modelData.l; color: theme.faint; font.pixelSize: 12; font.family: root.cfgFont }
-                                    Item { width: parent.width - 150; height: 1 }
-                                    Text { anchors.verticalCenter: parent.verticalCenter; text: modelData.v; color: theme.text; font.pixelSize: 12; font.family: root.cfgFont } } }
+                                delegate: Item { required property var modelData; width: parent.width; height: 20
+                                    Sym { id: wxdIc; anchors.verticalCenter: parent.verticalCenter; text: modelData.i; sz: 15; color: theme.iris }
+                                    Text { anchors { left: wxdIc.right; leftMargin: 8; verticalCenter: parent.verticalCenter }
+                                        text: modelData.l; color: theme.faint; font.pixelSize: 12; font.family: root.cfgFont }
+                                    Text { anchors { right: parent.right; verticalCenter: parent.verticalCenter }
+                                        width: Math.min(implicitWidth, parent.width - 110); elide: Text.ElideLeft; horizontalAlignment: Text.AlignRight
+                                        text: modelData.v; color: theme.text; font.pixelSize: 12; font.family: root.cfgFont } } }
                             // ---- 3-day forecast ----
                             Rectangle { width: parent.width; height: 1; color: theme.a(theme.line,0.7); visible: root.wxForecast.length>0 }
                             Text { visible: root.wxForecast.length>0; text: "forecast"; color: theme.faint; font.pixelSize: 10; font.family: root.cfgFont }
@@ -683,7 +739,7 @@ ShellRoot {
                                 delegate: Row { required property var modelData; width: parent.width; height: 26; spacing: 8
                                     Text { anchors.verticalCenter: parent.verticalCenter; text: modelData.day; color: theme.text; font.pixelSize: 12; font.family: root.cfgFont; width: 46 }
                                     Sym { anchors.verticalCenter: parent.verticalCenter; text: root.wxIcon(modelData.cond); sz: 17; color: theme.frost }
-                                    Text { anchors.verticalCenter: parent.verticalCenter; width: parent.width - 150; elide: Text.ElideRight; text: modelData.cond; color: theme.sub; font.pixelSize: 11; font.family: root.cfgFont }
+                                    Text { anchors.verticalCenter: parent.verticalCenter; width: parent.width - 168; elide: Text.ElideRight; text: modelData.cond; color: theme.sub; font.pixelSize: 11; font.family: root.cfgFont }
                                     Text { anchors.verticalCenter: parent.verticalCenter; text: modelData.hi; color: theme.text; font.pixelSize: 12; font.family: root.cfgFont }
                                     Text { anchors.verticalCenter: parent.verticalCenter; text: modelData.lo; color: theme.faint; font.pixelSize: 12; font.family: root.cfgFont } } }
                             Rectangle { width: parent.width; height: 1; color: theme.a(theme.line,0.7) }
