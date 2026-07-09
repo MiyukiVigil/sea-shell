@@ -35,10 +35,13 @@ ShellRoot {
     function isVideo(p) { var e = p.toLowerCase(); return e.endsWith(".mp4") || e.endsWith(".webm") || e.endsWith(".gif") }
     property bool matchColors: true
     property string matugenScript: Qt.resolvedUrl("matugen-accent.sh").toString().replace("file://", "")
+    property string lockwallScript: Qt.resolvedUrl("sea-lockwall.sh").toString().replace("file://","")
     function setWall(p) {
         var vid = isVideo(p);
         // persist the pick so it can be restored on login
         Quickshell.execDetached(["sh", "-c", "mkdir -p ~/.config/sea-shell && printf '%s' '" + p + "' > ~/.config/sea-shell/wallpaper"]);
+        // sync lock screen background (first frame for video, direct copy for static)
+        Quickshell.execDetached(["sh", root.lockwallScript, p]);
         // recolour the bar to match the wallpaper (matugen)
         if (root.matchColors) Quickshell.execDetached(["sh", root.matugenScript, p]);
         if (vid) {

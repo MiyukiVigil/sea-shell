@@ -19,6 +19,16 @@ ShellRoot {
     property var recMods: []         // modifier chips currently toggled on
     property string conflict: ""
     property string accent: "#63c7dd"
+ 
+    // Add new bind state variables
+    property bool adding: false
+    property string addDesc: ""
+    property string addAction: "exec, "
+    property var addMods: ["SUPER"]
+    property string addKey: ""
+    property bool addRecording: false
+
+    component Sym: Text { property int sz: 16; font.family: "Material Symbols Outlined"; font.pixelSize: sz }
 
     QtObject {
         id: theme
@@ -129,6 +139,17 @@ ShellRoot {
         root.rec = null; root.conflict = "";
         refetch.start();
     }
+    function applyAddBind() {
+        var modsStr = root.addMods.join(" ");
+        var scriptPath = Qt.resolvedUrl("sea-add-bind.sh").toString().replace("file://","");
+        Quickshell.execDetached(["sh", scriptPath, modsStr, root.addKey, root.addDesc, root.addAction]);
+        root.adding = false;
+        root.addDesc = "";
+        root.addAction = "exec, ";
+        root.addKey = "";
+        root.addMods = ["SUPER"];
+        refetch.start();
+    }
 
     PanelWindow {
         anchors { top: true; bottom: true; left: true; right: true }
@@ -172,17 +193,179 @@ ShellRoot {
                             Text { text: "type to filter…"; visible: field.text===""; color: theme.faint
                                 font.pixelSize: 12; font.family: "monospace"; anchors.verticalCenter: parent.verticalCenter }
                             Keys.onPressed: (e)=> {
-                                if (e.key === Qt.Key_Escape) { if (root.rec) { root.rec = null; root.conflict = "" } else Qt.quit(); e.accepted = true; return }
+                                if (e.key === Qt.Key_Escape) {
+                                    if (root.rec) { root.rec = null; root.conflict = "" }
+                                    else if (root.addRecording) { root.addRecording = false }
+                                    else if (root.adding) { root.adding = false }
+                                    else Qt.quit();
+                                    e.accepted = true;
+                                    return;
+                                }
                                 if (root.rec) {           // recording: this key becomes the new base key
                                     if (e.key===Qt.Key_Shift||e.key===Qt.Key_Control||e.key===Qt.Key_Alt||e.key===Qt.Key_Meta) { e.accepted=true; return }
                                     var n = root.keyName(e);
                                     if (n) root.applyRebind(n); else root.conflict = "unsupported key";
                                     e.accepted = true;
+                                    return;
+                                }
+                                if (root.addRecording) {
+                                    if (e.key===Qt.Key_Shift||e.key===Qt.Key_Control||e.key===Qt.Key_Alt||e.key===Qt.Key_Meta) { e.accepted=true; return }
+                                    var k = root.keyName(e);
+                                    if (k) { root.addKey = k; root.addRecording = false }
+                                    e.accepted = true;
                                 }
                             }
                         }
                     }
+                    // Add Button
+                    Rectangle {
+                        implicitWidth: 30; implicitHeight: 30; radius: 8
+                        color: addBtnMa.containsMouse ? theme.iris : theme.a(theme.line, 0.4)
+                        border.width: 1; border.color: theme.a(theme.iris, 0.2)
+                        Sym { anchors.centerIn: parent; text: "add"; sz: 18; color: addBtnMa.containsMouse ? theme.bg : theme.frost }
+                        MouseArea {
+                            id: addBtnMa
+                            anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                            onClicked: { root.adding = !root.adding; root.addRecording = false; field.forceActiveFocus() }
+                        }
+                    }
                     Text { text: root.shown.length + "/" + root.binds.length; color: theme.frost; font.pixelSize: 11; font.family: "monospace" }
+                }
+
+                // ================= ADD BIND PANEL =================
+                Rectangle {
+                    visible: root.adding
+                    Layout.fillWidth: true
+                    implicitHeight: addFormCol.implicitHeight + 20
+                    radius: 10
+                    color: theme.a(theme.line, 0.2)
+                    border.width: 1; border.color: theme.a(theme.iris, 0.2)
+                    ColumnLayout {
+                        id: addFormCol
+                        anchors.fill: parent; anchors.margins: 14; spacing: 12
+                        
+                        // Description
+                        ColumnLayout {
+                            spacing: 4; Layout.fillWidth: true
+                            Text { text: "description"; color: theme.faint; font.pixelSize: 10; font.family: "monospace" }
+                            Rectangle {
+                                Layout.fillWidth: true; implicitHeight: 32; radius: 6
+                                color: theme.a(theme.line, 0.4); border.width: 1
+                                border.color: descIn.activeFocus ? theme.iris : theme.a(theme.iris, 0.1)
+                                TextInput {
+                                    id: descIn
+                                    anchors.fill: parent; anchors.leftMargin: 8; anchors.rightMargin: 8
+                                    verticalAlignment: TextInput.AlignVCenter
+                                    color: theme.text; font.pixelSize: 12; font.family: "monospace"
+                                    text: root.addDesc
+                                    onTextChanged: root.addDesc = text
+                                    Text { text: "e.g. Launch Firefox"; visible: descIn.text===""; color: theme.faint; font.pixelSize: 12; font.family: "monospace"; anchors.verticalCenter: parent.verticalCenter }
+                                }
+                            }
+                        }
+                        
+                        // Action / Command
+                        ColumnLayout {
+                            spacing: 4; Layout.fillWidth: true
+                            Text { text: "action / command"; color: theme.faint; font.pixelSize: 10; font.family: "monospace" }
+                            Rectangle {
+                                Layout.fillWidth: true; implicitHeight: 32; radius: 6
+                                color: theme.a(theme.line, 0.4); border.width: 1
+                                border.color: actionIn.activeFocus ? theme.iris : theme.a(theme.iris, 0.1)
+                                TextInput {
+                                    id: actionIn
+                                    anchors.fill: parent; anchors.leftMargin: 8; anchors.rightMargin: 8
+                                    verticalAlignment: TextInput.AlignVCenter
+                                    color: theme.text; font.pixelSize: 12; font.family: "monospace"
+                                    text: root.addAction
+                                    onTextChanged: root.addAction = text
+                                }
+                            }
+                        }
+
+                        // Shortcut combination
+                        ColumnLayout {
+                            spacing: 4; Layout.fillWidth: true
+                            Text { text: "shortcut combination"; color: theme.faint; font.pixelSize: 10; font.family: "monospace" }
+                            RowLayout {
+                                spacing: 10; Layout.fillWidth: true
+                                // Modifier chips
+                                Row {
+                                    spacing: 6
+                                    Repeater {
+                                        model: ["SUPER","CTRL","ALT","SHIFT"]
+                                        delegate: Rectangle {
+                                            required property string modelData
+                                            readonly property bool on: root.addMods.indexOf(modelData) >= 0
+                                            width: amc.width + 14; height: 22; radius: 11
+                                            color: on ? theme.a(theme.iris,0.3) : theme.a(theme.line,0.5)
+                                            border.width: 1; border.color: on ? theme.iris : theme.a(theme.line,0.9)
+                                            Text { id: amc; anchors.centerIn: parent; text: modelData
+                                                color: on ? theme.frost : theme.faint; font.pixelSize: 10; font.family: "monospace"; font.bold: on }
+                                            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                                                onClicked: { var m = root.addMods.slice(); var i = m.indexOf(modelData);
+                                                    if (i >= 0) m.splice(i,1); else m.push(modelData);
+                                                    root.addMods = ["SUPER","CTRL","ALT","SHIFT"].filter(x => m.indexOf(x) >= 0);
+                                                    field.forceActiveFocus() } }
+                                        }
+                                    }
+                                }
+                                
+                                Text { text: "+"; color: theme.faint; font.pixelSize: 12; font.family: "monospace" }
+
+                                // Key capture button
+                                Rectangle {
+                                    implicitWidth: 120; implicitHeight: 24; radius: 6
+                                    color: root.addRecording ? theme.a(theme.bad, 0.2) : theme.a(theme.line, 0.4)
+                                    border.width: 1; border.color: root.addRecording ? theme.bad : theme.a(theme.iris, 0.3)
+                                    Text {
+                                        anchors.centerIn: parent
+                                        text: root.addRecording ? "press key…" : (root.addKey ? root.addKey : "set key combo")
+                                        color: root.addRecording ? theme.bad : theme.frost
+                                        font.pixelSize: 11; font.family: "monospace"; font.bold: true
+                                    }
+                                    MouseArea {
+                                        anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                                        onClicked: { root.addRecording = true; field.forceActiveFocus() }
+                                    }
+                                }
+                                Item { Layout.fillWidth: true }
+                            }
+                        }
+                        
+                        // Control buttons (Save / Cancel)
+                        RowLayout {
+                            Layout.fillWidth: true; spacing: 10; Layout.topMargin: 4
+                            Item { Layout.fillWidth: true }
+                            
+                            // Cancel button
+                            Rectangle {
+                                implicitWidth: 70; implicitHeight: 28; radius: 6
+                                color: cancelBtnMa.containsMouse ? theme.a(theme.bad, 0.15) : "transparent"
+                                border.width: 1; border.color: cancelBtnMa.containsMouse ? theme.bad : theme.a(theme.line, 0.5)
+                                Text { anchors.centerIn: parent; text: "Cancel"; color: cancelBtnMa.containsMouse ? theme.bad : theme.text; font.pixelSize: 11; font.family: "monospace" }
+                                MouseArea {
+                                    id: cancelBtnMa
+                                    anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                                    onClicked: { root.adding = false; root.addRecording = false; field.forceActiveFocus() }
+                                }
+                            }
+                            
+                            // Save button
+                            Rectangle {
+                                readonly property bool valid: root.addDesc.trim() !== "" && root.addKey !== "" && root.addAction.trim() !== ""
+                                implicitWidth: 90; implicitHeight: 28; radius: 6
+                                color: valid ? (saveBtnMa.containsMouse ? theme.iris : theme.a(theme.iris, 0.2)) : theme.a(theme.line, 0.2)
+                                border.width: 1; border.color: valid ? theme.iris : theme.a(theme.line, 0.5)
+                                Text { anchors.centerIn: parent; text: "Save Bind"; color: parent.valid ? (saveBtnMa.containsMouse ? theme.bg : theme.text) : theme.faint; font.pixelSize: 11; font.family: "monospace"; font.bold: true }
+                                MouseArea {
+                                    id: saveBtnMa
+                                    anchors.fill: parent; enabled: parent.valid; cursorShape: parent.valid ? Qt.PointingHandCursor : Qt.ArrowCursor
+                                    onClicked: root.applyAddBind()
+                                }
+                            }
+                        }
+                    }
                 }
 
                 Flickable {

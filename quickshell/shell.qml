@@ -139,6 +139,69 @@ ShellRoot {
     function wifiToggle() { Quickshell.execDetached(["sh","-c","nmcli radio wifi | grep -q enabled && nmcli radio wifi off || nmcli radio wifi on"]); wifiRefresh.start() }
     Timer { id: wifiRefresh; interval: 2500; onTriggered: wifiScan.running = true }
 
+    // ---------- cloudflare warp ----------
+    property string warpStatus: "Disconnected"   // raw status line from warp-cli
+    property bool warpConnected: warpStatus.indexOf("Connected") >= 0 && warpStatus.indexOf("Disconnected") < 0
+    property string warpMode: "warp"              // current mode (warp | doh | warp+doh | tunnel_only)
+    Process {
+        id: warpPoll; running: true
+        command: ["sh","-c","warp-cli status 2>/dev/null | grep '^Status' | sed 's/Status update: //'"]
+        stdout: StdioCollector { id: warpOut; onStreamFinished: {
+            var s = warpOut.text.trim(); if (s) root.warpStatus = s; } }
+    }
+    Process {
+        id: warpModePoll; running: true
+        command: ["sh","-c","warp-cli mode 2>/dev/null | head -1 | awk '{print $NF}'"]
+        stdout: StdioCollector { id: warpModeOut; onStreamFinished: {
+            var m = warpModeOut.text.trim(); if (m) root.warpMode = m; } }
+    }
+    Timer { interval: 4000; running: true; repeat: true; triggeredOnStart: true
+        onTriggered: { warpPoll.running = true; warpModePoll.running = true } }
+    function warpToggle() {
+        if (root.warpConnected) {
+            Quickshell.execDetached(["sh","-c","warp-cli disconnect && notify-send 'sea-shell' 'WARP disconnected'"]);
+            root.warpStatus = "Disconnected";
+        } else {
+            Quickshell.execDetached(["sh","-c","warp-cli connect && notify-send 'sea-shell' 'WARP connected' || notify-send 'sea-shell' 'WARP failed to connect'"]);
+            root.warpStatus = "Connecting...";
+        }
+        warpTimer.start();
+    }
+    function warpSetMode(m) {
+        Quickshell.execDetached(["sh","-c","warp-cli mode "+m]);
+        root.warpMode = m; warpTimer.start();
+    }
+    Timer { id: warpTimer; interval: 1800; repeat: false; onTriggered: { warpPoll.running = true; warpModePoll.running = true } }
+
+    // ---------- vpn (networkmanager) ----------
+    property var vpnList: []   // [{name, active}]
+    Process {
+        id: vpnScan; running: true
+        command: ["sh","-c","nmcli -t -f NAME,TYPE,ACTIVE con show | grep -E ':(vpn|wireguard):' | awk -F: '{print $3==\"yes\"?\"1\":\"0\",\$1}'"]
+        stdout: StdioCollector { id: vpnOut; onStreamFinished: {
+            var out = []; var lines = vpnOut.text.trim().split("\n");
+            for (var i=0;i<lines.length;i++) {
+                if (!lines[i]) continue;
+                var p = lines[i].split(" "); var act = p[0]==="1";
+                var name = p.slice(1).join(" ");
+                if (name) out.push({name: name, active: act});
+            }
+            root.vpnList = out;
+        } }
+    }
+    Timer { interval: 6000; running: true; repeat: true; triggeredOnStart: true; onTriggered: vpnScan.running = true }
+    function vpnToggle(name) {
+        var e = name.replace(/'/g,"");
+        var cur = root.vpnList.find(function(v){ return v.name===name && v.active; });
+        if (cur) {
+            Quickshell.execDetached(["sh","-c","nmcli con down id '"+e+"' && notify-send 'sea-shell' 'VPN disconnected'"]);
+        } else {
+            Quickshell.execDetached(["sh","-c","nmcli con up id '"+e+"' && notify-send 'sea-shell' 'VPN connected' || notify-send 'sea-shell' 'VPN failed to connect'"]);
+        }
+        vpnTimer.start();
+    }
+    Timer { id: vpnTimer; interval: 2000; repeat: false; onTriggered: vpnScan.running = true }
+
     // ---------- bluetooth ----------
     readonly property var btAdapter: Bluetooth.defaultAdapter
     readonly property var btDevices: (btAdapter && btAdapter.devices) ? btAdapter.devices.values : []
@@ -348,6 +411,21 @@ ShellRoot {
     SystemClock { id: clock; precision: SystemClock.Seconds }
 
     property bool trayCollapsed: false
+ 
+    // ---------- caffeine mode (idle & lock status) ----------
+    property bool idleOn: false
+    Process { id: idleChk; running: false; command: ["sh","-c","pgrep -x hypridle >/dev/null && echo on || echo off"]
+        stdout: StdioCollector { id: idleOut; onStreamFinished: root.idleOn = idleOut.text.trim() === "on" } }
+    Timer { id: idleTimer; interval: 5000; running: true; repeat: true; triggeredOnStart: true; onTriggered: idleChk.running = true }
+    function toggleIdle() {
+        if (root.idleOn) {
+            Quickshell.execDetached(["sh", "-c", "pkill -x hypridle; notify-send -i coffee 'sea-shell' 'Caffeine mode active — screen will stay on'"]);
+            root.idleOn = false;
+        } else {
+            Quickshell.execDetached(["sh", "-c", "hyprctl dispatch exec hypridle; notify-send 'sea-shell' 'Caffeine mode inactive — normal sleep active'"]);
+            root.idleOn = true;
+        }
+    }
 
     // keep clipboard history populated so CTRL+V / the bar icon work.
     // clip-watch.sh kills any stale watchers then starts exactly one pair (idempotent on restart).
@@ -430,6 +508,55 @@ ShellRoot {
             onPositionChanged: (e)=>{ if(pressed){ var v=sl.clamp(e.x/sl.width); sl.value=v; sl.moved(v) } } }
     }
 
+    component Marquee: Item {
+        id: mq
+        property alias text: staticTxt.text
+        property alias color: staticTxt.color
+        property alias font: staticTxt.font
+        property int maxW: 160
+
+        readonly property bool scrolling: staticTxt.implicitWidth > mq.maxW
+        // gap between end of text and the ghost copy that follows
+        readonly property int gap: 48
+        // total stride = text width + gap; scrolling loops over this distance
+        readonly property int stride: staticTxt.implicitWidth + gap
+
+        implicitHeight: staticTxt.implicitHeight
+        implicitWidth: scrolling ? mq.maxW : staticTxt.implicitWidth
+        width: implicitWidth
+        height: implicitHeight
+        clip: true
+
+        // Primary copy
+        Text {
+            id: staticTxt
+            anchors.verticalCenter: parent.verticalCenter
+            NumberAnimation on x {
+                id: txtAnim
+                running: mq.scrolling && root.player && root.player.isPlaying
+                loops: Animation.Infinite
+                // initial pause before the very first scroll
+                from: 0
+                to: -mq.stride
+                duration: Math.max(2000, mq.stride * 28)
+                easing.type: Easing.Linear
+            }
+            onTextChanged: { staticTxt.x = 0; txtAnim.restart() }
+        }
+
+        // Ghost copy — identical text offset by `stride` so it fills behind the primary
+        Text {
+            id: ghostTxt
+            anchors.verticalCenter: parent.verticalCenter
+            visible: mq.scrolling
+            text: staticTxt.text
+            color: staticTxt.color
+            font: staticTxt.font
+            // ghost always leads by exactly one stride ahead of primary
+            x: staticTxt.x + mq.stride
+        }
+    }
+
     // a clickable bar pill that toggles a dropdown identified by `key`
     component Pill: Rectangle {
         id: pill
@@ -437,6 +564,8 @@ ShellRoot {
         property string value: ""
         property color accent: theme.frost
         property string key: ""
+        property bool scrollText: false
+        property int maxTextW: 160
         signal clicked()
         signal rightClicked()
         signal scrolled(real dy)
@@ -449,7 +578,23 @@ ShellRoot {
         Behavior on color { ColorAnimation { duration: 120 } }
         Row { id: pr; anchors.centerIn: parent; spacing: 6
             Sym { anchors.verticalCenter: parent.verticalCenter; text: pill.icon; color: pill.accent; visible: text!==""; sz: 16 }
-            Text { anchors.verticalCenter: parent.verticalCenter; text: pill.value; color: theme.text; visible: text!==""; font.pixelSize: 13; font.family: root.cfgFont } }
+            // Use Marquee only when scrollText is enabled (e.g. mprisPill), plain Text otherwise.
+            // Marquee with maxW:9999 creates an implicit-width loop that causes flickering.
+            Loader {
+                anchors.verticalCenter: parent.verticalCenter
+                visible: pill.value !== ""
+                active: pill.value !== ""
+                sourceComponent: pill.scrollText ? marqueeComp : plainComp
+            }
+            Component {
+                id: plainComp
+                Text { text: pill.value; color: theme.text; font.pixelSize: 13; font.family: root.cfgFont }
+            }
+            Component {
+                id: marqueeComp
+                Marquee { text: pill.value; color: theme.text; font.pixelSize: 13; font.family: root.cfgFont; maxW: pill.maxTextW }
+            }
+        }
         MouseArea { id: pm; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
             acceptedButtons: Qt.LeftButton | Qt.RightButton
             onClicked: (e)=>{ if(e.button===Qt.RightButton){ pill.rightClicked(); return } if(pill.key!==""){ root.openBar = pill.owner; root.openPop = pill.open ? "" : pill.key } else pill.clicked() }
@@ -476,19 +621,61 @@ ShellRoot {
         anchors { top: true; left: true; right: true; bottom: true }
         mask: Region { item: cardBg; regions: [ sideRegion ] }
         Region { id: sideRegion; item: dw.sidecar }
-        readonly property point hp: (dw.visible && dw.host) ? dw.host.mapToGlobal(Qt.point(0, 0)) : Qt.point(-9999, -9999)
+        readonly property point hp: {
+            if (!dw.visible || !dw.host) return Qt.point(-9999, -9999);
+            // Reference position & parent hierarchy to force binding updates when layout shifts
+            var _trigger = dw.host.x + dw.host.y + dw.host.width + dw.host.height;
+            var p = dw.host.parent;
+            while (p) {
+                _trigger += p.x + p.y;
+                p = p.parent;
+            }
+            return dw.host.mapToGlobal(Qt.point(0, 0));
+        }
         readonly property int sw: dw.screen ? dw.screen.width : 1920
         // mapToGlobal speaks virtual-desktop coordinates; this surface is monitor-local,
         // so subtract the screen's global offset or cards drift on non-origin monitors
         readonly property int scrX: dw.screen ? dw.screen.x : 0
         readonly property int scrY: dw.screen ? dw.screen.y : 0
+
+        onVisibleChanged: {
+            if (visible) {
+                openAnim.restart();
+            } else {
+                cardBg.openAnimFactor = 0.0;
+            }
+        }
+
+        NumberAnimation {
+            id: openAnim
+            target: cardBg
+            property: "openAnimFactor"
+            from: 0.0
+            to: 1.0
+            duration: 180
+            easing.type: Easing.OutCubic
+        }
+
         Rectangle {
             id: cardBg
+            property real openAnimFactor: 0.0
             width: dw.cardW; height: dw.cardH
-            x: Math.max(8, Math.min(dw.sw - width - 8, dw.hp.x - dw.scrX + (dw.host ? dw.host.width/2 : 0) - width/2))
-            y: dw.hp.y - dw.scrY + (dw.host ? dw.host.height : 0) + 8
-            radius: root.cfgRadius; color: theme.a(theme.bg, root.dropOpacity)
-            border.width: 1; border.color: theme.a(theme.iris,0.34)
+            opacity: openAnimFactor
+            x: Math.max(8, Math.min(dw.sw - dw.cardW - 8, dw.hp.x - dw.scrX + (dw.host ? (dw.host.width || dw.host.implicitWidth)/2 : 0) - dw.cardW/2))
+            y: (dw.hp.y - dw.scrY + (dw.host ? (dw.host.height || dw.host.implicitHeight) : 0) + 8) + (1.0 - openAnimFactor) * -12
+            radius: root.cfgRadius
+            gradient: Gradient {
+                GradientStop { position: 0.0; color: theme.a(theme.bg, root.dropOpacity * 1.15) }
+                GradientStop { position: 1.0; color: theme.a(theme.bg, root.dropOpacity * 0.90) }
+            }
+            border.width: 1; border.color: theme.a(theme.iris, 0.28)
+
+            // Glass top highlight
+            Rectangle {
+                anchors { left: parent.left; right: parent.right; top: parent.top }
+                height: 1; radius: parent.radius
+                color: theme.a(theme.frost, 0.45)
+            }
         }
     }
 
@@ -556,13 +743,14 @@ ShellRoot {
                     anchors { horizontalCenter: parent.horizontalCenter; verticalCenter: parent.verticalCenter }
                     visible: root.player !== null
                     key: "mpris"
+                    scrollText: true
+                    maxTextW: 180
                     icon: (root.player && root.player.isPlaying) ? "pause" : "play_arrow"
                     accent: theme.iris
                     value: {
                         if (!root.player) return "";
                         var t = (root.player.trackTitle || ""); var ar = (root.player.trackArtist || "");
-                        var s = ar ? (ar + " — " + t) : t;
-                        return s.length > 40 ? s.slice(0,39)+"…" : s;
+                        return ar ? (ar + " — " + t) : t;
                     }
                     onRightClicked: { if(root.player) root.player.togglePlaying() }
                     onScrolled: (dy)=>{ if(!root.player) return; if(dy>0) root.player.next(); else root.player.previous() }
@@ -595,9 +783,18 @@ ShellRoot {
                                     source: (root.player && root.player.trackArtUrl) ? root.player.trackArtUrl : ""; visible: status===Image.Ready }
                                 Sym { anchors.centerIn: parent; text: "music_note"; sz: 34; color: theme.faint; visible: !(root.player && root.player.trackArtUrl && root.player.trackArtUrl!=="") } }
                             Column { anchors.verticalCenter: parent.verticalCenter; width: parent.width - 97; spacing: 3
-                                Text { width: parent.width; text: root.player ? (root.player.trackTitle||"—") : "—"; color: theme.text; font.pixelSize: 15; font.family: root.cfgFont; font.bold: true; elide: Text.ElideRight; maximumLineCount: 2; wrapMode: Text.Wrap }
-                                Text { width: parent.width; visible: text!==""; text: root.player ? (root.player.trackArtist||"") : ""; color: theme.sub; font.pixelSize: 12; font.family: root.cfgFont; elide: Text.ElideRight }
-                                Text { width: parent.width; visible: text!==""; text: root.player ? (root.player.trackAlbum||"") : ""; color: theme.faint; font.pixelSize: 10; font.family: root.cfgFont; elide: Text.ElideRight }
+                                Text {
+                                    width: parent.width; elide: Text.ElideRight
+                                    text: root.player ? (root.player.trackTitle||"—") : "—"; color: theme.text; font.pixelSize: 15; font.family: root.cfgFont; font.bold: true
+                                }
+                                Text {
+                                    width: parent.width; elide: Text.ElideRight; visible: text!==""
+                                    text: root.player ? (root.player.trackArtist||"") : ""; color: theme.sub; font.pixelSize: 12; font.family: root.cfgFont
+                                }
+                                Text {
+                                    width: parent.width; elide: Text.ElideRight; visible: text!==""
+                                    text: root.player ? (root.player.trackAlbum||"") : ""; color: theme.faint; font.pixelSize: 10; font.family: root.cfgFont
+                                }
                                 // gold badge: only appears for direct-ALSA (bit-perfect) playback, e.g. SONE
                                 Row { spacing: 5; visible: root.hqInfo !== ""
                                     Sym { anchors.verticalCenter: parent.verticalCenter; text: "verified"; sz: 13; color: theme.warn }
@@ -817,23 +1014,30 @@ ShellRoot {
                         value: root.notes.length>0 ? String(root.notes.length) : "" }
                     Drop { screen: bar.screen
                         id: notifDrop; host: bellPill; visible: root.openPop === "notif" && root.openBar === bar
-                        cardW: 340; cardH: Math.min(440, notifCol.implicitHeight + 32)
-                        Column { id: notifCol; anchors.fill: notifDrop.card; anchors.margins: 12; spacing: 8
-                            Row { width: parent.width
-                                Text { text: "notifications"; color: theme.iris; font.pixelSize: 11; font.family: root.cfgFont; font.bold: true }
-                                Item { width: parent.width - 150; height: 1 }
-                                Text { text: root.notes.length>0 ? "clear all" : ""; color: theme.sub; font.pixelSize: 11; font.family: root.cfgFont
-                                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.noteClear() } } }
-                            Text { visible: root.notes.length===0; text: "no notifications"; color: theme.faint; font.pixelSize: 12; font.family: root.cfgFont }
-                            Flickable { width: parent.width; height: Math.min(360, listCol.implicitHeight); contentHeight: listCol.implicitHeight; clip: true; boundsBehavior: Flickable.StopAtBounds; visible: root.notes.length>0
+                        cardW: 350; cardH: Math.min(460, notifCol.implicitHeight + 28)
+                        Column { id: notifCol; anchors.fill: notifDrop.card; anchors.margins: 14; spacing: 4
+                            // Header
+                            Item { width: parent.width; height: 28
+                                Text { anchors.verticalCenter: parent.verticalCenter; anchors.left: parent.left
+                                    text: "notifications"; color: theme.iris; font.pixelSize: 11; font.family: root.cfgFont; font.bold: true; font.letterSpacing: 0.8 }
+                                Rectangle { anchors.verticalCenter: parent.verticalCenter; anchors.right: parent.right
+                                    visible: root.notes.length > 0
+                                    width: clrTxt.implicitWidth + 16; height: 22; radius: 6
+                                    color: clrMa.containsMouse ? theme.a(theme.bad, 0.18) : theme.a(theme.line, 0.5)
+                                    Text { id: clrTxt; anchors.centerIn: parent; text: "clear all"; color: clrMa.containsMouse ? theme.bad : theme.sub; font.pixelSize: 10; font.family: root.cfgFont }
+                                    MouseArea { id: clrMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.noteClear() } } }
+                            Rectangle { width: parent.width; height: 1; color: theme.a(theme.line, 0.6) }
+                            Item { height: 2; width: 1 }
+                            Text { visible: root.notes.length===0; text: "no notifications"; color: theme.faint; font.pixelSize: 12; font.family: root.cfgFont; topPadding: 4 }
+                            Flickable { width: parent.width; height: Math.min(390, listCol.implicitHeight); contentHeight: listCol.implicitHeight; clip: true; boundsBehavior: Flickable.StopAtBounds; visible: root.notes.length>0
                                 Column { id: listCol; width: parent.width; spacing: 6
                                     Repeater { model: root.notes
-                                        delegate: Rectangle { required property var modelData; width: listCol.width; radius: 9
-                                            implicitHeight: ec.implicitHeight + 16; color: theme.a(theme.line,0.4)
-                                            border.width: 1; border.color: modelData.urgency===2 ? theme.a(theme.bad,0.5) : theme.a(theme.iris,0.14)
-                                            Column { id: ec; anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top; anchors.margins: 9; spacing: 2
+                                        delegate: Rectangle { required property var modelData; width: listCol.width; radius: 10
+                                            implicitHeight: ec.implicitHeight + 16; color: theme.a(theme.line,0.38)
+                                            border.width: 1; border.color: modelData.urgency===2 ? theme.a(theme.bad,0.45) : theme.a(theme.iris,0.12)
+                                            Column { id: ec; anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top; anchors.margins: 10; spacing: 3
                                                 Row { width: parent.width
-                                                    Text { text: modelData.appName; color: theme.frost; font.pixelSize: 10; font.family: root.cfgFont; elide: Text.ElideRight; width: parent.width-46 }
+                                                    Text { text: modelData.appName; color: theme.frost; font.pixelSize: 10; font.family: root.cfgFont; elide: Text.ElideRight; width: parent.width-50; font.bold: true }
                                                     Text { text: modelData.time; color: theme.faint; font.pixelSize: 10; font.family: root.cfgFont; width: 46; horizontalAlignment: Text.AlignRight } }
                                                 Text { width: parent.width; visible: modelData.summary!==""; text: modelData.summary; color: theme.text; font.pixelSize: 12; font.family: root.cfgFont; wrapMode: Text.WordWrap }
                                                 Text { width: parent.width; visible: modelData.body!==""; text: modelData.body; color: theme.sub; font.pixelSize: 11; font.family: root.cfgFont; wrapMode: Text.WordWrap; maximumLineCount: 3; elide: Text.ElideRight; textFormat: Text.PlainText } } } } } } } }
@@ -844,35 +1048,100 @@ ShellRoot {
                         }   // icon-only: SSID lives in the dropdown
                     Drop { screen: bar.screen
                         id: wifiDrop; host: wifiPill; visible: root.openPop === "wifi" && root.openBar === bar
-                        cardW: 270; cardH: wifiCol.implicitHeight + 32
+                        cardW: 290; cardH: wifiCol.implicitHeight + 28
                         onVisibleChanged: if(!visible) root.wifiPwFor = ""
-                        Column { id: wifiCol; anchors.fill: wifiDrop.card; anchors.margins: 12; spacing: 6
-                            Row { width: parent.width
-                                Text { text: "wi-fi"; color: theme.iris; font.pixelSize: 11; font.family: root.cfgFont; font.bold: true }
-                                Item { width: parent.width - 90; height: 1 }
-                                Sym { text: "refresh"; sz: 16; color: theme.sub; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: wifiScan.running = true } } }
+                        Column { id: wifiCol; anchors.fill: wifiDrop.card; anchors.margins: 14; spacing: 4
+                            // Header
+                            Item { width: parent.width; height: 28
+                                Text { anchors.verticalCenter: parent.verticalCenter; anchors.left: parent.left
+                                    text: "wi-fi"; color: theme.iris; font.pixelSize: 11; font.family: root.cfgFont; font.bold: true; font.letterSpacing: 0.8 }
+                                Rectangle { anchors.verticalCenter: parent.verticalCenter; anchors.right: parent.right
+                                    width: 26; height: 26; radius: 8
+                                    color: rfm.containsMouse ? theme.a(theme.iris,0.18) : "transparent"
+                                    Sym { anchors.centerIn: parent; text: "refresh"; sz: 15; color: theme.sub }
+                                    MouseArea { id: rfm; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: wifiScan.running = true } } }
+                            Rectangle { width: parent.width; height: 1; color: theme.a(theme.line, 0.6) }
+                            Item { height: 2; width: 1 }
                             Repeater { model: root.wifiList
-                                delegate: Column { id: netRow; required property var modelData; width: parent.width; spacing: 4
+                                delegate: Column { id: netRow; required property var modelData; width: parent.width; spacing: 3
                                     readonly property bool asking: root.wifiPwFor === netRow.modelData.ssid
-                                    Rectangle { width: parent.width; height: 32; radius: 7
-                                        color: netRow.modelData.active ? theme.a(theme.iris,0.2) : (netRow.asking ? theme.a(theme.iris,0.12) : (wm.containsMouse ? theme.a(theme.line,0.5) : "transparent"))
-                                        Row { anchors.fill: parent; anchors.leftMargin: 8; anchors.rightMargin: 8; spacing: 7
+                                    Rectangle { width: parent.width; height: 34; radius: 8
+                                        color: netRow.modelData.active ? theme.a(theme.iris,0.18) : (netRow.asking ? theme.a(theme.iris,0.10) : (wm.containsMouse ? theme.a(theme.line,0.45) : "transparent"))
+                                        border.width: netRow.modelData.active ? 1 : 0; border.color: theme.a(theme.iris,0.3)
+                                        Row { anchors.fill: parent; anchors.leftMargin: 10; anchors.rightMargin: 10; spacing: 8
                                             Sym { anchors.verticalCenter: parent.verticalCenter; text: netRow.modelData.signal>66?"signal_wifi_4_bar":netRow.modelData.signal>33?"network_wifi_3_bar":"network_wifi_1_bar"; sz: 16; color: netRow.modelData.active?theme.iris:theme.frost }
-                                            Text { anchors.verticalCenter: parent.verticalCenter; width: parent.width-70; elide: Text.ElideRight; text: netRow.modelData.ssid; color: theme.text; font.pixelSize: 12; font.family: root.cfgFont }
-                                            Sym { anchors.verticalCenter: parent.verticalCenter; text: netRow.modelData.active?"check":"lock"; sz: 12; color: netRow.modelData.active?theme.good:theme.faint; visible: netRow.modelData.secure||netRow.modelData.active } }
+                                            Text { anchors.verticalCenter: parent.verticalCenter; width: parent.width-64; elide: Text.ElideRight; text: netRow.modelData.ssid; color: netRow.modelData.active ? theme.text : theme.sub; font.pixelSize: 12; font.family: root.cfgFont; font.bold: netRow.modelData.active }
+                                            Sym { anchors.verticalCenter: parent.verticalCenter; text: netRow.modelData.active?"check_circle":"lock"; sz: 13; color: netRow.modelData.active?theme.good:theme.a(theme.faint,0.6); visible: netRow.modelData.secure||netRow.modelData.active } }
                                         MouseArea { id: wm; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
                                             onClicked: { if(netRow.modelData.active) return; if(netRow.asking) root.wifiPwFor=""; else root.wifiConnect(netRow.modelData.ssid, netRow.modelData.secure) } } }
-                                    // inline password field for this network
-                                    Row { width: parent.width; height: 32; visible: netRow.asking; spacing: 6
-                                        Rectangle { width: parent.width-40; height: 30; radius: 7; color: theme.a(theme.line,0.5); border.width: 1; border.color: pwIn.activeFocus?theme.iris:theme.a(theme.iris,0.2)
-                                            TextInput { id: pwIn; anchors.fill: parent; anchors.leftMargin: 9; anchors.rightMargin: 9; verticalAlignment: TextInput.AlignVCenter
+                                    // inline password field
+                                    Row { width: parent.width; height: 34; visible: netRow.asking; spacing: 6
+                                        Rectangle { width: parent.width-42; height: 32; radius: 8; color: theme.a(theme.line,0.5); border.width: 1; border.color: pwIn.activeFocus?theme.iris:theme.a(theme.iris,0.2)
+                                            TextInput { id: pwIn; anchors.fill: parent; anchors.leftMargin: 10; anchors.rightMargin: 10; verticalAlignment: TextInput.AlignVCenter
                                                 echoMode: TextInput.Password; color: theme.text; font.pixelSize: 12; font.family: root.cfgFont; clip: true; focus: netRow.asking
                                                 onAccepted: root.wifiJoin(netRow.modelData.ssid, text)
                                                 Text { anchors.verticalCenter: parent.verticalCenter; visible: pwIn.text===""; text: "password ↵"; color: theme.faint; font.pixelSize: 12; font.family: root.cfgFont } } }
-                                        Rectangle { width: 34; height: 30; radius: 7; color: jm.containsMouse?theme.iris:theme.a(theme.iris,0.25); border.width: 1; border.color: theme.iris
-                                            Sym { anchors.centerIn: parent; text: "login"; sz: 15; color: jm.containsMouse?theme.bg:theme.frost }
+                                        Rectangle { width: 36; height: 32; radius: 8; color: jm.containsMouse?theme.iris:theme.a(theme.iris,0.2); border.width: 1; border.color: theme.iris
+                                            Sym { anchors.centerIn: parent; text: "arrow_forward"; sz: 14; color: jm.containsMouse?theme.bg:theme.frost }
                                             MouseArea { id: jm; anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.wifiJoin(netRow.modelData.ssid, pwIn.text) } } } } }
-                            Text { visible: root.wifiList.length===0; text: "scanning…"; color: theme.faint; font.pixelSize: 11; font.family: root.cfgFont } } }
+                            Text { visible: root.wifiList.length===0; text: "scanning…"; color: theme.faint; font.pixelSize: 11; font.family: root.cfgFont; topPadding: 4 }
+
+                            // ---- VPN Section ----
+                            Item { height: 2; width: 1 }
+                            Rectangle { width: parent.width; height: 1; color: theme.a(theme.line, 0.6) }
+                            Item { height: 4; width: 1 }
+
+                            // Cloudflare WARP row
+                            Item { width: parent.width; height: 26
+                                Row { anchors.verticalCenter: parent.verticalCenter; anchors.left: parent.left; spacing: 7
+                                    Sym { anchors.verticalCenter: parent.verticalCenter; text: "security"; sz: 14
+                                        color: root.warpConnected ? theme.good : theme.faint }
+                                    Text { anchors.verticalCenter: parent.verticalCenter
+                                        text: "Cloudflare WARP"; color: theme.sub; font.pixelSize: 11; font.family: root.cfgFont }
+                                    Text { anchors.verticalCenter: parent.verticalCenter
+                                        visible: root.warpConnected
+                                        text: "· " + root.warpMode; color: theme.faint; font.pixelSize: 10; font.family: root.cfgFont } }
+                                // WARP toggle switch
+                                Rectangle { anchors.verticalCenter: parent.verticalCenter; anchors.right: parent.right
+                                    width: 36; height: 20; radius: 10
+                                    color: root.warpConnected ? theme.good : theme.a(theme.line, 0.85)
+                                    border.width: 1; border.color: root.warpConnected ? theme.a(theme.good,0.5) : theme.a(theme.iris,0.3)
+                                    Behavior on color { ColorAnimation { duration: 120 } }
+                                    Rectangle { width: 15; height: 15; radius: 8; color: theme.frost; anchors.verticalCenter: parent.verticalCenter
+                                        x: root.warpConnected ? 19 : 2; Behavior on x { NumberAnimation { duration: 130 } } }
+                                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.warpToggle() } } }
+
+                            // WARP mode chips (only when WARP is connected)
+                            Row { visible: root.warpConnected; spacing: 5; topPadding: 2
+                                Repeater { model: ["warp","doh","warp+doh","tunnel_only"]
+                                    delegate: Rectangle { required property var modelData
+                                        readonly property bool cur: root.warpMode === modelData
+                                        height: 20; radius: 5; width: modeTxt.implicitWidth + 14
+                                        color: cur ? theme.a(theme.good,0.2) : (modeMa.containsMouse ? theme.a(theme.line,0.5) : theme.a(theme.line,0.3))
+                                        border.width: cur ? 1 : 0; border.color: theme.a(theme.good,0.4)
+                                        Text { id: modeTxt; anchors.centerIn: parent
+                                            text: modelData; color: cur ? theme.good : theme.faint
+                                            font.pixelSize: 9; font.family: root.cfgFont; font.bold: cur }
+                                        MouseArea { id: modeMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                            onClicked: root.warpSetMode(modelData) } } } }
+
+                            // NM VPN connections (if any saved)
+                            Repeater { model: root.vpnList
+                                delegate: Item { required property var modelData; width: parent.width; height: 30
+                                    Row { anchors.verticalCenter: parent.verticalCenter; anchors.left: parent.left; spacing: 7
+                                        Sym { anchors.verticalCenter: parent.verticalCenter; text: "vpn_key"; sz: 14
+                                            color: modelData.active ? theme.iris : theme.faint }
+                                        Text { anchors.verticalCenter: parent.verticalCenter
+                                            text: modelData.name; color: modelData.active ? theme.text : theme.sub
+                                            font.pixelSize: 11; font.family: root.cfgFont; font.bold: modelData.active } }
+                                    Rectangle { anchors.verticalCenter: parent.verticalCenter; anchors.right: parent.right
+                                        width: 36; height: 20; radius: 10
+                                        color: modelData.active ? theme.iris : theme.a(theme.line, 0.85)
+                                        border.width: 1; border.color: modelData.active ? theme.a(theme.iris,0.5) : theme.a(theme.iris,0.3)
+                                        Behavior on color { ColorAnimation { duration: 120 } }
+                                        Rectangle { width: 15; height: 15; radius: 8; color: theme.frost; anchors.verticalCenter: parent.verticalCenter
+                                            x: modelData.active ? 19 : 2; Behavior on x { NumberAnimation { duration: 130 } } }
+                                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.vpnToggle(modelData.name) } } } } } }
 
                     // ---- BLUETOOTH ----
                     Pill { owner: bar; id: btPill; anchors.verticalCenter: parent.verticalCenter
@@ -883,32 +1152,45 @@ ShellRoot {
                         value: root.btActive ? root.btName(root.btActive) : "" }
                     Drop { screen: bar.screen
                         id: btDrop; host: btPill; visible: root.openPop === "bt" && root.openBar === bar
-                        cardW: 280; cardH: btCol.implicitHeight + 32
-                        Column { id: btCol; anchors.fill: btDrop.card; anchors.margins: 12; spacing: 7
-                            Row { width: parent.width; height: 22
-                                Text { anchors.verticalCenter: parent.verticalCenter; text: "bluetooth"; color: theme.iris; font.pixelSize: 11; font.family: root.cfgFont; font.bold: true }
-                                Item { width: parent.width - 150; height: 1 }
-                                Sym { anchors.verticalCenter: parent.verticalCenter; text: (root.btAdapter&&root.btAdapter.discovering)?"sync":"search"; sz: 15; color: theme.sub
-                                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: if(root.btAdapter) root.btAdapter.discovering = !root.btAdapter.discovering } }
-                                Item { width: 10; height: 1 }
-                                // power toggle
-                                Rectangle { anchors.verticalCenter: parent.verticalCenter; width: 38; height: 20; radius: 10
-                                    color: (root.btAdapter&&root.btAdapter.enabled)?theme.iris:theme.a(theme.line,0.85); border.width: 1; border.color: theme.a(theme.iris,0.3)
-                                    Rectangle { width: 15; height: 15; radius: 8; color: theme.frost; anchors.verticalCenter: parent.verticalCenter
-                                        x: (root.btAdapter&&root.btAdapter.enabled)?21:3; Behavior on x { NumberAnimation { duration: 130 } } }
-                                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: if(root.btAdapter) root.btAdapter.enabled = !root.btAdapter.enabled } } }
+                        cardW: 290; cardH: btCol.implicitHeight + 28
+                        Column { id: btCol; anchors.fill: btDrop.card; anchors.margins: 14; spacing: 4
+                            // Header
+                            Item { width: parent.width; height: 28
+                                Text { anchors.verticalCenter: parent.verticalCenter; anchors.left: parent.left
+                                    text: "bluetooth"; color: theme.iris; font.pixelSize: 11; font.family: root.cfgFont; font.bold: true; font.letterSpacing: 0.8 }
+                                Row { anchors.verticalCenter: parent.verticalCenter; anchors.right: parent.right; spacing: 6
+                                    Rectangle { width: 26; height: 26; radius: 8
+                                        color: btScanMa.containsMouse ? theme.a(theme.iris,0.18) : "transparent"
+                                        Sym { anchors.centerIn: parent; text: (root.btAdapter&&root.btAdapter.discovering)?"sync":"search"; sz: 15; color: theme.sub }
+                                        MouseArea { id: btScanMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: if(root.btAdapter) root.btAdapter.discovering = !root.btAdapter.discovering } }
+                                    // power toggle
+                                    Rectangle { width: 36; height: 20; radius: 10; anchors.verticalCenter: undefined
+                                        color: (root.btAdapter&&root.btAdapter.enabled)?theme.iris:theme.a(theme.line,0.85); border.width: 1; border.color: theme.a(theme.iris,0.3)
+                                        Rectangle { width: 15; height: 15; radius: 8; color: theme.frost; anchors.verticalCenter: parent.verticalCenter
+                                            x: (root.btAdapter&&root.btAdapter.enabled)?19:2; Behavior on x { NumberAnimation { duration: 130 } } }
+                                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: if(root.btAdapter) root.btAdapter.enabled = !root.btAdapter.enabled } } } }
+                            Rectangle { width: parent.width; height: 1; color: theme.a(theme.line, 0.6) }
+                            Item { height: 2; width: 1 }
                             Repeater { model: root.btDevices
-                                delegate: Rectangle { required property var modelData; width: parent.width; height: 34; radius: 7
-                                    color: modelData.connected ? theme.a(theme.iris,0.2) : (dm.containsMouse ? theme.a(theme.line,0.5) : "transparent")
-                                    Row { anchors.fill: parent; anchors.leftMargin: 8; anchors.rightMargin: 8; spacing: 7
-                                        Sym { anchors.verticalCenter: parent.verticalCenter; text: root.btIcon(modelData); sz: 16; color: modelData.connected?theme.iris:theme.frost }
-                                        Text { anchors.verticalCenter: parent.verticalCenter; width: parent.width - (modelData.batteryAvailable?96:56); elide: Text.ElideRight; text: root.btName(modelData); color: theme.text; font.pixelSize: 12; font.family: root.cfgFont }
+                                delegate: Rectangle { required property var modelData; width: parent.width; height: 36; radius: 8
+                                    color: modelData.connected ? theme.a(theme.iris,0.18) : (dm.containsMouse ? theme.a(theme.line,0.45) : "transparent")
+                                    border.width: modelData.connected ? 1 : 0; border.color: theme.a(theme.iris,0.3)
+                                    Row { anchors.fill: parent; anchors.leftMargin: 10; anchors.rightMargin: 10; spacing: 8
+                                        Sym { anchors.verticalCenter: parent.verticalCenter; text: root.btIcon(modelData); sz: 17; color: modelData.connected?theme.iris:theme.frost }
+                                        Text { anchors.verticalCenter: parent.verticalCenter; width: parent.width - (modelData.batteryAvailable?100:60); elide: Text.ElideRight; text: root.btName(modelData); color: theme.text; font.pixelSize: 12; font.family: root.cfgFont; font.bold: modelData.connected }
                                         Text { anchors.verticalCenter: parent.verticalCenter; visible: modelData.batteryAvailable; text: Math.round((modelData.battery||0)*100)+"%"; color: theme.sub; font.pixelSize: 10; font.family: root.cfgFont }
-                                        Sym { anchors.verticalCenter: parent.verticalCenter; visible: modelData.connected; text: "check"; sz: 14; color: theme.good }
+                                        Sym { anchors.verticalCenter: parent.verticalCenter; visible: modelData.connected; text: "check_circle"; sz: 14; color: theme.good }
                                         Sym { anchors.verticalCenter: parent.verticalCenter; visible: modelData.pairing; text: "sync"; sz: 14; color: theme.warn } }
                                     MouseArea { id: dm; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
                                         onClicked: { if(modelData.connected) modelData.disconnect(); else modelData.connect() } } } }
-                            Text { visible: root.btDevices.length===0; text: (root.btAdapter&&root.btAdapter.enabled)?"tap search to scan…":"bluetooth is off"; color: theme.faint; font.pixelSize: 11; font.family: root.cfgFont } } }
+                            Text { visible: root.btDevices.length===0; text: (root.btAdapter&&root.btAdapter.enabled)?"tap search to scan…":"bluetooth is off"; color: theme.faint; font.pixelSize: 11; font.family: root.cfgFont; topPadding: 4 } } }
+
+                    // ---- CAFFEINE ----
+                    Pill { owner: bar; anchors.verticalCenter: parent.verticalCenter
+                        icon: root.idleOn ? "bedtime" : "coffee"
+                        accent: root.idleOn ? theme.frost : theme.warn
+                        value: ""
+                        onClicked: root.toggleIdle() }
 
                     // ---- VOLUME ----
                     Pill { owner: bar; id: volPill; anchors.verticalCenter: parent.verticalCenter; key: "vol"
@@ -921,23 +1203,36 @@ ShellRoot {
                         onScrolled: (dy)=>{ if(!au) return; au.muted=false; au.volume=Math.max(0,Math.min(1,au.volume+(dy>0?0.05:-0.05))) } }
                     Drop { screen: bar.screen
                         id: volDrop; host: volPill; visible: root.openPop === "vol" && root.openBar === bar
-                        cardW: 280; cardH: volCol.implicitHeight + 32
-                        Column { id: volCol; anchors.fill: volDrop.card; anchors.margins: 12; spacing: 9
-                            Row { width: parent.width; spacing: 9
-                                Sym { anchors.verticalCenter: parent.verticalCenter; text: (volPill.au&&volPill.au.muted)?"volume_off":"volume_up"; sz: 19
-                                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: if(volPill.au) volPill.au.muted=!volPill.au.muted } }
-                                Slider { anchors.verticalCenter: parent.verticalCenter; width: parent.width-90
+                        cardW: 290; cardH: volCol.implicitHeight + 28
+                        Column { id: volCol; anchors.fill: volDrop.card; anchors.margins: 14; spacing: 4
+                            // Header
+                            Item { width: parent.width; height: 28
+                                Text { anchors.verticalCenter: parent.verticalCenter; anchors.left: parent.left
+                                    text: "volume"; color: theme.iris; font.pixelSize: 11; font.family: root.cfgFont; font.bold: true; font.letterSpacing: 0.8 }
+                                Text { anchors.verticalCenter: parent.verticalCenter; anchors.right: parent.right
+                                    text: volPill.vol+"%"; color: theme.sub; font.pixelSize: 12; font.family: root.cfgFont } }
+                            Rectangle { width: parent.width; height: 1; color: theme.a(theme.line, 0.6) }
+                            Item { height: 4; width: 1 }
+                            // Volume slider row
+                            Row { width: parent.width; spacing: 10; height: 32
+                                Rectangle { width: 28; height: 28; radius: 8; anchors.verticalCenter: parent.verticalCenter
+                                    color: volMuteMa.containsMouse ? theme.a(theme.iris,0.15) : "transparent"
+                                    Sym { anchors.centerIn: parent; text: (volPill.au&&volPill.au.muted)?"volume_off":"volume_up"; sz: 17; color: (volPill.au&&volPill.au.muted)?theme.bad:theme.frost }
+                                    MouseArea { id: volMuteMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: if(volPill.au) volPill.au.muted=!volPill.au.muted } }
+                                Slider { anchors.verticalCenter: parent.verticalCenter; width: parent.width - 38
                                     value: volPill.au ? volPill.au.volume : 0
-                                    onMoved: (v)=>{ if(volPill.au){ volPill.au.muted=false; volPill.au.volume=v } } }
-                                Text { anchors.verticalCenter: parent.verticalCenter; text: volPill.vol+"%"; color: theme.sub; font.pixelSize: 12; font.family: root.cfgFont; width: 34; horizontalAlignment: Text.AlignRight } }
-                            Text { text: "output"; color: theme.faint; font.pixelSize: 10; font.family: root.cfgFont }
+                                    onMoved: (v)=>{ if(volPill.au){ volPill.au.muted=false; volPill.au.volume=v } } } }
+                            Item { height: 2; width: 1 }
+                            Text { text: "output device"; color: theme.faint; font.pixelSize: 10; font.family: root.cfgFont; font.letterSpacing: 0.5 }
+                            Item { height: 1; width: 1 }
                             Repeater { model: root.sinks
                                 delegate: Rectangle { required property var modelData; readonly property bool cur: Pipewire.defaultAudioSink && Pipewire.defaultAudioSink.id===modelData.id
-                                    width: parent.width; height: 30; radius: 7
-                                    color: cur ? theme.a(theme.iris,0.2) : (sm.containsMouse?theme.a(theme.line,0.5):"transparent")
-                                    Row { anchors.fill: parent; anchors.leftMargin: 8; spacing: 7
+                                    width: parent.width; height: 32; radius: 8
+                                    color: cur ? theme.a(theme.iris,0.18) : (sm.containsMouse?theme.a(theme.line,0.45):"transparent")
+                                    border.width: cur ? 1 : 0; border.color: theme.a(theme.iris,0.3)
+                                    Row { anchors.fill: parent; anchors.leftMargin: 10; anchors.rightMargin: 10; spacing: 8
                                         Sym { anchors.verticalCenter: parent.verticalCenter; text: cur?"radio_button_checked":"radio_button_unchecked"; sz: 15; color: cur?theme.iris:theme.faint }
-                                        Text { anchors.verticalCenter: parent.verticalCenter; width: parent.width-40; elide: Text.ElideRight; text: root.nodeName(modelData); color: theme.text; font.pixelSize: 12; font.family: root.cfgFont } }
+                                        Text { anchors.verticalCenter: parent.verticalCenter; width: parent.width-42; elide: Text.ElideRight; text: root.nodeName(modelData); color: theme.text; font.pixelSize: 12; font.family: root.cfgFont; font.bold: cur } }
                                     MouseArea { id: sm; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: Pipewire.preferredDefaultAudioSink = modelData } } } } }
 
                     // ---- BATTERY ----
@@ -951,16 +1246,24 @@ ShellRoot {
                         value: pct+"%"; accent: charging?theme.good:pct<=20?theme.bad:theme.frost }
                     Drop { screen: bar.screen
                         id: batDrop; host: batPill; visible: root.openPop === "bat" && root.openBar === bar
-                        cardW: 220; cardH: batCol.implicitHeight + 32
-                        Column { id: batCol; anchors.fill: batDrop.card; anchors.margins: 12; spacing: 6
-                            Text { text: "power profile"; color: theme.iris; font.pixelSize: 11; font.family: root.cfgFont; font.bold: true }
-                            Repeater { model: [{k:"performance",i:"speed"},{k:"balanced",i:"balance"},{k:"power-saver",i:"eco"}]
+                        cardW: 230; cardH: batCol.implicitHeight + 28
+                        Column { id: batCol; anchors.fill: batDrop.card; anchors.margins: 14; spacing: 4
+                            // Header
+                            Item { width: parent.width; height: 28
+                                Text { anchors.verticalCenter: parent.verticalCenter; anchors.left: parent.left
+                                    text: "power profile"; color: theme.iris; font.pixelSize: 11; font.family: root.cfgFont; font.bold: true; font.letterSpacing: 0.8 }
+                                Text { anchors.verticalCenter: parent.verticalCenter; anchors.right: parent.right
+                                    text: batPill.pct+"%"; color: batPill.charging?theme.good:batPill.pct<=20?theme.bad:theme.sub; font.pixelSize: 12; font.family: root.cfgFont } }
+                            Rectangle { width: parent.width; height: 1; color: theme.a(theme.line, 0.6) }
+                            Item { height: 2; width: 1 }
+                            Repeater { model: [{k:"performance",i:"speed",l:"Performance"},{k:"balanced",i:"balance",l:"Balanced"},{k:"power-saver",i:"eco",l:"Power Saver"}]
                                 delegate: Rectangle { required property var modelData; readonly property bool cur: root.powerProfile===modelData.k
-                                    width: parent.width; height: 32; radius: 7
-                                    color: cur ? theme.a(theme.iris,0.2) : (bm.containsMouse?theme.a(theme.line,0.5):"transparent")
-                                    Row { anchors.fill: parent; anchors.leftMargin: 8; spacing: 8
+                                    width: parent.width; height: 34; radius: 8
+                                    color: cur ? theme.a(theme.iris,0.18) : (bm.containsMouse?theme.a(theme.line,0.45):"transparent")
+                                    border.width: cur ? 1 : 0; border.color: theme.a(theme.iris,0.3)
+                                    Row { anchors.fill: parent; anchors.leftMargin: 10; anchors.rightMargin: 10; spacing: 10
                                         Sym { anchors.verticalCenter: parent.verticalCenter; text: modelData.i; sz: 17; color: cur?theme.iris:theme.frost }
-                                        Text { anchors.verticalCenter: parent.verticalCenter; text: modelData.k; color: theme.text; font.pixelSize: 12; font.family: root.cfgFont } }
+                                        Text { anchors.verticalCenter: parent.verticalCenter; text: modelData.l; color: cur?theme.text:theme.sub; font.pixelSize: 12; font.family: root.cfgFont; font.bold: cur } }
                                     MouseArea { id: bm; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.setProfile(modelData.k) } } } } }
 
                     // ---- CLOCK ----
@@ -1006,9 +1309,9 @@ ShellRoot {
                                     Text { text: pwrDrop.up; color: theme.faint; font.pixelSize: 9; font.family: root.cfgFont } } }
                             Rectangle { width: parent.width; height: 1; color: theme.a(theme.iris,0.2) }
                             Item { width: 1; height: 2 }
-                            Repeater { model: [{i:"lock",l:"lock",c:"loginctl lock-session",col:theme.frost},
+                            Repeater { model: [{i:"lock",l:"lock",c:"~/.config/quickshell/sea-shell/sea-lock.sh",col:theme.frost},
                                                {i:"bedtime",l:"suspend",c:"systemctl suspend",col:theme.frost},
-                                               {i:"logout",l:"log out",c:"uwsm check is-active >/dev/null 2>&1 && uwsm stop || hyprctl dispatch exit",col:theme.frost},
+                                               {i:"logout",l:"log out",c:"systemctl --user is-active -q 'wayland-wm@*.service' && uwsm stop || { hyprctl dispatch exit; sleep 3; loginctl terminate-session self; }",col:theme.frost},
                                                {i:"restart_alt",l:"reboot",c:"systemctl reboot",col:theme.warn,danger:true},
                                                {i:"power_settings_new",l:"shut down",c:"systemctl poweroff",col:theme.bad,danger:true}]
                                 delegate: Rectangle { required property var modelData

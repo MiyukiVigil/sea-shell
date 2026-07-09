@@ -20,7 +20,10 @@ ShellRoot {
     onTabChanged: {
         if (tab === 7) kbProc.running = true          // keybinds: refresh binds
         if (tab === 8) sysProc.running = true         // system: refresh live stats
-        if (tab === 10) idleChk.running = true        // idle: re-check hypridle state
+        if (tab === 10) {
+            idleChk.running = true                    // idle: re-check hypridle state
+            lockSettingsGet.running = true            // idle & lock: load configs
+        }
         if (tab === 6) ppGet.running = true           // power: re-read profile
     }
 
@@ -50,6 +53,75 @@ ShellRoot {
         root.idleOn = !root.idleOn;
     }
 
+    // ---------- idle & lock config data ----------
+    property int lockDim: 150
+    property int lockLock: 300
+    property int lockDpms: 600
+    property int lockSuspend: 1800
+    property bool lockSuspendEnabled: true
+    property int lockGrace: 2
+    property bool lockHideCursor: true
+    property bool lockIgnoreEmpty: true
+    property int lockBlurPasses: 3
+    property int lockBlurSize: 6
+    property real lockVibrancy: 0.15
+    property string lockBg: "~/.config/sea-shell/sea-wall.png"
+
+    Process {
+        id: lockSettingsGet
+        running: false
+        command: ["python3", Qt.resolvedUrl("sea-lock-settings.py").toString().replace("file://",""), "get"]
+        stdout: StdioCollector {
+            id: lockGetOut
+            onStreamFinished: {
+                try {
+                    var data = JSON.parse(lockGetOut.text);
+                    if (data.idle_dim !== undefined) root.lockDim = data.idle_dim;
+                    if (data.idle_lock !== undefined) root.lockLock = data.idle_lock;
+                    if (data.idle_dpms !== undefined) root.lockDpms = data.idle_dpms;
+                    if (data.idle_suspend !== undefined) root.lockSuspend = data.idle_suspend;
+                    if (data.idle_suspend_enabled !== undefined) root.lockSuspendEnabled = data.idle_suspend_enabled;
+                    if (data.lock_grace !== undefined) root.lockGrace = data.lock_grace;
+                    if (data.lock_hide_cursor !== undefined) root.lockHideCursor = data.lock_hide_cursor;
+                    if (data.lock_ignore_empty !== undefined) root.lockIgnoreEmpty = data.lock_ignore_empty;
+                    if (data.lock_blur_passes !== undefined) root.lockBlurPasses = data.lock_blur_passes;
+                    if (data.lock_blur_size !== undefined) root.lockBlurSize = data.lock_blur_size;
+                    if (data.lock_vibrancy !== undefined) root.lockVibrancy = data.lock_vibrancy;
+                    if (data.lock_bg !== undefined) root.lockBg = data.lock_bg;
+                } catch(e) {
+                    console.log("Error parsing lock settings: " + e);
+                }
+            }
+        }
+    }
+
+    Process {
+        id: lockSettingsSet
+        running: false
+    }
+
+    function saveLockSettings() {
+        var obj = {
+            "idle_dim": root.lockDim,
+            "idle_lock": root.lockLock,
+            "idle_dpms": root.lockDpms,
+            "idle_suspend": root.lockSuspend,
+            "idle_suspend_enabled": root.lockSuspendEnabled,
+            "lock_grace": root.lockGrace,
+            "lock_hide_cursor": root.lockHideCursor,
+            "lock_ignore_empty": root.lockIgnoreEmpty,
+            "lock_blur_passes": root.lockBlurPasses,
+            "lock_blur_size": root.lockBlurSize,
+            "lock_vibrancy": root.lockVibrancy,
+            "lock_bg": root.lockBg
+        };
+        var jsonStr = JSON.stringify(obj);
+        var escapedJson = jsonStr.replace(/'/g, "'\\''");
+        var scriptPath = Qt.resolvedUrl("sea-lock-settings.py").toString().replace("file://","");
+        lockSettingsSet.command = ["sh", "-c", "printf '%s' '" + escapedJson + "' | python3 " + scriptPath + " set"];
+        lockSettingsSet.running = true;
+    }
+
     // ---------- power profile + battery ----------
     property string powerProfile: "balanced"
     Process { id: ppGet; running: true; command: ["sh","-c","powerprofilesctl get 2>/dev/null"]
@@ -67,6 +139,14 @@ ShellRoot {
     property var kbRec: null          // bind being rebound
     property var kbRecMods: []
     property string kbConflict: ""
+
+    // Add new bind state variables
+    property bool kbAdding: false
+    property string kbAddDesc: ""
+    property string kbAddAction: "exec, "
+    property var kbAddMods: ["SUPER"]
+    property string kbAddKey: ""
+    property bool kbAddRecording: false
     readonly property var kbShown: {
         var q = root.kbQuery.toLowerCase().trim();
         if (q === "") return root.kbBinds;
@@ -125,6 +205,17 @@ ShellRoot {
         Quickshell.execDetached(["sh", Qt.resolvedUrl("sea-rebind.sh").toString().replace("file://",""),
                                  root.kbRec.desc, root.kbRec.key, combo, base]);
         root.kbRec = null; root.kbConflict = "";
+        kbRefetch.start();
+    }
+    function kbApplyAddBind() {
+        var modsStr = root.kbAddMods.join(" ");
+        var scriptPath = Qt.resolvedUrl("sea-add-bind.sh").toString().replace("file://","");
+        Quickshell.execDetached(["sh", scriptPath, modsStr, root.kbAddKey, root.kbAddDesc, root.kbAddAction]);
+        root.kbAdding = false;
+        root.kbAddDesc = "";
+        root.kbAddAction = "exec, ";
+        root.kbAddKey = "";
+        root.kbAddMods = ["SUPER"];
         kbRefetch.start();
     }
 
@@ -400,6 +491,89 @@ ShellRoot {
         } } }
     Timer { id: wifiRefresh; interval: 2500; onTriggered: root.rescanWifi() }
 
+    // ---------- cloudflare warp ----------
+    property string warpStatus: "Disconnected"
+    property bool warpConnected: warpStatus.indexOf("Connected") >= 0 && warpStatus.indexOf("Disconnected") < 0
+    property string warpMode: "warp"
+    Process {
+        id: warpPoll; running: true
+        command: ["sh","-c","warp-cli status 2>/dev/null | grep '^Status' | sed 's/Status update: //'"]
+        stdout: StdioCollector { id: warpOut; onStreamFinished: { var s = warpOut.text.trim(); if (s) root.warpStatus = s } }
+    }
+    Process {
+        id: warpModePoll; running: true
+        command: ["sh","-c","warp-cli mode 2>/dev/null | awk 'NR==1{print $NF}'"]
+        stdout: StdioCollector { id: warpModeOut; onStreamFinished: { var m = warpModeOut.text.trim(); if (m) root.warpMode = m } }
+    }
+    Timer { id: warpPollTimer; interval: 4000; running: true; repeat: true; triggeredOnStart: true
+        onTriggered: { warpPoll.running = true; warpModePoll.running = true } }
+    function warpToggle() {
+        if (root.warpConnected) {
+            run("warp-cli disconnect && notify-send 'sea-shell' 'WARP disconnected'");
+            root.warpStatus = "Disconnected";
+        } else {
+            run("warp-cli connect && notify-send 'sea-shell' 'WARP connected' || notify-send 'sea-shell' 'WARP failed'");
+            root.warpStatus = "Connecting...";
+        }
+        warpRefreshTimer.start();
+    }
+    function warpSetMode(m) { run("warp-cli mode " + m); root.warpMode = m; warpRefreshTimer.start() }
+    Timer { id: warpRefreshTimer; interval: 1800; repeat: false; onTriggered: { warpPoll.running = true; warpModePoll.running = true } }
+
+    // ---------- VPN (NetworkManager — wireguard + openvpn) ----------
+    property var vpnList: []      // [{name, type, active}]
+    property string vpnMsg: ""
+    property bool vpnAddOpen: false
+    property int vpnAddMode: 0    // 0=wireguard conf, 1=openvpn ovpn
+    Process {
+        id: vpnScan; running: true
+        command: ["sh","-c","nmcli -t -f NAME,TYPE,ACTIVE con show 2>/dev/null | grep -E ':(vpn|wireguard):'"]
+        stdout: StdioCollector { id: vpnOut; onStreamFinished: {
+            var out = []; var lines = vpnOut.text.trim().split("\n");
+            for (var i=0; i<lines.length; i++) {
+                if (!lines[i]) continue;
+                var p = lines[i].split(":");
+                if (p.length < 3) continue;
+                out.push({ name: p[0], type: p[1], active: p[2]==="yes" });
+            }
+            root.vpnList = out;
+        } }
+    }
+    Timer { id: vpnPollTimer; interval: 5000; running: true; repeat: true; triggeredOnStart: true; onTriggered: vpnScan.running = true }
+    Timer { id: vpnRefreshTimer; interval: 2200; repeat: false; onTriggered: vpnScan.running = true }
+    function vpnToggle(name) {
+        var e = name.replace(/'/g, "");
+        var active = root.vpnList.some(function(v){ return v.name===name && v.active; });
+        if (active) {
+            run("nmcli con down id '" + e + "' && notify-send 'sea-shell' 'VPN disconnected'");
+            root.vpnMsg = "disconnecting " + e + "…";
+        } else {
+            run("nmcli con up id '" + e + "' && notify-send 'sea-shell' 'VPN connected' || notify-send 'sea-shell' 'VPN failed'");
+            root.vpnMsg = "connecting " + e + "…";
+        }
+        vpnRefreshTimer.start();
+    }
+    function vpnDelete(name) {
+        var e = name.replace(/'/g, "");
+        run("nmcli con delete id '" + e + "' 2>/dev/null");
+        root.vpnMsg = "deleted " + e;
+        vpnRefreshTimer.start();
+    }
+    // Import WireGuard via nmcli — expects the raw .conf text
+    function vpnAddWireguard(confPath) {
+        if (!confPath.trim()) { root.vpnMsg = "enter the path to a .conf file"; return }
+        var p = confPath.trim().replace(/^~/, Qt.resolvedUrl(".").toString().replace("file://","").replace(/\/quickshell.*$/,""));
+        run("nmcli con import type wireguard file '" + p.replace(/'/g,"'\\''") + "' && notify-send 'sea-shell' 'WireGuard profile imported' || notify-send 'sea-shell' 'Import failed — check path'");
+        root.vpnMsg = "importing WireGuard…"; vpnRefreshTimer.start();
+    }
+    // Import OpenVPN via nmcli
+    function vpnAddOpenVPN(confPath) {
+        if (!confPath.trim()) { root.vpnMsg = "enter the path to a .ovpn file"; return }
+        var p = confPath.trim().replace(/^~/, Qt.resolvedUrl(".").toString().replace("file://","").replace(/\/quickshell.*$/,""));
+        run("nmcli con import type openvpn file '" + p.replace(/'/g,"'\\''") + "' && notify-send 'sea-shell' 'OpenVPN profile imported' || notify-send 'sea-shell' 'Import failed — check path'");
+        root.vpnMsg = "importing OpenVPN…"; vpnRefreshTimer.start();
+    }
+
     // ============ reusable components ============
     component Sym: Text {
         property int sz: 18
@@ -503,8 +677,8 @@ ShellRoot {
 
         Rectangle {
             anchors.centerIn: parent
-            width: 720
-            height: Math.min(parent.height - 80, 620)
+            width: Math.min(parent.width - 60, 960)
+            height: Math.min(parent.height - 60, 780)
             radius: 18
             color: theme.a(theme.bg, 0.98)
             border.width: 1; border.color: theme.a(theme.iris, 0.34)
@@ -514,7 +688,7 @@ ShellRoot {
             ColumnLayout {
                 id: sidebar
                 anchors { left: parent.left; top: parent.top; bottom: parent.bottom; margins: 20 }
-                width: 180; spacing: 6
+                width: 200; spacing: 6
                 RowLayout {
                     spacing: 11; Layout.fillWidth: true; Layout.bottomMargin: 6
                     IconImage { implicitSize: 30; source: Qt.resolvedUrl("logo.svg") }
@@ -898,6 +1072,184 @@ ShellRoot {
                             }
                         }
 
+                        // ================= VPN =================
+                        ColumnLayout {
+                            visible: root.tab === 2; Layout.fillWidth: true; spacing: 10
+
+                            // WARP header row
+                            RowLayout {
+                                Layout.fillWidth: true; spacing: 8
+                                Sym { text: "security"; sz: 18; color: root.warpConnected ? theme.good : theme.iris }
+                                Text { text: "Cloudflare WARP"; color: theme.iris; font.pixelSize: 12; font.family: "monospace"; font.bold: true }
+                                Rectangle { Layout.fillWidth: true; height: 1; color: theme.a(theme.iris, 0.18) }
+                                Rectangle { implicitWidth: 46; implicitHeight: 22; radius: 11
+                                    color: root.warpConnected ? theme.a(theme.good, 0.4) : theme.a(theme.line, 0.7)
+                                    border.width: 1; border.color: root.warpConnected ? theme.good : theme.a(theme.line, 0.9)
+                                    Behavior on color { ColorAnimation { duration: 120 } }
+                                    Rectangle { width: 16; height: 16; radius: 8; y: 3
+                                        x: root.warpConnected ? parent.width - 19 : 3
+                                        color: root.warpConnected ? theme.frost : theme.faint
+                                        Behavior on x { NumberAnimation { duration: 130 } } }
+                                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.warpToggle() } }
+                            }
+
+                            // WARP status + mode chips
+                            RowLayout {
+                                Layout.fillWidth: true; spacing: 6
+                                Text { text: root.warpStatus; color: root.warpConnected ? theme.good : theme.faint
+                                    font.pixelSize: 11; font.family: "monospace" }
+                                Item { Layout.fillWidth: true }
+                                Repeater { model: ["warp","doh","warp+doh","tunnel_only"]
+                                    delegate: Rectangle {
+                                        required property var modelData
+                                        readonly property bool cur: root.warpMode === modelData
+                                        implicitHeight: 20; radius: 5; implicitWidth: wmt.implicitWidth + 14
+                                        color: cur ? theme.a(theme.good, 0.25) : (wma2.containsMouse ? theme.a(theme.line,0.5) : theme.a(theme.line,0.3))
+                                        border.width: cur ? 1 : 0; border.color: theme.a(theme.good, 0.45)
+                                        Text { id: wmt; anchors.centerIn: parent; text: modelData
+                                            color: cur ? theme.good : theme.faint; font.pixelSize: 9; font.family: "monospace"; font.bold: cur }
+                                        MouseArea { id: wma2; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                            onClicked: root.warpSetMode(modelData) } } }
+                            }
+
+                            // VPN connections divider
+                            RowLayout {
+                                Layout.fillWidth: true; spacing: 8; Layout.topMargin: 4
+                                Sym { text: "vpn_key"; sz: 18; color: theme.iris }
+                                Text { text: "VPN connections"; color: theme.iris; font.pixelSize: 12; font.family: "monospace"; font.bold: true }
+                                Rectangle { Layout.fillWidth: true; height: 1; color: theme.a(theme.iris, 0.18) }
+                            }
+
+                            // saved VPN list
+                            ColumnLayout {
+                                Layout.fillWidth: true; spacing: 6
+                                Text { visible: root.vpnList.length === 0; text: "no VPN profiles saved — import one below"
+                                    color: theme.faint; font.pixelSize: 11; font.family: "monospace" }
+                                Repeater {
+                                    model: root.vpnList
+                                    delegate: Rectangle {
+                                        required property var modelData
+                                        Layout.fillWidth: true; implicitHeight: 50; radius: 9
+                                        color: modelData.active ? theme.a(theme.iris, 0.18) : theme.a(theme.line, 0.35)
+                                        border.width: 1; border.color: modelData.active ? theme.a(theme.iris, 0.5) : theme.a(theme.iris, 0.12)
+                                        RowLayout {
+                                            anchors.fill: parent; anchors.leftMargin: 14; anchors.rightMargin: 12; spacing: 10
+                                            Sym { text: modelData.type==="wireguard" ? "cable" : "vpn_key"; sz: 17
+                                                color: modelData.active ? theme.iris : theme.faint }
+                                            ColumnLayout { spacing: 2; Layout.fillWidth: true
+                                                Text { text: modelData.name; color: modelData.active ? theme.text : theme.sub
+                                                    font.pixelSize: 13; font.family: "monospace"; font.bold: modelData.active; elide: Text.ElideRight }
+                                                Text { text: modelData.type + (modelData.active ? " · connected" : "")
+                                                    color: modelData.active ? theme.good : theme.faint; font.pixelSize: 10; font.family: "monospace" } }
+                                            Rectangle {
+                                                implicitWidth: 96; implicitHeight: 30; radius: 7
+                                                color: vtm.containsMouse ? (modelData.active ? theme.a(theme.bad,0.3) : theme.iris) : (modelData.active ? theme.a(theme.bad,0.15) : theme.a(theme.iris,0.2))
+                                                border.width: 1; border.color: modelData.active ? theme.bad : theme.iris
+                                                Behavior on color { ColorAnimation { duration: 110 } }
+                                                Text { anchors.centerIn: parent
+                                                    text: modelData.active ? "disconnect" : "connect"
+                                                    color: vtm.containsMouse ? (modelData.active ? theme.bad : theme.bg) : (modelData.active ? theme.bad : theme.frost)
+                                                    font.pixelSize: 11; font.family: "monospace"; font.bold: true }
+                                                MouseArea { id: vtm; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                                    onClicked: root.vpnToggle(modelData.name) } }
+                                            Rectangle {
+                                                implicitWidth: 32; implicitHeight: 30; radius: 7
+                                                color: vdm.containsMouse ? theme.a(theme.bad, 0.25) : "transparent"
+                                                Sym { anchors.centerIn: parent; text: "delete"; sz: 16
+                                                    color: vdm.containsMouse ? theme.bad : theme.faint }
+                                                MouseArea { id: vdm; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                                    onClicked: root.vpnDelete(modelData.name) } }
+                                        }
+                                    }
+                                }
+                            }
+
+                            // add VPN expandable panel
+                            Rectangle {
+                                Layout.fillWidth: true
+                                implicitHeight: root.vpnAddOpen ? vpnAddInner.implicitHeight + 20 : 42
+                                radius: 9; clip: true
+                                Behavior on implicitHeight { NumberAnimation { duration: 150; easing.type: Easing.OutCubic } }
+                                color: theme.a(theme.line, 0.3)
+                                border.width: 1; border.color: root.vpnAddOpen ? theme.a(theme.iris, 0.4) : theme.a(theme.iris, 0.12)
+
+                                ColumnLayout {
+                                    id: vpnAddInner
+                                    anchors { fill: parent; leftMargin: 14; rightMargin: 14; topMargin: 8; bottomMargin: 8 }
+                                    spacing: 10
+
+                                    // toggle header
+                                    MouseArea { Layout.fillWidth: true; implicitHeight: 26; cursorShape: Qt.PointingHandCursor
+                                        onClicked: root.vpnAddOpen = !root.vpnAddOpen
+                                        RowLayout { anchors.fill: parent; spacing: 8
+                                            Sym { text: "add_circle"; sz: 17; color: theme.frost }
+                                            Text { text: "import VPN profile"; color: theme.sub; font.pixelSize: 12; font.family: "monospace"; Layout.fillWidth: true }
+                                            Sym { text: root.vpnAddOpen ? "expand_less" : "expand_more"; sz: 17; color: theme.faint } } }
+
+                                    // type chips
+                                    RowLayout {
+                                        visible: root.vpnAddOpen; Layout.fillWidth: true; spacing: 8
+                                        Repeater { model: [{l:"WireGuard (.conf)",v:0},{l:"OpenVPN (.ovpn)",v:1}]
+                                            delegate: Rectangle {
+                                                required property var modelData
+                                                readonly property bool sel: root.vpnAddMode === modelData.v
+                                                Layout.fillWidth: true; implicitHeight: 32; radius: 7
+                                                color: sel ? theme.a(theme.iris,0.25) : (atm2.containsMouse ? theme.a(theme.line,0.5) : theme.a(theme.line,0.35))
+                                                border.width: 1; border.color: sel ? theme.iris : theme.a(theme.iris,0.15)
+                                                Text { anchors.centerIn: parent; text: modelData.l; color: sel ? theme.text : theme.sub
+                                                    font.pixelSize: 11; font.family: "monospace"; font.bold: sel }
+                                                MouseArea { id: atm2; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                                    onClicked: root.vpnAddMode = modelData.v } } }
+                                    }
+
+                                    // file path + import button
+                                    RowLayout {
+                                        visible: root.vpnAddOpen; Layout.fillWidth: true; spacing: 8
+                                        Rectangle {
+                                            Layout.fillWidth: true; implicitHeight: 34; radius: 8
+                                            color: theme.a(theme.bg, 0.8); border.width: 1
+                                            border.color: vpnPathIn.activeFocus ? theme.iris : theme.a(theme.iris, 0.25)
+                                            TextInput {
+                                                id: vpnPathIn
+                                                anchors { fill: parent; leftMargin: 10; rightMargin: 10 }
+                                                verticalAlignment: TextInput.AlignVCenter
+                                                color: theme.text; font.pixelSize: 12; font.family: "monospace"; clip: true
+                                                Text { anchors.verticalCenter: parent.verticalCenter; visible: vpnPathIn.text === ""
+                                                    text: root.vpnAddMode === 0 ? "~/path/to/tunnel.conf" : "~/path/to/config.ovpn"
+                                                    color: theme.faint; font.pixelSize: 12; font.family: "monospace" }
+                                                Keys.onReturnPressed: {
+                                                    if (root.vpnAddMode === 0) root.vpnAddWireguard(vpnPathIn.text);
+                                                    else root.vpnAddOpenVPN(vpnPathIn.text);
+                                                    vpnPathIn.text = ""; root.vpnAddOpen = false; } } }
+                                        Rectangle {
+                                            implicitWidth: 80; implicitHeight: 34; radius: 8
+                                            color: viam.containsMouse ? theme.iris : theme.a(theme.iris, 0.2)
+                                            border.width: 1; border.color: theme.iris
+                                            RowLayout { anchors.centerIn: parent; spacing: 5
+                                                Sym { text: "upload_file"; sz: 14; color: viam.containsMouse ? theme.bg : theme.frost }
+                                                Text { text: "import"; color: viam.containsMouse ? theme.bg : theme.text; font.pixelSize: 11; font.family: "monospace"; font.bold: true } }
+                                            MouseArea { id: viam; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                                onClicked: {
+                                                    if (root.vpnAddMode === 0) root.vpnAddWireguard(vpnPathIn.text);
+                                                    else root.vpnAddOpenVPN(vpnPathIn.text);
+                                                    vpnPathIn.text = ""; root.vpnAddOpen = false; } } }
+                                    }
+
+                                    // hint
+                                    Text { visible: root.vpnAddOpen; Layout.fillWidth: true; wrapMode: Text.Wrap
+                                        text: root.vpnAddMode === 0
+                                            ? "paste the path to a WireGuard .conf file — the profile name is taken from the filename. get a .conf from your VPN provider or export from your router."
+                                            : "paste the path to an OpenVPN .ovpn file — username/password will be prompted on first connect if required."
+                                        color: theme.faint; font.pixelSize: 10; font.family: "monospace" }
+                                }
+                            }
+
+                            // status message
+                            Text { visible: root.vpnMsg !== ""; text: root.vpnMsg
+                                color: root.vpnMsg.indexOf("fail") >= 0 || root.vpnMsg.indexOf("fail") >= 0 ? theme.bad : theme.sub
+                                font.pixelSize: 11; font.family: "monospace"; Layout.fillWidth: true; wrapMode: Text.Wrap }
+                        }
+
                         // ================= WEATHER =================
                         ColumnLayout {
                             visible: root.tab === 3; Layout.fillWidth: true; spacing: 14
@@ -1039,30 +1391,196 @@ ShellRoot {
                             visible: root.tab === 7; Layout.fillWidth: true; spacing: 10
                             Section { title: "keybinds"; icon: "keyboard" }
                             // search
+                            RowLayout {
+                                spacing: 10; Layout.fillWidth: true
+                                Rectangle {
+                                    Layout.fillWidth: true; implicitHeight: 32; radius: 8
+                                    color: theme.a(theme.line, 0.4)
+                                    border.width: 1; border.color: kbField.text!=="" ? theme.a(theme.iris,0.5) : theme.a(theme.iris,0.2)
+                                    Sym { id: kbLens; text: "search"; sz: 15; color: theme.faint
+                                        anchors { left: parent.left; leftMargin: 10; verticalCenter: parent.verticalCenter } }
+                                    TextInput {
+                                        id: kbField
+                                        anchors { left: kbLens.right; leftMargin: 8; right: parent.right; rightMargin: 10; verticalCenter: parent.verticalCenter }
+                                        color: theme.text; font.pixelSize: 13; font.family: "monospace"; clip: true
+                                        onTextChanged: root.kbQuery = text
+                                        Text { text: "type to filter · click a bind to rebind it"; visible: kbField.text===""
+                                            color: theme.faint; font.pixelSize: 12; font.family: "monospace"; anchors.verticalCenter: parent.verticalCenter }
+                                        Keys.onPressed: (e)=> {
+                                            if (e.key === Qt.Key_Escape) {
+                                                if (root.kbRec) { root.kbRec = null; root.kbConflict = "" }
+                                                else if (root.kbAddRecording) { root.kbAddRecording = false }
+                                                else if (root.kbAdding) { root.kbAdding = false }
+                                                else Qt.quit();
+                                                e.accepted = true;
+                                                return;
+                                            }
+                                            if (root.kbRec) {
+                                                if (e.key===Qt.Key_Shift||e.key===Qt.Key_Control||e.key===Qt.Key_Alt||e.key===Qt.Key_Meta) { e.accepted=true; return }
+                                                var n = root.kbKeyName(e);
+                                                if (n) root.kbApply(n); else root.kbConflict = "unsupported key";
+                                                e.accepted = true;
+                                                return;
+                                            }
+                                            if (root.kbAddRecording) {
+                                                if (e.key===Qt.Key_Shift||e.key===Qt.Key_Control||e.key===Qt.Key_Alt||e.key===Qt.Key_Meta) { e.accepted=true; return }
+                                                var k = root.kbKeyName(e);
+                                                if (k) { root.kbAddKey = k; root.kbAddRecording = false }
+                                                e.accepted = true;
+                                            }
+                                        }
+                                    }
+                                }
+                                // Add Button
+                                Rectangle {
+                                    implicitWidth: 32; implicitHeight: 32; radius: 8
+                                    color: kbAddBtnMa.containsMouse ? theme.iris : theme.a(theme.line, 0.4)
+                                    border.width: 1; border.color: theme.a(theme.iris, 0.2)
+                                    Sym { anchors.centerIn: parent; text: "add"; sz: 18; color: kbAddBtnMa.containsMouse ? theme.bg : theme.frost }
+                                    MouseArea {
+                                        id: kbAddBtnMa
+                                        anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                        onClicked: { root.kbAdding = !root.kbAdding; root.kbAddRecording = false; kbField.forceActiveFocus() }
+                                    }
+                                }
+                            }
+
+                            // ================= ADD BIND PANEL =================
                             Rectangle {
-                                Layout.fillWidth: true; implicitHeight: 32; radius: 8
-                                color: theme.a(theme.line, 0.4)
-                                border.width: 1; border.color: kbField.text!=="" ? theme.a(theme.iris,0.5) : theme.a(theme.iris,0.2)
-                                Sym { id: kbLens; text: "search"; sz: 15; color: theme.faint
-                                    anchors { left: parent.left; leftMargin: 10; verticalCenter: parent.verticalCenter } }
-                                TextInput {
-                                    id: kbField
-                                    anchors { left: kbLens.right; leftMargin: 8; right: parent.right; rightMargin: 10; verticalCenter: parent.verticalCenter }
-                                    color: theme.text; font.pixelSize: 13; font.family: "monospace"; clip: true
-                                    onTextChanged: root.kbQuery = text
-                                    Text { text: "type to filter · click a bind to rebind it"; visible: kbField.text===""
-                                        color: theme.faint; font.pixelSize: 12; font.family: "monospace"; anchors.verticalCenter: parent.verticalCenter }
-                                    Keys.onPressed: (e)=> {
-                                        if (e.key === Qt.Key_Escape) { if (root.kbRec) { root.kbRec = null; root.kbConflict = "" } else Qt.quit(); e.accepted = true; return }
-                                        if (root.kbRec) {
-                                            if (e.key===Qt.Key_Shift||e.key===Qt.Key_Control||e.key===Qt.Key_Alt||e.key===Qt.Key_Meta) { e.accepted=true; return }
-                                            var n = root.kbKeyName(e);
-                                            if (n) root.kbApply(n); else root.kbConflict = "unsupported key";
-                                            e.accepted = true;
+                                visible: root.kbAdding
+                                Layout.fillWidth: true
+                                implicitHeight: kbAddFormCol.implicitHeight + 20
+                                radius: 10
+                                color: theme.a(theme.line, 0.2)
+                                border.width: 1; border.color: theme.a(theme.iris, 0.2)
+                                ColumnLayout {
+                                    id: kbAddFormCol
+                                    anchors.fill: parent; anchors.margins: 14; spacing: 12
+                                    
+                                    // Description
+                                    ColumnLayout {
+                                        spacing: 4; Layout.fillWidth: true
+                                        Text { text: "description"; color: theme.faint; font.pixelSize: 10; font.family: "monospace" }
+                                        Rectangle {
+                                            Layout.fillWidth: true; implicitHeight: 32; radius: 6
+                                            color: theme.a(theme.line, 0.4); border.width: 1
+                                            border.color: kbDescIn.activeFocus ? theme.iris : theme.a(theme.iris, 0.1)
+                                            TextInput {
+                                                id: kbDescIn
+                                                anchors.fill: parent; anchors.leftMargin: 8; anchors.rightMargin: 8
+                                                verticalAlignment: TextInput.AlignVCenter
+                                                color: theme.text; font.pixelSize: 12; font.family: "monospace"
+                                                text: root.kbAddDesc
+                                                onTextChanged: root.kbAddDesc = text
+                                                Text { text: "e.g. Launch Firefox"; visible: kbDescIn.text===""; color: theme.faint; font.pixelSize: 12; font.family: "monospace"; anchors.verticalCenter: parent.verticalCenter }
+                                            }
+                                        }
+                                    }
+                                    
+                                    // Action / Command
+                                    ColumnLayout {
+                                        spacing: 4; Layout.fillWidth: true
+                                        Text { text: "action / command"; color: theme.faint; font.pixelSize: 10; font.family: "monospace" }
+                                        Rectangle {
+                                            Layout.fillWidth: true; implicitHeight: 32; radius: 6
+                                            color: theme.a(theme.line, 0.4); border.width: 1
+                                            border.color: kbActionIn.activeFocus ? theme.iris : theme.a(theme.iris, 0.1)
+                                            TextInput {
+                                                id: kbActionIn
+                                                anchors.fill: parent; anchors.leftMargin: 8; anchors.rightMargin: 8
+                                                verticalAlignment: TextInput.AlignVCenter
+                                                color: theme.text; font.pixelSize: 12; font.family: "monospace"
+                                                text: root.kbAddAction
+                                                onTextChanged: root.kbAddAction = text
+                                            }
+                                        }
+                                    }
+
+                                    // Shortcut combination
+                                    ColumnLayout {
+                                        spacing: 4; Layout.fillWidth: true
+                                        Text { text: "shortcut combination"; color: theme.faint; font.pixelSize: 10; font.family: "monospace" }
+                                        RowLayout {
+                                            spacing: 10; Layout.fillWidth: true
+                                            // Modifier chips
+                                            Row {
+                                                spacing: 6
+                                                Repeater {
+                                                    model: ["SUPER","CTRL","ALT","SHIFT"]
+                                                    delegate: Rectangle {
+                                                        required property string modelData
+                                                        readonly property bool on: root.kbAddMods.indexOf(modelData) >= 0
+                                                        width: kamc.width + 14; height: 22; radius: 11
+                                                        color: on ? theme.a(theme.iris,0.3) : theme.a(theme.line,0.5)
+                                                        border.width: 1; border.color: on ? theme.iris : theme.a(theme.line,0.9)
+                                                        Text { id: kamc; anchors.centerIn: parent; text: modelData
+                                                            color: on ? theme.frost : theme.faint; font.pixelSize: 10; font.family: "monospace"; font.bold: on }
+                                                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                                                            onClicked: { var m = root.kbAddMods.slice(); var i = m.indexOf(modelData);
+                                                                if (i >= 0) m.splice(i,1); else m.push(modelData);
+                                                                root.kbAddMods = ["SUPER","CTRL","ALT","SHIFT"].filter(x => m.indexOf(x) >= 0);
+                                                                kbField.forceActiveFocus() } }
+                                                    }
+                                                }
+                                            }
+                                            
+                                            Text { text: "+"; color: theme.faint; font.pixelSize: 12; font.family: "monospace" }
+
+                                            // Key capture button
+                                            Rectangle {
+                                                implicitWidth: 120; implicitHeight: 24; radius: 6
+                                                color: root.kbAddRecording ? theme.a(theme.bad, 0.2) : theme.a(theme.line, 0.4)
+                                                border.width: 1; border.color: root.kbAddRecording ? theme.bad : theme.a(theme.iris, 0.3)
+                                                Text {
+                                                    anchors.centerIn: parent
+                                                    text: root.kbAddRecording ? "press key…" : (root.kbAddKey ? root.kbAddKey : "set key combo")
+                                                    color: root.kbAddRecording ? theme.bad : theme.frost
+                                                    font.pixelSize: 11; font.family: "monospace"; font.bold: true
+                                                }
+                                                MouseArea {
+                                                    anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                                                    onClicked: { root.kbAddRecording = true; kbField.forceActiveFocus() }
+                                                }
+                                            }
+                                            Item { Layout.fillWidth: true }
+                                        }
+                                    }
+                                    
+                                    // Control buttons (Save / Cancel)
+                                    RowLayout {
+                                        Layout.fillWidth: true; spacing: 10; Layout.topMargin: 4
+                                        Item { Layout.fillWidth: true }
+                                        
+                                        // Cancel button
+                                        Rectangle {
+                                            implicitWidth: 70; implicitHeight: 28; radius: 6
+                                            color: kbcancelBtnMa.containsMouse ? theme.a(theme.bad, 0.15) : "transparent"
+                                            border.width: 1; border.color: kbcancelBtnMa.containsMouse ? theme.bad : theme.a(theme.line, 0.5)
+                                            Text { anchors.centerIn: parent; text: "Cancel"; color: kbcancelBtnMa.containsMouse ? theme.bad : theme.text; font.pixelSize: 11; font.family: "monospace" }
+                                            MouseArea {
+                                                id: kbcancelBtnMa
+                                                anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                                                onClicked: { root.kbAdding = false; root.kbAddRecording = false; kbField.forceActiveFocus() }
+                                            }
+                                        }
+                                        
+                                        // Save button
+                                        Rectangle {
+                                            readonly property bool valid: root.kbAddDesc.trim() !== "" && root.kbAddKey !== "" && root.kbAddAction.trim() !== ""
+                                            implicitWidth: 90; implicitHeight: 28; radius: 6
+                                            color: valid ? (kbsaveBtnMa.containsMouse ? theme.iris : theme.a(theme.iris, 0.2)) : theme.a(theme.line, 0.2)
+                                            border.width: 1; border.color: valid ? theme.iris : theme.a(theme.line, 0.5)
+                                            Text { anchors.centerIn: parent; text: "Save Bind"; color: parent.valid ? (kbsaveBtnMa.containsMouse ? theme.bg : theme.text) : theme.faint; font.pixelSize: 11; font.family: "monospace"; font.bold: true }
+                                            MouseArea {
+                                                id: kbsaveBtnMa
+                                                anchors.fill: parent; enabled: parent.valid; cursorShape: parent.valid ? Qt.PointingHandCursor : Qt.ArrowCursor
+                                                onClicked: root.kbApplyAddBind()
+                                            }
                                         }
                                     }
                                 }
                             }
+
                             // recording bar: modifier chips + status
                             RowLayout {
                                 visible: root.kbRec !== null; Layout.fillWidth: true; spacing: 8
@@ -1219,13 +1737,13 @@ ShellRoot {
                         // ================= IDLE & LOCK =================
                         ColumnLayout {
                             visible: root.tab === 10; Layout.fillWidth: true; spacing: 14
-                            Section { title: "idle & lock"; icon: "bedtime" }
+                            Section { title: "idle daemon"; icon: "bedtime" }
                             RowLayout {
                                 Layout.fillWidth: true; spacing: 10
                                 Sym { text: root.idleOn ? "bedtime" : "coffee"; sz: 18; color: root.idleOn ? theme.iris : theme.warn }
                                 ColumnLayout { spacing: 0; Layout.fillWidth: true
                                     Text { text: root.idleOn ? "idle daemon running" : "caffeine mode — idle daemon stopped"; color: theme.text; font.pixelSize: 13; font.family: "monospace" }
-                                    Text { text: root.idleOn ? "dim 2.5m · lock 5m · screen off 10m · suspend 30m" : "screen stays on until you turn hypridle back on"
+                                    Text { text: root.idleOn ? "dim " + (root.lockDim / 60).toFixed(1) + "m · lock " + (root.lockLock / 60).toFixed(1) + "m · screen off " + (root.lockDpms / 60).toFixed(1) + "m" + (root.lockSuspendEnabled ? " · suspend " + (root.lockSuspend / 60).toFixed(1) + "m" : "") : "screen stays on until you turn hypridle back on"
                                         color: theme.faint; font.pixelSize: 10; font.family: "monospace" } }
                                 Rectangle { implicitWidth: 46; implicitHeight: 22; radius: 11
                                     color: root.idleOn ? theme.a(theme.iris, 0.35) : theme.a(theme.warn, 0.3)
@@ -1236,14 +1754,175 @@ ShellRoot {
                                         Behavior on x { NumberAnimation { duration: 120 } } }
                                     MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.toggleIdle() } }
                             }
-                            GridLayout {
-                                columns: 2; columnSpacing: 10; rowSpacing: 8; Layout.fillWidth: true
-                                Row2 { icon: "lock"; label: "Lock now"; cmd: "loginctl lock-session"; quitAfter: true }
-                                Row2 { icon: "edit_note"; label: "Edit idle timeouts"; cmd: "xdg-open ~/.config/hypr/hypridle.conf & disown"; quitAfter: true }
-                                Row2 { icon: "wallpaper"; label: "Edit lock screen"; cmd: "xdg-open ~/.config/hypr/hyprlock.conf & disown"; quitAfter: true }
-                                Row2 { icon: "restart_alt"; label: "Restart idle daemon"; cmd: "pkill -x hypridle; sleep 0.3; hyprctl dispatch exec hypridle" }
+
+                            Section { title: "timeouts"; icon: "timer" }
+                            
+                            // Dim Backlight Slider
+                            RowLayout { Layout.fillWidth: true; spacing: 10
+                                Sym { text: "brightness_medium"; sz: 20 }
+                                Text { text: "dim display"; color: theme.sub; font.pixelSize: 12; font.family: "monospace"; Layout.minimumWidth: 100 }
+                                Slider { value: (root.lockDim - 10) / (600 - 10); onMoved: (v) => { root.lockDim = Math.round(10 + v * (600 - 10)) } }
+                                Text { text: root.lockDim + "s"; color: theme.sub; font.pixelSize: 12; font.family: "monospace"; Layout.minimumWidth: 46; horizontalAlignment: Text.AlignRight } }
+
+                            // Lock Screen Slider
+                            RowLayout { Layout.fillWidth: true; spacing: 10
+                                Sym { text: "lock"; sz: 20 }
+                                Text { text: "lock screen"; color: theme.sub; font.pixelSize: 12; font.family: "monospace"; Layout.minimumWidth: 100 }
+                                Slider { value: (root.lockLock - 30) / (1800 - 30); onMoved: (v) => { root.lockLock = Math.round(30 + v * (1800 - 30)) } }
+                                Text { text: (root.lockLock / 60).toFixed(1) + "m"; color: theme.sub; font.pixelSize: 12; font.family: "monospace"; Layout.minimumWidth: 46; horizontalAlignment: Text.AlignRight } }
+
+                            // Screen Off (DPMS) Slider
+                            RowLayout { Layout.fillWidth: true; spacing: 10
+                                Sym { text: "settings_brightness"; sz: 20 }
+                                Text { text: "screen off"; color: theme.sub; font.pixelSize: 12; font.family: "monospace"; Layout.minimumWidth: 100 }
+                                Slider { value: (root.lockDpms - 60) / (3600 - 60); onMoved: (v) => { root.lockDpms = Math.round(60 + v * (3600 - 60)) } }
+                                Text { text: (root.lockDpms / 60).toFixed(1) + "m"; color: theme.sub; font.pixelSize: 12; font.family: "monospace"; Layout.minimumWidth: 46; horizontalAlignment: Text.AlignRight } }
+
+                            // Suspend Toggle + Slider
+                            RowLayout { Layout.fillWidth: true; spacing: 10
+                                Sym { text: "power"; sz: 20; color: root.lockSuspendEnabled ? theme.frost : theme.faint }
+                                Text { text: "suspend system"; color: root.lockSuspendEnabled ? theme.sub : theme.faint; font.pixelSize: 12; font.family: "monospace"; Layout.minimumWidth: 100 }
+                                Slider {
+                                    fill: theme.bad
+                                    enabled: root.lockSuspendEnabled
+                                    value: (root.lockSuspend - 300) / (7200 - 300)
+                                    onMoved: (v) => { root.lockSuspend = Math.round(300 + v * (7200 - 300)) }
+                                }
+                                Text {
+                                    text: (root.lockSuspend / 60).toFixed(0) + "m"
+                                    color: root.lockSuspendEnabled ? theme.sub : theme.faint
+                                    font.pixelSize: 12; font.family: "monospace"; Layout.minimumWidth: 46; horizontalAlignment: Text.AlignRight
+                                }
+                                Rectangle { implicitWidth: 40; implicitHeight: 20; radius: 10
+                                    color: root.lockSuspendEnabled ? theme.a(theme.iris, 0.35) : theme.a(theme.line, 0.3)
+                                    border.width: 1; border.color: root.lockSuspendEnabled ? theme.iris : theme.faint
+                                    Rectangle { width: 14; height: 14; radius: 7; y: 3
+                                        x: root.lockSuspendEnabled ? parent.width - 17 : 3
+                                        color: root.lockSuspendEnabled ? theme.frost : theme.faint
+                                        Behavior on x { NumberAnimation { duration: 120 } } }
+                                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.lockSuspendEnabled = !root.lockSuspendEnabled } }
                             }
-                            Text { Layout.fillWidth: true; wrapMode: Text.Wrap; text: "timeout edits apply after restarting the idle daemon"; color: theme.faint; font.pixelSize: 10; font.family: "monospace" }
+
+                            Section { title: "lock screen options"; icon: "security" }
+
+                            // Grace period Slider
+                            RowLayout { Layout.fillWidth: true; spacing: 10
+                                Sym { text: "av_timer"; sz: 20 }
+                                Text { text: "grace period"; color: theme.sub; font.pixelSize: 12; font.family: "monospace"; Layout.minimumWidth: 110 }
+                                Slider { value: root.lockGrace / 10; onMoved: (v) => { root.lockGrace = Math.round(v * 10) } }
+                                Text { text: root.lockGrace + "s"; color: theme.sub; font.pixelSize: 12; font.family: "monospace"; Layout.minimumWidth: 36; horizontalAlignment: Text.AlignRight } }
+
+                            // Hide cursor Toggle
+                            RowLayout { Layout.fillWidth: true; spacing: 10
+                                Sym { text: "navigation"; sz: 20 }
+                                Text { text: "hide cursor on lock"; color: theme.sub; font.pixelSize: 12; font.family: "monospace"; Layout.fillWidth: true }
+                                Rectangle { implicitWidth: 40; implicitHeight: 20; radius: 10
+                                    color: root.lockHideCursor ? theme.a(theme.iris, 0.35) : theme.a(theme.line, 0.3)
+                                    border.width: 1; border.color: root.lockHideCursor ? theme.iris : theme.faint
+                                    Rectangle { width: 14; height: 14; radius: 7; y: 3
+                                        x: root.lockHideCursor ? parent.width - 17 : 3
+                                        color: root.lockHideCursor ? theme.frost : theme.faint
+                                        Behavior on x { NumberAnimation { duration: 120 } } }
+                                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.lockHideCursor = !root.lockHideCursor } }
+                            }
+
+                            // Ignore empty input Toggle
+                            RowLayout { Layout.fillWidth: true; spacing: 10
+                                Sym { text: "space_bar"; sz: 20 }
+                                Text { text: "ignore empty input"; color: theme.sub; font.pixelSize: 12; font.family: "monospace"; Layout.fillWidth: true }
+                                Rectangle { implicitWidth: 40; implicitHeight: 20; radius: 10
+                                    color: root.lockIgnoreEmpty ? theme.a(theme.iris, 0.35) : theme.a(theme.line, 0.3)
+                                    border.width: 1; border.color: root.lockIgnoreEmpty ? theme.iris : theme.faint
+                                    Rectangle { width: 14; height: 14; radius: 7; y: 3
+                                        x: root.lockIgnoreEmpty ? parent.width - 17 : 3
+                                        color: root.lockIgnoreEmpty ? theme.frost : theme.faint
+                                        Behavior on x { NumberAnimation { duration: 120 } } }
+                                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.lockIgnoreEmpty = !root.lockIgnoreEmpty } }
+                            }
+
+                            Section { title: "blur & background"; icon: "wallpaper" }
+
+                            // Blur Passes Slider
+                            RowLayout { Layout.fillWidth: true; spacing: 10
+                                Sym { text: "blur_on"; sz: 20 }
+                                Text { text: "blur passes"; color: theme.sub; font.pixelSize: 12; font.family: "monospace"; Layout.minimumWidth: 110 }
+                                Slider { value: root.lockBlurPasses / 10; onMoved: (v) => { root.lockBlurPasses = Math.round(v * 10) } }
+                                Text { text: root.lockBlurPasses.toString(); color: theme.sub; font.pixelSize: 12; font.family: "monospace"; Layout.minimumWidth: 36; horizontalAlignment: Text.AlignRight } }
+
+                            // Blur Size Slider
+                            RowLayout { Layout.fillWidth: true; spacing: 10
+                                Sym { text: "photo_size_select_large"; sz: 20 }
+                                Text { text: "blur size"; color: theme.sub; font.pixelSize: 12; font.family: "monospace"; Layout.minimumWidth: 110 }
+                                Slider { value: root.lockBlurSize / 20; onMoved: (v) => { root.lockBlurSize = Math.round(v * 20) } }
+                                Text { text: root.lockBlurSize.toString(); color: theme.sub; font.pixelSize: 12; font.family: "monospace"; Layout.minimumWidth: 36; horizontalAlignment: Text.AlignRight } }
+
+                            // Vibrancy Slider
+                            RowLayout { Layout.fillWidth: true; spacing: 10
+                                Sym { text: "vignette"; sz: 20 }
+                                Text { text: "vibrancy"; color: theme.sub; font.pixelSize: 12; font.family: "monospace"; Layout.minimumWidth: 110 }
+                                Slider { value: root.lockVibrancy; onMoved: (v) => { root.lockVibrancy = v } }
+                                Text { text: root.lockVibrancy.toFixed(2); color: theme.sub; font.pixelSize: 12; font.family: "monospace"; Layout.minimumWidth: 36; horizontalAlignment: Text.AlignRight } }
+
+                            // Wallpaper path text input
+                            Text { text: "wallpaper image path"; color: theme.faint; font.pixelSize: 10; font.family: "monospace"; Layout.topMargin: 4 }
+                            RowLayout {
+                                Layout.fillWidth: true; spacing: 10
+                                Rectangle {
+                                    Layout.fillWidth: true; implicitHeight: 36; radius: 8
+                                    color: theme.a(theme.line, 0.4); border.width: 1
+                                    border.color: bgIn.activeFocus ? theme.iris : theme.a(theme.iris, 0.16)
+                                    TextInput {
+                                        id: bgIn
+                                        anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 12
+                                        verticalAlignment: TextInput.AlignVCenter
+                                        color: theme.text; font.pixelSize: 12; font.family: "monospace"
+                                        clip: true; selectByMouse: true; selectionColor: theme.a(theme.iris, 0.4)
+                                        text: root.lockBg
+                                        onTextChanged: root.lockBg = text
+                                    }
+                                }
+                            }
+
+                            // Save & Actions Row
+                            RowLayout {
+                                Layout.fillWidth: true; spacing: 10; Layout.topMargin: 8
+                                Rectangle {
+                                    Layout.fillWidth: true; implicitHeight: 38; radius: 9
+                                    color: svLockM.containsMouse ? theme.iris : theme.a(theme.iris, 0.18)
+                                    border.width: 1; border.color: theme.iris
+                                    RowLayout {
+                                        anchors.centerIn: parent; spacing: 6
+                                        Sym { text: "save"; sz: 16; color: svLockM.containsMouse ? theme.bg : theme.frost }
+                                        Text { text: "Apply & Restart Daemon"; color: svLockM.containsMouse ? theme.bg : theme.text; font.pixelSize: 13; font.family: "monospace"; font.bold: true }
+                                    }
+                                    MouseArea {
+                                        id: svLockM
+                                        anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                        onClicked: {
+                                            root.saveLockSettings();
+                                            // Restart daemon
+                                            root.run("pkill -x hypridle; sleep 0.3; hyprctl dispatch exec hypridle");
+                                            // Notify user
+                                            root.run("notify-send 'sea-shell' 'Lock & Idle settings applied live!'");
+                                        }
+                                    }
+                                }
+                                Rectangle {
+                                    implicitWidth: 120; implicitHeight: 38; radius: 9
+                                    color: lkNowM.containsMouse ? theme.warn : theme.a(theme.line, 0.38)
+                                    border.width: 1; border.color: lkNowM.containsMouse ? theme.warn : theme.a(theme.iris, 0.16)
+                                    RowLayout {
+                                        anchors.centerIn: parent; spacing: 6
+                                        Sym { text: "lock"; sz: 16; color: lkNowM.containsMouse ? theme.bg : theme.warn }
+                                        Text { text: "Lock Now"; color: lkNowM.containsMouse ? theme.bg : theme.text; font.pixelSize: 13; font.family: "monospace" }
+                                    }
+                                    MouseArea {
+                                        id: lkNowM
+                                        anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                        onClicked: { root.run("~/.config/quickshell/sea-shell/sea-lock.sh"); Qt.quit() }
+                                    }
+                                }
+                            }
                         }
 
                         // ================= POWER =================
@@ -1284,9 +1963,9 @@ ShellRoot {
                             Section { title: "session"; icon: "power_settings_new" }
                             GridLayout {
                                 columns: 2; columnSpacing: 10; rowSpacing: 8; Layout.fillWidth: true
-                                Row2 { icon: "lock"; label: "Lock"; cmd: "loginctl lock-session"; quitAfter: true }
+                                Row2 { icon: "lock"; label: "Lock"; cmd: "~/.config/quickshell/sea-shell/sea-lock.sh"; quitAfter: true }
                                 Row2 { icon: "bedtime"; label: "Suspend"; cmd: "systemctl suspend"; quitAfter: true }
-                                Row2 { icon: "logout"; label: "Logout"; cmd: "uwsm check is-active >/dev/null 2>&1 && uwsm stop || hyprctl dispatch exit"; quitAfter: true }
+                                Row2 { icon: "logout"; label: "Logout"; cmd: "systemctl --user is-active -q 'wayland-wm@*.service' && uwsm stop || { hyprctl dispatch exit; sleep 3; loginctl terminate-session self; }"; quitAfter: true }
                                 Row2 { icon: "restart_alt"; label: "Reboot"; cmd: "systemctl reboot"; tint: theme.bad; quitAfter: true }
                                 Row2 { icon: "power_settings_new"; label: "Shutdown"; cmd: "systemctl poweroff"; tint: theme.bad; quitAfter: true }
                             }
