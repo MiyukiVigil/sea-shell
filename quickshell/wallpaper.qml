@@ -58,7 +58,9 @@ ShellRoot {
         } else {
             // static: swww (or its awww fork) → hyprpaper → mpvpaper (mpv can show a still) fallback
             Quickshell.execDetached(["sh", "-c",
-                "pkill -x mpvpaper 2>/dev/null; pkill -f sea-wallpaper-autopause 2>/dev/null; " +
+                // the [p] bracket stops `pkill -f` from matching THIS sh -c command
+                // line (which contains the pattern) and killing itself mid-switch.
+                "pkill -x mpvpaper 2>/dev/null; pkill -f 'sea-wallpaper-auto[p]ause' 2>/dev/null; " +
                 "SW=$(command -v swww || command -v awww); SWD=$(command -v swww-daemon || command -v awww-daemon); " +
                 "if [ -n \"$SW\" ]; then \"$SW\" query >/dev/null 2>&1 || { \"$SWD\" & sleep 0.4; }; \"$SW\" img '" + p + "' --transition-type grow --transition-fps 60; " +
                 "elif command -v hyprpaper >/dev/null; then killall hyprpaper 2>/dev/null; hyprpaper & sleep 0.3; hyprctl hyprpaper preload '" + p + "'; hyprctl hyprpaper wallpaper ',\"" + p + "\"'; " +
