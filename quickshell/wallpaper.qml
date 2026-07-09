@@ -36,6 +36,7 @@ ShellRoot {
     property bool matchColors: true
     property string matugenScript: Qt.resolvedUrl("matugen-accent.sh").toString().replace("file://", "")
     property string lockwallScript: Qt.resolvedUrl("sea-lockwall.sh").toString().replace("file://","")
+    property string autopauseScript: Qt.resolvedUrl("sea-wallpaper-autopause.sh").toString().replace("file://","")
     function setWall(p) {
         var vid = isVideo(p);
         // persist the pick so it can be restored on login
@@ -45,15 +46,19 @@ ShellRoot {
         // recolour the bar to match the wallpaper (matugen)
         if (root.matchColors) Quickshell.execDetached(["sh", root.matugenScript, p]);
         if (vid) {
-            // animated: mpvpaper (install: pacman -S mpvpaper)
+            // animated: mpvpaper (install: pacman -S mpvpaper). An mpv IPC socket
+            // lets sea-wallpaper-autopause.sh pause playback while a fullscreen
+            // window covers the wallpaper (saves a lot of CPU/GPU).
             Quickshell.execDetached(["sh", "-c",
-                "if command -v mpvpaper >/dev/null; then pkill -x mpvpaper; sleep 0.2; " +
-                "mpvpaper -o 'no-audio --loop-file=inf --panscan=1.0' '*' '" + p + "' & disown; " +
+                "S=\"$XDG_RUNTIME_DIR/sea-mpvpaper.sock\"; " +
+                "if command -v mpvpaper >/dev/null; then pkill -x mpvpaper; sleep 0.2; rm -f \"$S\"; " +
+                "mpvpaper -o \"no-audio --loop-file=inf --panscan=1.0 --input-ipc-server=$S\" '*' '" + p + "' & disown; " +
+                "sh '" + root.autopauseScript + "' >/dev/null 2>&1 & disown; " +
                 "else notify-send 'sea-shell' 'Animated wallpapers need mpvpaper: pacman -S mpvpaper'; fi"]);
         } else {
             // static: swww (or its awww fork) → hyprpaper → mpvpaper (mpv can show a still) fallback
             Quickshell.execDetached(["sh", "-c",
-                "pkill -x mpvpaper 2>/dev/null; " +
+                "pkill -x mpvpaper 2>/dev/null; pkill -f sea-wallpaper-autopause 2>/dev/null; " +
                 "SW=$(command -v swww || command -v awww); SWD=$(command -v swww-daemon || command -v awww-daemon); " +
                 "if [ -n \"$SW\" ]; then \"$SW\" query >/dev/null 2>&1 || { \"$SWD\" & sleep 0.4; }; \"$SW\" img '" + p + "' --transition-type grow --transition-fps 60; " +
                 "elif command -v hyprpaper >/dev/null; then killall hyprpaper 2>/dev/null; hyprpaper & sleep 0.3; hyprctl hyprpaper preload '" + p + "'; hyprctl hyprpaper wallpaper ',\"" + p + "\"'; " +

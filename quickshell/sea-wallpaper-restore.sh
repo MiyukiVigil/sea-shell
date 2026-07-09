@@ -10,7 +10,11 @@ case "$(printf '%s' "$wp" | tr '[:upper:]' '[:lower:]')" in
     *.mp4|*.webm|*.gif)
         command -v mpvpaper >/dev/null 2>&1 || exit 0
         pkill -x mpvpaper 2>/dev/null; sleep 0.2
-        exec mpvpaper -o 'no-audio --loop-file=inf --panscan=1.0' '*' "$wp"
+        S="$XDG_RUNTIME_DIR/sea-mpvpaper.sock"; rm -f "$S"
+        # start the fullscreen auto-pause listener (single-instance; safe to re-run)
+        sh "$(dirname "$0")/sea-wallpaper-autopause.sh" >/dev/null 2>&1 &
+        # the mpv IPC socket lets that listener pause playback under fullscreen windows
+        exec mpvpaper -o "no-audio --loop-file=inf --panscan=1.0 --input-ipc-server=$S" '*' "$wp"
         ;;
     *)
         SW="$(command -v swww || command -v awww)" || exit 0

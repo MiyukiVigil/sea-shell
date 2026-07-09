@@ -27,6 +27,77 @@ ShellRoot {
         if (tab === 6) ppGet.running = true           // power: re-read profile
     }
 
+    // ---------- native QML file browser ----------
+    property bool fileBrowserOpen: false
+    property string fileBrowserPath: ""  // current directory (absolute path)
+    property string fileBrowserFilter: "" // e.g. ".conf", ".ovpn", ".ics"
+    property var fileBrowserCallback: null // function(path) called on file selection
+    property var fileBrowserItems: []     // [{type, name}]
+    property string fileBrowserTitle: ""
+
+    Process {
+        id: fileBrowserProc
+        stdout: StdioCollector { id: fbOut; onStreamFinished: {
+            var items = [];
+            var text = fbOut.text.trim();
+            if (text) {
+                text.split("\n").forEach(line => {
+                    var parts = line.split("|");
+                    if (parts.length >= 2) {
+                        items.push({ type: parts[0], name: parts[1] });
+                    }
+                });
+            }
+            root.fileBrowserItems = items;
+        } }
+    }
+
+    function pickFile(title, filter, callback) {
+        root.fileBrowserTitle = title;
+        var ext = "";
+        if (filter) {
+            var m = filter.match(/\*\.([a-zA-Z0-9]+)/);
+            if (m) ext = "." + m[1];
+            else if (filter.indexOf(".") >= 0) ext = filter.slice(filter.indexOf("."));
+        }
+        root.fileBrowserFilter = ext;
+        root.fileBrowserCallback = callback;
+        if (!root.fileBrowserPath) {
+            root.fileBrowserPath = "/home/miyukivigil"; // default start
+        }
+        root.fileBrowserOpen = true;
+        refreshFileBrowser();
+    }
+
+    function refreshFileBrowser() {
+        var cmd = "find \"" + root.fileBrowserPath + "\" -maxdepth 1 -not -name '.*' -printf '%Y|%f\\n' 2>/dev/null | sort -t'|' -k1,1r -k2,2";
+        fileBrowserProc.command = ["sh", "-c", cmd];
+        fileBrowserProc.running = true;
+    }
+
+    function enterDir(name) {
+        var path = root.fileBrowserPath;
+        if (path === "/") {
+            root.fileBrowserPath = "/" + name;
+        } else {
+            root.fileBrowserPath = path + "/" + name;
+        }
+        refreshFileBrowser();
+    }
+
+    function goUpDir() {
+        var path = root.fileBrowserPath;
+        if (path === "/" || path === "") return;
+        var i = path.lastIndexOf("/");
+        if (i === 0) {
+            root.fileBrowserPath = "/";
+        } else {
+            root.fileBrowserPath = path.slice(0, i);
+        }
+        refreshFileBrowser();
+    }
+
+
     // ---------- system overview (System tab) ----------
     property var sysInfo: ({ gpus: [] })
     Process { id: sysProc; running: true
@@ -38,6 +109,47 @@ ShellRoot {
                 if (k === "gpu") o.gpus.push(v); else o[k] = v });
             root.sysInfo = o;
         } } }
+
+    // ---------- calendar events (import & view) ----------
+    property string calMsg: ""
+    property var calEvents: []
+    Process {
+        id: reloadEventsProc; running: true
+        command: ["sh", "-c", "cat ~/.config/sea-shell/calendar_events.json 2>/dev/null || echo '[]'"]
+        stdout: StdioCollector { id: eventsOut; onStreamFinished: {
+            try {
+                root.calEvents = JSON.parse(eventsOut.text.trim() || "[]");
+            } catch(e) {
+                root.calEvents = [];
+            }
+        } }
+    }
+    Process {
+        id: calImportProc
+        stdout: StdioCollector { id: calImportOut; onStreamFinished: {
+            try {
+                var res = JSON.parse(calImportOut.text.trim());
+                if (res.status === "success") {
+                    root.calMsg = "Successfully imported " + res.imported + " new events! (Total: " + res.total + ")";
+                    reloadEventsProc.running = true;
+                } else {
+                    root.calMsg = "Failed: " + res.message;
+                }
+            } catch(e) {
+                root.calMsg = "Import finished with error";
+            }
+        } }
+    }
+    function importICS(path) {
+        root.calMsg = "importing calendar events…";
+        calImportProc.command = ["python3", root.repo + "/sea-import-ics.py", path];
+        calImportProc.running = true;
+    }
+    function clearEvents() {
+        run("rm -f ~/.config/sea-shell/calendar_events.json");
+        root.calEvents = [];
+        root.calMsg = "All calendar events cleared.";
+    }
 
     // ---------- bluetooth (same engine as the bar dropdown) ----------
     readonly property var btAdapter: Bluetooth.defaultAdapter
@@ -521,20 +633,40 @@ ShellRoot {
     Timer { id: warpRefreshTimer; interval: 1800; repeat: false; onTriggered: { warpPoll.running = true; warpModePoll.running = true } }
 
     // ---------- VPN (NetworkManager — wireguard + openvpn) ----------
-    property var vpnList: []      // [{name, type, active}]
+    property var vpnList: []      // [{name, type, state, active}]
     property string vpnMsg: ""
     property bool vpnAddOpen: false
     property int vpnAddMode: 0    // 0=wireguard conf, 1=openvpn ovpn
+    property string vpnActionName: ""
+    property string vpnFailedName: ""
+    Timer { id: vpnFailTimer; interval: 6000; repeat: false; onTriggered: root.vpnFailedName = "" }
+
+    Process {
+        id: vpnActionProc
+        onExited: (code) => {
+            var ok = code === 0;
+            if (!ok) {
+                root.vpnFailedName = root.vpnActionName;
+                vpnFailTimer.start();
+                Quickshell.execDetached(["sh","-c","notify-send -u critical 'sea-shell' 'VPN connection failed'"]);
+            } else {
+                root.vpnFailedName = "";
+            }
+            root.vpnActionName = "";
+            vpnScan.running = true;
+        }
+    }
+
     Process {
         id: vpnScan; running: true
-        command: ["sh","-c","nmcli -t -f NAME,TYPE,ACTIVE con show 2>/dev/null | grep -E ':(vpn|wireguard):'"]
+        command: ["sh","-c","nmcli -t -f NAME,TYPE,STATE,ACTIVE con show 2>/dev/null | grep -E ':(vpn|wireguard):'"]
         stdout: StdioCollector { id: vpnOut; onStreamFinished: {
             var out = []; var lines = vpnOut.text.trim().split("\n");
             for (var i=0; i<lines.length; i++) {
                 if (!lines[i]) continue;
                 var p = lines[i].split(":");
-                if (p.length < 3) continue;
-                out.push({ name: p[0], type: p[1], active: p[2]==="yes" });
+                if (p.length < 4) continue;
+                out.push({ name: p[0], type: p[1], state: p[2], active: p[3]==="yes" });
             }
             root.vpnList = out;
         } }
@@ -542,16 +674,20 @@ ShellRoot {
     Timer { id: vpnPollTimer; interval: 5000; running: true; repeat: true; triggeredOnStart: true; onTriggered: vpnScan.running = true }
     Timer { id: vpnRefreshTimer; interval: 2200; repeat: false; onTriggered: vpnScan.running = true }
     function vpnToggle(name) {
+        if (root.vpnActionName !== "") return;
+        root.vpnActionName = name;
+        root.vpnFailedName = "";
         var e = name.replace(/'/g, "");
-        var active = root.vpnList.some(function(v){ return v.name===name && v.active; });
-        if (active) {
-            run("nmcli con down id '" + e + "' && notify-send 'sea-shell' 'VPN disconnected'");
+        var cur = root.vpnList.find(function(v){ return v.name===name && v.state==="activated"; });
+        if (cur) {
+            vpnActionProc.command = ["nmcli", "con", "down", "id", e];
             root.vpnMsg = "disconnecting " + e + "…";
         } else {
-            run("nmcli con up id '" + e + "' && notify-send 'sea-shell' 'VPN connected' || notify-send 'sea-shell' 'VPN failed'");
+            vpnActionProc.command = ["nmcli", "con", "up", "id", e];
             root.vpnMsg = "connecting " + e + "…";
         }
-        vpnRefreshTimer.start();
+        vpnActionProc.running = true;
+        vpnScan.running = true;
     }
     function vpnDelete(name) {
         var e = name.replace(/'/g, "");
@@ -1129,29 +1265,33 @@ ShellRoot {
                                     model: root.vpnList
                                     delegate: Rectangle {
                                         required property var modelData
+                                        readonly property bool connecting: modelData.state === "activating" || root.vpnActionName === modelData.name
+                                        readonly property bool failed: root.vpnFailedName === modelData.name
                                         Layout.fillWidth: true; implicitHeight: 50; radius: 9
-                                        color: modelData.active ? theme.a(theme.iris, 0.18) : theme.a(theme.line, 0.35)
-                                        border.width: 1; border.color: modelData.active ? theme.a(theme.iris, 0.5) : theme.a(theme.iris, 0.12)
+                                        color: modelData.active ? theme.a(theme.iris, 0.18) : (connecting ? theme.a(theme.frost, 0.08) : theme.a(theme.line, 0.35))
+                                        border.width: 1; border.color: failed ? theme.bad : (modelData.active ? theme.a(theme.iris, 0.5) : (connecting ? theme.a(theme.frost, 0.3) : theme.a(theme.iris, 0.12)))
                                         RowLayout {
                                             anchors.fill: parent; anchors.leftMargin: 14; anchors.rightMargin: 12; spacing: 10
                                             Sym { text: modelData.type==="wireguard" ? "cable" : "vpn_key"; sz: 17
-                                                color: modelData.active ? theme.iris : theme.faint }
+                                                color: modelData.active ? theme.iris : (connecting ? theme.frost : (failed ? theme.bad : theme.faint)) }
                                             ColumnLayout { spacing: 2; Layout.fillWidth: true
-                                                Text { text: modelData.name; color: modelData.active ? theme.text : theme.sub
-                                                    font.pixelSize: 13; font.family: "monospace"; font.bold: modelData.active; elide: Text.ElideRight }
-                                                Text { text: modelData.type + (modelData.active ? " · connected" : "")
-                                                    color: modelData.active ? theme.good : theme.faint; font.pixelSize: 10; font.family: "monospace" } }
+                                                Text { text: modelData.name; color: modelData.active ? theme.text : (connecting ? theme.frost : (failed ? theme.bad : theme.sub))
+                                                    font.pixelSize: 13; font.family: "monospace"; font.bold: modelData.active || connecting; elide: Text.ElideRight }
+                                                Text {
+                                                    text: connecting ? "connecting…" : (failed ? "connection failed — please try again" : (modelData.active ? "connected" : modelData.type))
+                                                    color: connecting ? theme.frost : (failed ? theme.bad : (modelData.active ? theme.good : theme.faint))
+                                                    font.pixelSize: 10; font.family: "monospace" } }
                                             Rectangle {
-                                                implicitWidth: 96; implicitHeight: 30; radius: 7
-                                                color: vtm.containsMouse ? (modelData.active ? theme.a(theme.bad,0.3) : theme.iris) : (modelData.active ? theme.a(theme.bad,0.15) : theme.a(theme.iris,0.2))
-                                                border.width: 1; border.color: modelData.active ? theme.bad : theme.iris
+                                                implicitWidth: 104; implicitHeight: 30; radius: 7
+                                                color: connecting ? theme.a(theme.line, 0.5) : (vtm.containsMouse ? (modelData.active ? theme.a(theme.bad,0.3) : theme.iris) : (modelData.active ? theme.a(theme.bad,0.15) : theme.a(theme.iris,0.2)))
+                                                border.width: 1; border.color: connecting ? theme.a(theme.line, 0.7) : (modelData.active ? theme.bad : theme.iris)
                                                 Behavior on color { ColorAnimation { duration: 110 } }
                                                 Text { anchors.centerIn: parent
-                                                    text: modelData.active ? "disconnect" : "connect"
-                                                    color: vtm.containsMouse ? (modelData.active ? theme.bad : theme.bg) : (modelData.active ? theme.bad : theme.frost)
+                                                    text: connecting ? "connecting…" : (modelData.active ? "disconnect" : "connect")
+                                                    color: connecting ? theme.faint : (vtm.containsMouse ? (modelData.active ? theme.bad : theme.bg) : (modelData.active ? theme.bad : theme.frost))
                                                     font.pixelSize: 11; font.family: "monospace"; font.bold: true }
-                                                MouseArea { id: vtm; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
-                                                    onClicked: root.vpnToggle(modelData.name) } }
+                                                MouseArea { id: vtm; anchors.fill: parent; hoverEnabled: true; cursorShape: connecting ? Qt.ArrowCursor : Qt.PointingHandCursor
+                                                    onClicked: if (!connecting) root.vpnToggle(modelData.name) } }
                                             Rectangle {
                                                 implicitWidth: 32; implicitHeight: 30; radius: 7
                                                 color: vdm.containsMouse ? theme.a(theme.bad, 0.25) : "transparent"
@@ -1221,6 +1361,19 @@ ShellRoot {
                                                     if (root.vpnAddMode === 0) root.vpnAddWireguard(vpnPathIn.text);
                                                     else root.vpnAddOpenVPN(vpnPathIn.text);
                                                     vpnPathIn.text = ""; root.vpnAddOpen = false; } } }
+                                        Rectangle {
+                                            implicitWidth: 36; implicitHeight: 34; radius: 8
+                                            color: vpnBrowseMa.containsMouse ? theme.a(theme.iris, 0.25) : theme.a(theme.line, 0.4)
+                                            border.width: 1; border.color: theme.a(theme.iris, 0.25)
+                                            Sym { anchors.centerIn: parent; text: "folder_open"; sz: 16; color: theme.frost }
+                                            MouseArea {
+                                                id: vpnBrowseMa
+                                                anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                                onClicked: {
+                                                    var filter = root.vpnAddMode === 0 ? "WireGuard (*.conf) | *.conf" : "OpenVPN (*.ovpn) | *.ovpn";
+                                                    root.pickFile(root.vpnAddMode === 0 ? "Select WireGuard Configuration" : "Select OpenVPN Configuration", filter, function(path) {
+                                                        vpnPathIn.text = path;
+                                                    }); } } }
                                         Rectangle {
                                             implicitWidth: 80; implicitHeight: 34; radius: 8
                                             color: viam.containsMouse ? theme.iris : theme.a(theme.iris, 0.2)
@@ -1677,7 +1830,94 @@ ShellRoot {
                                         color: (parseInt(root.sysInfo.diskpct) || 0) > 90 ? theme.bad : theme.frost } }
                                 Text { text: root.sysInfo.disk || "…"; color: theme.sub; font.pixelSize: 11; font.family: "monospace" }
                             }
-                            RowLayout { spacing: 8
+                            Section { title: "calendar events"; icon: "calendar_month" }
+                            RowLayout {
+                                Layout.fillWidth: true; spacing: 10
+                                Rectangle {
+                                    implicitWidth: 160; implicitHeight: 34; radius: 8
+                                    color: calImpMa.containsMouse ? theme.iris : theme.a(theme.iris, 0.2)
+                                    border.width: 1; border.color: theme.iris
+                                    RowLayout { anchors.centerIn: parent; spacing: 6
+                                        Sym { text: "upload_file"; sz: 14; color: calImpMa.containsMouse ? theme.bg : theme.frost }
+                                        Text { text: "Import .ics File"; color: calImpMa.containsMouse ? theme.bg : theme.text; font.pixelSize: 11; font.family: "monospace"; font.bold: true } }
+                                    MouseArea {
+                                        id: calImpMa
+                                        anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                        onClicked: {
+                                            root.pickFile("Select Calendar iCalendar (.ics) File", "iCalendar (*.ics) | *.ics", function(path) {
+                                                root.importICS(path);
+                                            }); } } }
+                                Rectangle {
+                                    implicitWidth: 140; implicitHeight: 34; radius: 8
+                                    color: calClrMa.containsMouse ? theme.a(theme.bad, 0.25) : "transparent"
+                                    border.width: 1; border.color: calClrMa.containsMouse ? theme.bad : theme.a(theme.bad, 0.4)
+                                    RowLayout { anchors.centerIn: parent; spacing: 6
+                                        Sym { text: "delete"; sz: 14; color: theme.bad }
+                                        Text { text: "Clear All Events"; color: theme.bad; font.pixelSize: 11; font.family: "monospace"; font.bold: true } }
+                                    MouseArea {
+                                        id: calClrMa
+                                        anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                        onClicked: root.clearEvents() } }
+                                Item { Layout.fillWidth: true }
+                            }
+
+                            // Import from URL Row
+                            RowLayout {
+                                Layout.fillWidth: true; spacing: 10
+                                Rectangle {
+                                    Layout.fillWidth: true; implicitHeight: 34; radius: 8
+                                    color: theme.a(theme.line, 0.4); border.width: 1
+                                    border.color: calUrlIn.activeFocus ? theme.iris : theme.a(theme.iris, 0.16)
+                                    TextInput {
+                                        id: calUrlIn
+                                        anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 12
+                                        verticalAlignment: TextInput.AlignVCenter
+                                        color: theme.text; font.pixelSize: 12; font.family: "monospace"
+                                        clip: true; selectByMouse: true; selectionColor: theme.a(theme.iris, 0.4)
+                                        Text { anchors.verticalCenter: parent.verticalCenter; visible: calUrlIn.text === ""
+                                            text: "https://example.com/calendar.ics"
+                                            color: theme.faint; font.pixelSize: 12; font.family: "monospace" }
+                                        Keys.onReturnPressed: {
+                                            if (calUrlIn.text.trim()) {
+                                                root.importICS(calUrlIn.text.trim());
+                                                calUrlIn.text = "";
+                                            } } } }
+                                Rectangle {
+                                    implicitWidth: 120; implicitHeight: 34; radius: 8
+                                    color: calUrlMa.containsMouse ? theme.iris : theme.a(theme.iris, 0.2)
+                                    border.width: 1; border.color: theme.iris
+                                    RowLayout { anchors.centerIn: parent; spacing: 5
+                                        Sym { text: "link"; sz: 14; color: calUrlMa.containsMouse ? theme.bg : theme.frost }
+                                        Text { text: "Import Link"; color: calUrlMa.containsMouse ? theme.bg : theme.text; font.pixelSize: 11; font.family: "monospace"; font.bold: true } }
+                                    MouseArea {
+                                        id: calUrlMa
+                                        anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                        onClicked: {
+                                            if (calUrlIn.text.trim()) {
+                                                root.importICS(calUrlIn.text.trim());
+                                                calUrlIn.text = "";
+                                            } } } }
+                            }
+
+                            Text { visible: root.calMsg !== ""; text: root.calMsg; color: theme.frost; font.pixelSize: 11; font.family: "monospace"; Layout.fillWidth: true; wrapMode: Text.Wrap }
+                            ColumnLayout {
+                                Layout.fillWidth: true; spacing: 6
+                                Text { visible: root.calEvents.length === 0; text: "no events imported yet"; color: theme.faint; font.pixelSize: 11; font.family: "monospace" }
+                                Repeater {
+                                    model: root.calEvents.slice(0, 8)
+                                    delegate: Rectangle {
+                                        required property var modelData
+                                        Layout.fillWidth: true; implicitHeight: 38; radius: 8
+                                        color: theme.a(theme.line, 0.35); border.width: 1; border.color: theme.a(theme.iris, 0.12)
+                                        RowLayout {
+                                            anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 12; spacing: 10
+                                            Sym { text: "event"; sz: 15; color: theme.frost }
+                                            Text { text: modelData.date + (modelData.time ? " · " + modelData.time : ""); color: theme.frost; font.pixelSize: 11; font.family: "monospace" }
+                                            Text { text: modelData.title; color: theme.text; font.pixelSize: 12; font.family: "monospace"; font.bold: true; elide: Text.ElideRight; Layout.fillWidth: true } } } }
+                                Text { visible: root.calEvents.length > 8; text: "… and " + (root.calEvents.length - 8) + " more events"; color: theme.faint; font.pixelSize: 10; font.family: "monospace"; Layout.alignment: Qt.AlignHCenter }
+                            }
+
+                            RowLayout { spacing: 8; Layout.topMargin: 8
                                 Sym { text: "refresh"; sz: 15; color: theme.sub
                                     MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: sysProc.running = true } }
                                 Text { text: "refresh"; color: theme.faint; font.pixelSize: 10; font.family: "monospace" }
@@ -1881,6 +2121,18 @@ ShellRoot {
                                         onTextChanged: root.lockBg = text
                                     }
                                 }
+                                Rectangle {
+                                    implicitWidth: 36; implicitHeight: 36; radius: 8
+                                    color: bgBrowseMa.containsMouse ? theme.a(theme.iris, 0.25) : theme.a(theme.line, 0.4)
+                                    border.width: 1; border.color: theme.a(theme.iris, 0.25)
+                                    Sym { anchors.centerIn: parent; text: "folder_open"; sz: 16; color: theme.frost }
+                                    MouseArea {
+                                        id: bgBrowseMa
+                                        anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                        onClicked: {
+                                            root.pickFile("Select Wallpaper Image", "Images (*.png *.jpg *.jpeg) | *.png;*.jpg;*.jpeg", function(path) {
+                                                bgIn.text = path;
+                                            }); } } }
                             }
 
                             // Save & Actions Row
@@ -1972,6 +2224,114 @@ ShellRoot {
                         }
                     }
                 }
+
+            // ================= NATIVE FILE BROWSER OVERLAY =================
+            Rectangle {
+                id: fbModal
+                visible: root.fileBrowserOpen
+                anchors.fill: parent
+                radius: 18
+                color: theme.a(theme.bg, 0.98)
+                border.width: 1; border.color: theme.a(theme.iris, 0.4)
+                MouseArea { anchors.fill: parent } // block clicks to content below
+
+                ColumnLayout {
+                    anchors.fill: parent
+                    anchors.margins: 24
+                    spacing: 14
+
+                    // Header row
+                    RowLayout {
+                        Layout.fillWidth: true; spacing: 10
+                        Sym { text: "folder_open"; sz: 22; color: theme.frost }
+                        Text { text: root.fileBrowserTitle; color: theme.text; font.pixelSize: 15; font.family: "monospace"; font.bold: true; Layout.fillWidth: true }
+                        // Cancel button
+                        Rectangle {
+                            implicitWidth: 32; implicitHeight: 32; radius: 16
+                            color: fbCloseMa.containsMouse ? theme.a(theme.bad, 0.25) : "transparent"
+                            Sym { anchors.centerIn: parent; text: "close"; sz: 18; color: fbCloseMa.containsMouse ? theme.bad : theme.faint }
+                            MouseArea { id: fbCloseMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                onClicked: root.fileBrowserOpen = false } }
+                    }
+
+                    // Path navigation bar
+                    RowLayout {
+                        Layout.fillWidth: true; spacing: 8
+                        Rectangle {
+                            implicitWidth: 36; implicitHeight: 34; radius: 8
+                            color: fbUpMa.containsMouse ? theme.iris : theme.a(theme.line, 0.4)
+                            border.width: 1; border.color: theme.a(theme.iris, 0.25)
+                            Sym { anchors.centerIn: parent; text: "arrow_upward"; sz: 16; color: fbUpMa.containsMouse ? theme.bg : theme.frost }
+                            MouseArea { id: fbUpMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.goUpDir() } }
+                        Rectangle {
+                            Layout.fillWidth: true; implicitHeight: 34; radius: 8
+                            color: theme.a(theme.bg, 0.8); border.width: 1; border.color: theme.a(theme.iris, 0.2)
+                            Text { anchors { fill: parent; leftMargin: 12; rightMargin: 12 }
+                                verticalAlignment: Text.AlignVCenter
+                                text: root.fileBrowserPath; color: theme.frost; font.pixelSize: 12; font.family: "monospace"; elide: Text.ElideLeft } }
+                    }
+
+                    // Content list (scrollable)
+                    Flickable {
+                        Layout.fillWidth: true; Layout.fillHeight: true
+                        contentWidth: width; contentHeight: fbCol.implicitHeight
+                        clip: true
+
+                        ColumnLayout {
+                            id: fbCol
+                            anchors.left: parent.left; anchors.right: parent.right; spacing: 4
+                            
+                            // ".." Go Up item
+                            Rectangle {
+                                visible: root.fileBrowserPath !== "/"
+                                Layout.fillWidth: true; implicitHeight: 38; radius: 8
+                                color: fbItemUpMa.containsMouse ? theme.a(theme.line, 0.6) : "transparent"
+                                RowLayout {
+                                    anchors.fill: parent; anchors.leftMargin: 14; anchors.rightMargin: 14; spacing: 10
+                                    Sym { text: "drive_folder_upload"; sz: 16; color: theme.iris }
+                                    Text { text: ".."; color: theme.sub; font.pixelSize: 12; font.family: "monospace"; font.bold: true } }
+                                MouseArea { id: fbItemUpMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.goUpDir() } }
+
+                            Repeater {
+                                model: root.fileBrowserItems
+                                delegate: Rectangle {
+                                    required property var modelData
+                                    readonly property bool isDir: modelData.type === "d"
+                                    readonly property bool matchesFilter: !root.fileBrowserFilter || modelData.name.endsWith(root.fileBrowserFilter)
+                                    visible: isDir || matchesFilter
+                                    Layout.fillWidth: true
+                                    implicitHeight: (isDir || matchesFilter) ? 38 : 0
+                                    radius: 8
+                                    color: fbItemMa.containsMouse ? theme.a(theme.iris, 0.16) : "transparent"
+                                    border.width: fbItemMa.containsMouse ? 1 : 0; border.color: theme.a(theme.iris, 0.25)
+                                    RowLayout {
+                                        anchors.fill: parent; anchors.leftMargin: 14; anchors.rightMargin: 14; spacing: 10
+                                        Sym {
+                                            text: isDir ? "folder" : "description"
+                                            sz: 16; color: isDir ? theme.frost : theme.faint }
+                                        Text {
+                                            text: modelData.name; color: theme.text
+                                            font.pixelSize: 12; font.family: "monospace"; font.bold: isDir; elide: Text.ElideRight; Layout.fillWidth: true } }
+                                    MouseArea {
+                                        id: fbItemMa
+                                        anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                        onClicked: {
+                                            if (isDir) {
+                                                root.enterDir(modelData.name);
+                                            } else {
+                                                root.fileBrowserOpen = false;
+                                                if (root.fileBrowserCallback) {
+                                                    var fullPath = root.fileBrowserPath === "/" ? "/" + modelData.name : root.fileBrowserPath + "/" + modelData.name;
+                                                    root.fileBrowserCallback(fullPath);
+                                                }
+                                            }
+                                        } }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }

@@ -68,6 +68,19 @@ ShellRoot {
         onLoaded: apply()
         onFileChanged: apply()
     }
+    // ---------- calendar events database ----------
+    property var calEvents: []
+    Process {
+        id: reloadEventsProc; running: true
+        command: ["sh", "-c", "cat ~/.config/sea-shell/calendar_events.json 2>/dev/null || echo '[]'"]
+        stdout: StdioCollector { id: eventsOut; onStreamFinished: {
+            try {
+                root.calEvents = JSON.parse(eventsOut.text.trim() || "[]");
+            } catch(e) {
+                root.calEvents = [];
+            }
+        } }
+    }
 
     QtObject {
         id: theme
@@ -174,33 +187,57 @@ ShellRoot {
     Timer { id: warpTimer; interval: 1800; repeat: false; onTriggered: { warpPoll.running = true; warpModePoll.running = true } }
 
     // ---------- vpn (networkmanager) ----------
-    property var vpnList: []   // [{name, active}]
+    property var vpnList: []   // [{name, type, state, active}]
+    property string vpnActionName: ""
+    property string vpnFailedName: ""
+    Timer { id: vpnFailTimer; interval: 6000; repeat: false; onTriggered: root.vpnFailedName = "" }
+
+    Process {
+        id: vpnActionProc
+        onExited: (code) => {
+            var ok = code === 0;
+            if (!ok) {
+                root.vpnFailedName = root.vpnActionName;
+                vpnFailTimer.start();
+                Quickshell.execDetached(["sh","-c","notify-send -u critical 'sea-shell' 'VPN connection failed'"]);
+            } else {
+                root.vpnFailedName = "";
+            }
+            root.vpnActionName = "";
+            vpnScan.running = true;
+        }
+    }
+
     Process {
         id: vpnScan; running: true
-        command: ["sh","-c","nmcli -t -f NAME,TYPE,ACTIVE con show | grep -E ':(vpn|wireguard):' | awk -F: '{print $3==\"yes\"?\"1\":\"0\",\$1}'"]
+        command: ["sh","-c","nmcli -t -f NAME,TYPE,STATE,ACTIVE con show 2>/dev/null | grep -E ':(vpn|wireguard):'"]
         stdout: StdioCollector { id: vpnOut; onStreamFinished: {
             var out = []; var lines = vpnOut.text.trim().split("\n");
-            for (var i=0;i<lines.length;i++) {
+            for (var i=0; i<lines.length; i++) {
                 if (!lines[i]) continue;
-                var p = lines[i].split(" "); var act = p[0]==="1";
-                var name = p.slice(1).join(" ");
-                if (name) out.push({name: name, active: act});
+                var p = lines[i].split(":");
+                if (p.length < 4) continue;
+                out.push({ name: p[0], type: p[1], state: p[2], active: p[3]==="yes" });
             }
             root.vpnList = out;
         } }
     }
-    Timer { interval: 6000; running: true; repeat: true; triggeredOnStart: true; onTriggered: vpnScan.running = true }
+    Timer { interval: 5000; running: true; repeat: true; triggeredOnStart: true; onTriggered: vpnScan.running = true }
     function vpnToggle(name) {
+        if (root.vpnActionName !== "") return;
+        root.vpnActionName = name;
+        root.vpnFailedName = "";
         var e = name.replace(/'/g,"");
-        var cur = root.vpnList.find(function(v){ return v.name===name && v.active; });
+        var cur = root.vpnList.find(function(v){ return v.name===name && v.state==="activated"; });
         if (cur) {
-            Quickshell.execDetached(["sh","-c","nmcli con down id '"+e+"' && notify-send 'sea-shell' 'VPN disconnected'"]);
+            vpnActionProc.command = ["nmcli", "con", "down", "id", e];
         } else {
-            Quickshell.execDetached(["sh","-c","nmcli con up id '"+e+"' && notify-send 'sea-shell' 'VPN connected' || notify-send 'sea-shell' 'VPN failed to connect'"]);
+            vpnActionProc.command = ["nmcli", "con", "up", "id", e];
         }
-        vpnTimer.start();
+        vpnActionProc.running = true;
+        vpnScan.running = true;
     }
-    Timer { id: vpnTimer; interval: 2000; repeat: false; onTriggered: vpnScan.running = true }
+
 
     // ---------- bluetooth ----------
     readonly property var btAdapter: Bluetooth.defaultAdapter
@@ -282,6 +319,45 @@ ShellRoot {
     Timer { interval: 15000; running: true; repeat: true; triggeredOnStart: true; onTriggered: ppGet.running = true }
     function setProfile(p) { Quickshell.execDetached(["powerprofilesctl","set",p]); root.powerProfile = p; ppRefresh.start() }
     Timer { id: ppRefresh; interval: 800; onTriggered: ppGet.running = true }
+
+    // ---------- system monitor (cpu · ram · gpu) ----------
+    property real cpuUsage: 0     // %
+    property real cpuTemp: 0      // °C
+    property real memUsed: 0      // GiB
+    property real memTotal: 0     // GiB
+    property real memPct: 0       // %
+    property string gpuName: ""   // "" when no discrete GPU
+    property bool  hasGpu: false
+    property real gpuUsage: 0     // %
+    property real gpuTemp: 0      // °C
+    property real gpuPower: 0     // W
+    property real gpuMemUsed: 0   // GiB
+    property real gpuMemTotal: 0  // GiB
+    // sea-sysmon.sh samples /proc + nvidia-smi and prints one pipe-delimited line
+    Process {
+        id: sysProc; running: true
+        command: ["bash", Qt.resolvedUrl("sea-sysmon.sh").toString().replace("file://","")]
+        stdout: StdioCollector { id: sysOut; onStreamFinished: {
+            var p = sysOut.text.trim().split("|");
+            if (p.length < 11) return;
+            root.cpuUsage    = parseFloat(p[0]) || 0;
+            root.cpuTemp     = parseFloat(p[1]) || 0;
+            root.memUsed     = parseFloat(p[2]) || 0;
+            root.memTotal    = parseFloat(p[3]) || 0;
+            root.memPct      = parseFloat(p[4]) || 0;
+            root.gpuName     = p[5] || "";
+            root.hasGpu      = root.gpuName !== "";
+            root.gpuUsage    = parseFloat(p[6]) || 0;
+            root.gpuTemp     = parseFloat(p[7]) || 0;
+            root.gpuPower    = parseFloat(p[8]) || 0;
+            root.gpuMemUsed  = parseFloat(p[9]) || 0;
+            root.gpuMemTotal = parseFloat(p[10]) || 0;
+        } }
+    }
+    // only poll while a bar is visible; 3s is a good live/quiet balance
+    Timer { interval: 3000; running: true; repeat: true; triggeredOnStart: true; onTriggered: sysProc.running = true }
+    // color a value by thermal/load severity (green → warn → bad)
+    function loadColor(v, warnAt, badAt) { return v >= badAt ? theme.bad : v >= warnAt ? theme.warn : theme.good }
 
     // ---------- low-battery alerts (through our own notification daemon via the bus) ----------
     property int battWarned: 0   // 0 none · 1 low fired · 2 critical fired — resets when charging
@@ -506,6 +582,24 @@ ShellRoot {
         MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
             onPressed: (e)=>{ var v=sl.clamp(e.x/sl.width); sl.value=v; sl.moved(v) }
             onPositionChanged: (e)=>{ if(pressed){ var v=sl.clamp(e.x/sl.width); sl.value=v; sl.moved(v) } } }
+    }
+
+    // labelled progress bar used in the system-monitor dropdown
+    component StatBar: Column {
+        property string label: ""
+        property real value: 0            // 0..100
+        property string rightText: ""
+        property color barColor: theme.iris
+        spacing: 4
+        Item { width: parent.width; height: 15
+            Text { anchors.left: parent.left; anchors.verticalCenter: parent.verticalCenter
+                text: label; color: theme.sub; font.pixelSize: 11; font.family: root.cfgFont }
+            Text { anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
+                text: rightText; color: theme.text; font.pixelSize: 11; font.family: root.cfgFont; font.bold: true } }
+        Rectangle { width: parent.width; height: 6; radius: 3; color: theme.a(theme.line,0.85)
+            Rectangle { height: parent.height; radius: 3; color: barColor
+                width: parent.width * Math.max(0, Math.min(1, value/100))
+                Behavior on width { NumberAnimation { duration: 300; easing.type: Easing.OutCubic } } } }
     }
 
     component Marquee: Item {
@@ -741,10 +835,20 @@ ShellRoot {
                 Pill { owner: bar
                     id: mprisPill
                     anchors { horizontalCenter: parent.horizontalCenter; verticalCenter: parent.verticalCenter }
-                    visible: root.player !== null
+                    // clamp the title width to the free gap between the left and right
+                    // clusters so a long track never overflows into (or past) them.
+                    // The pill is centred, so its half-width is limited by the tighter side.
+                    readonly property real freeText: {
+                        var half = barBg.width / 2;
+                        var leftEnd = leftGroup.x + leftGroup.width;    // right edge of left cluster
+                        var rightStart = rightGroup.x;                  // left edge of right cluster
+                        var room = Math.min(half - leftEnd, rightStart - half) - 12;   // per-side gap
+                        return room * 2 - 46;                           // both halves, minus icon+padding
+                    }
+                    visible: root.player !== null && freeText >= 40
                     key: "mpris"
                     scrollText: true
-                    maxTextW: 180
+                    maxTextW: Math.max(0, Math.min(180, freeText))
                     icon: (root.player && root.player.isPlaying) ? "pause" : "play_arrow"
                     accent: theme.iris
                     value: {
@@ -1127,21 +1231,31 @@ ShellRoot {
 
                             // NM VPN connections (if any saved)
                             Repeater { model: root.vpnList
-                                delegate: Item { required property var modelData; width: parent.width; height: 30
-                                    Row { anchors.verticalCenter: parent.verticalCenter; anchors.left: parent.left; spacing: 7
-                                        Sym { anchors.verticalCenter: parent.verticalCenter; text: "vpn_key"; sz: 14
-                                            color: modelData.active ? theme.iris : theme.faint }
-                                        Text { anchors.verticalCenter: parent.verticalCenter
-                                            text: modelData.name; color: modelData.active ? theme.text : theme.sub
-                                            font.pixelSize: 11; font.family: root.cfgFont; font.bold: modelData.active } }
+                                delegate: Item { required property var modelData
+                                    readonly property bool connecting: modelData.state === "activating" || root.vpnActionName === modelData.name
+                                    readonly property bool failed: root.vpnFailedName === modelData.name
+                                    width: parent.width; height: 34
+                                    Column { anchors.left: parent.left; anchors.verticalCenter: parent.verticalCenter; spacing: 0
+                                        Row { spacing: 7
+                                            Sym { anchors.verticalCenter: parent.verticalCenter; text: "vpn_key"; sz: 14
+                                                color: modelData.active ? theme.iris : (connecting ? theme.frost : (failed ? theme.bad : theme.faint)) }
+                                            Text { anchors.verticalCenter: parent.verticalCenter
+                                                text: modelData.name; color: modelData.active ? theme.text : (connecting ? theme.frost : (failed ? theme.bad : theme.sub))
+                                                font.pixelSize: 11; font.family: root.cfgFont; font.bold: modelData.active || connecting; elide: Text.ElideRight } }
+                                        Text {
+                                            visible: connecting || failed || modelData.active
+                                            text: connecting ? "connecting…" : (failed ? "connection failed" : "connected")
+                                            color: connecting ? theme.frost : (failed ? theme.bad : theme.good)
+                                            font.pixelSize: 9; font.family: root.cfgFont; leftPadding: 21 } }
                                     Rectangle { anchors.verticalCenter: parent.verticalCenter; anchors.right: parent.right
                                         width: 36; height: 20; radius: 10
-                                        color: modelData.active ? theme.iris : theme.a(theme.line, 0.85)
-                                        border.width: 1; border.color: modelData.active ? theme.a(theme.iris,0.5) : theme.a(theme.iris,0.3)
+                                        color: modelData.active ? theme.iris : (connecting ? theme.a(theme.frost, 0.4) : theme.a(theme.line, 0.85))
+                                        border.width: 1; border.color: modelData.active ? theme.a(theme.iris,0.5) : (connecting ? theme.a(theme.frost,0.3) : theme.a(theme.iris,0.3))
                                         Behavior on color { ColorAnimation { duration: 120 } }
                                         Rectangle { width: 15; height: 15; radius: 8; color: theme.frost; anchors.verticalCenter: parent.verticalCenter
                                             x: modelData.active ? 19 : 2; Behavior on x { NumberAnimation { duration: 130 } } }
-                                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.vpnToggle(modelData.name) } } } } } }
+                                        MouseArea { anchors.fill: parent; cursorShape: connecting ? Qt.ArrowCursor : Qt.PointingHandCursor
+                                            onClicked: if (!connecting) root.vpnToggle(modelData.name) } } } } } }
 
                     // ---- BLUETOOTH ----
                     Pill { owner: bar; id: btPill; anchors.verticalCenter: parent.verticalCenter
@@ -1191,6 +1305,51 @@ ShellRoot {
                         accent: root.idleOn ? theme.frost : theme.warn
                         value: ""
                         onClicked: root.toggleIdle() }
+
+                    // ---- SYSTEM MONITOR (cpu · ram · gpu) ----
+                    Pill { owner: bar; id: sysPill; anchors.verticalCenter: parent.verticalCenter; key: "sys"
+                        icon: "speed"; value: Math.round(root.cpuUsage)+"%"
+                        accent: root.loadColor(root.cpuTemp, 78, 90) }
+                    Drop { screen: bar.screen
+                        id: sysDrop; host: sysPill; visible: root.openPop === "sys" && root.openBar === bar
+                        cardW: 250; cardH: sysCol.implicitHeight + 28
+                        Column { id: sysCol; anchors.fill: sysDrop.card; anchors.margins: 14; spacing: 10
+                            // Header
+                            Item { width: parent.width; height: 20
+                                Text { anchors.verticalCenter: parent.verticalCenter; anchors.left: parent.left
+                                    text: "system"; color: theme.iris; font.pixelSize: 11; font.family: root.cfgFont; font.bold: true; font.letterSpacing: 0.8 }
+                                Row { anchors.verticalCenter: parent.verticalCenter; anchors.right: parent.right; spacing: 4
+                                    Sym { anchors.verticalCenter: parent.verticalCenter; text: "developer_board"; sz: 13; color: theme.faint }
+                                    Text { anchors.verticalCenter: parent.verticalCenter; text: "live"; color: theme.faint; font.pixelSize: 9; font.family: root.cfgFont } } }
+                            Rectangle { width: parent.width; height: 1; color: theme.a(theme.line, 0.6) }
+                            // CPU
+                            StatBar { width: parent.width; label: "CPU"
+                                value: root.cpuUsage; barColor: root.loadColor(root.cpuUsage, 70, 90)
+                                rightText: Math.round(root.cpuUsage)+"%  ·  "+Math.round(root.cpuTemp)+"°C" }
+                            // RAM
+                            StatBar { width: parent.width; label: "RAM"; barColor: theme.iris
+                                value: root.memPct
+                                rightText: root.memUsed.toFixed(1)+" / "+root.memTotal.toFixed(1)+" GB" }
+                            // GPU (only when a discrete GPU is present)
+                            Column { width: parent.width; spacing: 10; visible: root.hasGpu
+                                Rectangle { width: parent.width; height: 1; color: theme.a(theme.line, 0.6) }
+                                Item { width: parent.width; height: 14
+                                    Text { anchors.left: parent.left; anchors.verticalCenter: parent.verticalCenter
+                                        text: "GPU"; color: theme.frost; font.pixelSize: 10; font.family: root.cfgFont; font.bold: true; font.letterSpacing: 0.6 }
+                                    Text { anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
+                                        width: parent.width - 40; elide: Text.ElideLeft; horizontalAlignment: Text.AlignRight
+                                        text: root.gpuName; color: theme.faint; font.pixelSize: 10; font.family: root.cfgFont } }
+                                StatBar { width: parent.width; label: "usage"
+                                    value: root.gpuUsage; barColor: root.loadColor(root.gpuUsage, 70, 90)
+                                    rightText: Math.round(root.gpuUsage)+"%  ·  "+Math.round(root.gpuTemp)+"°C" }
+                                StatBar { width: parent.width; label: "VRAM"; barColor: theme.frost
+                                    value: root.gpuMemTotal>0 ? root.gpuMemUsed/root.gpuMemTotal*100 : 0
+                                    rightText: root.gpuMemUsed.toFixed(1)+" / "+root.gpuMemTotal.toFixed(1)+" GB" }
+                                Item { width: parent.width; height: 15
+                                    Text { anchors.left: parent.left; anchors.verticalCenter: parent.verticalCenter
+                                        text: "power draw"; color: theme.sub; font.pixelSize: 11; font.family: root.cfgFont }
+                                    Text { anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
+                                        text: root.gpuPower.toFixed(1)+" W"; color: theme.text; font.pixelSize: 11; font.family: root.cfgFont; font.bold: true } } } } }
 
                     // ---- VOLUME ----
                     Pill { owner: bar; id: volPill; anchors.verticalCenter: parent.verticalCenter; key: "vol"
@@ -1269,9 +1428,10 @@ ShellRoot {
                     // ---- CLOCK ----
                     Pill { owner: bar; id: clockPill; anchors.verticalCenter: parent.verticalCenter; key: "cal"; icon: "schedule"
                         value: Qt.formatDateTime(clock.date,"ddd d MMM · HH:mm"); accent: theme.iris }
-                    Drop { screen: bar.screen
+                     Drop { screen: bar.screen
                         id: calDrop; host: clockPill; visible: root.openPop === "cal" && root.openBar === bar
-                        cardW: 250; cardH: calCol.implicitHeight + 32
+                        cardW: 280; cardH: calCol.implicitHeight + 32
+                        onVisibleChanged: { if (visible) reloadEventsProc.running = true }
                         Column { id: calCol; anchors.fill: calDrop.card; anchors.margins: 14; spacing: 10
                             property var dt: clock.date
                             property int yr: dt.getFullYear()
@@ -1282,13 +1442,35 @@ ShellRoot {
                             Text { anchors.horizontalCenter: parent.horizontalCenter; text: Qt.formatDateTime(clock.date,"MMMM yyyy"); color: theme.frost; font.pixelSize: 14; font.family: root.cfgFont; font.bold: true }
                             Grid { anchors.horizontalCenter: parent.horizontalCenter; columns: 7; spacing: 4
                                 Repeater { model: ["S","M","T","W","T","F","S"]
-                                    delegate: Text { required property var modelData; width: 28; horizontalAlignment: Text.AlignHCenter; text: modelData; color: theme.faint; font.pixelSize: 11; font.family: root.cfgFont } }
+                                    delegate: Text { required property var modelData; width: 34; horizontalAlignment: Text.AlignHCenter; text: modelData; color: theme.faint; font.pixelSize: 11; font.family: root.cfgFont } }
                                 Repeater { model: calCol.lead
-                                    delegate: Item { width: 28; height: 24 } }
+                                    delegate: Item { width: 34; height: 26 } }
                                 Repeater { model: calCol.days
-                                    delegate: Rectangle { required property var modelData; readonly property bool isToday: modelData===calCol.today
-                                        width: 28; height: 24; radius: 7; color: isToday ? theme.iris : "transparent"
-                                        Text { anchors.centerIn: parent; text: parent.modelData; color: parent.isToday ? theme.bg : theme.text; font.pixelSize: 12; font.family: root.cfgFont; font.bold: parent.isToday } } } } } }
+                                    delegate: Rectangle {
+                                        required property var modelData
+                                        readonly property bool isToday: modelData===calCol.today
+                                        readonly property bool hasEvent: {
+                                            var dateStr = calCol.yr + "-" + String(calCol.mo + 1).padStart(2, "0") + "-" + String(modelData).padStart(2, "0");
+                                            return root.calEvents.some(function(e) { return e.date === dateStr; });
+                                        }
+                                        width: 34; height: 26; radius: 7; color: isToday ? theme.iris : "transparent"
+                                        border.width: (hasEvent && !isToday) ? 1 : 0; border.color: theme.a(theme.frost, 0.4)
+                                        Text { anchors.centerIn: parent; text: parent.modelData; color: parent.isToday ? theme.bg : theme.text; font.pixelSize: 12; font.family: root.cfgFont; font.bold: parent.isToday }
+                                        Rectangle {
+                                            visible: parent.hasEvent && !parent.isToday
+                                            width: 3; height: 3; radius: 1.5; color: theme.frost
+                                            anchors.bottom: parent.bottom; anchors.bottomMargin: 3; anchors.horizontalCenter: parent.horizontalCenter } } } }
+                            Rectangle { width: parent.width; height: 1; color: theme.a(theme.iris, 0.15) }
+                            Column {
+                                width: parent.width; spacing: 4
+                                Text { text: "Upcoming Events"; color: theme.frost; font.pixelSize: 10; font.family: root.cfgFont; font.bold: true; font.letterSpacing: 0.8; bottomPadding: 2 }
+                                Text { visible: root.calEvents.length === 0; text: "no upcoming events"; color: theme.faint; font.pixelSize: 10; font.family: root.cfgFont }
+                                Repeater {
+                                    model: root.calEvents.slice(0, 3)
+                                    delegate: Row {
+                                        width: parent.width; spacing: 8
+                                        Text { text: modelData.date.slice(5); color: theme.iris; font.pixelSize: 10; font.family: root.cfgFont; width: 34 }
+                                        Text { text: modelData.title; color: theme.text; font.pixelSize: 11; font.family: root.cfgFont; elide: Text.ElideRight; width: parent.width - 42 } } } } } }
 
                     // ---- POWER (very end) ----
                     Pill { owner: bar; id: pwrPill; anchors.verticalCenter: parent.verticalCenter; key: "pwr"; icon: "power_settings_new"; accent: theme.bad }
@@ -1333,7 +1515,7 @@ ShellRoot {
 
             // register this bar's windows with the ONE shared focus grab at root —
             // a grab per bar fights the other monitors' grabs and insta-closes dropdowns
-            Item { Component.onCompleted: { root.grabWins = root.grabWins.concat([bar, wxDrop, wifiDrop, btDrop, volDrop, batDrop, calDrop, pwrDrop, notifDrop, mprisDrop, trayDrop]) } }
+            Item { Component.onCompleted: { root.grabWins = root.grabWins.concat([bar, wxDrop, wifiDrop, btDrop, volDrop, batDrop, calDrop, pwrDrop, notifDrop, mprisDrop, trayDrop, sysDrop]) } }
         }
     }
 
