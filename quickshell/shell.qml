@@ -107,15 +107,34 @@ ShellRoot {
     property var wifiList: []
     property string ssid: ""
     property bool wifiOn: false
+    // Connection state comes from the DEVICE state (authoritative + instant), NOT from
+    // the scan list's ACTIVE column. That column depends on scan freshness and can drop
+    // the active AP for several polls right after a reconnect — which left the bar icon
+    // stuck on "disconnected". `dev status` always reflects reality, so poll it on its own.
+    Process {
+        id: wifiStatus; running: true
+        command: ["sh","-c","nmcli -t -f DEVICE,TYPE,STATE,CONNECTION dev status 2>/dev/null | awk -F: '$2==\"wifi\"{print $3 \"\\t\" $4; exit}'"]
+        stdout: StdioCollector { id: wifiStatOut; onStreamFinished: {
+            var t = wifiStatOut.text.replace(/\n$/,"");
+            if (!t) { root.wifiOn = false; root.ssid = ""; return }
+            var p = t.split("\t"); var st = p[0]||""; var conn = p[1]||"";
+            root.wifiOn = (st === "connected");
+            root.ssid = root.wifiOn ? conn : "";
+        } }
+    }
+    Timer { interval: 3000; running: true; repeat: true; triggeredOnStart: true; onTriggered: wifiStatus.running = true }
+    // the network list for the dropdown (styling only — active row cross-checks the
+    // connected SSID from dev status so a stale ACTIVE column can't mis-highlight)
     Process {
         id: wifiScan; running: true
         command: ["sh", "-c", "nmcli -t -f ACTIVE,SIGNAL,SECURITY,SSID dev wifi 2>/dev/null | awk -F: 'length($4)>0' | sort -t: -k2 -rn | head -8"]
         stdout: StdioCollector { id: wifiOut; onStreamFinished: {
-            var out = []; var cur = ""; var lines = wifiOut.text.trim().split("\n");
+            var out = []; var lines = wifiOut.text.trim().split("\n");
             for (var i=0;i<lines.length;i++){ if(!lines[i])continue; var p=lines[i].split(":");
-                var e={active:p[0]==="yes",signal:parseInt(p[1])||0,secure:(p[2]||"").length>0,ssid:p.slice(3).join(":")};
-                out.push(e); if(e.active) cur=e.ssid; }
-            root.wifiList = out; root.ssid = cur; root.wifiOn = cur.length>0;
+                var sid=p.slice(3).join(":");
+                var e={active:(p[0]==="yes")||(root.ssid!=="" && sid===root.ssid),signal:parseInt(p[1])||0,secure:(p[2]||"").length>0,ssid:sid};
+                out.push(e); }
+            root.wifiList = out;
         } }
     }
     Timer { interval: 8000; running: true; repeat: true; triggeredOnStart: true; onTriggered: wifiScan.running = true }
@@ -150,7 +169,7 @@ ShellRoot {
         root.wifiPwFor = ""; wifiRefresh.start();
     }
     function wifiToggle() { Quickshell.execDetached(["sh","-c","nmcli radio wifi | grep -q enabled && nmcli radio wifi off || nmcli radio wifi on"]); wifiRefresh.start() }
-    Timer { id: wifiRefresh; interval: 2500; onTriggered: wifiScan.running = true }
+    Timer { id: wifiRefresh; interval: 2500; onTriggered: { wifiScan.running = true; wifiStatus.running = true } }
 
     // ---------- cloudflare warp ----------
     property string warpStatus: "Disconnected"   // raw status line from warp-cli
@@ -763,13 +782,6 @@ ShellRoot {
                 GradientStop { position: 1.0; color: theme.a(theme.bg, root.dropOpacity * 0.90) }
             }
             border.width: 1; border.color: theme.a(theme.iris, 0.28)
-
-            // Glass top highlight
-            Rectangle {
-                anchors { left: parent.left; right: parent.right; top: parent.top }
-                height: 1; radius: parent.radius
-                color: theme.a(theme.frost, 0.45)
-            }
         }
     }
 
@@ -1163,7 +1175,7 @@ ShellRoot {
                                     width: 26; height: 26; radius: 8
                                     color: rfm.containsMouse ? theme.a(theme.iris,0.18) : "transparent"
                                     Sym { anchors.centerIn: parent; text: "refresh"; sz: 15; color: theme.sub }
-                                    MouseArea { id: rfm; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: wifiScan.running = true } } }
+                                    MouseArea { id: rfm; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: { wifiScan.running = true; wifiStatus.running = true } } } }
                             Rectangle { width: parent.width; height: 1; color: theme.a(theme.line, 0.6) }
                             Item { height: 2; width: 1 }
                             Repeater { model: root.wifiList
