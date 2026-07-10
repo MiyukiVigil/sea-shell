@@ -300,7 +300,7 @@ Scope {
                     GradientStop { position: 0.35; color: "transparent" }
                 }
             }
-            Rectangle { anchors { top: parent.top; left: parent.left; right: parent.right; margins: 1 }
+            Rectangle { anchors { top: parent.top; left: parent.left; right: parent.right; topMargin: 1; leftMargin: parent.radius; rightMargin: parent.radius }
                 height: 1; color: Qt.rgba(1, 1, 1, theme.light ? 0.45 : 0.12) }
 
             // ---------- search field ----------
