@@ -25,6 +25,7 @@ ShellRoot {
             lockSettingsGet.running = true            // idle & lock: load configs
         }
         if (tab === 6) ppGet.running = true           // power: re-read profile
+        if (tab === 11) reloadEventsProc.running = true  // calendar: refresh events
     }
 
     // ---------- native QML file browser ----------
@@ -149,6 +150,20 @@ ShellRoot {
         run("rm -f ~/.config/sea-shell/calendar_events.json");
         root.calEvents = [];
         root.calMsg = "All calendar events cleared.";
+    }
+    // events sorted chronologically, plus a small relative-time helper for the Calendar tab
+    readonly property var calSorted: root.calEvents.slice().sort(function(a,b){ return (""+a.date) < (""+b.date) ? -1 : (""+a.date) > (""+b.date) ? 1 : 0 })
+    function evDate(s) { var p = (""+s).split("-"); return new Date(parseInt(p[0]), (parseInt(p[1])||1)-1, parseInt(p[2])||1); }
+    function evRel(s) {
+        var d = root.evDate(s); d.setHours(0,0,0,0);
+        var now = new Date(); now.setHours(0,0,0,0);
+        var days = Math.round((d.getTime() - now.getTime()) / 86400000);
+        if (days < 0)   return { t: days===-1 ? "yesterday" : (-days)+"d ago", past: true,  soon: false };
+        if (days === 0) return { t: "today",             past: false, soon: true  };
+        if (days === 1) return { t: "tomorrow",          past: false, soon: true  };
+        if (days < 7)   return { t: "in "+days+"d",       past: false, soon: true  };
+        if (days < 31)  return { t: "in "+Math.round(days/7)+"w",  past: false, soon: false };
+        return { t: "in "+Math.round(days/30)+"mo",      past: false, soon: false };
     }
 
     // ---------- bluetooth (same engine as the bar dropdown) ----------
@@ -333,17 +348,18 @@ ShellRoot {
 
     QtObject {
         id: theme
-        readonly property color bg:    "#0d1420"
-        readonly property color panel: "#131b29"
-        readonly property color line:  "#24304a"
-        readonly property color text:  "#e2e9f4"
-        readonly property color sub:   "#a6b6cf"
-        readonly property color faint: "#6f8099"
-        readonly property color iris:  "#63c7dd"
-        readonly property color frost: "#a2e2e8"
-        readonly property color good:  "#a6e3a1"
-        readonly property color warn:  "#f4c542"
-        readonly property color bad:   "#f38ba8"
+        readonly property bool light: root.apLight
+        readonly property color bg:    light ? "#eaf1f6" : "#0d1420"
+        readonly property color panel: light ? "#dbe6ee" : "#131b29"
+        readonly property color line:  light ? "#b6c9d7" : "#24304a"
+        readonly property color text:  light ? "#0c1520" : "#e2e9f4"
+        readonly property color sub:   light ? "#2c4256" : "#a6b6cf"
+        readonly property color faint: light ? "#48606f" : "#6f8099"
+        readonly property color iris:  light ? Qt.darker(root.apAccent, 2.4)  : root.apAccent
+        readonly property color frost: light ? Qt.darker(root.apAccent, 1.7) : Qt.lighter(root.apAccent, 1.22)
+        readonly property color good:  light ? "#2f9e63" : "#a6e3a1"
+        readonly property color warn:  light ? "#b9820f" : "#f4c542"
+        readonly property color bad:   light ? "#d1495b" : "#f38ba8"
         function a(c, al) { return Qt.rgba(c.r, c.g, c.b, al) }
     }
 
@@ -451,6 +467,11 @@ ShellRoot {
     property int  apHeight: 42
     property string apAccent: "#63c7dd"
     property string apFont: "monospace"
+    property bool apLight: false            // dark (default) ↔ light palette
+    property bool apMatugen: false          // recolour accent + kitty from the wallpaper
+    property bool apAutoDark: false         // auto-switch dark/light by time of day
+    property string apDarkStart: "19:00"    // dark begins
+    property string apDarkEnd: "07:00"      // dark ends (light begins)
     property var apCustomFonts: []      // fonts the user typed, persisted as chips
     property var accents: ["#63c7dd","#4dd0c4","#6aa6ff","#cba6f7","#a6e3a1","#f4c542","#f38ba8","#ff9e64"]
     property var baseFonts: ["monospace","MesloLGM Nerd Font","JetBrainsMono Nerd Font","FiraCode Nerd Font","sans-serif","Iosevka"]
@@ -459,16 +480,26 @@ ShellRoot {
         stdout: StdioCollector { id: apOut; onStreamFinished: { try { var j=JSON.parse(apOut.text);
             if(j.radius!==undefined) root.apRadius=j.radius; if(j.opacity!==undefined) root.apOpacity=j.opacity;
             if(j.height!==undefined) root.apHeight=j.height; if(j.accent!==undefined) root.apAccent=j.accent;
-            if(j.font!==undefined) root.apFont=j.font; if(j.customFonts!==undefined) root.apCustomFonts=j.customFonts; } catch(e){} } } }
+            if(j.font!==undefined) root.apFont=j.font; if(j.customFonts!==undefined) root.apCustomFonts=j.customFonts;
+            if(j.mode!==undefined) root.apLight=(""+j.mode==="light"); if(j.matugen!==undefined) root.apMatugen=!!j.matugen;
+            if(j.autoDark!==undefined) root.apAutoDark=!!j.autoDark; if(j.darkStart!==undefined) root.apDarkStart=j.darkStart; if(j.darkEnd!==undefined) root.apDarkEnd=j.darkEnd; } catch(e){} } } }
     function saveAppearance() {
         var cf = '['; for(var i=0;i<root.apCustomFonts.length;i++){ cf += (i?',':'') + '\"'+root.apCustomFonts[i]+'\"'; } cf += ']';
-        var j = '{\"radius\":'+Math.round(root.apRadius)+',\"opacity\":'+root.apOpacity.toFixed(2)+',\"height\":'+Math.round(root.apHeight)+',\"accent\":\"'+root.apAccent+'\",\"font\":\"'+root.apFont+'\",\"customFonts\":'+cf+'}';
+        var j = '{\"radius\":'+Math.round(root.apRadius)+',\"opacity\":'+root.apOpacity.toFixed(2)+',\"height\":'+Math.round(root.apHeight)+',\"accent\":\"'+root.apAccent+'\",\"font\":\"'+root.apFont+'\",\"customFonts\":'+cf+',\"mode\":\"'+(root.apLight?'light':'dark')+'\",\"matugen\":'+(root.apMatugen?'true':'false')+',\"autoDark\":'+(root.apAutoDark?'true':'false')+',\"darkStart\":\"'+root.apDarkStart+'\",\"darkEnd\":\"'+root.apDarkEnd+'\"}';
         run("mkdir -p \"$HOME/.config/sea-shell\" && printf '%s' '"+j+"' > \"$HOME/.config/sea-shell/appearance.json\"");
     }
     function addCustomFont(f) {
         f = (f||"").trim(); if(f==="") return;
         if (root.baseFonts.indexOf(f)<0 && root.apCustomFonts.indexOf(f)<0) { var a=root.apCustomFonts.slice(); a.push(f); root.apCustomFonts=a; }
         root.apFont = f; root.saveAppearance();
+    }
+    // matugen AUTO toggle — persist the flag, then apply now (accent + kitty from the
+    // wallpaper) or reset everything back to the default sea cyan.
+    property string matugenScript: Qt.resolvedUrl("matugen-accent.sh").toString().replace("file://","")
+    function toggleMatugen() {
+        root.apMatugen = !root.apMatugen; root.saveAppearance();
+        if (root.apMatugen) run("sh '"+root.matugenScript+"'");
+        else { root.apAccent = "#63c7dd"; root.saveAppearance(); run("sh '"+root.matugenScript+"' --reset"); }
     }
     // matugen: derive a palette from the current wallpaper (pick any swatch)
     property bool matugenBusy: false
@@ -841,6 +872,7 @@ ShellRoot {
                 TabBtn { icon: "bluetooth";            label: "Bluetooth";  idx: 9 }
                 TabBtn { icon: "palette";              label: "Appearance"; idx: 4 }
                 TabBtn { icon: "cloud";                label: "Weather";    idx: 3 }
+                TabBtn { icon: "calendar_month";       label: "Calendar";   idx: 11 }
                 TabBtn { icon: "keyboard";             label: "Keybinds";   idx: 7 }
                 TabBtn { icon: "bedtime";              label: "Idle & lock"; idx: 10 }
                 TabBtn { icon: "bolt";                 label: "Actions";    idx: 5 }
@@ -1457,6 +1489,41 @@ ShellRoot {
                         // ================= APPEARANCE =================
                         ColumnLayout {
                             visible: root.tab === 4; Layout.fillWidth: true; spacing: 14
+                            Section { title: "theme"; icon: "contrast" }
+                            RowLayout { Layout.fillWidth: true; spacing: 8
+                                Repeater { model: [{k:false,l:"Dark",i:"dark_mode"},{k:true,l:"Light",i:"light_mode"}]
+                                    delegate: Rectangle { required property var modelData; readonly property bool sel: root.apLight===modelData.k
+                                        Layout.fillWidth: true; implicitHeight: 40; radius: 9
+                                        color: sel?theme.iris:(thmMa.containsMouse?theme.a(theme.iris,0.16):theme.a(theme.line,0.4)); border.width: 1; border.color: sel?theme.iris:theme.a(theme.iris,0.16)
+                                        RowLayout { anchors.centerIn: parent; spacing: 7
+                                            Sym { text: modelData.i; sz: 17; color: sel?theme.bg:theme.frost }
+                                            Text { text: modelData.l; color: sel?theme.bg:theme.text; font.pixelSize: 13; font.family: root.apFont; font.bold: sel } }
+                                        MouseArea { id: thmMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: { root.apLight=modelData.k; root.saveAppearance() } } } } }
+                            // auto dark mode by time of day
+                            Rectangle { Layout.fillWidth: true; implicitHeight: 46; radius: 9
+                                color: theme.a(theme.line,0.4); border.width: 1; border.color: root.apAutoDark?theme.a(theme.iris,0.5):theme.a(theme.iris,0.16)
+                                RowLayout { anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 12; spacing: 10
+                                    Sym { text: "bedtime"; sz: 18; color: root.apAutoDark?theme.frost:theme.faint }
+                                    ColumnLayout { spacing: 1; Layout.fillWidth: true
+                                        Text { text: "auto dark by time"; color: theme.text; font.pixelSize: 13; font.family: root.apFont }
+                                        Text { text: "dark inside the window · overrides the manual pick + the SUPER+⇧+D key"; color: theme.faint; font.pixelSize: 10; font.family: root.apFont } }
+                                    Rectangle { implicitWidth: 46; implicitHeight: 22; radius: 11
+                                        color: root.apAutoDark?theme.iris:theme.a(theme.line,0.85); border.width: 1; border.color: root.apAutoDark?theme.iris:theme.a(theme.iris,0.3)
+                                        Rectangle { width: 16; height: 16; radius: 8; y: 3; x: root.apAutoDark?27:3; color: theme.frost; Behavior on x { NumberAnimation { duration: 120 } } }
+                                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { root.apAutoDark=!root.apAutoDark; root.saveAppearance() } } } } }
+                            RowLayout { Layout.fillWidth: true; spacing: 10; visible: root.apAutoDark
+                                Sym { text: "schedule"; sz: 18 }
+                                Text { text: "dark from"; color: theme.sub; font.pixelSize: 12; font.family: root.apFont }
+                                Rectangle { implicitWidth: 68; implicitHeight: 32; radius: 8; color: theme.a(theme.line,0.5); border.width: 1; border.color: dstart.activeFocus?theme.iris:theme.a(theme.iris,0.2)
+                                    TextInput { id: dstart; anchors.fill: parent; horizontalAlignment: TextInput.AlignHCenter; verticalAlignment: TextInput.AlignVCenter
+                                        color: theme.text; font.pixelSize: 13; font.family: root.apFont; inputMask: "99:99;_"; text: root.apDarkStart
+                                        onEditingFinished: { root.apDarkStart = text; root.saveAppearance() } } }
+                                Text { text: "to"; color: theme.sub; font.pixelSize: 12; font.family: root.apFont }
+                                Rectangle { implicitWidth: 68; implicitHeight: 32; radius: 8; color: theme.a(theme.line,0.5); border.width: 1; border.color: dend.activeFocus?theme.iris:theme.a(theme.iris,0.2)
+                                    TextInput { id: dend; anchors.fill: parent; horizontalAlignment: TextInput.AlignHCenter; verticalAlignment: TextInput.AlignVCenter
+                                        color: theme.text; font.pixelSize: 13; font.family: root.apFont; inputMask: "99:99;_"; text: root.apDarkEnd
+                                        onEditingFinished: { root.apDarkEnd = text; root.saveAppearance() } } }
+                                Item { Layout.fillWidth: true } }
                             Section { title: "bar shape"; icon: "tune" }
                             // roundness
                             RowLayout { Layout.fillWidth: true; spacing: 10
@@ -1485,12 +1552,24 @@ ShellRoot {
                                         border.width: sel?3:1; border.color: sel?theme.text:theme.a(theme.text,0.2)
                                         Sym { anchors.centerIn: parent; visible: parent.sel; text: "check"; sz: 20; color: "#0d1420" }
                                         MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { root.apAccent=modelData; root.saveAppearance() } } } } }
-                            // matugen — derive accent from wallpaper
+                            // matugen AUTO — persisted; recolours the whole shell + kitty from the wallpaper (off = sea cyan)
+                            Rectangle { Layout.fillWidth: true; implicitHeight: 48; radius: 9
+                                color: theme.a(theme.line,0.4); border.width: 1; border.color: root.apMatugen?theme.a(theme.iris,0.5):theme.a(theme.iris,0.16)
+                                RowLayout { anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 12; spacing: 10
+                                    Sym { text: "colorize"; sz: 18; color: root.apMatugen?theme.frost:theme.faint }
+                                    ColumnLayout { spacing: 1; Layout.fillWidth: true
+                                        Text { text: "auto colours from wallpaper"; color: theme.text; font.pixelSize: 13; font.family: root.apFont }
+                                        Text { text: "recolours the shell + kitty on every wallpaper · off = sea cyan"; color: theme.faint; font.pixelSize: 10; font.family: root.apFont } }
+                                    Rectangle { implicitWidth: 46; implicitHeight: 22; radius: 11
+                                        color: root.apMatugen?theme.iris:theme.a(theme.line,0.85); border.width: 1; border.color: root.apMatugen?theme.iris:theme.a(theme.iris,0.3)
+                                        Rectangle { width: 16; height: 16; radius: 8; y: 3; x: root.apMatugen?27:3; color: theme.frost; Behavior on x { NumberAnimation { duration: 120 } } }
+                                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.toggleMatugen() } } } }
+                            // matugen — one-off: derive a palette from the wallpaper to pick a swatch
                             Rectangle { Layout.fillWidth: true; implicitHeight: 40; radius: 9
                                 color: mgm.containsMouse ? theme.iris : theme.a(theme.iris,0.18); border.width: 1; border.color: theme.iris
                                 RowLayout { anchors.centerIn: parent; spacing: 8
                                     Sym { text: root.matugenBusy?"sync":"auto_awesome"; sz: 17; color: mgm.containsMouse?theme.bg:theme.frost }
-                                    Text { text: root.matugenBusy ? "matching…" : "match wallpaper (matugen)"; color: mgm.containsMouse?theme.bg:theme.text; font.pixelSize: 13; font.family: root.apFont } }
+                                    Text { text: root.matugenBusy ? "matching…" : "pick a palette from wallpaper"; color: mgm.containsMouse?theme.bg:theme.text; font.pixelSize: 13; font.family: root.apFont } }
                                 MouseArea { id: mgm; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.matchWallpaper() } }
                             // extracted palette — pick any colour
                             Flow { Layout.fillWidth: true; spacing: 9; visible: root.matugenPalette.length>0
@@ -1830,97 +1909,141 @@ ShellRoot {
                                         color: (parseInt(root.sysInfo.diskpct) || 0) > 90 ? theme.bad : theme.frost } }
                                 Text { text: root.sysInfo.disk || "…"; color: theme.sub; font.pixelSize: 11; font.family: "monospace" }
                             }
-                            Section { title: "calendar events"; icon: "calendar_month" }
-                            RowLayout {
-                                Layout.fillWidth: true; spacing: 10
-                                Rectangle {
-                                    implicitWidth: 160; implicitHeight: 34; radius: 8
-                                    color: calImpMa.containsMouse ? theme.iris : theme.a(theme.iris, 0.2)
-                                    border.width: 1; border.color: theme.iris
-                                    RowLayout { anchors.centerIn: parent; spacing: 6
-                                        Sym { text: "upload_file"; sz: 14; color: calImpMa.containsMouse ? theme.bg : theme.frost }
-                                        Text { text: "Import .ics File"; color: calImpMa.containsMouse ? theme.bg : theme.text; font.pixelSize: 11; font.family: "monospace"; font.bold: true } }
-                                    MouseArea {
-                                        id: calImpMa
-                                        anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
-                                        onClicked: {
-                                            root.pickFile("Select Calendar iCalendar (.ics) File", "iCalendar (*.ics) | *.ics", function(path) {
-                                                root.importICS(path);
-                                            }); } } }
-                                Rectangle {
-                                    implicitWidth: 140; implicitHeight: 34; radius: 8
-                                    color: calClrMa.containsMouse ? theme.a(theme.bad, 0.25) : "transparent"
-                                    border.width: 1; border.color: calClrMa.containsMouse ? theme.bad : theme.a(theme.bad, 0.4)
-                                    RowLayout { anchors.centerIn: parent; spacing: 6
-                                        Sym { text: "delete"; sz: 14; color: theme.bad }
-                                        Text { text: "Clear All Events"; color: theme.bad; font.pixelSize: 11; font.family: "monospace"; font.bold: true } }
-                                    MouseArea {
-                                        id: calClrMa
-                                        anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
-                                        onClicked: root.clearEvents() } }
-                                Item { Layout.fillWidth: true }
-                            }
-
-                            // Import from URL Row
-                            RowLayout {
-                                Layout.fillWidth: true; spacing: 10
-                                Rectangle {
-                                    Layout.fillWidth: true; implicitHeight: 34; radius: 8
-                                    color: theme.a(theme.line, 0.4); border.width: 1
-                                    border.color: calUrlIn.activeFocus ? theme.iris : theme.a(theme.iris, 0.16)
-                                    TextInput {
-                                        id: calUrlIn
-                                        anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 12
-                                        verticalAlignment: TextInput.AlignVCenter
-                                        color: theme.text; font.pixelSize: 12; font.family: "monospace"
-                                        clip: true; selectByMouse: true; selectionColor: theme.a(theme.iris, 0.4)
-                                        Text { anchors.verticalCenter: parent.verticalCenter; visible: calUrlIn.text === ""
-                                            text: "https://example.com/calendar.ics"
-                                            color: theme.faint; font.pixelSize: 12; font.family: "monospace" }
-                                        Keys.onReturnPressed: {
-                                            if (calUrlIn.text.trim()) {
-                                                root.importICS(calUrlIn.text.trim());
-                                                calUrlIn.text = "";
-                                            } } } }
-                                Rectangle {
-                                    implicitWidth: 120; implicitHeight: 34; radius: 8
-                                    color: calUrlMa.containsMouse ? theme.iris : theme.a(theme.iris, 0.2)
-                                    border.width: 1; border.color: theme.iris
-                                    RowLayout { anchors.centerIn: parent; spacing: 5
-                                        Sym { text: "link"; sz: 14; color: calUrlMa.containsMouse ? theme.bg : theme.frost }
-                                        Text { text: "Import Link"; color: calUrlMa.containsMouse ? theme.bg : theme.text; font.pixelSize: 11; font.family: "monospace"; font.bold: true } }
-                                    MouseArea {
-                                        id: calUrlMa
-                                        anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
-                                        onClicked: {
-                                            if (calUrlIn.text.trim()) {
-                                                root.importICS(calUrlIn.text.trim());
-                                                calUrlIn.text = "";
-                                            } } } }
-                            }
-
-                            Text { visible: root.calMsg !== ""; text: root.calMsg; color: theme.frost; font.pixelSize: 11; font.family: "monospace"; Layout.fillWidth: true; wrapMode: Text.Wrap }
-                            ColumnLayout {
-                                Layout.fillWidth: true; spacing: 6
-                                Text { visible: root.calEvents.length === 0; text: "no events imported yet"; color: theme.faint; font.pixelSize: 11; font.family: "monospace" }
-                                Repeater {
-                                    model: root.calEvents.slice(0, 8)
-                                    delegate: Rectangle {
-                                        required property var modelData
-                                        Layout.fillWidth: true; implicitHeight: 38; radius: 8
-                                        color: theme.a(theme.line, 0.35); border.width: 1; border.color: theme.a(theme.iris, 0.12)
-                                        RowLayout {
-                                            anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 12; spacing: 10
-                                            Sym { text: "event"; sz: 15; color: theme.frost }
-                                            Text { text: modelData.date + (modelData.time ? " · " + modelData.time : ""); color: theme.frost; font.pixelSize: 11; font.family: "monospace" }
-                                            Text { text: modelData.title; color: theme.text; font.pixelSize: 12; font.family: "monospace"; font.bold: true; elide: Text.ElideRight; Layout.fillWidth: true } } } }
-                                Text { visible: root.calEvents.length > 8; text: "… and " + (root.calEvents.length - 8) + " more events"; color: theme.faint; font.pixelSize: 10; font.family: "monospace"; Layout.alignment: Qt.AlignHCenter }
-                            }
-
                             RowLayout { spacing: 8; Layout.topMargin: 8
                                 Sym { text: "refresh"; sz: 15; color: theme.sub
                                     MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: sysProc.running = true } }
                                 Text { text: "refresh"; color: theme.faint; font.pixelSize: 10; font.family: "monospace" }
+                            }
+                        }
+
+                        // ================= CALENDAR =================
+                        ColumnLayout {
+                            visible: root.tab === 11; Layout.fillWidth: true; spacing: 14
+
+                            // header + live count
+                            RowLayout {
+                                Layout.fillWidth: true; spacing: 8
+                                Sym { text: "calendar_month"; sz: 18; color: theme.iris }
+                                Text { text: "calendar"; color: theme.iris; font.pixelSize: 12; font.family: "monospace"; font.bold: true }
+                                Rectangle { Layout.fillWidth: true; height: 1; color: theme.a(theme.iris, 0.18) }
+                                Rectangle { visible: root.calEvents.length > 0; implicitHeight: 20; implicitWidth: cntTxt.width + 16; radius: 10
+                                    color: theme.a(theme.iris, 0.16); border.width: 1; border.color: theme.a(theme.iris, 0.3)
+                                    Text { id: cntTxt; anchors.centerIn: parent; text: root.calEvents.length + (root.calEvents.length===1 ? " event" : " events")
+                                        color: theme.frost; font.pixelSize: 10; font.family: "monospace"; font.bold: true } }
+                            }
+
+                            // ---- import card ----
+                            Rectangle {
+                                Layout.fillWidth: true; radius: 12; implicitHeight: impCol.implicitHeight + 24
+                                color: theme.a(theme.line, 0.28); border.width: 1; border.color: theme.a(theme.iris, 0.12)
+                                ColumnLayout {
+                                    id: impCol
+                                    anchors.left: parent.left; anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
+                                    anchors.leftMargin: 12; anchors.rightMargin: 12; spacing: 10
+                                    Text { text: "IMPORT EVENTS"; color: theme.faint; font.pixelSize: 9; font.family: "monospace"; font.bold: true; font.letterSpacing: 1 }
+                                    // url + import link
+                                    RowLayout {
+                                        Layout.fillWidth: true; spacing: 8
+                                        Rectangle {
+                                            Layout.fillWidth: true; implicitHeight: 36; radius: 8
+                                            color: theme.a(theme.bg, 0.4); border.width: 1
+                                            border.color: calUrlIn.activeFocus ? theme.iris : theme.a(theme.iris, 0.16)
+                                            RowLayout { anchors.fill: parent; anchors.leftMargin: 10; anchors.rightMargin: 10; spacing: 8
+                                                Sym { text: "link"; sz: 15; color: theme.faint }
+                                                TextInput {
+                                                    id: calUrlIn
+                                                    Layout.fillWidth: true
+                                                    verticalAlignment: TextInput.AlignVCenter
+                                                    color: theme.text; font.pixelSize: 12; font.family: "monospace"
+                                                    clip: true; selectByMouse: true; selectionColor: theme.a(theme.iris, 0.4)
+                                                    Text { anchors.verticalCenter: parent.verticalCenter; visible: calUrlIn.text === ""
+                                                        text: "paste an .ics link…"; color: theme.faint; font.pixelSize: 12; font.family: "monospace" }
+                                                    Keys.onReturnPressed: { if (calUrlIn.text.trim()) { root.importICS(calUrlIn.text.trim()); calUrlIn.text = ""; } } } }
+                                        }
+                                        Rectangle {
+                                            implicitWidth: 108; implicitHeight: 36; radius: 8
+                                            color: calUrlMa.containsMouse ? theme.iris : theme.a(theme.iris, 0.2)
+                                            border.width: 1; border.color: theme.iris
+                                            RowLayout { anchors.centerIn: parent; spacing: 6
+                                                Sym { text: "download"; sz: 15; color: calUrlMa.containsMouse ? theme.bg : theme.frost }
+                                                Text { text: "Import"; color: calUrlMa.containsMouse ? theme.bg : theme.text; font.pixelSize: 11; font.family: "monospace"; font.bold: true } }
+                                            MouseArea { id: calUrlMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                                onClicked: { if (calUrlIn.text.trim()) { root.importICS(calUrlIn.text.trim()); calUrlIn.text = ""; } } } }
+                                    }
+                                    // file picker + clear
+                                    RowLayout {
+                                        Layout.fillWidth: true; spacing: 8
+                                        Rectangle {
+                                            Layout.fillWidth: true; implicitHeight: 36; radius: 8
+                                            color: calImpMa.containsMouse ? theme.iris : theme.a(theme.iris, 0.14)
+                                            border.width: 1; border.color: theme.a(theme.iris, 0.6)
+                                            RowLayout { anchors.centerIn: parent; spacing: 6
+                                                Sym { text: "upload_file"; sz: 15; color: calImpMa.containsMouse ? theme.bg : theme.frost }
+                                                Text { text: "Import .ics file"; color: calImpMa.containsMouse ? theme.bg : theme.text; font.pixelSize: 11; font.family: "monospace"; font.bold: true } }
+                                            MouseArea { id: calImpMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                                onClicked: root.pickFile("Select Calendar iCalendar (.ics) File", "iCalendar (*.ics) | *.ics", function(path) { root.importICS(path); }) } }
+                                        Rectangle {
+                                            implicitWidth: 128; implicitHeight: 36; radius: 8
+                                            visible: root.calEvents.length > 0
+                                            color: calClrMa.containsMouse ? theme.a(theme.bad, 0.22) : "transparent"
+                                            border.width: 1; border.color: calClrMa.containsMouse ? theme.bad : theme.a(theme.bad, 0.4)
+                                            RowLayout { anchors.centerIn: parent; spacing: 6
+                                                Sym { text: "delete_sweep"; sz: 15; color: theme.bad }
+                                                Text { text: "Clear all"; color: theme.bad; font.pixelSize: 11; font.family: "monospace"; font.bold: true } }
+                                            MouseArea { id: calClrMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                                onClicked: root.clearEvents() } }
+                                    }
+                                    Text { visible: root.calMsg !== ""; text: root.calMsg; color: theme.frost; font.pixelSize: 11; font.family: "monospace"; Layout.fillWidth: true; wrapMode: Text.Wrap }
+                                }
+                            }
+
+                            // ---- events list header + refresh ----
+                            RowLayout {
+                                Layout.fillWidth: true; spacing: 8; Layout.topMargin: 2
+                                Text { text: "EVENTS"; color: theme.faint; font.pixelSize: 9; font.family: "monospace"; font.bold: true; font.letterSpacing: 1 }
+                                Rectangle { Layout.fillWidth: true; height: 1; color: theme.a(theme.iris, 0.1) }
+                                Sym { text: "refresh"; sz: 15; color: calRefMa.containsMouse ? theme.iris : theme.faint
+                                    MouseArea { id: calRefMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: reloadEventsProc.running = true } }
+                            }
+
+                            Text { visible: root.calEvents.length === 0; text: "no events yet — import an .ics file or link above";
+                                color: theme.faint; font.pixelSize: 11; font.family: "monospace"; Layout.fillWidth: true; wrapMode: Text.Wrap }
+
+                            Repeater {
+                                model: root.calSorted
+                                delegate: Rectangle {
+                                    required property var modelData
+                                    readonly property var rel: root.evRel(modelData.date)
+                                    Layout.fillWidth: true; implicitHeight: bodyRow.implicitHeight + 16; radius: 10
+                                    opacity: rel.past ? 0.45 : 1
+                                    color: theme.a(theme.line, 0.32); border.width: 1
+                                    border.color: rel.soon ? theme.a(theme.iris, 0.4) : theme.a(theme.iris, 0.1)
+                                    RowLayout {
+                                        id: bodyRow
+                                        anchors.left: parent.left; anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
+                                        anchors.leftMargin: 8; anchors.rightMargin: 12; spacing: 12
+                                        // date chip
+                                        Rectangle {
+                                            implicitWidth: 44; implicitHeight: 42; radius: 8
+                                            color: rel.soon ? theme.iris : theme.a(theme.iris, 0.14)
+                                            ColumnLayout { anchors.centerIn: parent; spacing: 0
+                                                Text { Layout.alignment: Qt.AlignHCenter; text: Qt.formatDate(root.evDate(modelData.date), "ddd").toUpperCase()
+                                                    color: rel.soon ? theme.bg : theme.frost; font.pixelSize: 9; font.family: "monospace"; font.bold: true }
+                                                Text { Layout.alignment: Qt.AlignHCenter; text: (""+modelData.date).slice(8)
+                                                    color: rel.soon ? theme.bg : theme.text; font.pixelSize: 17; font.family: "monospace"; font.bold: true } }
+                                        }
+                                        ColumnLayout {
+                                            Layout.fillWidth: true; spacing: 2
+                                            Text { text: modelData.title; color: theme.text; font.pixelSize: 12; font.family: "monospace"; font.bold: true
+                                                Layout.fillWidth: true; wrapMode: Text.Wrap; maximumLineCount: 2; elide: Text.ElideRight }
+                                            RowLayout { spacing: 6
+                                                Text { text: rel.t; color: rel.past ? theme.faint : theme.frost; font.pixelSize: 10; font.family: "monospace"; font.bold: true }
+                                                Text { visible: !!modelData.time; text: "· " + (modelData.time||""); color: theme.faint; font.pixelSize: 10; font.family: "monospace" }
+                                                Text { text: "· " + Qt.formatDate(root.evDate(modelData.date), "d MMM yyyy"); color: theme.faint; font.pixelSize: 10; font.family: "monospace" }
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
 

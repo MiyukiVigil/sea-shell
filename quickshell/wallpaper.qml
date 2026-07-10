@@ -12,15 +12,24 @@ import QtQuick.Layouts
 ShellRoot {
     id: root
     property var papers: []
+    property string accent: "#63c7dd"
+    property bool cfgLight: false
+    // follow the bar's appearance config (accent + light/dark + the persisted matugen flag)
+    Process { running: true; command: ["sh","-c","cat \"$HOME/.config/sea-shell/appearance.json\" 2>/dev/null"]
+        stdout: StdioCollector { id: apOut; onStreamFinished: { try { var j=JSON.parse(apOut.text);
+            if(j.accent) root.accent=j.accent;
+            if(j.mode!==undefined) root.cfgLight=(""+j.mode==="light");
+            if(j.matugen!==undefined) root.matchColors=!!j.matugen; } catch(e){} } } }
 
     QtObject {
         id: theme
-        readonly property color bg:    "#0d1420"
-        readonly property color line:  "#24304a"
-        readonly property color text:  "#e2e9f4"
-        readonly property color faint: "#6f8099"
-        readonly property color iris:  "#63c7dd"
-        readonly property color frost: "#a2e2e8"
+        readonly property bool light: root.cfgLight
+        readonly property color bg:    light ? "#eaf1f6" : "#0d1420"
+        readonly property color line:  light ? "#b6c9d7" : "#24304a"
+        readonly property color text:  light ? "#0c1520" : "#e2e9f4"
+        readonly property color faint: light ? "#48606f" : "#6f8099"
+        readonly property color iris:  light ? Qt.darker(root.accent, 2.4)  : root.accent
+        readonly property color frost: light ? Qt.darker(root.accent, 1.7) : Qt.lighter(root.accent, 1.22)
         function a(c, al) { return Qt.rgba(c.r, c.g, c.b, al) }
     }
 

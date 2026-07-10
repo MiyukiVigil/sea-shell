@@ -38,6 +38,37 @@ ShellRoot {
         function pin(): void { root.grabHold = true }
         function unpin(): void { root.grabHold = false }
     }
+
+    // ---------- alt-tab window switcher (resident, driven by ALT+Tab binds) ----------
+    property bool switcherOpen: false
+    property int switcherSel: 0
+    // every open window, most-recently-used first (focusHistoryID 0 = current)
+    readonly property var switcherWins: {
+        var m = Hyprland.toplevels ? Hyprland.toplevels.values : [];
+        var out = [];
+        for (var i=0;i<m.length;i++) { var t=m[i];
+            if (t && t.lastIpcObject && (""+(t.lastIpcObject.class||"")) !== "") out.push(t); }
+        out.sort(function(a,b){ return (a.lastIpcObject.focusHistoryID||0) - (b.lastIpcObject.focusHistoryID||0); });
+        return out;
+    }
+    function switcherStep(dir) {
+        var n = root.switcherWins.length; if (n === 0) return;
+        if (!root.switcherOpen) { root.switcherOpen = true; root.switcherSel = (n > 1 ? (dir > 0 ? 1 : n - 1) : 0); }
+        else root.switcherSel = ((root.switcherSel + dir) % n + n) % n;
+    }
+    function switcherCommit() {
+        if (!root.switcherOpen) return; root.switcherOpen = false;
+        var w = root.switcherWins[root.switcherSel];
+        if (w && w.lastIpcObject && w.lastIpcObject.address)
+            Hyprland.dispatch("focuswindow address:" + w.lastIpcObject.address);
+    }
+    IpcHandler {
+        target: "switcher"
+        function next(): void { root.switcherStep(1) }
+        function prev(): void { root.switcherStep(-1) }
+        function commit(): void { root.switcherCommit() }
+        function cancel(): void { root.switcherOpen = false }
+    }
     HyprlandFocusGrab {
         windows: root.grabWins
         active: root.openPop !== "" && !root.grabHold
@@ -50,9 +81,30 @@ ShellRoot {
     property int  cfgHeight: 42
     property string cfgAccent: "#63c7dd"
     property string cfgFont: "monospace"
-    // dropdowns use the bar's exact opacity; Hyprland's popup blur keeps text readable
-    readonly property real dropOpacity: root.cfgOpacity
-    Process { running: true; command: ["sh","-c","d=\"$HOME/.config/sea-shell\"; mkdir -p \"$d\"; [ -f \"$d/appearance.json\" ] || printf '{\"radius\":14,\"opacity\":0.80,\"height\":42,\"accent\":\"#63c7dd\",\"font\":\"monospace\"}' > \"$d/appearance.json\"; echo \"$d/appearance.json\""]
+    property bool   cfgLight: false          // dark (default) ↔ light palette
+
+    // Propagate the shell's light/dark choice to the SYSTEM: gsettings color-scheme
+    // (so GTK apps + browsers' prefers-color-scheme follow, via xdg-desktop-portal) and
+    // kitty. Every mode change — the SUPER+⇧+D key, the settings toggle, and the auto
+    // schedule — lands in appearance.json, which the FileView below watches, so this one
+    // hook covers them all (and syncs the system to the saved mode on startup).
+    readonly property string _applyModeSh: Qt.resolvedUrl("sea-apply-mode.sh").toString().replace("file://","")
+    property int _appliedMode: -1            // -1 unknown · 0 dark · 1 light (guards non-mode edits)
+    function applyMode() {
+        root._appliedMode = root.cfgLight ? 1 : 0;
+        modeProc.command = ["sh", root._applyModeSh, root.cfgLight ? "light" : "dark"];
+        modeProc.running = false; modeProc.running = true;
+    }
+    Process { id: modeProc }
+
+    // Dropdowns stay glassy (semi-transparent + blur). The bright-background washout
+    // is solved by the `xray` layer rule (sea.conf) — the blur samples the wallpaper,
+    // not whatever bright window is behind — so a low opacity reads fine over the dark
+    // wallpaper. Light mode needs more body (a translucent light card over the dark
+    // wallpaper would go muddy), so it sits higher.
+    readonly property real dropOpacity: root.cfgLight ? Math.max(0.55, root.cfgOpacity)
+                                                      : Math.max(0.35, root.cfgOpacity)
+    Process { running: true; command: ["sh","-c","d=\"$HOME/.config/sea-shell\"; mkdir -p \"$d\"; touch \"$d/kitty-matugen.conf\"; [ -f \"$d/appearance.json\" ] || printf '{\"radius\":14,\"opacity\":0.80,\"height\":42,\"accent\":\"#63c7dd\",\"font\":\"monospace\"}' > \"$d/appearance.json\"; echo \"$d/appearance.json\""]
         stdout: StdioCollector { id: apprPathOut; onStreamFinished: apprFile.path = apprPathOut.text.trim() } }
     FileView {
         id: apprFile; path: ""; watchChanges: true
@@ -64,12 +116,37 @@ ShellRoot {
             if (j.height  !== undefined) root.cfgHeight  = j.height;
             if (j.accent  !== undefined && (""+j.accent).length>0) root.cfgAccent = j.accent;
             if (j.font    !== undefined && (""+j.font).length>0)   root.cfgFont   = j.font;
+            if (j.mode    !== undefined) root.cfgLight = (""+j.mode === "light");
+            if ((root.cfgLight ? 1 : 0) !== root._appliedMode) root.applyMode();  // sync system + kitty on flip/startup
         } catch(e) {} }
         onLoaded: apply()
         onFileChanged: apply()
     }
+    // auto dark-mode schedule — sea-theme-schedule.sh flips `mode` in appearance.json
+    // when the clock crosses the configured window; the FileView above then applies it.
+    Process { id: themeSched; command: ["sh", Qt.resolvedUrl("sea-theme-schedule.sh").toString().replace("file://","")] }
+    Timer { interval: 60000; running: true; repeat: true; triggeredOnStart: true; onTriggered: themeSched.running = true }
     // ---------- calendar events database ----------
     property var calEvents: []
+    function calDate(s) { var p = (""+s).split("-"); return new Date(parseInt(p[0]), (parseInt(p[1])||1)-1, parseInt(p[2])||1); }
+    function calTodayKey() { var t = clock.date; return t.getFullYear() + "-" + String(t.getMonth()+1).padStart(2,"0") + "-" + String(t.getDate()).padStart(2,"0"); }
+    // events from today onward, sorted chronologically (the clock dropdown's "upcoming" list —
+    // the raw calEvents order is neither filtered nor sorted, so it used to surface past dates)
+    readonly property var calUpcoming: {
+        var key = root.calTodayKey();
+        return root.calEvents.filter(function(e){ return (""+e.date) >= key; })
+                             .sort(function(a,b){ return (""+a.date) < (""+b.date) ? -1 : (""+a.date) > (""+b.date) ? 1 : 0; });
+    }
+    function calRel(s) {
+        var d = root.calDate(s); d.setHours(0,0,0,0);
+        var now = new Date(clock.date.getFullYear(), clock.date.getMonth(), clock.date.getDate());
+        var days = Math.round((d.getTime() - now.getTime()) / 86400000);
+        if (days <= 0)  return "today";
+        if (days === 1) return "tomorrow";
+        if (days < 7)   return "in " + days + "d";
+        if (days < 31)  return "in " + Math.round(days/7) + "w";
+        return "in " + Math.round(days/30) + "mo";
+    }
     Process {
         id: reloadEventsProc; running: true
         command: ["sh", "-c", "cat ~/.config/sea-shell/calendar_events.json 2>/dev/null || echo '[]'"]
@@ -84,17 +161,23 @@ ShellRoot {
 
     QtObject {
         id: theme
-        readonly property color bg:    "#0d1420"
-        readonly property color panel: "#131b29"
-        readonly property color line:  "#24304a"
-        readonly property color text:  "#e2e9f4"
-        readonly property color sub:   "#a6b6cf"
-        readonly property color faint: "#6f8099"
-        readonly property color iris:  root.cfgAccent          // accent (user-configurable)
-        readonly property color frost: Qt.lighter(root.cfgAccent, 1.22)
-        readonly property color good:  "#a6e3a1"
-        readonly property color warn:  "#f4c542"
-        readonly property color bad:   "#f38ba8"
+        readonly property bool light: root.cfgLight
+        // sea palette in two keys — dark (default) and a light "sea foam" variant.
+        readonly property color bg:    light ? "#eaf1f6" : "#0d1420"
+        readonly property color panel: light ? "#dbe6ee" : "#131b29"
+        readonly property color line:  light ? "#b6c9d7" : "#24304a"
+        // The dropdowns are very translucent now, so the text does the readability work:
+        // near-white in dark mode, near-black in light mode, with punchy secondaries.
+        readonly property color text:  light ? "#08111c" : "#f2f6fc"
+        readonly property color sub:   light ? "#213747" : "#cbd6e6"
+        readonly property color faint: light ? "#3a4e5e" : "#9dabc1"
+        // the raw accent is too pale for text/borders on a light card, so darken it hard
+        // there — a pale accent (e.g. #96cdf8) only reads as text once it's well darkened.
+        readonly property color iris:  light ? Qt.darker(root.cfgAccent, 2.4)  : root.cfgAccent
+        readonly property color frost: light ? Qt.darker(root.cfgAccent, 1.7)  : Qt.lighter(root.cfgAccent, 1.22)
+        readonly property color good:  light ? "#2f9e63" : "#a6e3a1"
+        readonly property color warn:  light ? "#b9820f" : "#f4c542"
+        readonly property color bad:   light ? "#d1495b" : "#f38ba8"
         function a(c, al) { return Qt.rgba(c.r, c.g, c.b, al) }
     }
 
@@ -640,33 +723,29 @@ ShellRoot {
         height: implicitHeight
         clip: true
 
-        // Primary copy
-        Text {
-            id: staticTxt
-            anchors.verticalCenter: parent.verticalCenter
+        // Both copies live in ONE strip that scrolls as a single unit. (Previously the
+        // ghost bound its x to the animated primary's x — bindings on an animated
+        // property lag frame-to-frame, so the ghost fell behind and the loop looked
+        // like "scroll off, jump, repeat" instead of a seamless marquee.)
+        Item {
+            id: strip
+            height: mq.height
+            Text { id: staticTxt; anchors.verticalCenter: parent.verticalCenter }
+            Text {
+                anchors.verticalCenter: parent.verticalCenter
+                x: mq.stride                       // ghost sits exactly one stride ahead
+                visible: mq.scrolling
+                text: staticTxt.text; color: staticTxt.color; font: staticTxt.font
+            }
             NumberAnimation on x {
-                id: txtAnim
                 running: mq.scrolling && root.player && root.player.isPlaying
                 loops: Animation.Infinite
-                // initial pause before the very first scroll
                 from: 0
                 to: -mq.stride
                 duration: Math.max(2000, mq.stride * 28)
                 easing.type: Easing.Linear
+                onRunningChanged: if (!running) strip.x = 0    // reset when paused / not scrolling
             }
-            onTextChanged: { staticTxt.x = 0; txtAnim.restart() }
-        }
-
-        // Ghost copy — identical text offset by `stride` so it fills behind the primary
-        Text {
-            id: ghostTxt
-            anchors.verticalCenter: parent.verticalCenter
-            visible: mq.scrolling
-            text: staticTxt.text
-            color: staticTxt.color
-            font: staticTxt.font
-            // ghost always leads by exactly one stride ahead of primary
-            x: staticTxt.x + mq.stride
         }
     }
 
@@ -732,8 +811,10 @@ ShellRoot {
         WlrLayershell.keyboardFocus: WlrKeyboardFocus.OnDemand   // lets the wifi password field type
         exclusionMode: ExclusionMode.Ignore
         anchors { top: true; left: true; right: true; bottom: true }
-        mask: Region { item: cardBg; regions: [ sideRegion ] }
-        Region { id: sideRegion; item: dw.sidecar }
+        // empty input mask while closed (incl. the brief post-close hold) so clicks pass
+        // straight through — there's nothing to intercept once the card is gone.
+        mask: Region { item: dw.shown ? cardBg : null; regions: [ sideRegion ] }
+        Region { id: sideRegion; item: dw.shown ? dw.sidecar : null }
         readonly property point hp: {
             if (!dw.visible || !dw.host) return Qt.point(-9999, -9999);
             // Reference position & parent hierarchy to force binding updates when layout shifts
@@ -751,35 +832,40 @@ ShellRoot {
         readonly property int scrX: dw.screen ? dw.screen.x : 0
         readonly property int scrY: dw.screen ? dw.screen.y : 0
 
-        onVisibleChanged: {
-            if (visible) {
-                openAnim.restart();
-            } else {
-                cardBg.openAnimFactor = 0.0;
-            }
+        // `shown` is the logical open state (each usage sets it). CLOSE IS INSTANT: the
+        // card — shade AND text — is zeroed on the same frame, so nothing lingers or
+        // fades. The now-empty window is then held mapped for a few frames and unmapped
+        // only once it has no visible content, so the layer surface can never flash its
+        // last buffer on unmap. OPEN fades + slides the card in. (Pairs with the
+        // `layerrule = animation none` on sea-shell:drop in sea.conf.)
+        property bool shown: false
+        property bool held: false
+        visible: dw.shown || dw.held
+        onShownChanged: {
+            if (dw.shown) { holdTimer.stop(); dw.held = true; openAnim.restart(); }
+            else { openAnim.stop(); cardBg.openAnimFactor = 0.0; holdTimer.restart(); }
         }
+        Timer { id: holdTimer; interval: 90; onTriggered: dw.held = false }
+        Component.onCompleted: dw.held = dw.shown
+        NumberAnimation { id: openAnim; target: cardBg; property: "openAnimFactor"; to: 1.0; duration: 165; easing.type: Easing.OutCubic }
 
-        NumberAnimation {
-            id: openAnim
-            target: cardBg
-            property: "openAnimFactor"
-            from: 0.0
-            to: 1.0
-            duration: 180
-            easing.type: Easing.OutCubic
-        }
+        // Fade the WHOLE window content (card gradient AND the text columns, which are
+        // siblings of cardBg) as one. Fading only cardBg.opacity left the text at full
+        // opacity — so on open it flashed in before the card, and on close it lingered a
+        // frame after the card zeroed. contentItem is the parent of every default child,
+        // so one binding fades everything together; close zeroes it on the same frame.
+        Binding { target: dw.contentItem; property: "opacity"; value: cardBg.openAnimFactor }
 
         Rectangle {
             id: cardBg
             property real openAnimFactor: 0.0
             width: dw.cardW; height: dw.cardH
-            opacity: openAnimFactor
             x: Math.max(8, Math.min(dw.sw - dw.cardW - 8, dw.hp.x - dw.scrX + (dw.host ? (dw.host.width || dw.host.implicitWidth)/2 : 0) - dw.cardW/2))
             y: (dw.hp.y - dw.scrY + (dw.host ? (dw.host.height || dw.host.implicitHeight) : 0) + 8) + (1.0 - openAnimFactor) * -12
             radius: root.cfgRadius
             gradient: Gradient {
-                GradientStop { position: 0.0; color: theme.a(theme.bg, root.dropOpacity * 1.15) }
-                GradientStop { position: 1.0; color: theme.a(theme.bg, root.dropOpacity * 0.90) }
+                GradientStop { position: 0.0; color: theme.a(theme.bg, Math.min(1, root.dropOpacity * 1.10)) }
+                GradientStop { position: 1.0; color: theme.a(theme.bg, root.dropOpacity * 0.92) }
             }
             border.width: 1; border.color: theme.a(theme.iris, 0.28)
         }
@@ -872,7 +958,7 @@ ShellRoot {
                     onScrolled: (dy)=>{ if(!root.player) return; if(dy>0) root.player.next(); else root.player.previous() }
                 }
                 Drop { screen: bar.screen
-                    id: mprisDrop; host: mprisPill; visible: root.openPop === "mpris" && root.openBar === bar
+                    id: mprisDrop; host: mprisPill; shown: root.openPop ==="mpris" && root.openBar === bar
                     cardW: 380; cardH: mprCol.implicitHeight + 32
                     sidecar: root.lyricsOpen ? lyrPanel : null           // clicks land on the panel only while it's open
                     onVisibleChanged: if (visible && root.lyricsOpen) root.fetchLyrics()   // track may have changed while closed
@@ -1040,7 +1126,7 @@ ShellRoot {
 
                     // ---- WEATHER dropdown (its pill is declared after the tray, below) ----
                     Drop { screen: bar.screen
-                        id: wxDrop; host: wxPill; visible: root.openPop === "wx" && root.openBar === bar
+                        id: wxDrop; host: wxPill; shown: root.openPop ==="wx" && root.openBar === bar
                         cardW: 250; cardH: wxCol.implicitHeight + 32
                         Column { id: wxCol; anchors.fill: wxDrop.card; anchors.margins: 14; spacing: 8
                             Row { width: parent.width; spacing: 10
@@ -1099,7 +1185,7 @@ ShellRoot {
                     // part of the openPop single-dropdown system so the focus grab dismisses it ----
                     Drop { screen: bar.screen
                         id: trayDrop; host: bar.trayHost
-                        visible: root.openPop === "tray" && root.openBar === bar && bar.trayHost !== null
+                        shown: root.openPop ==="tray" && root.openBar === bar && bar.trayHost !== null
                         cardW: 230; cardH: Math.max(30, tmCol.implicitHeight + 12)
                         QsMenuOpener { id: trayMenu; menu: bar.trayMenuSel ? bar.trayMenuSel.menu : null }
                         Column { id: tmCol; anchors.fill: trayDrop.card; anchors.margins: 6; spacing: 1
@@ -1129,7 +1215,7 @@ ShellRoot {
                         accent: root.notes.length>0 ? theme.iris : theme.frost
                         value: root.notes.length>0 ? String(root.notes.length) : "" }
                     Drop { screen: bar.screen
-                        id: notifDrop; host: bellPill; visible: root.openPop === "notif" && root.openBar === bar
+                        id: notifDrop; host: bellPill; shown: root.openPop ==="notif" && root.openBar === bar
                         cardW: 350; cardH: Math.min(460, notifCol.implicitHeight + 28)
                         Column { id: notifCol; anchors.fill: notifDrop.card; anchors.margins: 14; spacing: 4
                             // Header
@@ -1163,7 +1249,7 @@ ShellRoot {
                         icon: root.wifiOn ? "wifi" : "wifi_off"; accent: root.wifiOn ? theme.frost : theme.bad
                         }   // icon-only: SSID lives in the dropdown
                     Drop { screen: bar.screen
-                        id: wifiDrop; host: wifiPill; visible: root.openPop === "wifi" && root.openBar === bar
+                        id: wifiDrop; host: wifiPill; shown: root.openPop ==="wifi" && root.openBar === bar
                         cardW: 290; cardH: wifiCol.implicitHeight + 28
                         onVisibleChanged: if(!visible) root.wifiPwFor = ""
                         Column { id: wifiCol; anchors.fill: wifiDrop.card; anchors.margins: 14; spacing: 4
@@ -1277,7 +1363,7 @@ ShellRoot {
                         accent: root.btActive ? theme.iris : ((root.btAdapter && root.btAdapter.enabled) ? theme.frost : theme.faint)
                         value: root.btActive ? root.btName(root.btActive) : "" }
                     Drop { screen: bar.screen
-                        id: btDrop; host: btPill; visible: root.openPop === "bt" && root.openBar === bar
+                        id: btDrop; host: btPill; shown: root.openPop ==="bt" && root.openBar === bar
                         cardW: 290; cardH: btCol.implicitHeight + 28
                         Column { id: btCol; anchors.fill: btDrop.card; anchors.margins: 14; spacing: 4
                             // Header
@@ -1323,7 +1409,7 @@ ShellRoot {
                         icon: "speed"; value: Math.round(root.cpuUsage)+"%"
                         accent: root.loadColor(root.cpuTemp, 78, 90) }
                     Drop { screen: bar.screen
-                        id: sysDrop; host: sysPill; visible: root.openPop === "sys" && root.openBar === bar
+                        id: sysDrop; host: sysPill; shown: root.openPop ==="sys" && root.openBar === bar
                         cardW: 250; cardH: sysCol.implicitHeight + 28
                         Column { id: sysCol; anchors.fill: sysDrop.card; anchors.margins: 14; spacing: 10
                             // Header
@@ -1373,7 +1459,7 @@ ShellRoot {
                         onRightClicked: { if(au) au.muted = !au.muted }
                         onScrolled: (dy)=>{ if(!au) return; au.muted=false; au.volume=Math.max(0,Math.min(1,au.volume+(dy>0?0.05:-0.05))) } }
                     Drop { screen: bar.screen
-                        id: volDrop; host: volPill; visible: root.openPop === "vol" && root.openBar === bar
+                        id: volDrop; host: volPill; shown: root.openPop ==="vol" && root.openBar === bar
                         cardW: 290; cardH: volCol.implicitHeight + 28
                         Column { id: volCol; anchors.fill: volDrop.card; anchors.margins: 14; spacing: 4
                             // Header
@@ -1416,7 +1502,7 @@ ShellRoot {
                         icon: charging?"battery_charging_full":pct>=90?"battery_full":pct>=60?"battery_5_bar":pct>=35?"battery_3_bar":pct>=15?"battery_1_bar":"battery_alert"
                         value: pct+"%"; accent: charging?theme.good:pct<=20?theme.bad:theme.frost }
                     Drop { screen: bar.screen
-                        id: batDrop; host: batPill; visible: root.openPop === "bat" && root.openBar === bar
+                        id: batDrop; host: batPill; shown: root.openPop ==="bat" && root.openBar === bar
                         cardW: 230; cardH: batCol.implicitHeight + 28
                         Column { id: batCol; anchors.fill: batDrop.card; anchors.margins: 14; spacing: 4
                             // Header
@@ -1441,7 +1527,7 @@ ShellRoot {
                     Pill { owner: bar; id: clockPill; anchors.verticalCenter: parent.verticalCenter; key: "cal"; icon: "schedule"
                         value: Qt.formatDateTime(clock.date,"ddd d MMM · HH:mm"); accent: theme.iris }
                      Drop { screen: bar.screen
-                        id: calDrop; host: clockPill; visible: root.openPop === "cal" && root.openBar === bar
+                        id: calDrop; host: clockPill; shown: root.openPop ==="cal" && root.openBar === bar
                         cardW: 280; cardH: calCol.implicitHeight + 32
                         onVisibleChanged: { if (visible) reloadEventsProc.running = true }
                         Column { id: calCol; anchors.fill: calDrop.card; anchors.margins: 14; spacing: 10
@@ -1465,7 +1551,8 @@ ShellRoot {
                                             var dateStr = calCol.yr + "-" + String(calCol.mo + 1).padStart(2, "0") + "-" + String(modelData).padStart(2, "0");
                                             return root.calEvents.some(function(e) { return e.date === dateStr; });
                                         }
-                                        width: 34; height: 26; radius: 7; color: isToday ? theme.iris : "transparent"
+                                        width: 34; height: 26; radius: 7
+                                        color: isToday ? theme.iris : (hasEvent ? theme.a(theme.iris, 0.13) : "transparent")
                                         border.width: (hasEvent && !isToday) ? 1 : 0; border.color: theme.a(theme.frost, 0.4)
                                         Text { anchors.centerIn: parent; text: parent.modelData; color: parent.isToday ? theme.bg : theme.text; font.pixelSize: 12; font.family: root.cfgFont; font.bold: parent.isToday }
                                         Rectangle {
@@ -1474,20 +1561,39 @@ ShellRoot {
                                             anchors.bottom: parent.bottom; anchors.bottomMargin: 3; anchors.horizontalCenter: parent.horizontalCenter } } } }
                             Rectangle { width: parent.width; height: 1; color: theme.a(theme.iris, 0.15) }
                             Column {
-                                width: parent.width; spacing: 4
-                                Text { text: "Upcoming Events"; color: theme.frost; font.pixelSize: 10; font.family: root.cfgFont; font.bold: true; font.letterSpacing: 0.8; bottomPadding: 2 }
-                                Text { visible: root.calEvents.length === 0; text: "no upcoming events"; color: theme.faint; font.pixelSize: 10; font.family: root.cfgFont }
+                                width: parent.width; spacing: 5
+                                Item { width: parent.width; height: 12
+                                    Text { anchors.left: parent.left; anchors.verticalCenter: parent.verticalCenter
+                                        text: "UPCOMING"; color: theme.frost; font.pixelSize: 9; font.family: root.cfgFont; font.bold: true; font.letterSpacing: 1 }
+                                    Text { anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
+                                        visible: root.calUpcoming.length > 4; text: "+" + (root.calUpcoming.length - 4) + " more"
+                                        color: theme.faint; font.pixelSize: 9; font.family: root.cfgFont } }
+                                Text { visible: root.calUpcoming.length === 0; text: "nothing coming up"; color: theme.faint; font.pixelSize: 10; font.family: root.cfgFont }
                                 Repeater {
-                                    model: root.calEvents.slice(0, 3)
-                                    delegate: Row {
-                                        width: parent.width; spacing: 8
-                                        Text { text: modelData.date.slice(5); color: theme.iris; font.pixelSize: 10; font.family: root.cfgFont; width: 34 }
-                                        Text { text: modelData.title; color: theme.text; font.pixelSize: 11; font.family: root.cfgFont; elide: Text.ElideRight; width: parent.width - 42 } } } } } }
+                                    model: root.calUpcoming.slice(0, 4)
+                                    delegate: Rectangle {
+                                        id: evRow
+                                        required property var modelData
+                                        readonly property string rel: root.calRel(modelData.date)
+                                        readonly property bool soon: evRow.rel === "today" || evRow.rel === "tomorrow"
+                                        width: parent.width; height: 34; radius: 7
+                                        color: evRow.soon ? theme.a(theme.iris, 0.12) : "transparent"
+                                        Row {
+                                            anchors.fill: parent; anchors.leftMargin: 7; anchors.rightMargin: 8; spacing: 9
+                                            Column { anchors.verticalCenter: parent.verticalCenter; width: 26
+                                                Text { anchors.horizontalCenter: parent.horizontalCenter; text: (""+evRow.modelData.date).slice(8)
+                                                    color: evRow.soon ? theme.frost : theme.iris; font.pixelSize: 15; font.family: root.cfgFont; font.bold: true }
+                                                Text { anchors.horizontalCenter: parent.horizontalCenter; text: Qt.formatDate(root.calDate(evRow.modelData.date), "MMM").toUpperCase()
+                                                    color: theme.faint; font.pixelSize: 8; font.family: root.cfgFont } }
+                                            Column { anchors.verticalCenter: parent.verticalCenter; width: parent.width - 44; spacing: 1
+                                                Text { width: parent.width; text: evRow.modelData.title; color: theme.text; font.pixelSize: 11; font.family: root.cfgFont; elide: Text.ElideRight }
+                                                Text { text: evRow.rel + "  ·  " + Qt.formatDate(root.calDate(evRow.modelData.date), "ddd") + (evRow.modelData.time ? "  ·  " + evRow.modelData.time : "")
+                                                    color: evRow.soon ? theme.frost : theme.faint; font.pixelSize: 9; font.family: root.cfgFont } } } } } } } }
 
                     // ---- POWER (very end) ----
                     Pill { owner: bar; id: pwrPill; anchors.verticalCenter: parent.verticalCenter; key: "pwr"; icon: "power_settings_new"; accent: theme.bad }
                     Drop { screen: bar.screen
-                        id: pwrDrop; host: pwrPill; visible: root.openPop === "pwr" && root.openBar === bar
+                        id: pwrDrop; host: pwrPill; shown: root.openPop ==="pwr" && root.openBar === bar
                         cardW: 210; cardH: pwrCol.implicitHeight + 28
                         property string confirmL: ""          // reboot/shutdown ask for a second click
                         property string who: ""
@@ -1599,6 +1705,71 @@ ShellRoot {
                         Rectangle { width: parent.width*Math.max(0,Math.min(1,root.osdVal)); height: parent.height; radius: 3; color: theme.iris
                             Behavior on width { NumberAnimation { duration: 90 } } } }
                 }
+            }
+        }
+    }
+
+    // ===== alt-tab window switcher =====
+    PanelWindow {
+        id: switcherWin
+        visible: root.switcherOpen
+        anchors { top: true; bottom: true; left: true; right: true }
+        color: "transparent"
+        WlrLayershell.layer: WlrLayer.Overlay
+        WlrLayershell.namespace: "sea-shell:switcher"
+        exclusionMode: ExclusionMode.Ignore
+        Rectangle { anchors.fill: parent; color: Qt.rgba(0,0,0,0.35)
+            MouseArea { anchors.fill: parent; onClicked: root.switcherOpen = false } }   // click-away cancels
+        readonly property int cardW: 148
+        Rectangle {
+            anchors.centerIn: parent
+            width: Math.min(parent.width - 80, swFlick.contentWidth + 28)
+            height: swCol.implicitHeight + 22
+            radius: root.cfgRadius + 4
+            color: theme.a(theme.bg, 0.97)
+            border.width: 1; border.color: theme.a(theme.iris, 0.32)
+            Column {
+                id: swCol; anchors.centerIn: parent; width: parent.width - 24; spacing: 9
+                Flickable {
+                    id: swFlick; width: parent.width; height: 150; contentWidth: swRow.implicitWidth; clip: true
+                    boundsBehavior: Flickable.StopAtBounds
+                    Row {
+                        id: swRow; height: parent.height; spacing: 10
+                        Repeater {
+                            model: root.switcherWins
+                            delegate: Rectangle {
+                                id: swCard
+                                required property var modelData
+                                required property int index
+                                readonly property bool sel: index === root.switcherSel
+                                readonly property var ipc: modelData.lastIpcObject
+                                width: switcherWin.cardW; height: 146; radius: 12
+                                color: sel ? theme.a(theme.iris, 0.22) : theme.a(theme.line, 0.4)
+                                border.width: sel ? 2 : 1; border.color: sel ? theme.iris : theme.a(theme.iris, 0.14)
+                                Column {
+                                    anchors.centerIn: parent; width: parent.width - 18; spacing: 7
+                                    IconImage { anchors.horizontalCenter: parent.horizontalCenter; implicitSize: 52; asynchronous: true
+                                        source: Quickshell.iconPath((""+(swCard.ipc.class||"")).toLowerCase(), "application-x-executable") }
+                                    Text { width: parent.width; horizontalAlignment: Text.AlignHCenter; elide: Text.ElideRight
+                                        text: swCard.ipc.class||"window"; color: theme.text; font.pixelSize: 12; font.family: root.cfgFont; font.bold: swCard.sel }
+                                    Text { width: parent.width; horizontalAlignment: Text.AlignHCenter; elide: Text.ElideRight; maximumLineCount: 2; wrapMode: Text.Wrap
+                                        text: swCard.ipc.title||""; color: theme.sub; font.pixelSize: 9; font.family: root.cfgFont }
+                                }
+                                MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                                    onClicked: { root.switcherSel = swCard.index; root.switcherCommit() } }
+                            }
+                        }
+                    }
+                    // keep the selected card visible when cycling past the edge
+                    Connections { target: root; function onSwitcherSelChanged() {
+                        var x = root.switcherSel * (switcherWin.cardW + 10);
+                        if (x < swFlick.contentX) swFlick.contentX = x;
+                        else if (x + switcherWin.cardW > swFlick.contentX + swFlick.width) swFlick.contentX = x + switcherWin.cardW - swFlick.width;
+                    } }
+                }
+                Text { anchors.horizontalCenter: parent.horizontalCenter
+                    text: root.switcherWins.length + " windows · Tab cycles · release Alt to focus · Esc cancels"
+                    color: theme.faint; font.pixelSize: 10; font.family: root.cfgFont }
             }
         }
     }

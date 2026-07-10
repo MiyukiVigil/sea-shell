@@ -19,6 +19,7 @@ import QtQuick
 Scope {
     id: root
     property string accent: "#63c7dd"
+    property bool cfgLight: false
     property real cfgRadius: 14
     property string query: ""
     property int sel: 0
@@ -27,32 +28,44 @@ Scope {
     property var clipLines: []     // cached `cliphist list` lines for ; mode
     property var hist: ({})        // app id → {n: launches, t: last epoch} (frecency)
     property string histPath: ""
+    property bool shown: false     // logical open state
+    property bool held: false      // keep the window mapped a few frames past close (no unmap flash)
 
     function open(prefix) {
         clipProc.running = true                     // refresh clipboard cache on every open
+        apProc.running = true                       // re-read accent + light/dark each open
         field.text = prefix; root.query = prefix; root.sel = 0
-        win.visible = true
+        root.shown = true
     }
-    function toggle() { win.visible ? close() : open("") }
-    function close() { win.visible = false; field.text = "" }
+    function toggle() { root.shown ? close() : open("") }
+    function close() { root.shown = false }
+
+    // CLOSE IS INSTANT: the card opacity is zeroed on the same frame (see card.openF),
+    // and — paired with `layerrule = animation none` on sea-shell:launcher — the layer
+    // surface can't fade its last buffer, so the result text never lingers on close.
+    // We hold the window mapped ~90ms, then unmap and only THEN clear the query, so the
+    // list never repopulates while still on screen.
+    onShownChanged: { if (shown) { held = true; holdTimer.stop() } else holdTimer.restart() }
+    Timer { id: holdTimer; interval: 90; onTriggered: { root.held = false; field.text = ""; root.query = "" } }
 
     QtObject {
         id: theme
-        readonly property color bg:    "#0d1420"
-        readonly property color line:  "#24304a"
-        readonly property color text:  "#e2e9f4"
-        readonly property color sub:   "#a6b6cf"
-        readonly property color faint: "#6f8099"
-        readonly property color iris:  root.accent
-        readonly property color frost: Qt.lighter(root.accent, 1.22)
-        readonly property color warn:  "#f4c542"
-        readonly property color bad:   "#f38ba8"
+        readonly property bool light: root.cfgLight
+        readonly property color bg:    light ? "#eaf1f6" : "#0d1420"
+        readonly property color line:  light ? "#b6c9d7" : "#24304a"
+        readonly property color text:  light ? "#0c1520" : "#e2e9f4"
+        readonly property color sub:   light ? "#2c4256" : "#a6b6cf"
+        readonly property color faint: light ? "#48606f" : "#6f8099"
+        readonly property color iris:  light ? Qt.darker(root.accent, 2.4)  : root.accent
+        readonly property color frost: light ? Qt.darker(root.accent, 1.7)  : Qt.lighter(root.accent, 1.22)
+        readonly property color warn:  light ? "#b9820f" : "#f4c542"
+        readonly property color bad:   light ? "#d1495b" : "#f38ba8"
         function a(c, al) { return Qt.rgba(c.r, c.g, c.b, al) }
     }
 
     // accent follows the bar's appearance config
-    Process { running: true; command: ["sh","-c","cat \"$HOME/.config/sea-shell/appearance.json\" 2>/dev/null"]
-        stdout: StdioCollector { id: apOut; onStreamFinished: { try { var j=JSON.parse(apOut.text); if(j.accent) root.accent=j.accent; if(j.radius!==undefined) root.cfgRadius=j.radius } catch(e){} } } }
+    Process { id: apProc; running: true; command: ["sh","-c","cat \"$HOME/.config/sea-shell/appearance.json\" 2>/dev/null"]
+        stdout: StdioCollector { id: apOut; onStreamFinished: { try { var j=JSON.parse(apOut.text); if(j.accent) root.accent=j.accent; if(j.radius!==undefined) root.cfgRadius=j.radius; if(j.mode!==undefined) root.cfgLight=(""+j.mode==="light") } catch(e){} } } }
 
     // ---------- frecency history ----------
     Process { running: true; command: ["sh","-c","d=\"$HOME/.config/sea-shell\"; mkdir -p \"$d\"; cat \"$d/launcher-history.json\" 2>/dev/null; printf '\\n%s/launcher-history.json' \"$d\" >&2"]
@@ -239,7 +252,7 @@ Scope {
 
     PanelWindow {
         id: win
-        visible: false
+        visible: root.shown || root.held
         anchors { top: true; bottom: true; left: true; right: true }
         color: "transparent"
         WlrLayershell.namespace: "sea-shell:launcher"
@@ -248,7 +261,11 @@ Scope {
         exclusionMode: ExclusionMode.Ignore
         onVisibleChanged: if (visible) field.forceActiveFocus()
 
-        Rectangle { anchors.fill: parent; color: Qt.rgba(0,0,0,0.42); MouseArea { anchors.fill: parent; onClicked: root.close() } }
+        // dim scrim — alpha stays under the launcher's ignore_alpha (0.42) so the desktop
+        // behind it is only dimmed, not blurred; only the card itself frosts. Fades with
+        // the card so close is instant (no lingering dim).
+        Rectangle { anchors.fill: parent; color: Qt.rgba(0,0,0,0.35); opacity: card.openF
+            MouseArea { anchors.fill: parent; onClicked: root.close() } }
 
         Rectangle {
             id: card
@@ -257,15 +274,34 @@ Scope {
             anchors.horizontalCenter: parent.horizontalCenter
             y: parent.height * 0.16
             radius: root.cfgRadius
-            color: theme.a(theme.bg, 0.98)                       // solid card — no blur needed
-            border.width: 1; border.color: theme.a(theme.iris, 0.34)
+            // glassy matte — translucent so the compositor blur (sea-shell:launcher
+            // layerrule) frosts the wallpaper behind it; soft cool tint, no gloss.
+            color: theme.a(theme.bg, theme.light ? 0.60 : 0.52)
+            border.width: 1; border.color: theme.a(theme.frost, 0.26)
             Behavior on height { NumberAnimation { duration: 110; easing.type: Easing.OutCubic } }
-            // tile-in spring via property flip — an imperative Animation.start() in
-            // Component.onCompleted makes quickshell 0.3 exit silently on layer surfaces
-            scale: win.visible ? 1 : 0.96
-            opacity: win.visible ? 1 : 0
-            Behavior on scale { NumberAnimation { duration: 190; easing.type: Easing.OutBack; easing.overshoot: 1.4 } }
-            Behavior on opacity { NumberAnimation { duration: 140 } }
+
+            // open fades + tiles in; close zeroes openF on the same frame → instant, no
+            // lingering. (An imperative Animation.start() in Component.onCompleted makes
+            // quickshell 0.3 exit silently on layer surfaces, so we drive it via Connections.)
+            property real openF: 0.0
+            opacity: openF
+            scale: 0.975 + 0.025 * openF
+            NumberAnimation { id: cardIn; target: card; property: "openF"; to: 1.0
+                duration: 200; easing.type: Easing.OutCubic }
+            Connections { target: root; function onShownChanged() {
+                if (root.shown) cardIn.restart(); else { cardIn.stop(); card.openF = 0.0 } } }
+
+            // frosted-glass rim: a whisper of light at the top edge, fading out — matte,
+            // not a glossy sheen. Sits above the fill, below the content.
+            Rectangle {
+                anchors.fill: parent; radius: parent.radius
+                gradient: Gradient {
+                    GradientStop { position: 0.0;  color: Qt.rgba(1, 1, 1, theme.light ? 0.10 : 0.05) }
+                    GradientStop { position: 0.35; color: "transparent" }
+                }
+            }
+            Rectangle { anchors { top: parent.top; left: parent.left; right: parent.right; margins: 1 }
+                height: 1; color: Qt.rgba(1, 1, 1, theme.light ? 0.45 : 0.12) }
 
             // ---------- search field ----------
             Item {

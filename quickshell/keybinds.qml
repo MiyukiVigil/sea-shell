@@ -19,6 +19,7 @@ ShellRoot {
     property var recMods: []         // modifier chips currently toggled on
     property string conflict: ""
     property string accent: "#63c7dd"
+    property bool cfgLight: false
  
     // Add new bind state variables
     property bool adding: false
@@ -32,20 +33,21 @@ ShellRoot {
 
     QtObject {
         id: theme
-        readonly property color bg:    "#0d1420"
-        readonly property color line:  "#24304a"
-        readonly property color text:  "#e2e9f4"
-        readonly property color sub:   "#a6b6cf"
-        readonly property color faint: "#6f8099"
-        readonly property color iris:  root.accent
-        readonly property color frost: Qt.lighter(root.accent, 1.22)
-        readonly property color bad:   "#f38ba8"
+        readonly property bool light: root.cfgLight
+        readonly property color bg:    light ? "#eaf1f6" : "#0d1420"
+        readonly property color line:  light ? "#b6c9d7" : "#24304a"
+        readonly property color text:  light ? "#0c1520" : "#e2e9f4"
+        readonly property color sub:   light ? "#2c4256" : "#a6b6cf"
+        readonly property color faint: light ? "#48606f" : "#6f8099"
+        readonly property color iris:  light ? Qt.darker(root.accent, 2.4)  : root.accent
+        readonly property color frost: light ? Qt.darker(root.accent, 1.7) : Qt.lighter(root.accent, 1.22)
+        readonly property color bad:   light ? "#d1495b" : "#f38ba8"
         function a(c, al) { return Qt.rgba(c.r, c.g, c.b, al) }
     }
 
     // accent follows the bar's appearance config
     Process { running: true; command: ["sh","-c","cat \"$HOME/.config/sea-shell/appearance.json\" 2>/dev/null"]
-        stdout: StdioCollector { id: apOut; onStreamFinished: { try { var j=JSON.parse(apOut.text); if(j.accent) root.accent=j.accent } catch(e){} } } }
+        stdout: StdioCollector { id: apOut; onStreamFinished: { try { var j=JSON.parse(apOut.text); if(j.accent) root.accent=j.accent; if(j.mode!==undefined) root.cfgLight=(""+j.mode==="light") } catch(e){} } } }
 
     function modStr(m) {
         var s = [];
