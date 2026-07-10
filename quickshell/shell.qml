@@ -17,7 +17,6 @@ import QtQuick.Layouts
 
 ShellRoot {
     id: root
-    property string settingsPath: Qt.resolvedUrl("settings.qml").toString().replace("file://", "")
 
     // resident launcher — no process-spawn delay; open via `qs -c sea-shell ipc call launcher …`
     Launcher { id: launcher }
@@ -26,6 +25,13 @@ ShellRoot {
         function toggle(): void { launcher.toggle() }
         function clipboard(): void { launcher.open(";") }
     }
+
+    // resident settings (control center) — preloaded in the background so opening is instant
+    // instead of spawning a ~0.5s `qs -p settings.qml`. Toggle via its own "settings" IPC
+    // (SUPER+S) or, in-process, settingsLoader.item.openTab(n). asynchronous → never blocks
+    // the bar at login; the item lands ~½s after startup, long before the user opens it.
+    Loader { id: settingsLoader; asynchronous: true; active: true; source: Qt.resolvedUrl("settings.qml") }
+    function openSettings(tab) { if (settingsLoader.item) settingsLoader.item.openTab(tab) }
     property string openPop: ""      // only one dropdown open at a time
     property var openBar: null       // …and only on the monitor whose pill was clicked
     // one shared click-outside grab covering every monitor's bar + dropdowns.
@@ -83,9 +89,11 @@ ShellRoot {
     property string cfgFont: "monospace"
     property bool   cfgLight: false          // dark (default) ↔ light palette
     property string cfgBarFill: "matugen"    // top-bar fill: matugen (accent-tinted) · black · white
-    property string cfgEdge: "top"           // which screen edge the bar docks to: top·bottom·left·right
-    // left/right = a VERTICAL bar: groups stack in a column, dropdowns open sideways.
-    readonly property bool barVertical: cfgEdge === "left" || cfgEdge === "right"
+    property string cfgEdge: "top"           // which screen edge the bar docks to: top or bottom
+    // horizontal bar only — left/right (a vertical bar) was removed; this shell was never
+    // designed for it and the narrow strip never laid out cleanly. Kept as a constant so the
+    // (now dormant) orientation-aware branches below all resolve to the horizontal layout.
+    readonly property bool barVertical: false
     // bar background colour. "matugen" is a VISIBLY accent-tinted dark/light — theme.bg itself
     // is deliberately near-black (lightness 0.07) so it reads as black at 100% opacity, hiding
     // the hue; the bar lifts the lightness + saturation so the wallpaper colour actually shows.
@@ -126,7 +134,8 @@ ShellRoot {
             if (j.radius  !== undefined) root.cfgRadius  = j.radius;
             if (j.opacity !== undefined) root.cfgOpacity = j.opacity;
             if (j.barFill !== undefined && (""+j.barFill).length>0) root.cfgBarFill = j.barFill;
-            if (j.edge    !== undefined && (""+j.edge).length>0)    root.cfgEdge    = j.edge;
+            // top / bottom only — this shell is a horizontal bar; left/right were dropped.
+            if (j.edge === "top" || j.edge === "bottom") root.cfgEdge = j.edge;
             if (j.height  !== undefined) root.cfgHeight  = j.height;
             if (j.accent  !== undefined && (""+j.accent).length>0) root.cfgAccent = j.accent;
             if (j.font    !== undefined && (""+j.font).length>0)   root.cfgFont   = j.font;
@@ -136,15 +145,6 @@ ShellRoot {
         onLoaded: apply()
         onFileChanged: apply()
     }
-    // Flipping a horizontal bar to a vertical one (or back) restructures the layer surface —
-    // which axis is fixed, which anchors are set — and wlroots can't cleanly re-anchor that
-    // live (the old layout lingers/breaks). A one-off hard reload rebuilds the shell into the
-    // new orientation. Same-orientation swaps (top↔bottom, left↔right) re-anchor fine and are
-    // left alone. The `_orientReady` gate skips the initial startup load so this never loops.
-    property bool _orientReady: false
-    Timer { interval: 2500; running: true; repeat: false; onTriggered: root._orientReady = true }
-    onBarVerticalChanged: if (root._orientReady) orientationReload.restart()
-    Timer { id: orientationReload; interval: 80; repeat: false; onTriggered: Quickshell.reload(true) }
     // auto dark-mode schedule — sea-theme-schedule.sh flips `mode` in appearance.json
     // when the clock crosses the configured window; the FileView above then applies it.
     Process { id: themeSched; command: ["sh", Qt.resolvedUrl("sea-theme-schedule.sh").toString().replace("file://","")] }
@@ -1450,7 +1450,7 @@ ShellRoot {
                                 Row { anchors.fill: parent; spacing: 8
                                     Sym { anchors.verticalCenter: parent.verticalCenter; text: "settings"; sz: 15; color: theme.sub }
                                     Text { anchors.verticalCenter: parent.verticalCenter; text: "set location / units"; color: theme.sub; font.pixelSize: 11; font.family: root.cfgFont } }
-                                MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { root.openPop=""; Quickshell.execDetached(["qs","-p",root.settingsPath]) } } } } }
+                                MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { root.openPop=""; root.openSettings(3) } } } } }
                     Drop { screen: bar.screen
                         id: trayDrop; host: bar.trayHost
                         shown: root.openPop ==="tray" && root.openBar === bar && bar.trayHost !== null

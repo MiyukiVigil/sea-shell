@@ -28,6 +28,7 @@ QS_DEST="$CFG/quickshell/sea-shell"
 HYPR_DEST="$CFG/hypr/sea-shell"
 KITTY_THEME="$CFG/kitty/sea-cyan.conf"
 DATA_DIR="$CFG/sea-shell"                 # runtime data (appearance.json, wallpaper)
+SEA_VERSION="$(cat "$SCRIPT_DIR/VERSION" 2>/dev/null || echo 1.3.0)"   # release, from ./VERSION
 
 # ---- pretty output ----
 c() { printf '\033[%sm' "$1"; }
@@ -199,7 +200,7 @@ exec-once = sh -c 'sleep 0.5; exec ~/.config/quickshell/sea-shell/sea-wallpaper-
 
 do_install() {
   [ "${NO_DEPS:-0}" = "1" ] || install_deps      # packages first (Arch-gated); --no-deps skips
-  title "installing sea-shell from ${SCRIPT_DIR/#$HOME/\~}"
+  title "installing sea-shell v$SEA_VERSION from ${SCRIPT_DIR/#$HOME/\~}"
   check_deps
   mkdir -p "$DATA_DIR"
   # seed the (empty) matugen border override so sea.conf's `source` of it never dangles

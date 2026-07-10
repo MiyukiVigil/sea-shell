@@ -1,7 +1,9 @@
 //@ pragma UseQApplication
 // sea-shell — settings / control center (tabbed)
-// Run:  qs -p ~/.config/quickshell/sea-shell/settings.qml   (SUPER+S)
-// Esc or click-outside closes.  Verified on Quickshell 0.3.0.
+// RESIDENT: preloaded once by shell.qml (Loader) and shown/hidden via IPC so opening is
+// instant instead of spawning a ~0.5s `qs -p` process each time. Toggle it with
+//   qs -c sea-shell ipc call settings toggle       (SUPER+S)
+// or, in-process, settingsLoader.item.openTab(n).  Esc / click-outside hides it.
 import Quickshell
 import Quickshell.Wayland
 import Quickshell.Widgets
@@ -12,20 +14,40 @@ import Quickshell.Bluetooth
 import QtQuick
 import QtQuick.Layouts
 
-ShellRoot {
+Scope {
     id: root
     property string repo: Qt.resolvedUrl(".").toString().replace("file://", "").replace(/\/$/, "")
-    property int tab: 0
+    readonly property string seaVersion: "1.3"     // sea-shell release — mirrored in the repo VERSION file
+    property int tab: 8                             // land on the System / About dashboard
+
+    // ---- resident lifecycle: the panel is hidden until shown, so it costs ~nothing closed ----
+    property bool shown: false
+    function openPanel() { root.showTab(8) }
+    function openTab(t) { root.showTab(t) }
+    function closePanel() { root.shown = false }
+    function togglePanel() { if (root.shown) root.closePanel(); else root.openPanel() }
+    function showTab(t) {
+        apReadProc.running = true;                  // pick up appearance changes made while closed
+        if (root.tab === t) root.refreshTab(t); else root.tab = t;   // else onTabChanged refreshes
+        root.shown = true;
+    }
+    function refreshTab(t) {
+        if (t === 7) kbProc.running = true            // keybinds: refresh binds
+        if (t === 8) sysProc.running = true           // system: refresh live stats
+        if (t === 10) { idleChk.running = true; lockSettingsGet.running = true }   // idle & lock
+        if (t === 6) ppGet.running = true             // power: re-read profile
+        if (t === 11) { reloadEventsProc.running = true; calCfgLoad.running = true }  // calendar
+    }
     function run(cmd) { Quickshell.execDetached(["sh", "-c", cmd]) }
-    onTabChanged: {
-        if (tab === 7) kbProc.running = true          // keybinds: refresh binds
-        if (tab === 8) sysProc.running = true         // system: refresh live stats
-        if (tab === 10) {
-            idleChk.running = true                    // idle: re-check hypridle state
-            lockSettingsGet.running = true            // idle & lock: load configs
-        }
-        if (tab === 6) ppGet.running = true           // power: re-read profile
-        if (tab === 11) { reloadEventsProc.running = true; calCfgLoad.running = true }  // calendar: refresh events + subs/prefs
+    onTabChanged: refreshTab(tab)
+
+    // SUPER+S and other external triggers toggle the resident panel through this handler
+    IpcHandler {
+        target: "settings"
+        function toggle(): void { root.togglePanel() }
+        function open(): void { root.openPanel() }
+        function openTab(tab: int): void { root.openTab(tab) }
+        function close(): void { root.closePanel() }
     }
 
     // ---------- native QML file browser ----------
@@ -102,7 +124,7 @@ ShellRoot {
     // ---------- system overview (System tab) ----------
     property var sysInfo: ({ gpus: [] })
     Process { id: sysProc; running: true
-        command: ["sh","-c",". /etc/os-release 2>/dev/null; printf 'os=%s\\n' \"$PRETTY_NAME\"; printf 'host=%s@%s\\n' \"$USER\" \"$(hostnamectl hostname 2>/dev/null || hostname)\"; printf 'kernel=%s\\n' \"$(uname -r)\"; awk '{s=int($1); printf \"up=%dh %02dm\\n\", s/3600, (s%3600)/60}' /proc/uptime; awk -F: '/model name/{gsub(/^[ \\t]+/,\"\",$2); print \"cpu=\"$2; exit}' /proc/cpuinfo; lspci 2>/dev/null | awk -F': ' '/VGA|3D controller/{print \"gpu=\"$2}' | head -2; awk '/MemTotal/{t=$2}/MemAvailable/{a=$2}END{printf \"ram=%.1f / %.1f GiB\\nrampct=%d\\n\", (t-a)/1048576, t/1048576, ((t-a)*100)/t}' /proc/meminfo; df -h / | awk 'NR==2{printf \"disk=%s of %s\\ndiskpct=%d\\n\", $3, $2, $5}'; printf 'shell=quickshell %s\\n' \"$(qs --version 2>/dev/null | awk '{print $2}')\""]
+        command: ["bash", root.repo + "/sea-sysinfo.sh"]
         stdout: StdioCollector { id: sysOut; onStreamFinished: {
             var o = { gpus: [] };
             sysOut.text.split("\n").forEach(l => { var i = l.indexOf("="); if (i < 1) return;
@@ -486,8 +508,8 @@ ShellRoot {
     property string apScheme: "scheme-tonal-spot"   // matugen colour-scheme algorithm
     readonly property var schemes: ["scheme-tonal-spot","scheme-content","scheme-neutral","scheme-expressive","scheme-fidelity","scheme-monochrome","scheme-rainbow","scheme-fruit-salad"]
     property string apBarFill: "matugen"            // top-bar fill: matugen · black · white
-    property string apEdge: "top"                   // bar dock edge: top·bottom·left·right
-    readonly property var edges: ["top","bottom","left","right"]
+    property string apEdge: "top"                   // bar dock edge: top or bottom
+    readonly property var edges: ["top","bottom"]
     property bool apAutoDark: false         // auto-switch dark/light by time of day
     property string apDarkStart: "19:00"    // dark begins
     property string apDarkEnd: "07:00"      // dark ends (light begins)
@@ -495,7 +517,7 @@ ShellRoot {
     property var accents: ["#63c7dd","#4dd0c4","#6aa6ff","#cba6f7","#a6e3a1","#f4c542","#f38ba8","#ff9e64"]
     property var baseFonts: ["monospace","MesloLGM Nerd Font","JetBrainsMono Nerd Font","FiraCode Nerd Font","sans-serif","Iosevka"]
     readonly property var fontPresets: root.baseFonts.concat(root.apCustomFonts)
-    Process { running: true; command: ["sh","-c","cat \"$HOME/.config/sea-shell/appearance.json\" 2>/dev/null"]
+    Process { id: apReadProc; running: true; command: ["sh","-c","cat \"$HOME/.config/sea-shell/appearance.json\" 2>/dev/null"]
         stdout: StdioCollector { id: apOut; onStreamFinished: { try { var j=JSON.parse(apOut.text);
             if(j.radius!==undefined) root.apRadius=j.radius; if(j.opacity!==undefined) root.apOpacity=j.opacity;
             if(j.height!==undefined) root.apHeight=j.height; if(j.accent!==undefined) root.apAccent=j.accent;
@@ -503,7 +525,7 @@ ShellRoot {
             if(j.mode!==undefined) root.apLight=(""+j.mode==="light"); if(j.matugen!==undefined) root.apMatugen=!!j.matugen;
             if(j.scheme!==undefined && (""+j.scheme).length>0) root.apScheme=j.scheme;
             if(j.barFill!==undefined && (""+j.barFill).length>0) root.apBarFill=j.barFill;
-            if(j.edge!==undefined && (""+j.edge).length>0) root.apEdge=j.edge;
+            if(j.edge==="top"||j.edge==="bottom") root.apEdge=j.edge;   // horizontal bar only
             if(j.autoDark!==undefined) root.apAutoDark=!!j.autoDark; if(j.darkStart!==undefined) root.apDarkStart=j.darkStart; if(j.darkEnd!==undefined) root.apDarkEnd=j.darkEnd; } catch(e){} root.apLoaded = true; } } }
     // gates the window until the saved palette is read, so it fades in with the user's
     // matugen colours instead of flashing the default sea-cyan for a frame first
@@ -678,7 +700,7 @@ ShellRoot {
         command: ["sh","-c","warp-cli mode 2>/dev/null | awk 'NR==1{print $NF}'"]
         stdout: StdioCollector { id: warpModeOut; onStreamFinished: { var m = warpModeOut.text.trim(); if (m) root.warpMode = m } }
     }
-    Timer { id: warpPollTimer; interval: 4000; running: true; repeat: true; triggeredOnStart: true
+    Timer { id: warpPollTimer; interval: 4000; running: root.shown; repeat: true; triggeredOnStart: true
         onTriggered: { warpPoll.running = true; warpModePoll.running = true } }
     function warpToggle() {
         if (root.warpConnected) {
@@ -732,7 +754,7 @@ ShellRoot {
             root.vpnList = out;
         } }
     }
-    Timer { id: vpnPollTimer; interval: 5000; running: true; repeat: true; triggeredOnStart: true; onTriggered: vpnScan.running = true }
+    Timer { id: vpnPollTimer; interval: 5000; running: root.shown; repeat: true; triggeredOnStart: true; onTriggered: vpnScan.running = true }
     Timer { id: vpnRefreshTimer; interval: 2200; repeat: false; onTriggered: vpnScan.running = true }
     function vpnToggle(name) {
         if (root.vpnActionName !== "") return;
@@ -839,7 +861,7 @@ ShellRoot {
             }
             MouseArea {
                 id: rma; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
-                onClicked: { root.run(parent.parent.cmd); if (parent.parent.quitAfter) Qt.quit() }
+                onClicked: { root.run(parent.parent.cmd); if (parent.parent.quitAfter) root.closePanel() }
             }
         }
     }
@@ -850,7 +872,7 @@ ShellRoot {
         property string label: ""
         property int idx: 0
         readonly property bool sel: root.tab === idx
-        Layout.fillWidth: true; implicitHeight: 35; radius: 10
+        Layout.fillWidth: true; implicitHeight: 32; radius: 9
         color: sel ? theme.a(theme.iris, 0.2) : (tbm.containsMouse ? theme.a(theme.line, 0.5) : "transparent")
         border.width: 1; border.color: sel ? theme.a(theme.iris, 0.5) : "transparent"
         RowLayout {
@@ -861,16 +883,60 @@ ShellRoot {
         MouseArea { id: tbm; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.tab = idx }
     }
 
+    // small uppercase section heading that groups the sidebar tabs
+    component GroupLabel: Text {
+        Layout.fillWidth: true; Layout.topMargin: 9; Layout.leftMargin: 5; Layout.bottomMargin: 1
+        color: theme.faint; font.pixelSize: 9; font.family: "monospace"; font.bold: true; font.letterSpacing: 1.5
+    }
+
+    // one key/value tile for the About/System dashboard
+    component InfoTile: Rectangle {
+        property string icon: ""
+        property string label: ""
+        property string value: "…"
+        Layout.fillWidth: true; implicitHeight: 46; radius: 11
+        color: theme.a(theme.line, 0.24); border.width: 1; border.color: theme.a(theme.iris, 0.10)
+        RowLayout {
+            anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 12; spacing: 11
+            Sym { text: icon; sz: 19; color: theme.iris }
+            ColumnLayout {
+                spacing: 1; Layout.fillWidth: true
+                Text { text: label; color: theme.faint; font.pixelSize: 9; font.family: "monospace"; font.bold: true; font.letterSpacing: 1 }
+                Text { text: value; color: theme.text; font.pixelSize: 12; font.family: "monospace"; elide: Text.ElideRight; Layout.fillWidth: true }
+            }
+        }
+    }
+
+    // a labelled progress meter (RAM / disk)
+    component Meter: RowLayout {
+        property string label: ""
+        property string value: "…"
+        property real pct: 0
+        property color fill: theme.iris
+        Layout.fillWidth: true; spacing: 11
+        Text { text: label; color: theme.faint; font.pixelSize: 11; font.family: "monospace"; Layout.preferredWidth: 58 }
+        Rectangle {
+            Layout.fillWidth: true; implicitHeight: 9; radius: 5; color: theme.a(theme.line, 0.8)
+            Rectangle { height: parent.height; radius: 5
+                width: parent.width * Math.max(0, Math.min(1, parent.parent.pct / 100))
+                color: parent.parent.pct > 88 ? theme.bad : parent.parent.fill
+                Behavior on width { NumberAnimation { duration: 260; easing.type: Easing.OutCubic } } }
+        }
+        Text { text: value; color: theme.sub; font.pixelSize: 11; font.family: "monospace"; Layout.preferredWidth: 96; horizontalAlignment: Text.AlignRight }
+    }
+
     // ============ window ============
     PanelWindow {
+        id: panel
+        visible: root.shown                    // resident: mapped only while open
         anchors { top: true; bottom: true; left: true; right: true }
         color: "transparent"
         WlrLayershell.layer: WlrLayer.Overlay
         WlrLayershell.keyboardFocus: WlrKeyboardFocus.Exclusive
         exclusionMode: ExclusionMode.Ignore
 
-        Rectangle { anchors.fill: parent; color: Qt.rgba(0, 0, 0, 0.5); MouseArea { anchors.fill: parent; onClicked: Qt.quit() } }
-        Item { anchors.fill: parent; focus: true; Keys.onEscapePressed: Qt.quit() }
+        Rectangle { anchors.fill: parent; color: Qt.rgba(0, 0, 0, 0.5); MouseArea { anchors.fill: parent; onClicked: root.closePanel() } }
+        Item { anchors.fill: parent; focus: root.shown; Keys.onEscapePressed: root.closePanel() }
 
         Rectangle {
             anchors.centerIn: parent
@@ -887,30 +953,47 @@ ShellRoot {
             // ---------------- sidebar (anchored, fixed width) ----------------
             ColumnLayout {
                 id: sidebar
-                anchors { left: parent.left; top: parent.top; bottom: parent.bottom; margins: 20 }
-                width: 200; spacing: 6
+                anchors { left: parent.left; top: parent.top; bottom: parent.bottom; margins: 18 }
+                width: 202; spacing: 3
+                // ---- brand header: logo + name + version ----
                 RowLayout {
-                    spacing: 11; Layout.fillWidth: true; Layout.bottomMargin: 6
-                    SeaLogo { size: 30; card: theme.panel; accent: theme.iris; highlight: theme.frost; rim: theme.iris }
+                    spacing: 11; Layout.fillWidth: true; Layout.bottomMargin: 4
+                    SeaLogo { size: 34; card: theme.panel; accent: theme.iris; highlight: theme.frost; rim: theme.iris }
                     ColumnLayout {
-                        spacing: 0
-                        Text { text: "sea-shell"; color: theme.text; font.pixelSize: 17; font.family: "monospace"; font.bold: true }
+                        spacing: 1; Layout.fillWidth: true
+                        RowLayout {
+                            spacing: 6
+                            Text { text: "sea-shell"; color: theme.text; font.pixelSize: 17; font.family: "monospace"; font.bold: true }
+                            Rectangle {
+                                implicitHeight: 15; implicitWidth: verTxt.width + 10; radius: 7
+                                color: theme.a(theme.iris, 0.18); border.width: 1; border.color: theme.a(theme.iris, 0.4)
+                                Text { id: verTxt; anchors.centerIn: parent; text: "v" + root.seaVersion
+                                    color: theme.frost; font.pixelSize: 9; font.family: "monospace"; font.bold: true }
+                            }
+                        }
                         Text { text: "control center"; color: theme.frost; font.pixelSize: 10; font.family: "monospace" }
                     }
                 }
-                TabBtn { icon: "info";                 label: "System";     idx: 8 }
-                TabBtn { icon: "volume_up";            label: "Audio";      idx: 0 }
-                TabBtn { icon: "brightness_6";         label: "Display";    idx: 1 }
-                TabBtn { icon: "wifi";                 label: "Network";    idx: 2 }
-                TabBtn { icon: "bluetooth";            label: "Bluetooth";  idx: 9 }
-                TabBtn { icon: "palette";              label: "Appearance"; idx: 4 }
-                TabBtn { icon: "cloud";                label: "Weather";    idx: 3 }
-                TabBtn { icon: "calendar_month";       label: "Calendar";   idx: 11 }
-                TabBtn { icon: "keyboard";             label: "Keybinds";   idx: 7 }
+                Rectangle { Layout.fillWidth: true; Layout.topMargin: 4; Layout.bottomMargin: 2; height: 1; color: theme.a(theme.iris, 0.14) }
+
+                GroupLabel { text: "OVERVIEW" }
+                TabBtn { icon: "monitor_heart";        label: "System";      idx: 8 }
+                GroupLabel { text: "LOOK & FEEL" }
+                TabBtn { icon: "palette";              label: "Appearance";  idx: 4 }
+                GroupLabel { text: "DEVICES" }
+                TabBtn { icon: "volume_up";            label: "Audio";       idx: 0 }
+                TabBtn { icon: "brightness_6";         label: "Display";     idx: 1 }
+                TabBtn { icon: "wifi";                 label: "Network";     idx: 2 }
+                TabBtn { icon: "bluetooth";            label: "Bluetooth";   idx: 9 }
+                GroupLabel { text: "DAILY" }
+                TabBtn { icon: "cloud";                label: "Weather";     idx: 3 }
+                TabBtn { icon: "calendar_month";       label: "Calendar";    idx: 11 }
+                TabBtn { icon: "keyboard";             label: "Keybinds";    idx: 7 }
+                GroupLabel { text: "SESSION" }
                 TabBtn { icon: "bedtime";              label: "Idle & lock"; idx: 10 }
-                TabBtn { icon: "bolt";                 label: "Actions";    idx: 5 }
-                TabBtn { icon: "power_settings_new";   label: "Power";      idx: 6 }
-                Item { Layout.fillHeight: true }
+                TabBtn { icon: "bolt";                 label: "Actions";     idx: 5 }
+                TabBtn { icon: "power_settings_new";   label: "Power";       idx: 6 }
+                Item { Layout.fillHeight: true; Layout.minimumHeight: 6 }
                 Text { text: "esc to close"; color: theme.faint; font.pixelSize: 10; font.family: "monospace"; Layout.fillWidth: true; horizontalAlignment: Text.AlignHCenter }
             }
 
@@ -1722,7 +1805,7 @@ ShellRoot {
                                                 if (root.kbRec) { root.kbRec = null; root.kbConflict = "" }
                                                 else if (root.kbAddRecording) { root.kbAddRecording = false }
                                                 else if (root.kbAdding) { root.kbAdding = false }
-                                                else Qt.quit();
+                                                else root.closePanel();
                                                 e.accepted = true;
                                                 return;
                                             }
@@ -1950,48 +2033,81 @@ ShellRoot {
                         }
 
                         // ================= SYSTEM =================
+                        // ================= SYSTEM / ABOUT =================
                         ColumnLayout {
                             visible: root.tab === 8; Layout.fillWidth: true; spacing: 12
-                            Section { title: "system"; icon: "info" }
-                            Repeater {
-                                model: [
-                                    { i: "person",        k: "user",   v: root.sysInfo.host || "…" },
-                                    { i: "deployed_code", k: "os",     v: root.sysInfo.os || "…" },
-                                    { i: "terminal",      k: "kernel", v: root.sysInfo.kernel || "…" },
-                                    { i: "schedule",      k: "uptime", v: root.sysInfo.up || "…" },
-                                    { i: "memory",        k: "cpu",    v: root.sysInfo.cpu || "…" },
-                                    { i: "developer_board", k: "gpu",  v: (root.sysInfo.gpus || []).join("  ·  ") || "…" },
-                                    { i: "web_asset",     k: "shell",  v: root.sysInfo.shell || "…" }
-                                ]
-                                delegate: RowLayout {
-                                    required property var modelData
-                                    Layout.fillWidth: true; spacing: 10
-                                    Sym { text: modelData.i; sz: 17; color: theme.iris }
-                                    Text { text: modelData.k; color: theme.faint; font.pixelSize: 11; font.family: "monospace"; Layout.preferredWidth: 60 }
-                                    Text { text: modelData.v; color: theme.text; font.pixelSize: 12; font.family: "monospace"; elide: Text.ElideRight; Layout.fillWidth: true }
+
+                            // ---- hero: brand · version · host ----
+                            Rectangle {
+                                Layout.fillWidth: true; radius: 16; implicitHeight: 90
+                                gradient: Gradient {
+                                    orientation: Gradient.Horizontal
+                                    GradientStop { position: 0.0; color: theme.a(theme.iris, 0.17) }
+                                    GradientStop { position: 1.0; color: theme.a(theme.line, 0.20) }
+                                }
+                                border.width: 1; border.color: theme.a(theme.iris, 0.22)
+                                RowLayout {
+                                    anchors.fill: parent; anchors.leftMargin: 20; anchors.rightMargin: 20; spacing: 18
+                                    SeaLogo { size: 62; card: theme.panel; accent: theme.iris; highlight: theme.frost; rim: theme.iris }
+                                    ColumnLayout {
+                                        spacing: 4; Layout.fillWidth: true
+                                        RowLayout { spacing: 9
+                                            Text { text: "sea-shell"; color: theme.text; font.pixelSize: 25; font.family: "monospace"; font.bold: true }
+                                            Rectangle { Layout.alignment: Qt.AlignVCenter
+                                                implicitHeight: 21; implicitWidth: hvT.width + 15; radius: 10; color: theme.iris
+                                                Text { id: hvT; anchors.centerIn: parent; text: "v" + root.seaVersion; color: theme.bg; font.pixelSize: 11; font.family: "monospace"; font.bold: true } }
+                                        }
+                                        RowLayout { spacing: 7
+                                            Sym { text: "person"; sz: 14; color: theme.frost }
+                                            Text { text: root.sysInfo.host || "…"; color: theme.frost; font.pixelSize: 13; font.family: "monospace" }
+                                            Sym { text: "deployed_code"; sz: 14; color: theme.faint; Layout.leftMargin: 6 }
+                                            Text { text: root.sysInfo.os || "…"; color: theme.sub; font.pixelSize: 12; font.family: "monospace"; elide: Text.ElideRight; Layout.fillWidth: true }
+                                        }
+                                    }
+                                    ColumnLayout { spacing: 2; Layout.alignment: Qt.AlignVCenter
+                                        Text { text: "UPTIME"; color: theme.faint; font.pixelSize: 8; font.family: "monospace"; font.bold: true; font.letterSpacing: 1.5; Layout.alignment: Qt.AlignRight }
+                                        Text { text: root.sysInfo.up || "…"; color: theme.frost; font.pixelSize: 15; font.family: "monospace"; font.bold: true; Layout.alignment: Qt.AlignRight }
+                                    }
                                 }
                             }
-                            Section { title: "memory · disk"; icon: "database" }
-                            RowLayout {
-                                Layout.fillWidth: true; spacing: 10
-                                Text { text: "ram"; color: theme.faint; font.pixelSize: 11; font.family: "monospace"; Layout.preferredWidth: 60 }
-                                Rectangle { Layout.fillWidth: true; implicitHeight: 8; radius: 4; color: theme.a(theme.line, 0.8)
-                                    Rectangle { height: parent.height; radius: 4; width: parent.width * ((parseInt(root.sysInfo.rampct) || 0) / 100)
-                                        color: (parseInt(root.sysInfo.rampct) || 0) > 85 ? theme.bad : theme.iris } }
-                                Text { text: root.sysInfo.ram || "…"; color: theme.sub; font.pixelSize: 11; font.family: "monospace" }
+
+                            // ---- system info grid ----
+                            Section { title: "system"; icon: "monitor_heart" }
+                            GridLayout {
+                                Layout.fillWidth: true; columns: 2; columnSpacing: 10; rowSpacing: 8
+                                InfoTile { icon: "terminal";        label: "KERNEL";     value: root.sysInfo.kernel || "…" }
+                                InfoTile { icon: "dashboard";       label: "COMPOSITOR"; value: root.sysInfo.wm ? ("Hyprland " + root.sysInfo.wm) : "Hyprland" }
+                                InfoTile { icon: "desktop_windows"; label: "SESSION";    value: root.sysInfo.session ? (root.sysInfo.session.charAt(0).toUpperCase() + root.sysInfo.session.slice(1)) : "Wayland" }
+                                InfoTile { icon: "aspect_ratio";    label: "RESOLUTION"; value: root.sysInfo.res || "…" }
+                                InfoTile { icon: "code";            label: "SHELL";      value: root.sysInfo.shell || "…" }
+                                InfoTile { icon: "inventory_2";     label: "PACKAGES";   value: root.sysInfo.pkgs ? (root.sysInfo.pkgs + "  ·  pacman") : "…" }
+                                InfoTile { icon: "architecture";    label: "ARCH";       value: root.sysInfo.arch || "…" }
+                                InfoTile { icon: "monitoring";      label: "LOAD AVG";   value: root.sysInfo.load || "…" }
                             }
-                            RowLayout {
-                                Layout.fillWidth: true; spacing: 10
-                                Text { text: "disk /"; color: theme.faint; font.pixelSize: 11; font.family: "monospace"; Layout.preferredWidth: 60 }
-                                Rectangle { Layout.fillWidth: true; implicitHeight: 8; radius: 4; color: theme.a(theme.line, 0.8)
-                                    Rectangle { height: parent.height; radius: 4; width: parent.width * ((parseInt(root.sysInfo.diskpct) || 0) / 100)
-                                        color: (parseInt(root.sysInfo.diskpct) || 0) > 90 ? theme.bad : theme.frost } }
-                                Text { text: root.sysInfo.disk || "…"; color: theme.sub; font.pixelSize: 11; font.family: "monospace" }
+
+                            // ---- hardware ----
+                            Section { title: "hardware"; icon: "memory" }
+                            InfoTile { icon: "developer_board"; label: "CPU"
+                                value: (root.sysInfo.cpu || "…") + (root.sysInfo.cores ? ("  ·  " + root.sysInfo.cores + " threads") : "") }
+                            Repeater { model: root.sysInfo.gpus || []
+                                delegate: InfoTile { required property var modelData; icon: "view_in_ar"; label: "GPU"; value: modelData } }
+                            ColumnLayout { Layout.fillWidth: true; Layout.topMargin: 4; spacing: 10
+                                Meter { label: "memory"; pct: parseInt(root.sysInfo.rampct) || 0; value: root.sysInfo.ram || "…"; fill: theme.iris }
+                                Meter { label: "disk /"; pct: parseInt(root.sysInfo.diskpct) || 0; value: root.sysInfo.disk || "…"; fill: theme.frost }
                             }
-                            RowLayout { spacing: 8; Layout.topMargin: 8
-                                Sym { text: "refresh"; sz: 15; color: theme.sub
-                                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: sysProc.running = true } }
-                                Text { text: "refresh"; color: theme.faint; font.pixelSize: 10; font.family: "monospace" }
+
+                            // ---- refresh ----
+                            RowLayout { Layout.topMargin: 6; Layout.fillWidth: true
+                                Item { Layout.fillWidth: true }
+                                Rectangle {
+                                    implicitHeight: 30; implicitWidth: rfRow.width + 22; radius: 9
+                                    color: rfMa.containsMouse ? theme.a(theme.iris, 0.2) : theme.a(theme.line, 0.4)
+                                    border.width: 1; border.color: theme.a(theme.iris, 0.2)
+                                    RowLayout { id: rfRow; anchors.centerIn: parent; spacing: 7
+                                        Sym { text: "refresh"; sz: 15; color: theme.frost }
+                                        Text { text: "refresh"; color: theme.sub; font.pixelSize: 11; font.family: "monospace" } }
+                                    MouseArea { id: rfMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: sysProc.running = true }
+                                }
                             }
                         }
 
@@ -2429,7 +2545,7 @@ ShellRoot {
                                     MouseArea {
                                         id: lkNowM
                                         anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
-                                        onClicked: { root.run("~/.config/quickshell/sea-shell/sea-lock.sh"); Qt.quit() }
+                                        onClicked: { root.run("~/.config/quickshell/sea-shell/sea-lock.sh"); root.closePanel() }
                                     }
                                 }
                             }
