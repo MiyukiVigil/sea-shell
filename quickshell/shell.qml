@@ -82,6 +82,12 @@ ShellRoot {
     property string cfgAccent: "#63c7dd"
     property string cfgFont: "monospace"
     property bool   cfgLight: false          // dark (default) ↔ light palette
+    property string cfgBarFill: "matugen"    // top-bar fill: matugen (accent-tinted) · black · white
+    // bar background colour — a clean neutral black/white option (nice at 100% opacity), else
+    // the matugen-tinted surface. Only affects the top bar; dropdowns stay accent-tinted.
+    readonly property color barFillColor: cfgBarFill === "black" ? "#0a0d12"
+                                        : cfgBarFill === "white" ? "#f5f8fb"
+                                        : theme.bg
 
     // Propagate the shell's light/dark choice to the SYSTEM: gsettings color-scheme
     // (so GTK apps + browsers' prefers-color-scheme follow, via xdg-desktop-portal) and
@@ -113,6 +119,7 @@ ShellRoot {
             var t = text(); if(!t || !t.trim()) return; var j = JSON.parse(t);
             if (j.radius  !== undefined) root.cfgRadius  = j.radius;
             if (j.opacity !== undefined) root.cfgOpacity = j.opacity;
+            if (j.barFill !== undefined && (""+j.barFill).length>0) root.cfgBarFill = j.barFill;
             if (j.height  !== undefined) root.cfgHeight  = j.height;
             if (j.accent  !== undefined && (""+j.accent).length>0) root.cfgAccent = j.accent;
             if (j.font    !== undefined && (""+j.font).length>0)   root.cfgFont   = j.font;
@@ -207,10 +214,15 @@ ShellRoot {
     QtObject {
         id: theme
         readonly property bool light: root.cfgLight
-        // sea palette in two keys — dark (default) and a light "sea foam" variant.
-        readonly property color bg:    light ? "#eaf1f6" : "#0d1420"
-        readonly property color panel: light ? "#dbe6ee" : "#131b29"
-        readonly property color line:  light ? "#b6c9d7" : "#24304a"
+        // Surfaces follow the accent HUE at low saturation, so the whole shell tracks matugen
+        // instead of a fixed navy — a subtle tint only (text keeps its high-contrast values).
+        // The default/off accent is sea cyan, whose hue lands right back on the old deep-ocean
+        // navy, so nothing jarring changes when matugen is off.
+        readonly property color _acc: root.cfgAccent
+        readonly property real  _ah:  _acc.hslHue >= 0 ? _acc.hslHue : 0.55
+        readonly property color bg:    light ? Qt.hsla(_ah, 0.20, 0.945, 1) : Qt.hsla(_ah, 0.36, 0.070, 1)
+        readonly property color panel: light ? Qt.hsla(_ah, 0.18, 0.895, 1) : Qt.hsla(_ah, 0.30, 0.110, 1)
+        readonly property color line:  light ? Qt.hsla(_ah, 0.16, 0.780, 1) : Qt.hsla(_ah, 0.24, 0.205, 1)
         // The dropdowns are very translucent now, so the text does the readability work:
         // near-white in dark mode, near-black in light mode, with punchy secondaries.
         readonly property color text:  light ? "#08111c" : "#f2f6fc"
@@ -958,7 +970,7 @@ ShellRoot {
                 anchors.fill: parent
                 anchors { topMargin: 6; leftMargin: 8; rightMargin: 8 }
                 radius: root.cfgRadius
-                color: theme.a(theme.bg, root.cfgOpacity)
+                color: theme.a(root.barFillColor, root.cfgOpacity)
                 border.width: 1; border.color: theme.a(theme.iris,0.30)
 
                 // ---------- LEFT: logo · workspaces · app name ----------
@@ -966,7 +978,8 @@ ShellRoot {
                     id: leftGroup
                     anchors { left: parent.left; leftMargin: 12; verticalCenter: parent.verticalCenter }
                     spacing: 9
-                    IconImage { anchors.verticalCenter: parent.verticalCenter; implicitSize: 24; source: Qt.resolvedUrl("logo.svg")
+                    SeaLogo { anchors.verticalCenter: parent.verticalCenter; size: 24
+                        card: theme.panel; accent: theme.iris; highlight: theme.frost; rim: theme.iris
                         MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: launcher.toggle() } }
                     Row {
                         anchors.verticalCenter: parent.verticalCenter; spacing: 6

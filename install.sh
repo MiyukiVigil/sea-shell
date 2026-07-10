@@ -110,7 +110,7 @@ check_deps() {
   [ ${#optional[@]} -gt 0 ] && warn "optional, some features off without them: ${optional[*]}"
   [ ${#optional[@]} -gt 0 ] && info "grab them all:  sudo pacman -S ${optional[*]}"
   # NB: no `grep -q` here — with pipefail, its early exit SIGPIPEs fc-list into a false warning
-  fc-list 2>/dev/null | grep -i "material symbols" >/dev/null || warn "font 'Material Symbols Outlined' not found — bar icons will be boxes (pacman -S ttf-material-symbols-variable-git)"
+  fc-list 2>/dev/null | grep -i "material symbols" >/dev/null || warn "font 'Material Symbols Outlined' not found — bar icons will be boxes (yay -S ttf-material-symbols-variable)"
   return 0
 }
 
@@ -130,8 +130,8 @@ REPO_PKGS=(
 # AUR packages — need an AUR helper (paru/yay); bootstrapped below if absent.
 AUR_PKGS=(
   quickshell                          # the bar/launcher/overlays engine — the heart of it
-  matugen-bin                         # wallpaper→accent theming ("match colours")
-  ttf-material-symbols-variable-git   # the bar's icon font
+  matugen                             # wallpaper→accent theming ("match colours")
+  ttf-material-symbols-variable       # the bar's icon font (stable pkg; the -git one won't build)
   swww                                # static / image wallpapers
   mpvpaper                            # animated (video) wallpapers
 )
@@ -202,6 +202,8 @@ do_install() {
   title "installing sea-shell from ${SCRIPT_DIR/#$HOME/\~}"
   check_deps
   mkdir -p "$DATA_DIR"
+  # seed the (empty) matugen border override so sea.conf's `source` of it never dangles
+  mkdir -p "$HYPR_DEST"; [ -e "$HYPR_DEST/matugen.conf" ] || : > "$HYPR_DEST/matugen.conf"
   # remember where the repo lives so GUI edits (keybind rebinds) can sync back to it
   printf '%s' "$SCRIPT_DIR" > "$DATA_DIR/.repo"
 

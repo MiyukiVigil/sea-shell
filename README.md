@@ -192,7 +192,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/MiyukiVigil/sea-shell/main/b
 
 **Packages are Arch-only** (Arch · CachyOS · EndeavourOS · Manjaro · Artix). The installer
 `pacman -S`'s the repo deps, uses an AUR helper (paru/yay — **bootstraps paru** if you have
-neither) for `quickshell`, `matugen-bin`, `ttf-material-symbols-variable-git` and `mpvpaper`,
+neither) for `quickshell`, `matugen`, `ttf-material-symbols-variable` and `mpvpaper`,
 then enables NetworkManager / Bluetooth / PipeWire / power-profiles-daemon. On a non-Arch
 distro, install those yourself and run `--no-deps`.
 
@@ -214,7 +214,7 @@ Then the installer:
 Deps are installed for you on Arch. On a `--no-deps` run the bar still degrades
 gracefully when something's absent, and `check_deps` prints a `pacman -S` line for
 whatever's missing. Icons need the **Material Symbols Outlined** font
-(`ttf-material-symbols-variable-git`, pulled in above). GPU stats on the monitor pill
+(`ttf-material-symbols-variable`, pulled in above). GPU stats on the monitor pill
 use `nvidia-smi` when present. Disable any other bar's autostart so you don't get two.
 
 ## Try it without installing

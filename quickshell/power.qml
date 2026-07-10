@@ -22,8 +22,10 @@ ShellRoot {
     QtObject {
         id: theme
         readonly property bool light: root.cfgLight
-        readonly property color bg:    light ? "#eaf1f6" : "#0d1420"
-        readonly property color line:  light ? "#b6c9d7" : "#24304a"
+        readonly property color _acc: root.accent
+        readonly property real  _ah:  _acc.hslHue >= 0 ? _acc.hslHue : 0.55
+        readonly property color bg:    light ? Qt.hsla(_ah, 0.20, 0.945, 1) : Qt.hsla(_ah, 0.36, 0.070, 1)
+        readonly property color line:  light ? Qt.hsla(_ah, 0.16, 0.780, 1) : Qt.hsla(_ah, 0.24, 0.205, 1)
         readonly property color text:  light ? "#0c1520" : "#e2e9f4"
         readonly property color sub:   light ? "#2c4256" : "#a6b6cf"
         readonly property color faint: light ? "#48606f" : "#6f8099"
