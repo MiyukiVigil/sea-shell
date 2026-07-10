@@ -11,6 +11,14 @@ Built for: **CachyOS · Hyprland 0.55 · Quickshell 0.3 · kitty · fish · star
 No external launcher or status-bar helper needed — the bar, app launcher, clipboard
 picker, notification daemon, power menu and control center are all native Quickshell.
 
+## Quick install (Arch-based)
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/MiyukiVigil/sea-shell/main/bootstrap.sh)
+```
+Clones the repo, installs every dependency (pacman + AUR), and lays down the configs.
+Use `bash <(…)` — not `curl … | bash` — so `sudo`/`pacman` can still prompt. Full options
+and how it works are under [Install](#install) below.
+
 ## Palette
 ```
 iris   #63c7dd   frost  #a2e2e8   iris-deep #45b2cc
@@ -162,14 +170,33 @@ sea-shell/
 ```
 (fastfetch is intentionally left alone — you keep your own.)
 
-## Install (one command)
+## Install
+
+**One line** (Arch-based only — clones + installs packages + configs):
 ```bash
-./install.sh                 # copies everything into ~/.config — reboot-proof
-./install.sh --dev           # symlinks to this repo instead (live-edit mode)
+bash <(curl -fsSL https://raw.githubusercontent.com/MiyukiVigil/sea-shell/main/bootstrap.sh)
+```
+> Use `bash <(…)`, not `curl … | bash` — the pipe steals stdin so `sudo`/`pacman` can't prompt.
+> Append installer flags too, e.g. `… bootstrap.sh) --wallpaper`.
+
+**Or clone and run it yourself:**
+```bash
+./install.sh                 # packages (pacman + AUR) THEN configs — reboot-proof
+./install.sh --deps          # only install the packages
+./install.sh --no-deps       # skip packages, only lay down configs (any distro)
+./install.sh --dev           # symlink configs to this repo (live-edit mode)
 ./install.sh --wallpaper     # also generate + set the sea-gradient wallpaper
+./install.sh -y              # non-interactive (--noconfirm)
 ./install.sh --uninstall     # cleanly remove everything it added
 ```
-The installer:
+
+**Packages are Arch-only** (Arch · CachyOS · EndeavourOS · Manjaro · Artix). The installer
+`pacman -S`'s the repo deps, uses an AUR helper (paru/yay — **bootstraps paru** if you have
+neither) for `quickshell`, `matugen-bin`, `ttf-material-symbols-variable-git` and `mpvpaper`,
+then enables NetworkManager / Bluetooth / PipeWire / power-profiles-daemon. On a non-Arch
+distro, install those yourself and run `--no-deps`.
+
+Then the installer:
 - **copies** the Quickshell config to `~/.config/quickshell/sea-shell` and the
   hypr confs to `~/.config/hypr/sea-shell` — the repo can be moved or deleted;
   re-run after pulling updates (`--dev` symlinks instead while you're ricing)
@@ -184,12 +211,11 @@ The installer:
 - backs up every foreign file it touches (`.bak-<timestamp>`), and reloads
   Hyprland + restarts the bar if you run it inside a session
 
-Deps: `grim slurp wl-clipboard cliphist fd playerctl brightnessctl swww mpvpaper
-ncat hyprlock hypridle hyprpolkitagent matugen` are all optional — features
-degrade gracefully, and the installer prints one `pacman -S` line for whatever's
-missing. Icons need the **Material Symbols Outlined** font. GPU stats on the monitor
-pill use `nvidia-smi` when present. Disable any other bar's autostart so you don't
-get two.
+Deps are installed for you on Arch. On a `--no-deps` run the bar still degrades
+gracefully when something's absent, and `check_deps` prints a `pacman -S` line for
+whatever's missing. Icons need the **Material Symbols Outlined** font
+(`ttf-material-symbols-variable-git`, pulled in above). GPU stats on the monitor pill
+use `nvidia-smi` when present. Disable any other bar's autostart so you don't get two.
 
 ## Try it without installing
 ```bash

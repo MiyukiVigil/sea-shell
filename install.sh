@@ -2,10 +2,15 @@
 # sea-shell installer — installs the sea-cyan rice into ~/.config so it works
 # on every login with no dependence on where this repo lives.
 # Idempotent + reversible.  Usage:
-#   ./install.sh              # install (copies configs into ~/.config)
+#   ./install.sh              # full install: packages (pacman + AUR) THEN configs
+#   ./install.sh --deps       # only install the packages, touch no configs
+#   ./install.sh --no-deps    # skip packages, only lay down configs (works on any distro)
 #   ./install.sh --dev        # developer mode: symlink configs to this repo instead
 #   ./install.sh --wallpaper  # also generate + set a sea-gradient wallpaper
+#   ./install.sh -y|--yes     # non-interactive (pacman/makepkg --noconfirm)
 #   ./install.sh --uninstall  # remove everything this script added
+# Package install is Arch-only (Arch/CachyOS/EndeavourOS/Manjaro/Artix — needs pacman + the
+# AUR). On any other distro, install the deps yourself and run with --no-deps.
 # NOTE: intentionally NOT using `set -e` — this script leans on `[ test ] && action`
 # idioms whose non-zero exit is expected control flow, which `set -e` would treat
 # as a fatal error (e.g. check_deps returning 1 when nothing is missing).
@@ -109,6 +114,76 @@ check_deps() {
   return 0
 }
 
+# ---------- package installation (Arch only) ----------
+# Official-repo packages — installed with pacman (fast, no build).
+REPO_PKGS=(
+  hyprland hypridle hyprlock hyprpolkitagent          # compositor + idle/lock/polkit
+  kitty fish starship fastfetch                       # terminal · shell · prompt · fetch
+  pipewire wireplumber pipewire-pulse                 # audio (the bar's volume/OSD)
+  networkmanager bluez bluez-utils upower             # net · bluetooth · battery
+  power-profiles-daemon polkit                        # power menu · auth
+  xdg-desktop-portal-gtk adw-gtk-theme                # GTK/Qt/browser light-dark follows the shell
+  brightnessctl playerctl cliphist wl-clipboard       # brightness · media · clipboard
+  grim slurp cava                                     # screenshots · audio visualiser
+  libnotify python fd ffmpeg imagemagick curl         # notifications + helpers used by scripts
+)
+# AUR packages — need an AUR helper (paru/yay); bootstrapped below if absent.
+AUR_PKGS=(
+  quickshell                          # the bar/launcher/overlays engine — the heart of it
+  matugen-bin                         # wallpaper→accent theming ("match colours")
+  ttf-material-symbols-variable-git   # the bar's icon font
+  swww                                # static / image wallpapers
+  mpvpaper                            # animated (video) wallpapers
+)
+
+require_arch() {
+  command -v pacman >/dev/null 2>&1 && return 0
+  warn "sea-shell's automatic setup installs from the Arch repos + AUR, so it only runs on"
+  warn "Arch-based distros (Arch · CachyOS · EndeavourOS · Manjaro · Artix …)."
+  warn "On another distro: install the equivalents of these yourself, then run --no-deps:"
+  warn "  ${REPO_PKGS[*]} ${AUR_PKGS[*]}"
+  exit 1
+}
+
+aur_helper() { for h in paru yay; do command -v "$h" >/dev/null 2>&1 && { echo "$h"; return 0; }; done; return 1; }
+
+bootstrap_paru() {
+  info "no AUR helper found — bootstrapping paru (for quickshell, matugen, the icon font)…"
+  sudo pacman -S --needed $NOCONFIRM base-devel git || return 1
+  local tmp; tmp="$(mktemp -d)"
+  git clone --depth 1 https://aur.archlinux.org/paru-bin.git "$tmp/paru-bin" || { rm -rf "$tmp"; return 1; }
+  ( cd "$tmp/paru-bin" && makepkg -si $NOCONFIRM ); local rc=$?
+  rm -rf "$tmp"; [ $rc -eq 0 ] && command -v paru >/dev/null 2>&1
+}
+
+enable_services() {
+  info "enabling services (NetworkManager · Bluetooth · power profiles · PipeWire)…"
+  sudo systemctl enable --now NetworkManager.service     2>/dev/null || true
+  sudo systemctl enable --now bluetooth.service          2>/dev/null || true
+  sudo systemctl enable --now power-profiles-daemon.service 2>/dev/null || true
+  systemctl --user enable --now pipewire.service pipewire-pulse.service wireplumber.service 2>/dev/null || true
+  # start light/dark from a known state so GTK/Qt/browsers have a color-scheme to follow
+  command -v gsettings >/dev/null 2>&1 && gsettings set org.gnome.desktop.interface color-scheme 'prefer-dark' 2>/dev/null || true
+  ok "services enabled"
+}
+
+install_deps() {
+  require_arch
+  title "installing packages"
+  info "official repos (pacman)…"
+  sudo pacman -S --needed $NOCONFIRM "${REPO_PKGS[@]}" || warn "some repo packages didn't install — check the names/network above"
+  local helper; helper="$(aur_helper)" || { bootstrap_paru && helper=paru || helper=""; }
+  if [ -n "$helper" ]; then
+    info "AUR ($helper)…"
+    "$helper" -S --needed $NOCONFIRM "${AUR_PKGS[@]}" || warn "some AUR packages failed to build — see output above"
+  else
+    warn "no AUR helper and paru bootstrap failed — install these from the AUR yourself:"
+    warn "  ${AUR_PKGS[*]}"
+  fi
+  enable_services
+  ok "packages done"
+}
+
 hypr_block() {
   # $1 = dir the hypr confs are sourced from
   # idle daemon + polkit agent are guarded at runtime, so installing the package
@@ -123,6 +198,7 @@ exec-once = sh -c 'sleep 0.5; exec ~/.config/quickshell/sea-shell/sea-wallpaper-
 }
 
 do_install() {
+  [ "${NO_DEPS:-0}" = "1" ] || install_deps      # packages first (Arch-gated); --no-deps skips
   title "installing sea-shell from ${SCRIPT_DIR/#$HOME/\~}"
   check_deps
   mkdir -p "$DATA_DIR"
@@ -213,12 +289,26 @@ do_uninstall() {
   title "done — run 'hyprctl reload' to apply"
 }
 
-# ---- args ----
-case "${1:-}" in
-  --uninstall|-u) do_uninstall ;;
-  --wallpaper)    WALLPAPER=1 do_install ;;
-  --dev)          DEV=1 do_install ;;
-  -h|--help) sed -n '2,9p' "$0" ;;
-  "") do_install ;;
-  *) warn "unknown option: $1"; sed -n '2,9p' "$0"; exit 1 ;;
+# ---- args (flags combine, e.g. `--no-deps --wallpaper`) ----
+ACTION=install
+for arg in "$@"; do
+  case "$arg" in
+    --uninstall|-u) ACTION=uninstall ;;
+    --deps)         ACTION=deps ;;
+    --no-deps)      NO_DEPS=1 ;;
+    --dev)          DEV=1 ;;
+    --wallpaper)    WALLPAPER=1 ;;
+    -y|--yes)       ASSUME_YES=1 ;;
+    -h|--help)      ACTION=help ;;
+    *) warn "unknown option: $arg"; ACTION=help ;;
+  esac
+done
+# non-interactive when asked (-y) or when there's no terminal to prompt on (piped install)
+if [ "${ASSUME_YES:-0}" = "1" ] || [ ! -t 0 ]; then NOCONFIRM="--noconfirm"; else NOCONFIRM=""; fi
+
+case "$ACTION" in
+  install)   do_install ;;
+  uninstall) do_uninstall ;;
+  deps)      install_deps ;;
+  help)      sed -n '2,14p' "$0" ;;
 esac
