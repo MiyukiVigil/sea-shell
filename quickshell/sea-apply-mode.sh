@@ -20,6 +20,17 @@ mkdir -p "$d"
 if [ "$mode" = "light" ]; then
     gsettings set org.gnome.desktop.interface color-scheme 'prefer-light' 2>/dev/null || true
 
+    # If "match colours" (matugen) is on and a wallpaper-matched light palette exists, use it
+    # so light mode is themed to the wallpaper just like dark mode. Otherwise fall back to the
+    # fixed sea-light palette below. Either way it lands in kitty-mode.conf (wins in sea-cyan).
+    lm="$d/kitty-matugen-light.conf"
+    matugen_on=$(python3 -c "import json,sys; print(str(json.load(open(sys.argv[1])).get('matugen', False)))" "$HOME/.config/sea-shell/appearance.json" 2>/dev/null)
+    if [ "$matugen_on" = "True" ] && [ -s "$lm" ]; then
+        cp "$lm" "$kmode"
+        pkill -USR1 -x kitty 2>/dev/null || true
+        exit 0
+    fi
+
     # Latte-derived sea palette — deliberately DARK, saturated fonts so text stays crisp
     # on the light background (the low-contrast pastels of dark mode wash out on white).
     # This include sits after the dark base + matugen in sea-cyan.conf, so it wins.

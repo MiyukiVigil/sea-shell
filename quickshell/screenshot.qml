@@ -12,22 +12,29 @@ ShellRoot {
     property bool save: false
     property string winGeo: ""
     property string winTitle: ""
+    property string accent: "#63c7dd"
+    property bool cfgLight: false
 
     // pin the bar's focus grab so an open dropdown (music player etc.) survives
     // both this widget taking focus AND the later slurp/grim capture
     Component.onCompleted: Quickshell.execDetached(["qs","-c","sea-shell","ipc","call","shell","pin"])
     function cancel() { Quickshell.execDetached(["qs","-c","sea-shell","ipc","call","shell","unpin"]); Qt.quit() }
 
+    // follow the shell's accent + light/dark (same appearance.json every other surface reads)
+    Process { running: true; command: ["sh","-c","cat \"$HOME/.config/sea-shell/appearance.json\" 2>/dev/null"]
+        stdout: StdioCollector { id: apOut; onStreamFinished: { try { var j=JSON.parse(apOut.text); if(j.accent) root.accent=j.accent; if(j.mode!==undefined) root.cfgLight=(""+j.mode==="light") } catch(e){} } } }
+
     QtObject {
         id: theme
-        readonly property color bg:    "#0d1420"
-        readonly property color line:  "#24304a"
-        readonly property color text:  "#e2e9f4"
-        readonly property color sub:   "#a6b6cf"
-        readonly property color faint: "#6f8099"
-        readonly property color iris:  "#63c7dd"
-        readonly property color frost: "#a2e2e8"
-        readonly property color warn:  "#f4c542"
+        readonly property bool light: root.cfgLight
+        readonly property color bg:    light ? "#eaf1f6" : "#0d1420"
+        readonly property color line:  light ? "#b6c9d7" : "#24304a"
+        readonly property color text:  light ? "#0c1520" : "#e2e9f4"
+        readonly property color sub:   light ? "#2c4256" : "#a6b6cf"
+        readonly property color faint: light ? "#48606f" : "#6f8099"
+        readonly property color iris:  light ? Qt.darker(root.accent, 2.4) : root.accent
+        readonly property color frost: light ? Qt.darker(root.accent, 1.7) : Qt.lighter(root.accent, 1.22)
+        readonly property color warn:  light ? "#b9820f" : "#f4c542"
         function a(c, al) { return Qt.rgba(c.r, c.g, c.b, al) }
     }
 

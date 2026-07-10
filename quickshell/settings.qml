@@ -25,7 +25,7 @@ ShellRoot {
             lockSettingsGet.running = true            // idle & lock: load configs
         }
         if (tab === 6) ppGet.running = true           // power: re-read profile
-        if (tab === 11) reloadEventsProc.running = true  // calendar: refresh events
+        if (tab === 11) { reloadEventsProc.running = true; calCfgLoad.running = true }  // calendar: refresh events + subs/prefs
     }
 
     // ---------- native QML file browser ----------
@@ -114,6 +114,18 @@ ShellRoot {
     // ---------- calendar events (import & view) ----------
     property string calMsg: ""
     property var calEvents: []
+    // subscriptions + reminder prefs live in calendar.json (also touched by the import script)
+    property var calSubs: []
+    property bool calRemind: true
+    property int  calLead: 30
+    Process { id: calCfgLoad; running: true; command: ["sh","-c","cat ~/.config/sea-shell/calendar.json 2>/dev/null || echo '{}'"]
+        stdout: StdioCollector { id: calCfgOut; onStreamFinished: { try { var j=JSON.parse(calCfgOut.text.trim()||"{}");
+            root.calSubs = j.subs || []; if(j.remind!==undefined) root.calRemind=!!j.remind; if(j.lead!==undefined) root.calLead=j.lead; } catch(e){} } } }
+    // one Process for every calendar mutation (delete / unsub / resync / set) → reload after
+    Process { id: calMutProc
+        stdout: StdioCollector { onStreamFinished: { reloadEventsProc.running = true; calCfgLoad.running = true; } } }
+    function calMutate(a) { calMutProc.command = ["python3", root.repo + "/sea-import-ics.py"].concat(a); calMutProc.running = false; calMutProc.running = true; }
+    function evKey(e) { return e.date + "|" + e.title + "|" + (e.time||""); }
     Process {
         id: reloadEventsProc; running: true
         command: ["sh", "-c", "cat ~/.config/sea-shell/calendar_events.json 2>/dev/null || echo '[]'"]
@@ -1997,6 +2009,58 @@ ShellRoot {
                                 }
                             }
 
+                            // ---- subscriptions (imported links are remembered & auto-refreshed) ----
+                            RowLayout { Layout.fillWidth: true; spacing: 8; visible: root.calSubs.length > 0
+                                Text { text: "SUBSCRIPTIONS"; color: theme.faint; font.pixelSize: 9; font.family: "monospace"; font.bold: true; font.letterSpacing: 1 }
+                                Rectangle { Layout.fillWidth: true; height: 1; color: theme.a(theme.iris, 0.1) }
+                                Sym { text: "sync"; sz: 14; color: resyncMa.containsMouse ? theme.iris : theme.faint
+                                    MouseArea { id: resyncMa; anchors.fill: parent; anchors.margins: -4; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: { root.calMsg = "re-syncing subscriptions…"; root.calMutate(["--resync"]) } } }
+                                Text { text: "re-sync"; color: resyncMa.containsMouse ? theme.iris : theme.faint; font.pixelSize: 9; font.family: "monospace" }
+                            }
+                            Repeater {
+                                model: root.calSubs
+                                delegate: Rectangle {
+                                    required property var modelData
+                                    Layout.fillWidth: true; implicitHeight: 32; radius: 8
+                                    color: theme.a(theme.line, 0.3); border.width: 1; border.color: theme.a(theme.iris, 0.1)
+                                    RowLayout { anchors.fill: parent; anchors.leftMargin: 10; anchors.rightMargin: 8; spacing: 8
+                                        Sym { text: "link"; sz: 14; color: theme.frost }
+                                        Text { text: modelData; color: theme.sub; font.pixelSize: 10; font.family: "monospace"; elide: Text.ElideMiddle; Layout.fillWidth: true }
+                                        Sym { text: "close"; sz: 15; color: unsubMa.containsMouse ? theme.bad : theme.faint
+                                            MouseArea { id: unsubMa; anchors.fill: parent; anchors.margins: -4; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.calMutate(["--unsub", modelData]) } } }
+                                }
+                            }
+
+                            // ---- reminders ----
+                            RowLayout { Layout.fillWidth: true; spacing: 8; Layout.topMargin: 2
+                                Text { text: "REMINDERS"; color: theme.faint; font.pixelSize: 9; font.family: "monospace"; font.bold: true; font.letterSpacing: 1 }
+                                Rectangle { Layout.fillWidth: true; height: 1; color: theme.a(theme.iris, 0.1) }
+                            }
+                            Rectangle {
+                                Layout.fillWidth: true; implicitHeight: 46; radius: 9
+                                color: theme.a(theme.line, 0.28); border.width: 1; border.color: root.calRemind ? theme.a(theme.iris, 0.4) : theme.a(theme.iris, 0.12)
+                                RowLayout { anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 12; spacing: 10
+                                    Sym { text: "notifications_active"; sz: 18; color: root.calRemind ? theme.frost : theme.faint }
+                                    ColumnLayout { spacing: 0; Layout.fillWidth: true
+                                        Text { text: "notify before events"; color: theme.text; font.pixelSize: 13; font.family: "monospace" }
+                                        Text { text: "timed: " + root.calLead + " min ahead · all-day: at 8:00 am"; color: theme.faint; font.pixelSize: 10; font.family: "monospace" } }
+                                    Rectangle { implicitWidth: 46; implicitHeight: 22; radius: 11
+                                        color: root.calRemind ? theme.iris : theme.a(theme.line, 0.85); border.width: 1; border.color: root.calRemind ? theme.iris : theme.a(theme.iris, 0.3)
+                                        Rectangle { width: 16; height: 16; radius: 8; y: 3; x: root.calRemind ? 27 : 3; color: theme.frost; Behavior on x { NumberAnimation { duration: 120 } } }
+                                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.calMutate(["--set","remind", root.calRemind ? "false" : "true"]) } } }
+                            }
+                            RowLayout { Layout.fillWidth: true; spacing: 6; visible: root.calRemind
+                                Text { text: "lead"; color: theme.sub; font.pixelSize: 11; font.family: "monospace"; Layout.rightMargin: 4 }
+                                Repeater { model: [10, 15, 30, 60]
+                                    delegate: Rectangle { required property var modelData
+                                        readonly property bool sel: root.calLead === modelData
+                                        implicitWidth: 48; implicitHeight: 26; radius: 7
+                                        color: sel ? theme.iris : (ldMa.containsMouse ? theme.a(theme.iris, 0.16) : theme.a(theme.line, 0.4)); border.width: 1; border.color: sel ? theme.iris : theme.a(theme.iris, 0.14)
+                                        Text { anchors.centerIn: parent; text: modelData + "m"; color: sel ? theme.bg : theme.sub; font.pixelSize: 10; font.family: "monospace"; font.bold: sel }
+                                        MouseArea { id: ldMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.calMutate(["--set","lead", "" + modelData]) } } }
+                                Item { Layout.fillWidth: true }
+                            }
+
                             // ---- events list header + refresh ----
                             RowLayout {
                                 Layout.fillWidth: true; spacing: 8; Layout.topMargin: 2
@@ -2042,6 +2106,10 @@ ShellRoot {
                                                 Text { text: "· " + Qt.formatDate(root.evDate(modelData.date), "d MMM yyyy"); color: theme.faint; font.pixelSize: 10; font.family: "monospace" }
                                             }
                                         }
+                                        Sym { text: "close"; sz: 16; Layout.alignment: Qt.AlignVCenter
+                                            color: delMa.containsMouse ? theme.bad : theme.a(theme.faint, 0.55)
+                                            MouseArea { id: delMa; anchors.fill: parent; anchors.margins: -5; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                                onClicked: root.calMutate(["--delete", root.evKey(modelData)]) } }
                                     }
                                 }
                             }

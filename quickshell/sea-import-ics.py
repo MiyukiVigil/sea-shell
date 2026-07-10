@@ -69,61 +69,124 @@ def parse_ics(filepath):
         
     return parse_ics_content(content)
 
+def fetch_url(url):
+    req = urllib.request.Request(
+        url,
+        headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+    )
+    with urllib.request.urlopen(req, timeout=12) as response:
+        return response.read().decode('utf-8', errors='ignore')
+
 def parse_ics_url(url):
     try:
-        req = urllib.request.Request(
-            url, 
-            headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-        )
-        with urllib.request.urlopen(req, timeout=12) as response:
-            content = response.read().decode('utf-8', errors='ignore')
+        content = fetch_url(url)
     except Exception as e:
         print(json.dumps({"status": "error", "message": f"Download failed: {str(e)}"}))
         sys.exit(1)
-        
     return parse_ics_content(content)
 
+# ---------- storage ----------
+CFG_DIR = os.path.expanduser("~/.config/sea-shell")
+DB      = os.path.join(CFG_DIR, "calendar_events.json")
+CAL     = os.path.join(CFG_DIR, "calendar.json")   # { subs: [url], remind: bool, lead: minutes }
+
+def load_json(path, fallback):
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception:
+        return fallback
+
+def save_json(path, data):
+    os.makedirs(CFG_DIR, exist_ok=True)
+    with open(path, 'w', encoding='utf-8') as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+
+def load_cal():
+    c = load_json(CAL, {})
+    if not isinstance(c, dict):
+        c = {}
+    c.setdefault("subs", [])
+    c.setdefault("remind", True)
+    c.setdefault("lead", 30)
+    return c
+
+def evkey(e):
+    return f"{e['date']}|{e['title']}|{e.get('time','')}"
+
+def merge(existing, new_events):
+    seen = {evkey(e) for e in existing}
+    n = 0
+    for e in new_events:
+        if evkey(e) not in seen:
+            existing.append(e); seen.add(evkey(e)); n += 1
+    return n
+
+def save_events(evs):
+    evs.sort(key=lambda x: (x['date'], x.get('time', '')))
+    save_json(DB, evs)
+
 def main():
-    if len(sys.argv) < 2:
+    args = sys.argv[1:]
+    if not args:
         print(json.dumps({"status": "error", "message": "No file path or URL provided"}))
         sys.exit(1)
-        
-    target = sys.argv[1].strip()
+
+    # ---- re-sync every subscribed URL (bar runs this on a timer) ----
+    if args[0] == "--resync":
+        cal = load_cal(); evs = load_json(DB, []); added = 0; errors = []
+        for url in cal.get("subs", []):
+            try:
+                added += merge(evs, parse_ics_content(fetch_url(url)))
+            except Exception as ex:
+                errors.append(f"{url}: {ex}")
+        save_events(evs)
+        print(json.dumps({"status": "success", "imported": added, "total": len(evs),
+                          "subs": len(cal.get("subs", [])), "errors": errors}))
+        return
+
+    # ---- remove a subscription (leaves already-imported events in place) ----
+    if args[0] == "--unsub" and len(args) > 1:
+        cal = load_cal(); cal["subs"] = [u for u in cal["subs"] if u != args[1]]
+        save_json(CAL, cal)
+        print(json.dumps({"status": "success", "subs": len(cal["subs"])}))
+        return
+
+    # ---- delete a single event by "date|title|time" key ----
+    if args[0] == "--delete" and len(args) > 1:
+        evs = [e for e in load_json(DB, []) if evkey(e) != args[1]]
+        save_events(evs)
+        print(json.dumps({"status": "success", "total": len(evs)}))
+        return
+
+    # ---- set a preference: --set remind true|false  |  --set lead 30 ----
+    if args[0] == "--set" and len(args) > 2:
+        cal = load_cal()
+        if args[1] == "remind":
+            cal["remind"] = (args[2].lower() == "true")
+        elif args[1] == "lead":
+            try: cal["lead"] = max(0, int(args[2]))
+            except Exception: pass
+        save_json(CAL, cal)
+        print(json.dumps({"status": "success", "remind": cal["remind"], "lead": cal["lead"]}))
+        return
+
+    # ---- default: import a file or URL (a URL is also remembered as a subscription) ----
+    target = args[0].strip()
     if target.startswith("http://") or target.startswith("https://"):
         new_events = parse_ics_url(target)
+        cal = load_cal()
+        if target not in cal["subs"]:
+            cal["subs"].append(target); save_json(CAL, cal)
     else:
         new_events = parse_ics(target)
-    
-    db_path = os.path.expanduser("~/.config/sea-shell/calendar_events.json")
-    existing_events = []
-    if os.path.exists(db_path):
-        try:
-            with open(db_path, 'r', encoding='utf-8') as f:
-                existing_events = json.load(f)
-        except Exception:
-            pass
-            
-    # Merge without duplicates
-    seen = {f"{e['date']}|{e['title']}|{e.get('time','')}" for e in existing_events}
-    new_count = 0
-    for e in new_events:
-        key = f"{e['date']}|{e['title']}|{e.get('time','')}"
-        if key not in seen:
-            existing_events.append(e)
-            seen.add(key)
-            new_count += 1
-            
-    # Sort events by date and time
-    existing_events.sort(key=lambda x: (x['date'], x.get('time', '')))
-    
-    try:
-        os.makedirs(os.path.dirname(db_path), exist_ok=True)
-        with open(db_path, 'w', encoding='utf-8') as f:
-            json.dump(existing_events, f, indent=2, ensure_ascii=False)
-        print(json.dumps({"status": "success", "imported": new_count, "total": len(existing_events)}))
-    except Exception as e:
-        print(json.dumps({"status": "error", "message": f"Write failed: {str(e)}"}))
-        sys.exit(1)
+
+    evs = load_json(DB, [])
+    if not isinstance(evs, list):
+        evs = []
+    n = merge(evs, new_events)
+    save_events(evs)
+    print(json.dumps({"status": "success", "imported": n, "total": len(evs)}))
 
 if __name__ == "__main__":
     main()

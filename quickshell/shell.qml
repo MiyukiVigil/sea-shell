@@ -158,6 +158,51 @@ ShellRoot {
             }
         } }
     }
+    // ---- subscribed .ics re-sync: "Import Link" remembers the URL; refresh it on a timer ----
+    readonly property string _icsScript: Qt.resolvedUrl("sea-import-ics.py").toString().replace("file://","")
+    Process { id: calResyncProc; command: ["python3", root._icsScript, "--resync"]
+        stdout: StdioCollector { onStreamFinished: reloadEventsProc.running = true } }
+    Timer { interval: 25000;          running: true; repeat: false; onTriggered: calResyncProc.running = true }   // freshen ~25s after login
+    Timer { interval: 6*3600*1000;    running: true; repeat: true;  onTriggered: calResyncProc.running = true }   // and every 6h
+
+    // ---- reminder settings (calendar.json, written by settings/import script) ----
+    property bool calRemind: true
+    property int  calLead: 30
+    Process { id: calCfgProc; running: true; command: ["sh","-c","cat ~/.config/sea-shell/calendar.json 2>/dev/null || echo '{}'"]
+        stdout: StdioCollector { id: calCfgOut; onStreamFinished: { try { var j=JSON.parse(calCfgOut.text.trim()||"{}");
+            if(j.remind!==undefined) root.calRemind=!!j.remind; if(j.lead!==undefined) root.calLead=j.lead; } catch(e){} } } }
+    Timer { interval: 5*60000; running: true; repeat: true; onTriggered: calCfgProc.running = true }   // pick up settings changes
+
+    // ---- reminders: fire a notification a lead-time before each event (timed events) or at
+    //      08:00 on the day (all-day). Fired keys persist so a bar restart won't re-notify. ----
+    property var calReminded: ({})
+    Process { running: true; command: ["sh","-c","cat ~/.config/sea-shell/calendar-reminded.json 2>/dev/null || echo '{}'"]
+        stdout: StdioCollector { id: remOut; onStreamFinished: { try { root.calReminded = JSON.parse(remOut.text.trim()||"{}") } catch(e) { root.calReminded = {} } } } }
+    function fireReminder(e, key, whenStr) {
+        var m = root.calReminded; m[key] = 1;
+        Quickshell.execDetached(["sh","-c","echo '" + Qt.btoa(JSON.stringify(m)) + "' | base64 -d > \"$HOME/.config/sea-shell/calendar-reminded.json\""]);
+        Quickshell.execDetached(["notify-send","-a","sea-shell","-i","x-office-calendar","Reminder · " + e.title, whenStr + "  ·  " + e.date]);
+    }
+    function checkReminders() {
+        if (!root.calRemind) return;
+        var now = clock.date;
+        for (var i=0;i<root.calEvents.length;i++) {
+            var e = root.calEvents[i]; var key = e.date + "|" + e.title + "|" + (e.time||"");
+            if (root.calReminded[key]) continue;
+            var d = root.calDate(e.date);
+            if (e.time && (""+e.time).indexOf(":")>0) {
+                var hm = (""+e.time).split(":");
+                var evt = new Date(d.getFullYear(), d.getMonth(), d.getDate(), parseInt(hm[0]), parseInt(hm[1]));
+                var due = new Date(evt.getTime() - root.calLead*60000);
+                if (now >= due && now <= evt) fireReminder(e, key, "at " + e.time);
+            } else {
+                var at8 = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 8, 0);
+                var endDay = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 23, 59);
+                if (now >= at8 && now <= endDay) fireReminder(e, key, "today");
+            }
+        }
+    }
+    Timer { interval: 60000; running: true; repeat: true; triggeredOnStart: true; onTriggered: root.checkReminders() }
 
     QtObject {
         id: theme
@@ -612,6 +657,12 @@ ShellRoot {
     // ---------- notifications (our own daemon: popups + bar center) ----------
     property var notes: []           // history for the center
     property int noteSeq: 0
+    // Do Not Disturb: suppress on-screen popups (history still records everything). Persists
+    // across restarts; critical-urgency notifications still pop through so alerts aren't lost.
+    property bool dnd: false
+    Process { running: true; command: ["sh","-c","cat ~/.config/sea-shell/dnd 2>/dev/null || echo 0"]
+        stdout: StdioCollector { id: dndOut; onStreamFinished: root.dnd = (dndOut.text.trim() === "1") } }
+    function setDnd(v) { root.dnd = v; Quickshell.execDetached(["sh","-c","echo " + (v?"1":"0") + " > \"$HOME/.config/sea-shell/dnd\""]); }
     ListModel { id: popupModel }      // transient on-screen popups
     NotificationServer {
         id: notifServer
@@ -626,7 +677,9 @@ ShellRoot {
                           appName: (n.appName||"notification"), urgency: n.urgency,
                           time: Qt.formatDateTime(new Date(), "HH:mm") };
             root.notes = [entry].concat(root.notes).slice(0, 40);
-            popupModel.insert(0, { key: k, summary: entry.summary, body: entry.body, appName: entry.appName, urg: n.urgency });
+            // DND swallows the popup but keeps the history entry; critical (urgency 2) breaks through
+            if (!root.dnd || n.urgency === 2)
+                popupModel.insert(0, { key: k, summary: entry.summary, body: entry.body, appName: entry.appName, urg: n.urgency });
             // not tracked → server releases it after this handler; we've copied the fields
         }
     }
@@ -867,7 +920,18 @@ ShellRoot {
                 GradientStop { position: 0.0; color: theme.a(theme.bg, Math.min(1, root.dropOpacity * 1.10)) }
                 GradientStop { position: 1.0; color: theme.a(theme.bg, root.dropOpacity * 0.92) }
             }
-            border.width: 1; border.color: theme.a(theme.iris, 0.28)
+            border.width: 1; border.color: theme.a(theme.frost, 0.26)
+            // matte-glass rim — a whisper of light at the top edge fading out, matching the
+            // launcher card. Children draw above the fill but below the content columns.
+            Rectangle {
+                anchors.fill: parent; radius: parent.radius
+                gradient: Gradient {
+                    GradientStop { position: 0.0;  color: Qt.rgba(1, 1, 1, theme.light ? 0.10 : 0.05) }
+                    GradientStop { position: 0.32; color: "transparent" }
+                }
+            }
+            Rectangle { anchors { top: parent.top; left: parent.left; right: parent.right; margins: 1 }
+                height: 1; color: Qt.rgba(1, 1, 1, theme.light ? 0.45 : 0.12) }
         }
     }
 
@@ -1211,9 +1275,9 @@ ShellRoot {
 
                     // ---- NOTIFICATION CENTER (bell + badge) ----
                     Pill { owner: bar; id: bellPill; anchors.verticalCenter: parent.verticalCenter; key: "notif"
-                        icon: root.notes.length>0 ? "notifications" : "notifications_none"
-                        accent: root.notes.length>0 ? theme.iris : theme.frost
-                        value: root.notes.length>0 ? String(root.notes.length) : "" }
+                        icon: root.dnd ? "notifications_off" : (root.notes.length>0 ? "notifications" : "notifications_none")
+                        accent: root.dnd ? theme.warn : (root.notes.length>0 ? theme.iris : theme.frost)
+                        value: root.dnd ? "" : (root.notes.length>0 ? String(root.notes.length) : "") }
                     Drop { screen: bar.screen
                         id: notifDrop; host: bellPill; shown: root.openPop ==="notif" && root.openBar === bar
                         cardW: 350; cardH: Math.min(460, notifCol.implicitHeight + 28)
@@ -1222,12 +1286,23 @@ ShellRoot {
                             Item { width: parent.width; height: 28
                                 Text { anchors.verticalCenter: parent.verticalCenter; anchors.left: parent.left
                                     text: "notifications"; color: theme.iris; font.pixelSize: 11; font.family: root.cfgFont; font.bold: true; font.letterSpacing: 0.8 }
-                                Rectangle { anchors.verticalCenter: parent.verticalCenter; anchors.right: parent.right
-                                    visible: root.notes.length > 0
-                                    width: clrTxt.implicitWidth + 16; height: 22; radius: 6
-                                    color: clrMa.containsMouse ? theme.a(theme.bad, 0.18) : theme.a(theme.line, 0.5)
-                                    Text { id: clrTxt; anchors.centerIn: parent; text: "clear all"; color: clrMa.containsMouse ? theme.bad : theme.sub; font.pixelSize: 10; font.family: root.cfgFont }
-                                    MouseArea { id: clrMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.noteClear() } } }
+                                Row { anchors.verticalCenter: parent.verticalCenter; anchors.right: parent.right; spacing: 6
+                                    // Do Not Disturb toggle
+                                    Rectangle { anchors.verticalCenter: parent.verticalCenter
+                                        width: dndRow.width + 16; height: 22; radius: 6
+                                        color: root.dnd ? theme.a(theme.warn, 0.2) : (dndMa.containsMouse ? theme.a(theme.line, 0.75) : theme.a(theme.line, 0.5))
+                                        border.width: 1; border.color: root.dnd ? theme.a(theme.warn, 0.5) : "transparent"
+                                        Row { id: dndRow; anchors.centerIn: parent; spacing: 4
+                                            Sym { anchors.verticalCenter: parent.verticalCenter; text: root.dnd ? "do_not_disturb_on" : "do_not_disturb_off"; sz: 13; color: root.dnd ? theme.warn : theme.sub }
+                                            Text { anchors.verticalCenter: parent.verticalCenter; text: "DND"; color: root.dnd ? theme.warn : theme.sub; font.pixelSize: 10; font.family: root.cfgFont; font.bold: root.dnd } }
+                                        MouseArea { id: dndMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.setDnd(!root.dnd) } }
+                                    // clear all
+                                    Rectangle { anchors.verticalCenter: parent.verticalCenter
+                                        visible: root.notes.length > 0
+                                        width: clrTxt.implicitWidth + 16; height: 22; radius: 6
+                                        color: clrMa.containsMouse ? theme.a(theme.bad, 0.18) : theme.a(theme.line, 0.5)
+                                        Text { id: clrTxt; anchors.centerIn: parent; text: "clear all"; color: clrMa.containsMouse ? theme.bad : theme.sub; font.pixelSize: 10; font.family: root.cfgFont }
+                                        MouseArea { id: clrMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.noteClear() } } } }
                             Rectangle { width: parent.width; height: 1; color: theme.a(theme.line, 0.6) }
                             Item { height: 2; width: 1 }
                             Text { visible: root.notes.length===0; text: "no notifications"; color: theme.faint; font.pixelSize: 12; font.family: root.cfgFont; topPadding: 4 }
@@ -1538,6 +1613,17 @@ ShellRoot {
                             property int lead: new Date(yr, mo, 1).getDay()
                             property var days: { var arr=[]; var n=new Date(yr, mo+1, 0).getDate(); for(var i=1;i<=n;i++) arr.push(i); return arr }
                             Text { anchors.horizontalCenter: parent.horizontalCenter; text: Qt.formatDateTime(clock.date,"MMMM yyyy"); color: theme.frost; font.pixelSize: 14; font.family: root.cfgFont; font.bold: true }
+                            // at-a-glance counts for today / the next 7 days
+                            Text { anchors.horizontalCenter: parent.horizontalCenter
+                                readonly property int todayN: root.calEvents.filter(function(e){ return (""+e.date) === root.calTodayKey(); }).length
+                                readonly property int weekN: {
+                                    var end = new Date(clock.date.getFullYear(), clock.date.getMonth(), clock.date.getDate()+6);
+                                    var ek = end.getFullYear()+"-"+String(end.getMonth()+1).padStart(2,"0")+"-"+String(end.getDate()).padStart(2,"0");
+                                    return root.calUpcoming.filter(function(e){ return (""+e.date) <= ek; }).length;
+                                }
+                                visible: weekN > 0
+                                text: [ todayN>0 ? todayN + " today" : "", weekN>0 ? weekN + " this week" : "" ].filter(Boolean).join("  ·  ")
+                                color: theme.faint; font.pixelSize: 9; font.family: root.cfgFont }
                             Grid { anchors.horizontalCenter: parent.horizontalCenter; columns: 7; spacing: 4
                                 Repeater { model: ["S","M","T","W","T","F","S"]
                                     delegate: Text { required property var modelData; width: 34; horizontalAlignment: Text.AlignHCenter; text: modelData; color: theme.faint; font.pixelSize: 11; font.family: root.cfgFont } }
