@@ -83,11 +83,17 @@ ShellRoot {
     property string cfgFont: "monospace"
     property bool   cfgLight: false          // dark (default) ↔ light palette
     property string cfgBarFill: "matugen"    // top-bar fill: matugen (accent-tinted) · black · white
-    // bar background colour — a clean neutral black/white option (nice at 100% opacity), else
-    // the matugen-tinted surface. Only affects the top bar; dropdowns stay accent-tinted.
+    property string cfgEdge: "top"           // which screen edge the bar docks to: top·bottom·left·right
+    // left/right = a VERTICAL bar: groups stack in a column, dropdowns open sideways.
+    readonly property bool barVertical: cfgEdge === "left" || cfgEdge === "right"
+    // bar background colour. "matugen" is a VISIBLY accent-tinted dark/light — theme.bg itself
+    // is deliberately near-black (lightness 0.07) so it reads as black at 100% opacity, hiding
+    // the hue; the bar lifts the lightness + saturation so the wallpaper colour actually shows.
+    // "black"/"white" are clean neutrals. Only affects the top bar; dropdowns stay theme.bg.
     readonly property color barFillColor: cfgBarFill === "black" ? "#0a0d12"
                                         : cfgBarFill === "white" ? "#f5f8fb"
-                                        : theme.bg
+                                        : theme.light ? Qt.hsla(theme._ah, 0.18, 0.90, 1)
+                                                      : Qt.hsla(theme._ah, 0.46, 0.135, 1)
 
     // Propagate the shell's light/dark choice to the SYSTEM: gsettings color-scheme
     // (so GTK apps + browsers' prefers-color-scheme follow, via xdg-desktop-portal) and
@@ -120,6 +126,7 @@ ShellRoot {
             if (j.radius  !== undefined) root.cfgRadius  = j.radius;
             if (j.opacity !== undefined) root.cfgOpacity = j.opacity;
             if (j.barFill !== undefined && (""+j.barFill).length>0) root.cfgBarFill = j.barFill;
+            if (j.edge    !== undefined && (""+j.edge).length>0)    root.cfgEdge    = j.edge;
             if (j.height  !== undefined) root.cfgHeight  = j.height;
             if (j.accent  !== undefined && (""+j.accent).length>0) root.cfgAccent = j.accent;
             if (j.font    !== undefined && (""+j.font).length>0)   root.cfgFont   = j.font;
@@ -129,6 +136,15 @@ ShellRoot {
         onLoaded: apply()
         onFileChanged: apply()
     }
+    // Flipping a horizontal bar to a vertical one (or back) restructures the layer surface —
+    // which axis is fixed, which anchors are set — and wlroots can't cleanly re-anchor that
+    // live (the old layout lingers/breaks). A one-off hard reload rebuilds the shell into the
+    // new orientation. Same-orientation swaps (top↔bottom, left↔right) re-anchor fine and are
+    // left alone. The `_orientReady` gate skips the initial startup load so this never loops.
+    property bool _orientReady: false
+    Timer { interval: 2500; running: true; repeat: false; onTriggered: root._orientReady = true }
+    onBarVerticalChanged: if (root._orientReady) orientationReload.restart()
+    Timer { id: orientationReload; interval: 80; repeat: false; onTriggered: Quickshell.reload(true) }
     // auto dark-mode schedule — sea-theme-schedule.sh flips `mode` in appearance.json
     // when the clock crosses the configured window; the FileView above then applies it.
     Process { id: themeSched; command: ["sh", Qt.resolvedUrl("sea-theme-schedule.sh").toString().replace("file://","")] }
@@ -819,6 +835,7 @@ ShellRoot {
         id: pill
         property string icon: ""
         property string value: ""
+        property string vertValue: ""    // compact value used on a vertical bar (falls back to value)
         property color accent: theme.frost
         property string key: ""
         property bool scrollText: false
@@ -828,24 +845,49 @@ ShellRoot {
         signal scrolled(real dy)
         property var owner: null
         readonly property bool open: root.openPop === key && key !== ""
-        implicitHeight: 26; implicitWidth: pr.implicitWidth + 20
-        radius: height/2
+        readonly property bool vert: root.barVertical
+        // On a vertical bar the pill becomes a capsule with the icon stacked over the value.
+        // The value only shows when short enough to fit the narrow bar (a long string like the
+        // full date would overflow) — so pills like battery/volume keep their readout while the
+        // clock (given a compact HH:mm vertValue) stays legible and others fall back to icon-only.
+        readonly property string vtext: pill.vertValue !== "" ? pill.vertValue : pill.value
+        readonly property bool showVal: pill.vert ? (pill.vtext.length > 0 && pill.vtext.length <= 6)
+                                                  : (pill.value !== "")
+        implicitHeight: pill.vert ? (pr.implicitHeight + 12) : 26
+        // vertical pills share ONE width (derived from bar thickness) so they stack into a
+        // clean column with flush edges instead of a ragged centre-aligned zigzag
+        implicitWidth:  pill.vert ? Math.max(30, root.cfgHeight - 12) : (pr.implicitWidth + 20)
+        // uniform rounded-rectangle corners on a vertical bar (not a per-pill capsule, which
+        // would make short pills horizontal ovals and tall ones vertical ovals)
+        radius: pill.vert ? Math.min(13, height/2) : height/2
         color: (open || pm.containsMouse) ? theme.a(theme.iris,0.18) : theme.a(theme.line,0.42)
         border.width: 1; border.color: (open || pm.containsMouse) ? theme.a(theme.iris,0.55) : theme.a(theme.iris,0.16)
         Behavior on color { ColorAnimation { duration: 120 } }
-        Row { id: pr; anchors.centerIn: parent; spacing: 6
-            Sym { anchors.verticalCenter: parent.verticalCenter; text: pill.icon; color: pill.accent; visible: text!==""; sz: 16 }
+        // Grid (not Row) so the icon + value sit side-by-side (horizontal bar) or stacked
+        // (vertical bar). Cross-axis centring is the Grid's job, so children carry no anchors.
+        Grid { id: pr; anchors.centerIn: parent
+            columns: pill.vert ? 1 : 99
+            rowSpacing: 1; columnSpacing: 6
+            horizontalItemAlignment: Grid.AlignHCenter; verticalItemAlignment: Grid.AlignVCenter
+            // Material Symbols glyphs sit ~0.16em left of their advance box, so a centred
+            // icon-only pill looks left-shifted. A Translate nudges the paint right to centre
+            // the ink WITHOUT changing layout width (so icon+value spacing is untouched).
+            Sym { text: pill.icon; color: pill.accent; visible: text!==""; sz: pill.vert ? 15 : 16
+                transform: Translate { x: Math.round((pill.vert ? 15 : 16) * 0.16) } }
             // Use Marquee only when scrollText is enabled (e.g. mprisPill), plain Text otherwise.
             // Marquee with maxW:9999 creates an implicit-width loop that causes flickering.
             Loader {
-                anchors.verticalCenter: parent.verticalCenter
-                visible: pill.value !== ""
-                active: pill.value !== ""
-                sourceComponent: pill.scrollText ? marqueeComp : plainComp
+                visible: pill.showVal
+                active: pill.showVal
+                sourceComponent: pill.vert ? vertComp : (pill.scrollText ? marqueeComp : plainComp)
             }
             Component {
                 id: plainComp
                 Text { text: pill.value; color: theme.text; font.pixelSize: 13; font.family: root.cfgFont }
+            }
+            Component {
+                id: vertComp
+                Text { text: pill.vtext; color: theme.text; font.pixelSize: 10; font.family: root.cfgFont }
             }
             Component {
                 id: marqueeComp
@@ -892,10 +934,20 @@ ShellRoot {
             return dw.host.mapToGlobal(Qt.point(0, 0));
         }
         readonly property int sw: dw.screen ? dw.screen.width : 1920
+        readonly property int sh: dw.screen ? dw.screen.height : 1080
         // mapToGlobal speaks virtual-desktop coordinates; this surface is monitor-local,
         // so subtract the screen's global offset or cards drift on non-origin monitors
         readonly property int scrX: dw.screen ? dw.screen.x : 0
         readonly property int scrY: dw.screen ? dw.screen.y : 0
+        readonly property int hostW: dw.host ? (dw.host.width  || dw.host.implicitWidth)  : 0
+        readonly property int hostH: dw.host ? (dw.host.height || dw.host.implicitHeight) : 0
+        // host position in this (monitor-local) Drop window's coordinates. mapToGlobal on a
+        // layer surface does NOT include the surface's inset on its docked axis — a right/bottom
+        // bar reads as if flush to the monitor's left/top — so add that inset back per edge.
+        readonly property real barOffX: root.cfgEdge === "right"  ? Math.max(0, dw.sw - root.cfgHeight) : 0
+        readonly property real barOffY: root.cfgEdge === "bottom" ? Math.max(0, dw.sh - root.cfgHeight) : 0
+        readonly property real hostGX: dw.hp.x - dw.scrX + dw.barOffX
+        readonly property real hostGY: dw.hp.y - dw.scrY + dw.barOffY
 
         // `shown` is the logical open state (each usage sets it). CLOSE IS INSTANT: the
         // card — shade AND text — is zeroed on the same frame, so nothing lingers or
@@ -925,8 +977,20 @@ ShellRoot {
             id: cardBg
             property real openAnimFactor: 0.0
             width: dw.cardW; height: dw.cardH
-            x: Math.max(8, Math.min(dw.sw - dw.cardW - 8, dw.hp.x - dw.scrX + (dw.host ? (dw.host.width || dw.host.implicitWidth)/2 : 0) - dw.cardW/2))
-            y: (dw.hp.y - dw.scrY + (dw.host ? (dw.host.height || dw.host.implicitHeight) : 0) + 8) + (1.0 - openAnimFactor) * -12
+            // the card opens off the side the bar is docked to: below a top bar, above a
+            // bottom bar, to the right of a left bar, to the left of a right bar. It slides
+            // in FROM the bar (12px) and is clamped to stay on-screen on the free axis.
+            readonly property real slide: (1.0 - openAnimFactor) * 12
+            x: {
+                if (root.cfgEdge === "left")  return dw.hostGX + dw.hostW + 8 - slide;
+                if (root.cfgEdge === "right") return dw.hostGX - dw.cardW - 8 + slide;
+                return Math.max(8, Math.min(dw.sw - dw.cardW - 8, dw.hostGX + dw.hostW/2 - dw.cardW/2));
+            }
+            y: {
+                if (root.cfgEdge === "bottom") return dw.hostGY - dw.cardH - 8 + slide;
+                if (root.barVertical)          return Math.max(8, Math.min(dw.sh - dw.cardH - 8, dw.hostGY + dw.hostH/2 - dw.cardH/2));
+                return dw.hostGY + dw.hostH + 8 - slide;   // top bar
+            }
             radius: root.cfgRadius
             gradient: Gradient {
                 GradientStop { position: 0.0; color: theme.a(theme.bg, Math.min(1, root.dropOpacity * 1.10)) }
@@ -962,36 +1026,65 @@ ShellRoot {
             WlrLayershell.namespace: "sea-shell:bar"
             WlrLayershell.keyboardFocus: WlrKeyboardFocus.OnDemand   // lets dropdown text fields (wifi pw) type
             exclusionMode: ExclusionMode.Auto
-            anchors { top: true; left: true; right: true }
-            implicitHeight: root.cfgHeight
+            // 4-way docking: top/bottom stretch horizontally (anchor left+right + a fixed
+            // height); left/right stretch vertically (anchor top+bottom + a fixed width).
+            anchors.top:    root.cfgEdge === "top"    || root.barVertical
+            anchors.bottom: root.cfgEdge === "bottom" || root.barVertical
+            anchors.left:   root.cfgEdge === "left"   || !root.barVertical
+            anchors.right:  root.cfgEdge === "right"  || !root.barVertical
+            implicitHeight: root.barVertical ? 0 : root.cfgHeight
+            implicitWidth:  root.barVertical ? root.cfgHeight : 0
 
             Rectangle {
                 id: barBg
                 anchors.fill: parent
-                anchors { topMargin: 6; leftMargin: 8; rightMargin: 8 }
+                // 6px gap on the docked edge, 8px on the two free edges (0 on the inner edge)
+                anchors.topMargin:    root.cfgEdge === "bottom" ? 0 : (root.barVertical ? 8 : 6)
+                anchors.bottomMargin: root.cfgEdge === "top"    ? 0 : (root.barVertical ? 8 : 6)
+                anchors.leftMargin:   root.cfgEdge === "right"  ? 0 : (root.barVertical ? 6 : 8)
+                anchors.rightMargin:  root.cfgEdge === "left"   ? 0 : (root.barVertical ? 6 : 8)
                 radius: root.cfgRadius
                 color: theme.a(root.barFillColor, root.cfgOpacity)
-                border.width: 1; border.color: theme.a(theme.iris,0.30)
+                // at 0% opacity the fill vanishes and so does the outline — only the chips remain
+                border.width: root.cfgOpacity < 0.06 ? 0 : 1
+                border.color: theme.a(theme.iris, 0.30 * Math.min(1, root.cfgOpacity / 0.5))
 
-                // ---------- LEFT: logo · workspaces · app name ----------
-                Row {
+                // ---------- START: logo · workspaces · app name ----------
+                // Grid (not Row) so the same markup lays out horizontally (top/bottom bar,
+                // columns:99 → one row) or vertically (left/right bar, columns:1 → one column).
+                // Cross-axis centring is done by the Grid's item-alignment, so children carry
+                // NO verticalCenter/horizontalCenter anchors of their own.
+                Grid {
                     id: leftGroup
-                    anchors { left: parent.left; leftMargin: 12; verticalCenter: parent.verticalCenter }
-                    spacing: 9
-                    SeaLogo { anchors.verticalCenter: parent.verticalCenter; size: 24
+                    columns: root.barVertical ? 1 : 99
+                    rowSpacing: 9; columnSpacing: 9
+                    horizontalItemAlignment: Grid.AlignHCenter; verticalItemAlignment: Grid.AlignVCenter
+                    anchors.left:   root.barVertical ? undefined : parent.left
+                    anchors.leftMargin: 12
+                    anchors.top:    root.barVertical ? parent.top : undefined
+                    anchors.topMargin: 12
+                    anchors.verticalCenter:   root.barVertical ? undefined : parent.verticalCenter
+                    anchors.horizontalCenter: root.barVertical ? parent.horizontalCenter : undefined
+                    SeaLogo { size: 24
                         card: theme.panel; accent: theme.iris; highlight: theme.frost; rim: theme.iris
                         MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: launcher.toggle() } }
-                    Row {
-                        anchors.verticalCenter: parent.verticalCenter; spacing: 6
+                    Grid {
+                        columns: root.barVertical ? 1 : 99
+                        rowSpacing: 6; columnSpacing: 6
+                        horizontalItemAlignment: Grid.AlignHCenter; verticalItemAlignment: Grid.AlignVCenter
                         Repeater {
                             model: Hyprland.workspaces
                             delegate: Rectangle {
                                 required property var modelData
                                 readonly property bool foc: Hyprland.focusedWorkspace && Hyprland.focusedWorkspace.id === modelData.id
-                                width: foc ? 36 : 24; height: 24; radius: height/2   // circle → pill when active
+                                // active workspace grows along the bar's long axis
+                                width:  (foc && !root.barVertical) ? 36 : 24
+                                height: (foc && root.barVertical)  ? 36 : 24
+                                radius: 12   // circle → pill when active
                                 color: foc ? theme.iris : theme.a(theme.line,0.55)
                                 border.width: 1; border.color: foc ? theme.frost : theme.a(theme.iris,0.18)
-                                Behavior on width { NumberAnimation { duration: 180; easing.type: Easing.OutBack } }
+                                Behavior on width  { NumberAnimation { duration: 180; easing.type: Easing.OutBack } }
+                                Behavior on height { NumberAnimation { duration: 180; easing.type: Easing.OutBack } }
                                 Behavior on color { ColorAnimation { duration: 160 } }
                                 Text { anchors.centerIn: parent; text: modelData.id; color: foc ? theme.bg : theme.sub; font.pixelSize: 12; font.family: root.cfgFont; font.bold: foc }
                                 MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: Hyprland.dispatch("workspace "+modelData.id) }
@@ -999,7 +1092,8 @@ ShellRoot {
                         }
                     }
                     Text {
-                        anchors.verticalCenter: parent.verticalCenter
+                        // the horizontal window title has no room in a narrow vertical bar
+                        visible: !root.barVertical
                         width: Math.min(implicitWidth, 240); elide: Text.ElideRight
                         color: theme.faint; font.pixelSize: 12; font.family: root.cfgFont
                         text: (Hyprland.activeToplevel && Hyprland.activeToplevel.lastIpcObject) ? (Hyprland.activeToplevel.lastIpcObject.class || "") : ""
@@ -1195,13 +1289,133 @@ ShellRoot {
                                     Text { id: plainT; width: parent.width; text: root.plainLyrics; wrapMode: Text.Wrap
                                         horizontalAlignment: Text.AlignHCenter; color: theme.sub; font.pixelSize: 12; font.family: root.cfgFont } } } } } }
 
-                // ---------- RIGHT: weather · tray · wifi · vol · battery · clock ----------
-                Row {
+                // ---------- END: weather · tray · wifi · vol · battery · clock ----------
+                // Grid, same trick as leftGroup — horizontal (top/bottom) or vertical (left/right).
+                // Anchored to the far edge: right for a horizontal bar, bottom for a vertical one.
+                Grid {
                     id: rightGroup
-                    anchors { right: parent.right; rightMargin: 12; verticalCenter: parent.verticalCenter }
-                    spacing: 9
+                    columns: root.barVertical ? 1 : 99
+                    rowSpacing: 9; columnSpacing: 9
+                    horizontalItemAlignment: Grid.AlignHCenter; verticalItemAlignment: Grid.AlignVCenter
+                    // horizontal axis via anchors; vertical position via manual y. Anchoring a
+                    // content-sized Grid's `bottom` collapses it (height reads 0 at anchor time),
+                    // so we compute y from implicitHeight: bottom-pinned when vertical, centred when not.
+                    anchors.right:  root.barVertical ? undefined : parent.right
+                    anchors.rightMargin: 12
+                    anchors.horizontalCenter: root.barVertical ? parent.horizontalCenter : undefined
+                    y: root.barVertical ? (parent.height - implicitHeight - 12)
+                                        : (parent.height - implicitHeight) / 2
 
                     // ---- WEATHER dropdown (its pill is declared after the tray, below) ----
+                    
+
+                    // ---- SYSTEM TRAY (after weather) — collapsible, right-click = app menu ----
+                    Grid { columns: root.barVertical ? 1 : 99; rowSpacing: 8; columnSpacing: 8
+                        horizontalItemAlignment: Grid.AlignHCenter; verticalItemAlignment: Grid.AlignVCenter
+                        // collapse / expand toggle
+                        Rectangle { width: 20; height: 20; radius: 6
+                            visible: SystemTray.items.values.length > 0
+                            color: tcm.containsMouse ? theme.a(theme.iris,0.18) : "transparent"
+                            Sym { anchors.centerIn: parent; text: root.barVertical ? (root.trayCollapsed ? "expand_less" : "expand_more") : (root.trayCollapsed ? "chevron_left" : "chevron_right"); sz: 16; color: theme.sub }
+                            MouseArea { id: tcm; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.trayCollapsed = !root.trayCollapsed } }
+                        Grid { columns: root.barVertical ? 1 : 99; rowSpacing: 9; columnSpacing: 9; visible: !root.trayCollapsed
+                            horizontalItemAlignment: Grid.AlignHCenter; verticalItemAlignment: Grid.AlignVCenter
+                            Repeater { model: SystemTray.items
+                                delegate: Item { id: trayItem; required property SystemTrayItem modelData; width: 18; height: 18
+                                    IconImage { anchors.fill: parent; asynchronous: true; source: trayItem.modelData.icon }
+                                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; acceptedButtons: Qt.LeftButton|Qt.RightButton
+                                        onClicked: (e)=>{
+                                            if (e.button===Qt.LeftButton) { trayItem.modelData.activate(); return }
+                                            // one shared menu window → opening a 2nd icon replaces it, same icon toggles
+                                            if (root.openPop==="tray" && bar.trayHost===trayItem) { root.openPop=""; return }
+                                            bar.trayHost = trayItem; bar.trayMenuSel = trayItem.modelData; root.openBar = bar; root.openPop = "tray" } }
+                                } } } }
+
+                    // ---- shared tray menu: ONE blurable layer-surface Drop (sea-shell:drop),
+                    // part of the openPop single-dropdown system so the focus grab dismisses it ----
+                    
+
+                    // ---- WEATHER pill (placed after the tray) ----
+                    Pill { owner: bar; id: wxPill; key: "wx"
+                        visible: root.wxTemp!==""; icon: root.wxIcon(root.wxCond); value: root.wxTemp; accent: theme.frost }
+
+                    // ---- CLIPBOARD (opens the launcher in clipboard mode) ----
+                    Pill { owner: bar; icon: "content_paste"; accent: theme.frost
+                        onClicked: { root.openPop = ""; launcher.open(";") } }
+
+                    // ---- NOTIFICATION CENTER (bell + badge) ----
+                    Pill { owner: bar; id: bellPill; key: "notif"
+                        icon: root.dnd ? "notifications_off" : (root.notes.length>0 ? "notifications" : "notifications_none")
+                        accent: root.dnd ? theme.warn : (root.notes.length>0 ? theme.iris : theme.frost)
+                        value: root.dnd ? "" : (root.notes.length>0 ? String(root.notes.length) : "") }
+                    
+
+                    // ---- WIFI ----
+                    Pill { owner: bar; id: wifiPill; key: "wifi"
+                        icon: root.wifiOn ? "wifi" : "wifi_off"; accent: root.wifiOn ? theme.frost : theme.bad
+                        }   // icon-only: SSID lives in the dropdown
+                    
+
+                    // ---- BLUETOOTH ----
+                    Pill { owner: bar; id: btPill
+                        visible: root.btAdapter !== null
+                        key: root.btAdapter ? "bt" : ""
+                        icon: (!root.btAdapter || !root.btAdapter.enabled) ? "bluetooth_disabled" : (root.btActive ? "bluetooth_connected" : (root.btAdapter.discovering ? "bluetooth_searching" : "bluetooth"))
+                        accent: root.btActive ? theme.iris : ((root.btAdapter && root.btAdapter.enabled) ? theme.frost : theme.faint)
+                        value: root.btActive ? root.btName(root.btActive) : "" }
+                    
+
+                    // ---- CAFFEINE ----
+                    Pill { owner: bar
+                        icon: root.idleOn ? "bedtime" : "coffee"
+                        accent: root.idleOn ? theme.frost : theme.warn
+                        value: ""
+                        onClicked: root.toggleIdle() }
+
+                    // ---- SYSTEM MONITOR (cpu · ram · gpu) ----
+                    Pill { owner: bar; id: sysPill; key: "sys"
+                        icon: "speed"; value: Math.round(root.cpuUsage)+"%"
+                        accent: root.loadColor(root.cpuTemp, 78, 90) }
+                    
+
+                    // ---- VOLUME ----
+                    Pill { owner: bar; id: volPill; key: "vol"
+                        readonly property var au: Pipewire.defaultAudioSink ? Pipewire.defaultAudioSink.audio : null
+                        readonly property int vol: au ? Math.round(au.volume*100) : 0
+                        icon: !au||au.muted ? "volume_off" : vol<34?"volume_mute":vol<67?"volume_down":"volume_up"
+                        accent: (au&&au.muted)?theme.faint:theme.frost
+                        value: au ? (au.muted?"muted":vol+"%") : "—"
+                        onRightClicked: { if(au) au.muted = !au.muted }
+                        onScrolled: (dy)=>{ if(!au) return; au.muted=false; au.volume=Math.max(0,Math.min(1,au.volume+(dy>0?0.05:-0.05))) } }
+                    
+
+                    // ---- BATTERY ----
+                    Pill { owner: bar; id: batPill
+                        readonly property var dev: UPower.displayDevice
+                        readonly property bool charging: !UPower.onBattery
+                        readonly property int pct: dev ? Math.round(dev.percentage*100) : 0
+                        visible: dev && dev.isLaptopBattery
+                        key: visible ? "bat" : ""
+                        icon: charging?"battery_charging_full":pct>=90?"battery_full":pct>=60?"battery_5_bar":pct>=35?"battery_3_bar":pct>=15?"battery_1_bar":"battery_alert"
+                        value: pct+"%"; accent: charging?theme.good:pct<=20?theme.bad:theme.frost }
+                    
+
+                    // ---- CLOCK ----
+                    Pill { owner: bar; id: clockPill; key: "cal"; icon: "schedule"
+                        value: Qt.formatDateTime(clock.date,"ddd d MMM · HH:mm")
+                        vertValue: Qt.formatDateTime(clock.date,"HH:mm"); accent: theme.iris }
+                     
+
+                    // ---- POWER (very end) ----
+                    Pill { owner: bar; id: pwrPill; key: "pwr"; icon: "power_settings_new"; accent: theme.bad }
+                    
+                }
+
+                // dropdown windows for the END cluster — kept OUT of the rightGroup positioner:
+                // a layer-surface window reads to a Grid as a full-height item, which in a vertical
+                // (columns:1) bar would insert screen-tall gaps. They anchor to their host by id, so
+                // their parent doesn't matter — parking them here keeps the Grid pill-only.
+                Item { id: rightGroupDrops
                     Drop { screen: bar.screen
                         id: wxDrop; host: wxPill; shown: root.openPop ==="wx" && root.openBar === bar
                         cardW: 250; cardH: wxCol.implicitHeight + 32
@@ -1237,29 +1451,6 @@ ShellRoot {
                                     Sym { anchors.verticalCenter: parent.verticalCenter; text: "settings"; sz: 15; color: theme.sub }
                                     Text { anchors.verticalCenter: parent.verticalCenter; text: "set location / units"; color: theme.sub; font.pixelSize: 11; font.family: root.cfgFont } }
                                 MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { root.openPop=""; Quickshell.execDetached(["qs","-p",root.settingsPath]) } } } } }
-
-                    // ---- SYSTEM TRAY (after weather) — collapsible, right-click = app menu ----
-                    Row { anchors.verticalCenter: parent.verticalCenter; spacing: 8
-                        // collapse / expand toggle
-                        Rectangle { anchors.verticalCenter: parent.verticalCenter; width: 20; height: 20; radius: 6
-                            visible: SystemTray.items.values.length > 0
-                            color: tcm.containsMouse ? theme.a(theme.iris,0.18) : "transparent"
-                            Sym { anchors.centerIn: parent; text: root.trayCollapsed ? "chevron_left" : "chevron_right"; sz: 16; color: theme.sub }
-                            MouseArea { id: tcm; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.trayCollapsed = !root.trayCollapsed } }
-                        Row { anchors.verticalCenter: parent.verticalCenter; spacing: 9; visible: !root.trayCollapsed
-                            Repeater { model: SystemTray.items
-                                delegate: Item { id: trayItem; required property SystemTrayItem modelData; width: 18; height: 18
-                                    IconImage { anchors.fill: parent; asynchronous: true; source: trayItem.modelData.icon }
-                                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; acceptedButtons: Qt.LeftButton|Qt.RightButton
-                                        onClicked: (e)=>{
-                                            if (e.button===Qt.LeftButton) { trayItem.modelData.activate(); return }
-                                            // one shared menu window → opening a 2nd icon replaces it, same icon toggles
-                                            if (root.openPop==="tray" && bar.trayHost===trayItem) { root.openPop=""; return }
-                                            bar.trayHost = trayItem; bar.trayMenuSel = trayItem.modelData; root.openBar = bar; root.openPop = "tray" } }
-                                } } } }
-
-                    // ---- shared tray menu: ONE blurable layer-surface Drop (sea-shell:drop),
-                    // part of the openPop single-dropdown system so the focus grab dismisses it ----
                     Drop { screen: bar.screen
                         id: trayDrop; host: bar.trayHost
                         shown: root.openPop ==="tray" && root.openBar === bar && bar.trayHost !== null
@@ -1277,20 +1468,6 @@ ShellRoot {
                                         Sym { anchors.verticalCenter: parent.verticalCenter; visible: modelData.hasChildren; text: "chevron_right"; sz: 14; color: theme.sub } }
                                     MouseArea { id: em; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; enabled: !modelData.isSeparator
                                         onClicked: { if(!modelData.hasChildren){ modelData.triggered(); root.openPop="" } } } } } } }
-
-                    // ---- WEATHER pill (placed after the tray) ----
-                    Pill { owner: bar; id: wxPill; anchors.verticalCenter: parent.verticalCenter; key: "wx"
-                        visible: root.wxTemp!==""; icon: root.wxIcon(root.wxCond); value: root.wxTemp; accent: theme.frost }
-
-                    // ---- CLIPBOARD (opens the launcher in clipboard mode) ----
-                    Pill { owner: bar; anchors.verticalCenter: parent.verticalCenter; icon: "content_paste"; accent: theme.frost
-                        onClicked: { root.openPop = ""; launcher.open(";") } }
-
-                    // ---- NOTIFICATION CENTER (bell + badge) ----
-                    Pill { owner: bar; id: bellPill; anchors.verticalCenter: parent.verticalCenter; key: "notif"
-                        icon: root.dnd ? "notifications_off" : (root.notes.length>0 ? "notifications" : "notifications_none")
-                        accent: root.dnd ? theme.warn : (root.notes.length>0 ? theme.iris : theme.frost)
-                        value: root.dnd ? "" : (root.notes.length>0 ? String(root.notes.length) : "") }
                     Drop { screen: bar.screen
                         id: notifDrop; host: bellPill; shown: root.openPop ==="notif" && root.openBar === bar
                         cardW: 350; cardH: Math.min(460, notifCol.implicitHeight + 28)
@@ -1331,11 +1508,6 @@ ShellRoot {
                                                     Text { text: modelData.time; color: theme.faint; font.pixelSize: 10; font.family: root.cfgFont; width: 46; horizontalAlignment: Text.AlignRight } }
                                                 Text { width: parent.width; visible: modelData.summary!==""; text: modelData.summary; color: theme.text; font.pixelSize: 12; font.family: root.cfgFont; wrapMode: Text.WordWrap }
                                                 Text { width: parent.width; visible: modelData.body!==""; text: modelData.body; color: theme.sub; font.pixelSize: 11; font.family: root.cfgFont; wrapMode: Text.WordWrap; maximumLineCount: 3; elide: Text.ElideRight; textFormat: Text.PlainText } } } } } } } }
-
-                    // ---- WIFI ----
-                    Pill { owner: bar; id: wifiPill; anchors.verticalCenter: parent.verticalCenter; key: "wifi"
-                        icon: root.wifiOn ? "wifi" : "wifi_off"; accent: root.wifiOn ? theme.frost : theme.bad
-                        }   // icon-only: SSID lives in the dropdown
                     Drop { screen: bar.screen
                         id: wifiDrop; host: wifiPill; shown: root.openPop ==="wifi" && root.openBar === bar
                         cardW: 290; cardH: wifiCol.implicitHeight + 28
@@ -1442,14 +1614,6 @@ ShellRoot {
                                             x: modelData.active ? 19 : 2; Behavior on x { NumberAnimation { duration: 130 } } }
                                         MouseArea { anchors.fill: parent; cursorShape: connecting ? Qt.ArrowCursor : Qt.PointingHandCursor
                                             onClicked: if (!connecting) root.vpnToggle(modelData.name) } } } } } }
-
-                    // ---- BLUETOOTH ----
-                    Pill { owner: bar; id: btPill; anchors.verticalCenter: parent.verticalCenter
-                        visible: root.btAdapter !== null
-                        key: root.btAdapter ? "bt" : ""
-                        icon: (!root.btAdapter || !root.btAdapter.enabled) ? "bluetooth_disabled" : (root.btActive ? "bluetooth_connected" : (root.btAdapter.discovering ? "bluetooth_searching" : "bluetooth"))
-                        accent: root.btActive ? theme.iris : ((root.btAdapter && root.btAdapter.enabled) ? theme.frost : theme.faint)
-                        value: root.btActive ? root.btName(root.btActive) : "" }
                     Drop { screen: bar.screen
                         id: btDrop; host: btPill; shown: root.openPop ==="bt" && root.openBar === bar
                         cardW: 290; cardH: btCol.implicitHeight + 28
@@ -1484,18 +1648,6 @@ ShellRoot {
                                     MouseArea { id: dm; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
                                         onClicked: { if(modelData.connected) modelData.disconnect(); else modelData.connect() } } } }
                             Text { visible: root.btDevices.length===0; text: (root.btAdapter&&root.btAdapter.enabled)?"tap search to scan…":"bluetooth is off"; color: theme.faint; font.pixelSize: 11; font.family: root.cfgFont; topPadding: 4 } } }
-
-                    // ---- CAFFEINE ----
-                    Pill { owner: bar; anchors.verticalCenter: parent.verticalCenter
-                        icon: root.idleOn ? "bedtime" : "coffee"
-                        accent: root.idleOn ? theme.frost : theme.warn
-                        value: ""
-                        onClicked: root.toggleIdle() }
-
-                    // ---- SYSTEM MONITOR (cpu · ram · gpu) ----
-                    Pill { owner: bar; id: sysPill; anchors.verticalCenter: parent.verticalCenter; key: "sys"
-                        icon: "speed"; value: Math.round(root.cpuUsage)+"%"
-                        accent: root.loadColor(root.cpuTemp, 78, 90) }
                     Drop { screen: bar.screen
                         id: sysDrop; host: sysPill; shown: root.openPop ==="sys" && root.openBar === bar
                         cardW: 250; cardH: sysCol.implicitHeight + 28
@@ -1536,16 +1688,6 @@ ShellRoot {
                                         text: "power draw"; color: theme.sub; font.pixelSize: 11; font.family: root.cfgFont }
                                     Text { anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
                                         text: root.gpuPower.toFixed(1)+" W"; color: theme.text; font.pixelSize: 11; font.family: root.cfgFont; font.bold: true } } } } }
-
-                    // ---- VOLUME ----
-                    Pill { owner: bar; id: volPill; anchors.verticalCenter: parent.verticalCenter; key: "vol"
-                        readonly property var au: Pipewire.defaultAudioSink ? Pipewire.defaultAudioSink.audio : null
-                        readonly property int vol: au ? Math.round(au.volume*100) : 0
-                        icon: !au||au.muted ? "volume_off" : vol<34?"volume_mute":vol<67?"volume_down":"volume_up"
-                        accent: (au&&au.muted)?theme.faint:theme.frost
-                        value: au ? (au.muted?"muted":vol+"%") : "—"
-                        onRightClicked: { if(au) au.muted = !au.muted }
-                        onScrolled: (dy)=>{ if(!au) return; au.muted=false; au.volume=Math.max(0,Math.min(1,au.volume+(dy>0?0.05:-0.05))) } }
                     Drop { screen: bar.screen
                         id: volDrop; host: volPill; shown: root.openPop ==="vol" && root.openBar === bar
                         cardW: 290; cardH: volCol.implicitHeight + 28
@@ -1579,16 +1721,6 @@ ShellRoot {
                                         Sym { anchors.verticalCenter: parent.verticalCenter; text: cur?"radio_button_checked":"radio_button_unchecked"; sz: 15; color: cur?theme.iris:theme.faint }
                                         Text { anchors.verticalCenter: parent.verticalCenter; width: parent.width-42; elide: Text.ElideRight; text: root.nodeName(modelData); color: theme.text; font.pixelSize: 12; font.family: root.cfgFont; font.bold: cur } }
                                     MouseArea { id: sm; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: Pipewire.preferredDefaultAudioSink = modelData } } } } }
-
-                    // ---- BATTERY ----
-                    Pill { owner: bar; id: batPill; anchors.verticalCenter: parent.verticalCenter
-                        readonly property var dev: UPower.displayDevice
-                        readonly property bool charging: !UPower.onBattery
-                        readonly property int pct: dev ? Math.round(dev.percentage*100) : 0
-                        visible: dev && dev.isLaptopBattery
-                        key: visible ? "bat" : ""
-                        icon: charging?"battery_charging_full":pct>=90?"battery_full":pct>=60?"battery_5_bar":pct>=35?"battery_3_bar":pct>=15?"battery_1_bar":"battery_alert"
-                        value: pct+"%"; accent: charging?theme.good:pct<=20?theme.bad:theme.frost }
                     Drop { screen: bar.screen
                         id: batDrop; host: batPill; shown: root.openPop ==="bat" && root.openBar === bar
                         cardW: 230; cardH: batCol.implicitHeight + 28
@@ -1610,11 +1742,7 @@ ShellRoot {
                                         Sym { anchors.verticalCenter: parent.verticalCenter; text: modelData.i; sz: 17; color: cur?theme.iris:theme.frost }
                                         Text { anchors.verticalCenter: parent.verticalCenter; text: modelData.l; color: cur?theme.text:theme.sub; font.pixelSize: 12; font.family: root.cfgFont; font.bold: cur } }
                                     MouseArea { id: bm; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.setProfile(modelData.k) } } } } }
-
-                    // ---- CLOCK ----
-                    Pill { owner: bar; id: clockPill; anchors.verticalCenter: parent.verticalCenter; key: "cal"; icon: "schedule"
-                        value: Qt.formatDateTime(clock.date,"ddd d MMM · HH:mm"); accent: theme.iris }
-                     Drop { screen: bar.screen
+                    Drop { screen: bar.screen
                         id: calDrop; host: clockPill; shown: root.openPop ==="cal" && root.openBar === bar
                         cardW: 280; cardH: calCol.implicitHeight + 32
                         onVisibleChanged: { if (visible) reloadEventsProc.running = true }
@@ -1688,9 +1816,6 @@ ShellRoot {
                                                 Text { width: parent.width; text: evRow.modelData.title; color: theme.text; font.pixelSize: 11; font.family: root.cfgFont; elide: Text.ElideRight }
                                                 Text { text: evRow.rel + "  ·  " + Qt.formatDate(root.calDate(evRow.modelData.date), "ddd") + (evRow.modelData.time ? "  ·  " + evRow.modelData.time : "")
                                                     color: evRow.soon ? theme.frost : theme.faint; font.pixelSize: 9; font.family: root.cfgFont } } } } } } } }
-
-                    // ---- POWER (very end) ----
-                    Pill { owner: bar; id: pwrPill; anchors.verticalCenter: parent.verticalCenter; key: "pwr"; icon: "power_settings_new"; accent: theme.bad }
                     Drop { screen: bar.screen
                         id: pwrDrop; host: pwrPill; shown: root.openPop ==="pwr" && root.openBar === bar
                         cardW: 210; cardH: pwrCol.implicitHeight + 28
@@ -1736,7 +1861,7 @@ ShellRoot {
         }
     }
 
-    // ===== on-screen notification popups (top-right, under the bar) =====
+ // ===== on-screen notification popups (top-right, under the bar) =====
     PanelWindow {
         id: notifWin
         anchors { top: true; right: true }

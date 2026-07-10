@@ -486,6 +486,8 @@ ShellRoot {
     property string apScheme: "scheme-tonal-spot"   // matugen colour-scheme algorithm
     readonly property var schemes: ["scheme-tonal-spot","scheme-content","scheme-neutral","scheme-expressive","scheme-fidelity","scheme-monochrome","scheme-rainbow","scheme-fruit-salad"]
     property string apBarFill: "matugen"            // top-bar fill: matugen · black · white
+    property string apEdge: "top"                   // bar dock edge: top·bottom·left·right
+    readonly property var edges: ["top","bottom","left","right"]
     property bool apAutoDark: false         // auto-switch dark/light by time of day
     property string apDarkStart: "19:00"    // dark begins
     property string apDarkEnd: "07:00"      // dark ends (light begins)
@@ -501,10 +503,14 @@ ShellRoot {
             if(j.mode!==undefined) root.apLight=(""+j.mode==="light"); if(j.matugen!==undefined) root.apMatugen=!!j.matugen;
             if(j.scheme!==undefined && (""+j.scheme).length>0) root.apScheme=j.scheme;
             if(j.barFill!==undefined && (""+j.barFill).length>0) root.apBarFill=j.barFill;
-            if(j.autoDark!==undefined) root.apAutoDark=!!j.autoDark; if(j.darkStart!==undefined) root.apDarkStart=j.darkStart; if(j.darkEnd!==undefined) root.apDarkEnd=j.darkEnd; } catch(e){} } } }
+            if(j.edge!==undefined && (""+j.edge).length>0) root.apEdge=j.edge;
+            if(j.autoDark!==undefined) root.apAutoDark=!!j.autoDark; if(j.darkStart!==undefined) root.apDarkStart=j.darkStart; if(j.darkEnd!==undefined) root.apDarkEnd=j.darkEnd; } catch(e){} root.apLoaded = true; } } }
+    // gates the window until the saved palette is read, so it fades in with the user's
+    // matugen colours instead of flashing the default sea-cyan for a frame first
+    property bool apLoaded: false
     function saveAppearance() {
         var cf = '['; for(var i=0;i<root.apCustomFonts.length;i++){ cf += (i?',':'') + '\"'+root.apCustomFonts[i]+'\"'; } cf += ']';
-        var j = '{\"radius\":'+Math.round(root.apRadius)+',\"opacity\":'+root.apOpacity.toFixed(2)+',\"height\":'+Math.round(root.apHeight)+',\"accent\":\"'+root.apAccent+'\",\"font\":\"'+root.apFont+'\",\"customFonts\":'+cf+',\"mode\":\"'+(root.apLight?'light':'dark')+'\",\"matugen\":'+(root.apMatugen?'true':'false')+',\"scheme\":\"'+root.apScheme+'\",\"barFill\":\"'+root.apBarFill+'\",\"autoDark\":'+(root.apAutoDark?'true':'false')+',\"darkStart\":\"'+root.apDarkStart+'\",\"darkEnd\":\"'+root.apDarkEnd+'\"}';
+        var j = '{\"radius\":'+Math.round(root.apRadius)+',\"opacity\":'+root.apOpacity.toFixed(2)+',\"height\":'+Math.round(root.apHeight)+',\"accent\":\"'+root.apAccent+'\",\"font\":\"'+root.apFont+'\",\"customFonts\":'+cf+',\"mode\":\"'+(root.apLight?'light':'dark')+'\",\"matugen\":'+(root.apMatugen?'true':'false')+',\"scheme\":\"'+root.apScheme+'\",\"barFill\":\"'+root.apBarFill+'\",\"edge\":\"'+root.apEdge+'\",\"autoDark\":'+(root.apAutoDark?'true':'false')+',\"darkStart\":\"'+root.apDarkStart+'\",\"darkEnd\":\"'+root.apDarkEnd+'\"}';
         run("mkdir -p \"$HOME/.config/sea-shell\" && printf '%s' '"+j+"' > \"$HOME/.config/sea-shell/appearance.json\"");
     }
     function addCustomFont(f) {
@@ -871,6 +877,9 @@ ShellRoot {
             width: Math.min(parent.width - 60, 960)
             height: Math.min(parent.height - 60, 780)
             radius: 18
+            // fade in once the saved palette is read — no default sea-cyan flash first
+            opacity: root.apLoaded ? 1 : 0
+            Behavior on opacity { NumberAnimation { duration: 130; easing.type: Easing.OutCubic } }
             color: theme.a(theme.bg, 0.98)
             border.width: 1; border.color: theme.a(theme.iris, 0.34)
             MouseArea { anchors.fill: parent }
@@ -1555,12 +1564,27 @@ ShellRoot {
                                 Text { text: "roundness"; color: theme.sub; font.pixelSize: 12; font.family: "monospace"; Layout.minimumWidth: 82 }
                                 Slider { value: root.apRadius/26; onMoved: (v)=>{ root.apRadius = v*26; root.saveAppearance() } }
                                 Text { text: Math.round(root.apRadius)+"px"; color: theme.sub; font.pixelSize: 12; font.family: "monospace"; Layout.minimumWidth: 40; horizontalAlignment: Text.AlignRight } }
-                            // transparency
+                            // bar position — which screen edge the bar docks to (left/right = vertical bar)
+                            RowLayout { Layout.fillWidth: true; spacing: 10
+                                Sym { text: "dock_to_right"; sz: 20 }
+                                Text { text: "position"; color: theme.sub; font.pixelSize: 12; font.family: "monospace"; Layout.minimumWidth: 82 }
+                                RowLayout { Layout.fillWidth: true; spacing: 6
+                                    Repeater { model: root.edges
+                                        delegate: Rectangle { required property var modelData
+                                            readonly property bool sel: root.apEdge===modelData
+                                            Layout.fillWidth: true; implicitHeight: 30; radius: 8
+                                            color: sel ? theme.iris : (edMa.containsMouse ? theme.a(theme.iris,0.16) : theme.a(theme.line,0.4))
+                                            border.width: 1; border.color: sel ? theme.iris : theme.a(theme.iris,0.14)
+                                            Text { anchors.centerIn: parent; text: modelData; color: sel ? theme.bg : theme.sub; font.pixelSize: 11; font.family: "monospace"; font.bold: sel }
+                                            MouseArea { id: edMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: { root.apEdge=modelData; root.saveAppearance() } } } } } }
+                            // transparency — 0% leaves only the pill buttons floating
                             RowLayout { Layout.fillWidth: true; spacing: 10
                                 Sym { text: "opacity"; sz: 20 }
                                 Text { text: "opacity"; color: theme.sub; font.pixelSize: 12; font.family: "monospace"; Layout.minimumWidth: 82 }
-                                Slider { fill: theme.frost; value: (root.apOpacity-0.25)/0.75; onMoved: (v)=>{ root.apOpacity = 0.25 + v*0.75; root.saveAppearance() } }
+                                Slider { fill: theme.frost; value: root.apOpacity; onMoved: (v)=>{ root.apOpacity = v; root.saveAppearance() } }
                                 Text { text: Math.round(root.apOpacity*100)+"%"; color: theme.sub; font.pixelSize: 12; font.family: "monospace"; Layout.minimumWidth: 40; horizontalAlignment: Text.AlignRight } }
+                            Text { visible: root.apOpacity < 0.06
+                                text: "↑ 0% hides the bar background — only the buttons show"; color: theme.faint; font.pixelSize: 10; font.family: "monospace"; Layout.fillWidth: true }
                             // bar fill — a clean solid black/white, or the matugen accent tint (most obvious at 100% opacity)
                             RowLayout { Layout.fillWidth: true; spacing: 10
                                 Sym { text: "format_color_fill"; sz: 20 }
