@@ -18,7 +18,13 @@ kmode="$d/kitty-mode.conf"
 mkdir -p "$d"
 
 if [ "$mode" = "light" ]; then
-    gsettings set org.gnome.desktop.interface color-scheme 'prefer-light' 2>/dev/null || true
+    # Check if user has a forced app preference (dark/light independent from the shell)
+    appMode=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('appMode','auto'))" "$d/appearance.json" 2>/dev/null)
+    case "$appMode" in
+        dark)  gsettings set org.gnome.desktop.interface color-scheme 'prefer-dark'  2>/dev/null || true ;;
+        light) gsettings set org.gnome.desktop.interface color-scheme 'prefer-light' 2>/dev/null || true ;;
+        *)     gsettings set org.gnome.desktop.interface color-scheme 'prefer-light' 2>/dev/null || true ;;
+    esac
 
     # If "match colours" (matugen) is on and a wallpaper-matched light palette exists, use it
     # so light mode is themed to the wallpaper just like dark mode. Otherwise fall back to the
@@ -70,7 +76,12 @@ color7  #3c4658
 color15 #0c1520
 EOF
 else
-    gsettings set org.gnome.desktop.interface color-scheme 'prefer-dark' 2>/dev/null || true
+    appMode=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('appMode','auto'))" "$d/appearance.json" 2>/dev/null)
+    case "$appMode" in
+        dark)  gsettings set org.gnome.desktop.interface color-scheme 'prefer-dark'  2>/dev/null || true ;;
+        light) gsettings set org.gnome.desktop.interface color-scheme 'prefer-light' 2>/dev/null || true ;;
+        *)     gsettings set org.gnome.desktop.interface color-scheme 'prefer-dark'  2>/dev/null || true ;;
+    esac
     : > "$kmode"        # empty → the dark base (sea-cyan.conf + matugen) applies
 fi
 

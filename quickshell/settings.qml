@@ -17,7 +17,7 @@ import QtQuick.Layouts
 Scope {
     id: root
     property string repo: Qt.resolvedUrl(".").toString().replace("file://", "").replace(/\/$/, "")
-    readonly property string seaVersion: "1.3"     // sea-shell release — mirrored in the repo VERSION file
+    readonly property string seaVersion: "2.0"     // sea-shell release — mirrored in the repo VERSION file
     property int tab: 8                             // land on the System / About dashboard
 
     // ---- resident lifecycle: the panel is hidden until shown, so it costs ~nothing closed ----
@@ -514,6 +514,46 @@ Scope {
     property string apDarkStart: "19:00"    // dark begins
     property string apDarkEnd: "07:00"      // dark ends (light begins)
     property var apCustomFonts: []      // fonts the user typed, persisted as chips
+    property string apAppMode: "auto"       // system app dark/light: "auto" (follows shell), "dark", "light"
+    property int apSubTab: 0
+    property int idlSubTab: 0
+    // ---------- bar widgets toggles ----------
+    property bool wgMpris: true
+    property bool wgTray: true
+    property bool wgWeather: true
+    property bool wgClipboard: true
+    property bool wgNotif: true
+    property bool wgWifi: true
+    property bool wgBluetooth: true
+    property bool wgCaffeine: true
+    property bool wgSystem: true
+    property bool wgVolume: true
+    property bool wgBattery: true
+    property bool wgClock: true
+    property bool wgPower: true
+    // ---------- matugen per-target overrides ----------
+    property bool ovrHyprland: true
+    property bool ovrKitty: true
+    property bool ovrFastfetch: true
+    property bool ovrStarship: true
+    property string ovrHyprActive: ""       // custom active border colour (hex, empty = auto)
+    property string ovrHyprInactive: ""     // custom inactive border colour (hex, empty = auto)
+    property string ovrKittyAccent: ""      // custom kitty accent (hex, empty = auto)
+    property string ovrKittyBg: ""          // custom kitty background (hex, empty = auto)
+    property string ovrFastfetchAccent: ""  // custom fastfetch accent (hex, empty = auto)
+    property string ovrStarshipAccent: ""   // custom starship accent (hex, empty = auto)
+    Process { id: ovrReadProc; running: true; command: ["sh","-c","cat \"$HOME/.config/sea-shell/matugen-overrides.json\" 2>/dev/null"]
+        stdout: StdioCollector { id: ovrOut; onStreamFinished: { try { var j=JSON.parse(ovrOut.text);
+            if(j.hyprland) { if(j.hyprland.enabled!==undefined) root.ovrHyprland=!!j.hyprland.enabled; if(j.hyprland.customActive) root.ovrHyprActive=j.hyprland.customActive; if(j.hyprland.customInactive) root.ovrHyprInactive=j.hyprland.customInactive; }
+            if(j.kitty) { if(j.kitty.enabled!==undefined) root.ovrKitty=!!j.kitty.enabled; if(j.kitty.customAccent) root.ovrKittyAccent=j.kitty.customAccent; if(j.kitty.customBg) root.ovrKittyBg=j.kitty.customBg; }
+            if(j.fastfetch) { if(j.fastfetch.enabled!==undefined) root.ovrFastfetch=!!j.fastfetch.enabled; if(j.fastfetch.customAccent) root.ovrFastfetchAccent=j.fastfetch.customAccent; }
+            if(j.starship) { if(j.starship.enabled!==undefined) root.ovrStarship=!!j.starship.enabled; if(j.starship.customAccent) root.ovrStarshipAccent=j.starship.customAccent; }
+        } catch(e){} } } }
+    function saveOverrides() {
+        var j = '{"hyprland":{"enabled":'+(root.ovrHyprland?'true':'false')+',"customActive":"'+root.ovrHyprActive+'","customInactive":"'+root.ovrHyprInactive+'"},"kitty":{"enabled":'+(root.ovrKitty?'true':'false')+',"customAccent":"'+root.ovrKittyAccent+'","customBg":"'+root.ovrKittyBg+'"},"fastfetch":{"enabled":'+(root.ovrFastfetch?'true':'false')+',"customAccent":"'+root.ovrFastfetchAccent+'"},"starship":{"enabled":'+(root.ovrStarship?'true':'false')+',"customAccent":"'+root.ovrStarshipAccent+'"}}';
+        run("mkdir -p \"$HOME/.config/sea-shell\" && printf '%s' '"+j+"' > \"$HOME/.config/sea-shell/matugen-overrides.json\"");
+    }
+    function toggleOverride(target) { saveOverrides(); run("sh '"+root.matugenScript+"'"); }
     property var accents: ["#63c7dd","#4dd0c4","#6aa6ff","#cba6f7","#a6e3a1","#f4c542","#f38ba8","#ff9e64"]
     property var baseFonts: ["monospace","MesloLGM Nerd Font","JetBrainsMono Nerd Font","FiraCode Nerd Font","sans-serif","Iosevka"]
     readonly property var fontPresets: root.baseFonts.concat(root.apCustomFonts)
@@ -526,14 +566,126 @@ Scope {
             if(j.scheme!==undefined && (""+j.scheme).length>0) root.apScheme=j.scheme;
             if(j.barFill!==undefined && (""+j.barFill).length>0) root.apBarFill=j.barFill;
             if(j.edge==="top"||j.edge==="bottom") root.apEdge=j.edge;   // horizontal bar only
-            if(j.autoDark!==undefined) root.apAutoDark=!!j.autoDark; if(j.darkStart!==undefined) root.apDarkStart=j.darkStart; if(j.darkEnd!==undefined) root.apDarkEnd=j.darkEnd; } catch(e){} root.apLoaded = true; } } }
+            if(j.autoDark!==undefined) root.apAutoDark=!!j.autoDark; if(j.darkStart!==undefined) root.apDarkStart=j.darkStart; if(j.darkEnd!==undefined) root.apDarkEnd=j.darkEnd;
+            if(j.appMode!==undefined && (j.appMode==="auto"||j.appMode==="dark"||j.appMode==="light")) root.apAppMode=j.appMode;
+            if(j.wgMpris!==undefined) root.wgMpris=!!j.wgMpris;
+            if(j.wgTray!==undefined) root.wgTray=!!j.wgTray;
+            if(j.wgWeather!==undefined) root.wgWeather=!!j.wgWeather;
+            if(j.wgClipboard!==undefined) root.wgClipboard=!!j.wgClipboard;
+            if(j.wgNotif!==undefined) root.wgNotif=!!j.wgNotif;
+            if(j.wgWifi!==undefined) root.wgWifi=!!j.wgWifi;
+            if(j.wgBluetooth!==undefined) root.wgBluetooth=!!j.wgBluetooth;
+            if(j.wgCaffeine!==undefined) root.wgCaffeine=!!j.wgCaffeine;
+            if(j.wgSystem!==undefined) root.wgSystem=!!j.wgSystem;
+            if(j.wgVolume!==undefined) root.wgVolume=!!j.wgVolume;
+            if(j.wgBattery!==undefined) root.wgBattery=!!j.wgBattery;
+            if(j.wgClock!==undefined) root.wgClock=!!j.wgClock;
+            if(j.wgPower!==undefined) root.wgPower=!!j.wgPower;
+        } catch(e){} root.apLoaded = true; } } }
     // gates the window until the saved palette is read, so it fades in with the user's
     // matugen colours instead of flashing the default sea-cyan for a frame first
     property bool apLoaded: false
+
+    // ---------- theme profiles ----------
+    property var profilesList: []
+    Process { id: profilesReadProc; running: true; command: ["sh","-c","cat \"$HOME/.config/sea-shell/profiles.json\" 2>/dev/null || echo '[]'"]
+        stdout: StdioCollector { id: profOut; onStreamFinished: { try { root.profilesList = JSON.parse(profOut.text) } catch(e){ root.profilesList = [] } } } }
+
+    function saveProfile(name) {
+        if (!name.trim()) return;
+        var p = {
+            name: name.trim(),
+            accent: root.apAccent,
+            radius: root.apRadius,
+            opacity: root.apOpacity,
+            height: root.apHeight,
+            font: root.apFont,
+            mode: root.apLight ? "light" : "dark",
+            matugen: root.apMatugen,
+            scheme: root.apScheme,
+            edge: root.apEdge,
+            barFill: root.apBarFill,
+            autoDark: root.apAutoDark,
+            darkStart: root.apDarkStart,
+            darkEnd: root.apDarkEnd,
+            appMode: root.apAppMode,
+            wgMpris: root.wgMpris,
+            wgTray: root.wgTray,
+            wgWeather: root.wgWeather,
+            wgClipboard: root.wgClipboard,
+            wgNotif: root.wgNotif,
+            wgWifi: root.wgWifi,
+            wgBluetooth: root.wgBluetooth,
+            wgCaffeine: root.wgCaffeine,
+            wgSystem: root.wgSystem,
+            wgVolume: root.wgVolume,
+            wgBattery: root.wgBattery,
+            wgClock: root.wgClock,
+            wgPower: root.wgPower
+        };
+        var list = root.profilesList.slice();
+        var idx = -1;
+        for (var i = 0; i < list.length; i++) {
+            if (list[i].name === name.trim()) { idx = i; break; }
+        }
+        if (idx >= 0) list[idx] = p; else list.push(p);
+        root.profilesList = list;
+        
+        var base64 = Qt.btoa(JSON.stringify(list));
+        run("mkdir -p \"$HOME/.config/sea-shell\" && echo '" + base64 + "' | base64 -d > \"$HOME/.config/sea-shell/profiles.json\"");
+    }
+
+    function loadProfile(p) {
+        if (p.accent !== undefined) root.apAccent = p.accent;
+        if (p.radius !== undefined) root.apRadius = p.radius;
+        if (p.opacity !== undefined) root.apOpacity = p.opacity;
+        if (p.height !== undefined) root.apHeight = p.height;
+        if (p.font !== undefined) root.apFont = p.font;
+        if (p.matugen !== undefined) root.apMatugen = p.matugen;
+        if (p.scheme !== undefined) root.apScheme = p.scheme;
+        if (p.edge !== undefined) root.apEdge = p.edge;
+        if (p.barFill !== undefined) root.apBarFill = p.barFill;
+        if (p.autoDark !== undefined) root.apAutoDark = p.autoDark;
+        if (p.darkStart !== undefined) root.apDarkStart = p.darkStart;
+        if (p.darkEnd !== undefined) root.apDarkEnd = p.darkEnd;
+        if (p.appMode !== undefined) root.apAppMode = p.appMode;
+        if (p.mode !== undefined) root.apLight = ("" + p.mode === "light");
+        
+        if (p.wgMpris !== undefined) root.wgMpris = p.wgMpris;
+        if (p.wgTray !== undefined) root.wgTray = p.wgTray;
+        if (p.wgWeather !== undefined) root.wgWeather = p.wgWeather;
+        if (p.wgClipboard !== undefined) root.wgClipboard = p.wgClipboard;
+        if (p.wgNotif !== undefined) root.wgNotif = p.wgNotif;
+        if (p.wgWifi !== undefined) root.wgWifi = p.wgWifi;
+        if (p.wgBluetooth !== undefined) root.wgBluetooth = p.wgBluetooth;
+        if (p.wgCaffeine !== undefined) root.wgCaffeine = p.wgCaffeine;
+        if (p.wgSystem !== undefined) root.wgSystem = p.wgSystem;
+        if (p.wgVolume !== undefined) root.wgVolume = p.wgVolume;
+        if (p.wgBattery !== undefined) root.wgBattery = p.wgBattery;
+        if (p.wgClock !== undefined) root.wgClock = p.wgClock;
+        if (p.wgPower !== undefined) root.wgPower = p.wgPower;
+        
+        root.saveAppearance();
+    }
+
+    function deleteProfile(idx) {
+        var list = root.profilesList.slice();
+        list.splice(idx, 1);
+        root.profilesList = list;
+        var base64 = Qt.btoa(JSON.stringify(list));
+        run("mkdir -p \"$HOME/.config/sea-shell\" && echo '" + base64 + "' | base64 -d > \"$HOME/.config/sea-shell/profiles.json\"");
+    }
     function saveAppearance() {
         var cf = '['; for(var i=0;i<root.apCustomFonts.length;i++){ cf += (i?',':'') + '\"'+root.apCustomFonts[i]+'\"'; } cf += ']';
-        var j = '{\"radius\":'+Math.round(root.apRadius)+',\"opacity\":'+root.apOpacity.toFixed(2)+',\"height\":'+Math.round(root.apHeight)+',\"accent\":\"'+root.apAccent+'\",\"font\":\"'+root.apFont+'\",\"customFonts\":'+cf+',\"mode\":\"'+(root.apLight?'light':'dark')+'\",\"matugen\":'+(root.apMatugen?'true':'false')+',\"scheme\":\"'+root.apScheme+'\",\"barFill\":\"'+root.apBarFill+'\",\"edge\":\"'+root.apEdge+'\",\"autoDark\":'+(root.apAutoDark?'true':'false')+',\"darkStart\":\"'+root.apDarkStart+'\",\"darkEnd\":\"'+root.apDarkEnd+'\"}';
+        var j = '{\"radius\":'+Math.round(root.apRadius)+',\"opacity\":'+root.apOpacity.toFixed(2)+',\"height\":'+Math.round(root.apHeight)+',\"accent\":\"'+root.apAccent+'\",\"font\":\"'+root.apFont+'\",\"customFonts\":'+cf+',\"mode\":\"'+(root.apLight?'light':'dark')+'\",\"matugen\":'+(root.apMatugen?'true':'false')+',\"scheme\":\"'+root.apScheme+'\",\"barFill\":\"'+root.apBarFill+'\",\"edge\":\"'+root.apEdge+'\",\"autoDark\":'+(root.apAutoDark?'true':'false')+',\"darkStart\":\"'+root.apDarkStart+'\",\"darkEnd\":\"'+root.apDarkEnd+'\",\"appMode\":\"'+root.apAppMode+'\",\"wgMpris\":'+(root.wgMpris?'true':'false')+',\"wgTray\":'+(root.wgTray?'true':'false')+',\"wgWeather\":'+(root.wgWeather?'true':'false')+',\"wgClipboard\":'+(root.wgClipboard?'true':'false')+',\"wgNotif\":'+(root.wgNotif?'true':'false')+',\"wgWifi\":'+(root.wgWifi?'true':'false')+',\"wgBluetooth\":'+(root.wgBluetooth?'true':'false')+',\"wgCaffeine\":'+(root.wgCaffeine?'true':'false')+',\"wgSystem\":'+(root.wgSystem?'true':'false')+',\"wgVolume\":'+(root.wgVolume?'true':'false')+',\"wgBattery\":'+(root.wgBattery?'true':'false')+',\"wgClock\":'+(root.wgClock?'true':'false')+',\"wgPower\":'+(root.wgPower?'true':'false')+'}';
         run("mkdir -p \"$HOME/.config/sea-shell\" && printf '%s' '"+j+"' > \"$HOME/.config/sea-shell/appearance.json\"");
+    }
+    // apply the system app dark/light preference independently from the shell theme
+    function applyAppMode() {
+        var m = root.apAppMode;
+        if (m === "auto") m = root.apLight ? "light" : "dark";
+        if (m === "light") run("gsettings set org.gnome.desktop.interface color-scheme 'prefer-light'");
+        else run("gsettings set org.gnome.desktop.interface color-scheme 'prefer-dark'");
     }
     function addCustomFont(f) {
         f = (f||"").trim(); if(f==="") return;
@@ -543,6 +695,46 @@ Scope {
     // matugen AUTO toggle — persist the flag, then apply now (accent + kitty from the
     // wallpaper) or reset everything back to the default sea cyan.
     property string matugenScript: Qt.resolvedUrl("matugen-accent.sh").toString().replace("file://","")
+    property string pickScript: Qt.resolvedUrl("sea-pick-color.sh").toString().replace("file://","")
+    property string pickingTarget: ""
+    Process {
+        id: colorPickerProc
+        command: ["sh", root.pickScript]
+        stdout: StdioCollector {
+            id: pickerOut
+            onStreamFinished: {
+                var col = pickerOut.text.trim();
+                if (col.indexOf("#") === 0 && col.length === 7) {
+                    root.applyPickedColor(col);
+                }
+            }
+        }
+    }
+    function applyPickedColor(col) {
+        if (root.pickingTarget === "accent") {
+            root.apAccent = col;
+            root.saveAppearance();
+            run("sh '"+root.matugenScript+"'");
+        } else if (root.pickingTarget === "hyprActive") {
+            root.ovrHyprActive = col;
+            root.toggleOverride("hyprland");
+        } else if (root.pickingTarget === "hyprInactive") {
+            root.ovrHyprInactive = col;
+            root.toggleOverride("hyprland");
+        } else if (root.pickingTarget === "kittyAccent") {
+            root.ovrKittyAccent = col;
+            root.toggleOverride("kitty");
+        } else if (root.pickingTarget === "kittyBg") {
+            root.ovrKittyBg = col;
+            root.toggleOverride("kitty");
+        } else if (root.pickingTarget === "fastfetch") {
+            root.ovrFastfetchAccent = col;
+            root.toggleOverride("fastfetch");
+        } else if (root.pickingTarget === "starship") {
+            root.ovrStarshipAccent = col;
+            root.toggleOverride("starship");
+        }
+    }
     function toggleMatugen() {
         root.apMatugen = !root.apMatugen; root.saveAppearance();
         if (root.apMatugen) run("sh '"+root.matugenScript+"'");
@@ -980,6 +1172,8 @@ Scope {
                 TabBtn { icon: "monitor_heart";        label: "System";      idx: 8 }
                 GroupLabel { text: "LOOK & FEEL" }
                 TabBtn { icon: "palette";              label: "Appearance";  idx: 4 }
+                TabBtn { icon: "widgets";              label: "Bar Widgets"; idx: 12 }
+                TabBtn { icon: "auto_awesome";         label: "Theme Profiles"; idx: 13 }
                 GroupLabel { text: "DEVICES" }
                 TabBtn { icon: "volume_up";            label: "Audio";       idx: 0 }
                 TabBtn { icon: "brightness_6";         label: "Display";     idx: 1 }
@@ -1605,161 +1799,548 @@ Scope {
                         // ================= APPEARANCE =================
                         ColumnLayout {
                             visible: root.tab === 4; Layout.fillWidth: true; spacing: 14
-                            Section { title: "theme"; icon: "contrast" }
-                            RowLayout { Layout.fillWidth: true; spacing: 8
-                                Repeater { model: [{k:false,l:"Dark",i:"dark_mode"},{k:true,l:"Light",i:"light_mode"}]
-                                    delegate: Rectangle { required property var modelData; readonly property bool sel: root.apLight===modelData.k
-                                        Layout.fillWidth: true; implicitHeight: 40; radius: 9
-                                        color: sel?theme.iris:(thmMa.containsMouse?theme.a(theme.iris,0.16):theme.a(theme.line,0.4)); border.width: 1; border.color: sel?theme.iris:theme.a(theme.iris,0.16)
-                                        RowLayout { anchors.centerIn: parent; spacing: 7
-                                            Sym { text: modelData.i; sz: 17; color: sel?theme.bg:theme.frost }
-                                            Text { text: modelData.l; color: sel?theme.bg:theme.text; font.pixelSize: 13; font.family: root.apFont; font.bold: sel } }
-                                        MouseArea { id: thmMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: { root.apLight=modelData.k; root.saveAppearance() } } } } }
-                            // auto dark mode by time of day
-                            Rectangle { Layout.fillWidth: true; implicitHeight: 46; radius: 9
-                                color: theme.a(theme.line,0.4); border.width: 1; border.color: root.apAutoDark?theme.a(theme.iris,0.5):theme.a(theme.iris,0.16)
-                                RowLayout { anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 12; spacing: 10
-                                    Sym { text: "bedtime"; sz: 18; color: root.apAutoDark?theme.frost:theme.faint }
-                                    ColumnLayout { spacing: 1; Layout.fillWidth: true
-                                        Text { text: "auto dark by time"; color: theme.text; font.pixelSize: 13; font.family: root.apFont }
-                                        Text { text: "dark inside the window · overrides the manual pick + the SUPER+⇧+D key"; color: theme.faint; font.pixelSize: 10; font.family: root.apFont } }
-                                    Rectangle { implicitWidth: 46; implicitHeight: 22; radius: 11
-                                        color: root.apAutoDark?theme.iris:theme.a(theme.line,0.85); border.width: 1; border.color: root.apAutoDark?theme.iris:theme.a(theme.iris,0.3)
-                                        Rectangle { width: 16; height: 16; radius: 8; y: 3; x: root.apAutoDark?27:3; color: theme.frost; Behavior on x { NumberAnimation { duration: 120 } } }
-                                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { root.apAutoDark=!root.apAutoDark; root.saveAppearance() } } } } }
-                            RowLayout { Layout.fillWidth: true; spacing: 10; visible: root.apAutoDark
-                                Sym { text: "schedule"; sz: 18 }
-                                Text { text: "dark from"; color: theme.sub; font.pixelSize: 12; font.family: root.apFont }
-                                Rectangle { implicitWidth: 68; implicitHeight: 32; radius: 8; color: theme.a(theme.line,0.5); border.width: 1; border.color: dstart.activeFocus?theme.iris:theme.a(theme.iris,0.2)
-                                    TextInput { id: dstart; anchors.fill: parent; horizontalAlignment: TextInput.AlignHCenter; verticalAlignment: TextInput.AlignVCenter
-                                        color: theme.text; font.pixelSize: 13; font.family: root.apFont; inputMask: "99:99;_"; text: root.apDarkStart
-                                        onEditingFinished: { root.apDarkStart = text; root.saveAppearance() } } }
-                                Text { text: "to"; color: theme.sub; font.pixelSize: 12; font.family: root.apFont }
-                                Rectangle { implicitWidth: 68; implicitHeight: 32; radius: 8; color: theme.a(theme.line,0.5); border.width: 1; border.color: dend.activeFocus?theme.iris:theme.a(theme.iris,0.2)
-                                    TextInput { id: dend; anchors.fill: parent; horizontalAlignment: TextInput.AlignHCenter; verticalAlignment: TextInput.AlignVCenter
-                                        color: theme.text; font.pixelSize: 13; font.family: root.apFont; inputMask: "99:99;_"; text: root.apDarkEnd
-                                        onEditingFinished: { root.apDarkEnd = text; root.saveAppearance() } } }
-                                Item { Layout.fillWidth: true } }
-                            Section { title: "bar shape"; icon: "tune" }
-                            // roundness
-                            RowLayout { Layout.fillWidth: true; spacing: 10
-                                Sym { text: "rounded_corner"; sz: 20 }
-                                Text { text: "roundness"; color: theme.sub; font.pixelSize: 12; font.family: "monospace"; Layout.minimumWidth: 82 }
-                                Slider { value: root.apRadius/26; onMoved: (v)=>{ root.apRadius = v*26; root.saveAppearance() } }
-                                Text { text: Math.round(root.apRadius)+"px"; color: theme.sub; font.pixelSize: 12; font.family: "monospace"; Layout.minimumWidth: 40; horizontalAlignment: Text.AlignRight } }
-                            // bar position — which screen edge the bar docks to (left/right = vertical bar)
-                            RowLayout { Layout.fillWidth: true; spacing: 10
-                                Sym { text: "dock_to_right"; sz: 20 }
-                                Text { text: "position"; color: theme.sub; font.pixelSize: 12; font.family: "monospace"; Layout.minimumWidth: 82 }
-                                RowLayout { Layout.fillWidth: true; spacing: 6
-                                    Repeater { model: root.edges
-                                        delegate: Rectangle { required property var modelData
-                                            readonly property bool sel: root.apEdge===modelData
-                                            Layout.fillWidth: true; implicitHeight: 30; radius: 8
-                                            color: sel ? theme.iris : (edMa.containsMouse ? theme.a(theme.iris,0.16) : theme.a(theme.line,0.4))
-                                            border.width: 1; border.color: sel ? theme.iris : theme.a(theme.iris,0.14)
-                                            Text { anchors.centerIn: parent; text: modelData; color: sel ? theme.bg : theme.sub; font.pixelSize: 11; font.family: "monospace"; font.bold: sel }
-                                            MouseArea { id: edMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: { root.apEdge=modelData; root.saveAppearance() } } } } } }
-                            // transparency — 0% leaves only the pill buttons floating
-                            RowLayout { Layout.fillWidth: true; spacing: 10
-                                Sym { text: "opacity"; sz: 20 }
-                                Text { text: "opacity"; color: theme.sub; font.pixelSize: 12; font.family: "monospace"; Layout.minimumWidth: 82 }
-                                Slider { fill: theme.frost; value: root.apOpacity; onMoved: (v)=>{ root.apOpacity = v; root.saveAppearance() } }
-                                Text { text: Math.round(root.apOpacity*100)+"%"; color: theme.sub; font.pixelSize: 12; font.family: "monospace"; Layout.minimumWidth: 40; horizontalAlignment: Text.AlignRight } }
-                            Text { visible: root.apOpacity < 0.06
-                                text: "↑ 0% hides the bar background — only the buttons show"; color: theme.faint; font.pixelSize: 10; font.family: "monospace"; Layout.fillWidth: true }
-                            // bar fill — a clean solid black/white, or the matugen accent tint (most obvious at 100% opacity)
-                            RowLayout { Layout.fillWidth: true; spacing: 10
-                                Sym { text: "format_color_fill"; sz: 20 }
-                                Text { text: "bar fill"; color: theme.sub; font.pixelSize: 12; font.family: "monospace"; Layout.minimumWidth: 82 }
-                                RowLayout { Layout.fillWidth: true; spacing: 6
-                                    Repeater { model: [{k:"matugen",l:"matugen"},{k:"black",l:"black"},{k:"white",l:"white"}]
-                                        delegate: Rectangle { required property var modelData
-                                            readonly property bool sel: root.apBarFill===modelData.k
-                                            Layout.fillWidth: true; implicitHeight: 30; radius: 8
-                                            color: sel ? theme.iris : (bfMa.containsMouse ? theme.a(theme.iris,0.16) : theme.a(theme.line,0.4))
-                                            border.width: 1; border.color: sel ? theme.iris : theme.a(theme.iris,0.14)
-                                            Text { anchors.centerIn: parent; text: modelData.l; color: sel ? theme.bg : theme.sub; font.pixelSize: 11; font.family: "monospace"; font.bold: sel }
-                                            MouseArea { id: bfMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: { root.apBarFill=modelData.k; root.saveAppearance() } } } } } }
-                            Text { visible: root.apBarFill!=="matugen" && root.apOpacity<0.99
-                                text: "↑ set opacity to 100% for a solid " + root.apBarFill + " bar"; color: theme.faint; font.pixelSize: 10; font.family: "monospace"; Layout.fillWidth: true }
-                            // height
-                            RowLayout { Layout.fillWidth: true; spacing: 10
-                                Sym { text: "height"; sz: 20 }
-                                Text { text: "bar height"; color: theme.sub; font.pixelSize: 12; font.family: "monospace"; Layout.minimumWidth: 82 }
-                                Slider { fill: theme.good; value: (root.apHeight-34)/20; onMoved: (v)=>{ root.apHeight = 34 + v*20; root.saveAppearance() } }
-                                Text { text: Math.round(root.apHeight)+"px"; color: theme.sub; font.pixelSize: 12; font.family: "monospace"; Layout.minimumWidth: 40; horizontalAlignment: Text.AlignRight } }
 
-                            Section { title: "accent colour"; icon: "palette" }
-                            Flow { Layout.fillWidth: true; spacing: 10
-                                Repeater { model: root.accents
-                                    delegate: Rectangle { required property var modelData; readonly property bool sel: root.apAccent.toLowerCase()===modelData.toLowerCase()
-                                        width: 40; height: 40; radius: 20; color: modelData
-                                        border.width: sel?3:1; border.color: sel?theme.text:theme.a(theme.text,0.2)
-                                        Sym { anchors.centerIn: parent; visible: parent.sel; text: "check"; sz: 20; color: "#0d1420" }
-                                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { root.apAccent=modelData; root.saveAppearance() } } } } }
-                            // matugen AUTO — persisted; recolours the whole shell + kitty from the wallpaper (off = sea cyan)
-                            Rectangle { Layout.fillWidth: true; implicitHeight: 48; radius: 9
-                                color: theme.a(theme.line,0.4); border.width: 1; border.color: root.apMatugen?theme.a(theme.iris,0.5):theme.a(theme.iris,0.16)
-                                RowLayout { anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 12; spacing: 10
-                                    Sym { text: "colorize"; sz: 18; color: root.apMatugen?theme.frost:theme.faint }
-                                    ColumnLayout { spacing: 1; Layout.fillWidth: true
-                                        Text { text: "auto colours from wallpaper"; color: theme.text; font.pixelSize: 13; font.family: root.apFont }
-                                        Text { text: "recolours the shell + kitty on every wallpaper · off = sea cyan"; color: theme.faint; font.pixelSize: 10; font.family: root.apFont } }
-                                    Rectangle { implicitWidth: 46; implicitHeight: 22; radius: 11
-                                        color: root.apMatugen?theme.iris:theme.a(theme.line,0.85); border.width: 1; border.color: root.apMatugen?theme.iris:theme.a(theme.iris,0.3)
-                                        Rectangle { width: 16; height: 16; radius: 8; y: 3; x: root.apMatugen?27:3; color: theme.frost; Behavior on x { NumberAnimation { duration: 120 } } }
-                                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.toggleMatugen() } } } }
-                            // matugen scheme — which Material You algorithm builds the palette (only shown when auto is on)
-                            ColumnLayout { Layout.fillWidth: true; spacing: 6; visible: root.apMatugen
-                                RowLayout { Layout.fillWidth: true; spacing: 6
-                                    Sym { text: "tune"; sz: 15; color: theme.faint }
-                                    Text { text: "colour scheme"; color: theme.sub; font.pixelSize: 12; font.family: root.apFont }
-                                    Item { Layout.fillWidth: true }
-                                    Text { text: root.apScheme.replace("scheme-",""); color: theme.frost; font.pixelSize: 11; font.family: root.apFont } }
-                                Flow { Layout.fillWidth: true; spacing: 7
-                                    Repeater { model: root.schemes
-                                        delegate: Rectangle { required property var modelData
-                                            readonly property bool sel: root.apScheme===modelData
-                                            implicitWidth: scTxt.implicitWidth + 20; implicitHeight: 30; radius: 8
-                                            color: sel ? theme.iris : (scMa.containsMouse ? theme.a(theme.iris,0.16) : theme.a(theme.line,0.4))
-                                            border.width: 1; border.color: sel ? theme.iris : theme.a(theme.iris,0.14)
-                                            Text { id: scTxt; anchors.centerIn: parent; text: (""+modelData).replace("scheme-",""); color: sel ? theme.bg : theme.sub; font.pixelSize: 11; font.family: root.apFont; font.bold: sel }
-                                            MouseArea { id: scMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.setScheme(modelData) } } } } }
-                            // matugen — one-off: derive a palette from the wallpaper to pick a swatch
-                            Rectangle { Layout.fillWidth: true; implicitHeight: 40; radius: 9
-                                color: mgm.containsMouse ? theme.iris : theme.a(theme.iris,0.18); border.width: 1; border.color: theme.iris
-                                RowLayout { anchors.centerIn: parent; spacing: 8
-                                    Sym { text: root.matugenBusy?"sync":"auto_awesome"; sz: 17; color: mgm.containsMouse?theme.bg:theme.frost }
-                                    Text { text: root.matugenBusy ? "matching…" : "pick a palette from wallpaper"; color: mgm.containsMouse?theme.bg:theme.text; font.pixelSize: 13; font.family: root.apFont } }
-                                MouseArea { id: mgm; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.matchWallpaper() } }
-                            // extracted palette — pick any colour
-                            Flow { Layout.fillWidth: true; spacing: 9; visible: root.matugenPalette.length>0
-                                Repeater { model: root.matugenPalette
-                                    delegate: Rectangle { required property var modelData; readonly property bool sel: root.apAccent.toLowerCase()===modelData.toLowerCase()
-                                        width: 36; height: 36; radius: 18; color: modelData
-                                        border.width: sel?3:1; border.color: sel?theme.text:theme.a(theme.text,0.2)
-                                        Sym { anchors.centerIn: parent; visible: parent.sel; text: "check"; sz: 18; color: "#0d1420" }
-                                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { root.apAccent=modelData; root.saveAppearance() } } } } }
-
-                            Section { title: "font"; icon: "font_download" }
-                            Flow { Layout.fillWidth: true; spacing: 7
-                                Repeater { model: root.fontPresets
-                                    delegate: Rectangle { required property var modelData; readonly property bool sel: root.apFont===modelData
-                                        implicitWidth: ft.implicitWidth+20; implicitHeight: 32; radius: 8
-                                        color: sel?theme.iris:(fmm.containsMouse?theme.a(theme.iris,0.16):theme.a(theme.line,0.4)); border.width: 1; border.color: sel?theme.iris:theme.a(theme.iris,0.16)
-                                        Text { id: ft; anchors.centerIn: parent; text: modelData; color: sel?theme.bg:theme.text; font.pixelSize: 12; font.family: modelData; font.bold: sel }
-                                        MouseArea { id: fmm; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: { root.apFont=modelData; root.saveAppearance() } } } }
+                            // segmented horizontal navigation bar for Appearance sub-menus
+                            RowLayout {
+                                Layout.fillWidth: true; spacing: 6; Layout.bottomMargin: 8
+                                Repeater {
+                                    model: [
+                                        { i: "settings_system_daydream", l: "bar theme" },
+                                        { i: "palette", l: "colors" },
+                                        { i: "tune", l: "targets" },
+                                        { i: "font_download", l: "fonts" }
+                                    ]
+                                    delegate: Rectangle {
+                                        required property var modelData; required property int index
+                                        readonly property bool sel: root.apSubTab === index
+                                        Layout.fillWidth: true; implicitHeight: 34; radius: 8
+                                        color: sel ? theme.iris : (subMa.containsMouse ? theme.a(theme.iris, 0.16) : theme.a(theme.line, 0.4))
+                                        border.width: 1; border.color: sel ? theme.iris : theme.a(theme.iris, 0.14)
+                                        RowLayout {
+                                            anchors.centerIn: parent; spacing: 6
+                                            Sym { text: modelData.i; sz: 14; color: sel ? theme.bg : theme.frost }
+                                            Text { text: modelData.l; color: sel ? theme.bg : theme.text; font.pixelSize: 11; font.family: root.apFont; font.bold: sel }
+                                        }
+                                        MouseArea { id: subMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.apSubTab = index }
+                                    }
+                                }
                             }
-                            // custom font entry
-                            Rectangle { Layout.fillWidth: true; implicitHeight: 38; radius: 9
-                                color: theme.a(theme.line,0.4); border.width: 1; border.color: fontIn.activeFocus?theme.iris:theme.a(theme.iris,0.16)
-                                TextInput { id: fontIn; anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 12; verticalAlignment: TextInput.AlignVCenter
-                                    color: theme.text; font.pixelSize: 13; font.family: root.apFont; clip: true; selectByMouse: true; selectionColor: theme.a(theme.iris,0.4)
-                                    Component.onCompleted: text = root.apFont
-                                    onAccepted: root.addCustomFont(text)
-                                    Text { anchors.verticalCenter: parent.verticalCenter; visible: fontIn.text===""; text: "type a font name, ↵ to save it as a chip"; color: theme.faint; font.pixelSize: 13; font.family: root.apFont } } }
-                            Text { text: "changes apply to the bar live"; color: theme.faint; font.pixelSize: 10; font.family: root.apFont }
+
+                            // SUB-TAB 0: Bar Theme
+                            ColumnLayout {
+                                visible: root.apSubTab === 0; Layout.fillWidth: true; spacing: 14
+                                Section { title: "theme"; icon: "contrast" }
+                                RowLayout { Layout.fillWidth: true; spacing: 8
+                                    Repeater { model: [{k:false,l:"Dark",i:"dark_mode"},{k:true,l:"Light",i:"light_mode"}]
+                                        delegate: Rectangle { required property var modelData; readonly property bool sel: root.apLight===modelData.k
+                                            Layout.fillWidth: true; implicitHeight: 40; radius: 9
+                                            color: sel?theme.iris:(thmMa.containsMouse?theme.a(theme.iris,0.16):theme.a(theme.line,0.4)); border.width: 1; border.color: sel?theme.iris:theme.a(theme.iris,0.16)
+                                            RowLayout { anchors.centerIn: parent; spacing: 7
+                                                Sym { text: modelData.i; sz: 17; color: sel?theme.bg:theme.frost }
+                                                Text { text: modelData.l; color: sel?theme.bg:theme.text; font.pixelSize: 13; font.family: root.apFont; font.bold: sel } }
+                                            MouseArea { id: thmMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: { root.apLight=modelData.k; root.saveAppearance() } } } } }
+                                // auto dark mode by time of day
+                                Rectangle { Layout.fillWidth: true; implicitHeight: 46; radius: 9
+                                    color: theme.a(theme.line,0.4); border.width: 1; border.color: root.apAutoDark?theme.a(theme.iris,0.5):theme.a(theme.iris,0.16)
+                                    RowLayout { anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 12; spacing: 10
+                                        Sym { text: "bedtime"; sz: 18; color: root.apAutoDark?theme.frost:theme.faint }
+                                        ColumnLayout { spacing: 1; Layout.fillWidth: true
+                                            Text { text: "auto dark by time"; color: theme.text; font.pixelSize: 13; font.family: root.apFont }
+                                            Text { text: "dark inside the window · overrides the manual pick + the SUPER+⇧+D key"; color: theme.faint; font.pixelSize: 10; font.family: root.apFont } }
+                                        Rectangle { implicitWidth: 46; implicitHeight: 22; radius: 11
+                                            color: root.apAutoDark?theme.iris:theme.a(theme.line,0.85); border.width: 1; border.color: root.apAutoDark?theme.iris:theme.a(theme.iris,0.3)
+                                            Rectangle { width: 16; height: 16; radius: 8; y: 3; x: root.apAutoDark?27:3; color: theme.frost; Behavior on x { NumberAnimation { duration: 120 } } }
+                                            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { root.apAutoDark=!root.apAutoDark; root.saveAppearance() } } } } }
+                                RowLayout { Layout.fillWidth: true; spacing: 10; visible: root.apAutoDark
+                                    Sym { text: "schedule"; sz: 18 }
+                                    Text { text: "dark from"; color: theme.sub; font.pixelSize: 12; font.family: root.apFont }
+                                    Rectangle { implicitWidth: 68; implicitHeight: 32; radius: 8; color: theme.a(theme.line,0.5); border.width: 1; border.color: dstart.activeFocus?theme.iris:theme.a(theme.iris,0.2)
+                                        TextInput { id: dstart; anchors.fill: parent; horizontalAlignment: TextInput.AlignHCenter; verticalAlignment: TextInput.AlignVCenter
+                                            color: theme.text; font.pixelSize: 13; font.family: root.apFont; inputMask: "99:99;_"; text: root.apDarkStart
+                                            onEditingFinished: { root.apDarkStart = text; root.saveAppearance() } } }
+                                    Text { text: "to"; color: theme.sub; font.pixelSize: 12; font.family: root.apFont }
+                                    Rectangle { implicitWidth: 68; implicitHeight: 32; radius: 8; color: theme.a(theme.line,0.5); border.width: 1; border.color: dend.activeFocus?theme.iris:theme.a(theme.iris,0.2)
+                                        TextInput { id: dend; anchors.fill: parent; horizontalAlignment: TextInput.AlignHCenter; verticalAlignment: TextInput.AlignVCenter
+                                            color: theme.text; font.pixelSize: 13; font.family: root.apFont; inputMask: "99:99;_"; text: root.apDarkEnd
+                                            onEditingFinished: { root.apDarkEnd = text; root.saveAppearance() } } }
+                                    Item { Layout.fillWidth: true } }
+                                // system app dark/light preference — independent from shell theme
+                                Section { title: "app preference"; icon: "apps" }
+                                Text { text: "controls GTK / Qt app themes independently from the shell"; color: theme.faint; font.pixelSize: 10; font.family: root.apFont }
+                                RowLayout { Layout.fillWidth: true; spacing: 8
+                                    Repeater { model: [{k:"auto",l:"Auto",i:"sync"},{k:"dark",l:"Dark",i:"dark_mode"},{k:"light",l:"Light",i:"light_mode"}]
+                                        delegate: Rectangle { required property var modelData; readonly property bool sel: root.apAppMode===modelData.k
+                                            Layout.fillWidth: true; implicitHeight: 40; radius: 9
+                                            color: sel?theme.iris:(amMa.containsMouse?theme.a(theme.iris,0.16):theme.a(theme.line,0.4)); border.width: 1; border.color: sel?theme.iris:theme.a(theme.iris,0.16)
+                                            RowLayout { anchors.centerIn: parent; spacing: 7
+                                                Sym { text: modelData.i; sz: 17; color: sel?theme.bg:theme.frost }
+                                                Text { text: modelData.l; color: sel?theme.bg:theme.text; font.pixelSize: 13; font.family: root.apFont; font.bold: sel } }
+                                            MouseArea { id: amMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: { root.apAppMode=modelData.k; root.saveAppearance(); root.applyAppMode() } } } } }
+                                Text { visible: root.apAppMode!=="auto"; text: "apps will stay " + root.apAppMode + " regardless of shell theme"; color: theme.iris; font.pixelSize: 10; font.family: root.apFont }
+                                Section { title: "bar shape"; icon: "tune" }
+                                // roundness
+                                RowLayout { Layout.fillWidth: true; spacing: 10
+                                    Sym { text: "rounded_corner"; sz: 20 }
+                                    Text { text: "roundness"; color: theme.sub; font.pixelSize: 12; font.family: "monospace"; Layout.minimumWidth: 82 }
+                                    Slider { value: root.apRadius/26; onMoved: (v)=>{ root.apRadius = v*26; root.saveAppearance() } }
+                                    Text { text: Math.round(root.apRadius)+"px"; color: theme.sub; font.pixelSize: 12; font.family: "monospace"; Layout.minimumWidth: 40; horizontalAlignment: Text.AlignRight } }
+                                // bar position — which screen edge the bar docks to (left/right = vertical bar)
+                                RowLayout { Layout.fillWidth: true; spacing: 10
+                                    Sym { text: "dock_to_right"; sz: 20 }
+                                    Text { text: "position"; color: theme.sub; font.pixelSize: 12; font.family: "monospace"; Layout.minimumWidth: 82 }
+                                    RowLayout { Layout.fillWidth: true; spacing: 6
+                                        Repeater { model: root.edges
+                                            delegate: Rectangle { required property var modelData
+                                                readonly property bool sel: root.apEdge===modelData
+                                                Layout.fillWidth: true; implicitHeight: 30; radius: 8
+                                                color: sel ? theme.iris : (edMa.containsMouse ? theme.a(theme.iris,0.16) : theme.a(theme.line,0.4))
+                                                border.width: 1; border.color: sel ? theme.iris : theme.a(theme.iris,0.14)
+                                                Text { anchors.centerIn: parent; text: modelData; color: sel ? theme.bg : theme.sub; font.pixelSize: 11; font.family: "monospace"; font.bold: sel }
+                                                MouseArea { id: edMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: { root.apEdge=modelData; root.saveAppearance() } } } } } }
+                                // transparency — 0% leaves only the pill buttons floating
+                                RowLayout { Layout.fillWidth: true; spacing: 10
+                                    Sym { text: "opacity"; sz: 20 }
+                                    Text { text: "opacity"; color: theme.sub; font.pixelSize: 12; font.family: "monospace"; Layout.minimumWidth: 82 }
+                                    Slider { fill: theme.frost; value: root.apOpacity; onMoved: (v)=>{ root.apOpacity = v; root.saveAppearance() } }
+                                    Text { text: Math.round(root.apOpacity*100)+"%"; color: theme.sub; font.pixelSize: 12; font.family: "monospace"; Layout.minimumWidth: 40; horizontalAlignment: Text.AlignRight } }
+                                Text { visible: root.apOpacity < 0.06
+                                    text: "↑ 0% hides the bar background — only the buttons show"; color: theme.faint; font.pixelSize: 10; font.family: "monospace"; Layout.fillWidth: true }
+                                // bar fill — a clean solid black/white, or the matugen accent tint (most obvious at 100% opacity)
+                                RowLayout { Layout.fillWidth: true; spacing: 10
+                                    Sym { text: "format_color_fill"; sz: 20 }
+                                    Text { text: "bar fill"; color: theme.sub; font.pixelSize: 12; font.family: "monospace"; Layout.minimumWidth: 82 }
+                                    RowLayout { Layout.fillWidth: true; spacing: 6
+                                        Repeater { model: [{k:"matugen",l:"matugen"},{k:"black",l:"black"},{k:"white",l:"white"}]
+                                            delegate: Rectangle { required property var modelData
+                                                readonly property bool sel: root.apBarFill===modelData.k
+                                                Layout.fillWidth: true; implicitHeight: 30; radius: 8
+                                                color: sel ? theme.iris : (bfMa.containsMouse ? theme.a(theme.iris,0.16) : theme.a(theme.line,0.4))
+                                                border.width: 1; border.color: sel ? theme.iris : theme.a(theme.iris,0.14)
+                                                Text { anchors.centerIn: parent; text: modelData.l; color: sel ? theme.bg : theme.sub; font.pixelSize: 11; font.family: "monospace"; font.bold: sel }
+                                                MouseArea { id: bfMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: { root.apBarFill=modelData.k; root.saveAppearance() } } } } } }
+                                Text { visible: root.apBarFill!=="matugen" && root.apOpacity<0.99
+                                    text: "↑ set opacity to 100% for a solid " + root.apBarFill + " bar"; color: theme.faint; font.pixelSize: 10; font.family: "monospace"; Layout.fillWidth: true }
+                                // height
+                                RowLayout { Layout.fillWidth: true; spacing: 10
+                                    Sym { text: "height"; sz: 20 }
+                                    Text { text: "bar height"; color: theme.sub; font.pixelSize: 12; font.family: "monospace"; Layout.minimumWidth: 82 }
+                                    Slider { fill: theme.good; value: (root.apHeight-34)/20; onMoved: (v)=>{ root.apHeight = 34 + v*20; root.saveAppearance() } }
+                                    Text { text: Math.round(root.apHeight)+"px"; color: theme.sub; font.pixelSize: 12; font.family: "monospace"; Layout.minimumWidth: 40; horizontalAlignment: Text.AlignRight } }
+                            }
+
+                            // SUB-TAB 1: Colors
+                            ColumnLayout {
+                                visible: root.apSubTab === 1; Layout.fillWidth: true; spacing: 14
+                                Section { title: "accent colour"; icon: "palette" }
+                                Flow { Layout.fillWidth: true; spacing: 10
+                                    Repeater { model: root.accents
+                                        delegate: Rectangle { required property var modelData; readonly property bool sel: root.apAccent.toLowerCase()===modelData.toLowerCase()
+                                            width: 40; height: 40; radius: 20; color: modelData
+                                            border.width: sel?3:1; border.color: sel?theme.text:theme.a(theme.text,0.2)
+                                            Sym { anchors.centerIn: parent; visible: parent.sel; text: "check"; sz: 20; color: "#0d1420" }
+                                            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { root.apAccent=modelData; root.saveAppearance(); run("sh '"+root.matugenScript+"'") } } } } }
+                                // matugen AUTO — persisted; recolours the whole shell + kitty from the wallpaper (off = sea cyan)
+                                Rectangle { Layout.fillWidth: true; implicitHeight: 48; radius: 9
+                                    color: theme.a(theme.line,0.4); border.width: 1; border.color: root.apMatugen?theme.a(theme.iris,0.5):theme.a(theme.iris,0.16)
+                                    RowLayout { anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 12; spacing: 10
+                                        Sym { text: "colorize"; sz: 18; color: root.apMatugen?theme.frost:theme.faint }
+                                        ColumnLayout { spacing: 1; Layout.fillWidth: true
+                                            Text { text: "auto colours from wallpaper"; color: theme.text; font.pixelSize: 13; font.family: root.apFont }
+                                            Text { text: "recolours the shell + kitty on every wallpaper · off = sea cyan"; color: theme.faint; font.pixelSize: 10; font.family: root.apFont } }
+                                        Rectangle { implicitWidth: 46; implicitHeight: 22; radius: 11
+                                            color: root.apMatugen?theme.iris:theme.a(theme.line,0.85); border.width: 1; border.color: root.apMatugen?theme.iris:theme.a(theme.iris,0.3)
+                                            Rectangle { width: 16; height: 16; radius: 8; y: 3; x: root.apMatugen?27:3; color: theme.frost; Behavior on x { NumberAnimation { duration: 120 } } }
+                                            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.toggleMatugen() } } } }
+                                // matugen scheme — which Material You algorithm builds the palette (only shown when auto is on)
+                                ColumnLayout { Layout.fillWidth: true; spacing: 6; visible: root.apMatugen
+                                    RowLayout { Layout.fillWidth: true; spacing: 6
+                                        Sym { text: "tune"; sz: 15; color: theme.faint }
+                                        Text { text: "colour scheme"; color: theme.sub; font.pixelSize: 12; font.family: root.apFont }
+                                        Item { Layout.fillWidth: true }
+                                        Text { text: root.apScheme.replace("scheme-",""); color: theme.frost; font.pixelSize: 11; font.family: root.apFont } }
+                                    Flow { Layout.fillWidth: true; spacing: 7
+                                        Repeater { model: root.schemes
+                                            delegate: Rectangle { required property var modelData
+                                                readonly property bool sel: root.apScheme===modelData
+                                                implicitWidth: scTxt.implicitWidth + 20; implicitHeight: 30; radius: 8
+                                                color: sel ? theme.iris : (scMa.containsMouse ? theme.a(theme.iris,0.16) : theme.a(theme.line,0.4))
+                                                border.width: 1; border.color: sel ? theme.iris : theme.a(theme.iris,0.14)
+                                                Text { id: scTxt; anchors.centerIn: parent; text: (""+modelData).replace("scheme-",""); color: sel ? theme.bg : theme.sub; font.pixelSize: 11; font.family: root.apFont; font.bold: sel }
+                                                MouseArea { id: scMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.setScheme(modelData) } } } } }
+                                // matugen — one-off: derive a palette from the wallpaper or pick with eyedropper
+                                RowLayout { Layout.fillWidth: true; spacing: 8
+                                    Rectangle { Layout.fillWidth: true; implicitHeight: 40; radius: 9
+                                        color: mgm.containsMouse ? theme.iris : theme.a(theme.iris,0.18); border.width: 1; border.color: theme.iris
+                                        RowLayout { anchors.centerIn: parent; spacing: 8
+                                            Sym { text: root.matugenBusy?"sync":"auto_awesome"; sz: 17; color: mgm.containsMouse?theme.bg:theme.frost }
+                                            Text { text: root.matugenBusy ? "matching…" : "pick a palette from wallpaper"; color: mgm.containsMouse?theme.bg:theme.text; font.pixelSize: 12; font.family: root.apFont } }
+                                        MouseArea { id: mgm; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.matchWallpaper() } }
+                                    Rectangle { implicitWidth: 100; implicitHeight: 40; radius: 9
+                                        color: edm.containsMouse ? theme.iris : theme.a(theme.iris,0.18); border.width: 1; border.color: theme.iris
+                                        RowLayout { anchors.centerIn: parent; spacing: 6
+                                            Sym { text: "colorize"; sz: 17; color: edm.containsMouse?theme.bg:theme.frost }
+                                            Text { text: "picker"; color: edm.containsMouse?theme.bg:theme.text; font.pixelSize: 12; font.family: root.apFont } }
+                                        MouseArea { id: edm; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: { root.pickingTarget = "accent"; colorPickerProc.running = true } } } }
+                                // extracted palette — pick any colour
+                                Flow { Layout.fillWidth: true; spacing: 9; visible: root.matugenPalette.length>0
+                                    Repeater { model: root.matugenPalette
+                                        delegate: Rectangle { required property var modelData; readonly property bool sel: root.apAccent.toLowerCase()===modelData.toLowerCase()
+                                            width: 36; height: 36; radius: 18; color: modelData
+                                            border.width: sel?3:1; border.color: sel?theme.text:theme.a(theme.text,0.2)
+                                            Sym { anchors.centerIn: parent; visible: parent.sel; text: "check"; sz: 18; color: "#0d1420" }
+                                            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { root.apAccent=modelData; root.saveAppearance(); run("sh '"+root.matugenScript+"'") } } } } }
+                            }
+
+                            // SUB-TAB 2: Custom Targets Overrides
+                            ColumnLayout {
+                                visible: root.apSubTab === 2; Layout.fillWidth: true; spacing: 14
+                                // ---------- per-target colour overrides ----------
+                                ColumnLayout { Layout.fillWidth: true; spacing: 8
+                                    Section { title: "colour targets"; icon: "tune" }
+                                    Text { text: "customize which apps auto-match wallpaper/global accent · disabled auto-match targets can use custom colors"; color: theme.faint; font.pixelSize: 10; font.family: root.apFont }
+                                    // Hyprland borders
+                                    Rectangle { Layout.fillWidth: true; implicitHeight: hyprCol.implicitHeight + 20; radius: 9
+                                        color: theme.a(theme.line,0.4); border.width: 1; border.color: root.ovrHyprland?theme.a(theme.iris,0.5):theme.a(theme.iris,0.16)
+                                        ColumnLayout { id: hyprCol; anchors.fill: parent; anchors.margins: 10; spacing: 8
+                                            RowLayout { Layout.fillWidth: true; spacing: 10
+                                                Sym { text: "border_style"; sz: 18; color: root.ovrHyprland?theme.frost:theme.faint }
+                                                ColumnLayout { spacing: 1; Layout.fillWidth: true
+                                                    Text { text: "hyprland borders"; color: theme.text; font.pixelSize: 13; font.family: root.apFont }
+                                                    Text { text: "window active/inactive border colours"; color: theme.faint; font.pixelSize: 10; font.family: root.apFont } }
+                                                Rectangle { implicitWidth: 46; implicitHeight: 22; radius: 11
+                                                    color: root.ovrHyprland?theme.iris:theme.a(theme.line,0.85); border.width: 1; border.color: root.ovrHyprland?theme.iris:theme.a(theme.iris,0.3)
+                                                    Rectangle { width: 16; height: 16; radius: 8; y: 3; x: root.ovrHyprland?27:3; color: theme.frost; Behavior on x { NumberAnimation { duration: 120 } } }
+                                                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { root.ovrHyprland=!root.ovrHyprland; root.toggleOverride("hyprland") } } } }
+                                            // custom border colours (only visible when auto-match is OFF)
+                                            ColumnLayout { Layout.fillWidth: true; spacing: 6; visible: !root.ovrHyprland
+                                                RowLayout { Layout.fillWidth: true; spacing: 8
+                                                    Text { text: "active"; color: theme.sub; font.pixelSize: 11; font.family: root.apFont; Layout.minimumWidth: 46 }
+                                                    Rectangle { implicitWidth: 16; implicitHeight: 16; radius: 4; color: root.ovrHyprActive || root.apAccent; border.width: 1; border.color: theme.a(theme.text,0.2) }
+                                                    Rectangle { Layout.fillWidth: true; implicitHeight: 28; radius: 6; color: theme.a(theme.line,0.5); border.width: 1; border.color: haIn.activeFocus?theme.iris:theme.a(theme.iris,0.2)
+                                                        TextInput { id: haIn; anchors.fill: parent; anchors.leftMargin: 8; anchors.rightMargin: 8; verticalAlignment: TextInput.AlignVCenter
+                                                            color: theme.text; font.pixelSize: 11; font.family: "monospace"; clip: true; selectByMouse: true; text: root.ovrHyprActive
+                                                            onEditingFinished: { root.ovrHyprActive=text.trim(); root.toggleOverride("hyprland") }
+                                                            Text { anchors.verticalCenter: parent.verticalCenter; visible: !haIn.text; text: "auto"; color: theme.faint; font.pixelSize: 11; font.family: "monospace" } } }
+                                                    Rectangle { implicitWidth: 28; implicitHeight: 28; radius: 6
+                                                        color: haEdm.containsMouse ? theme.a(theme.iris, 0.2) : theme.a(theme.line, 0.4)
+                                                        border.width: 1; border.color: theme.a(theme.iris, 0.16)
+                                                        Sym { anchors.centerIn: parent; text: "colorize"; sz: 14; color: theme.frost }
+                                                        MouseArea { id: haEdm; anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { root.pickingTarget = "hyprActive"; colorPickerProc.running = true } } } }
+                                                Flow { Layout.fillWidth: true; spacing: 4; Layout.leftMargin: 54
+                                                    Repeater { model: root.accents.concat(root.matugenPalette)
+                                                        delegate: Rectangle { required property var modelData; width: 16; height: 16; radius: 8; color: modelData; border.width: 1; border.color: theme.a(theme.text, 0.2)
+                                                            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { root.ovrHyprActive = modelData; root.toggleOverride("hyprland") } } } } }
+                                                RowLayout { Layout.fillWidth: true; spacing: 8
+                                                    Text { text: "inactive"; color: theme.sub; font.pixelSize: 11; font.family: root.apFont; Layout.minimumWidth: 46 }
+                                                    Rectangle { implicitWidth: 16; implicitHeight: 16; radius: 4; color: root.ovrHyprInactive || theme.a(root.apAccent,0.4); border.width: 1; border.color: theme.a(theme.text,0.2) }
+                                                    Rectangle { Layout.fillWidth: true; implicitHeight: 28; radius: 6; color: theme.a(theme.line,0.5); border.width: 1; border.color: hiIn.activeFocus?theme.iris:theme.a(theme.iris,0.2)
+                                                        TextInput { id: hiIn; anchors.fill: parent; anchors.leftMargin: 8; anchors.rightMargin: 8; verticalAlignment: TextInput.AlignVCenter
+                                                            color: theme.text; font.pixelSize: 11; font.family: "monospace"; clip: true; selectByMouse: true; text: root.ovrHyprInactive
+                                                            onEditingFinished: { root.ovrHyprInactive=text.trim(); root.toggleOverride("hyprland") }
+                                                            Text { anchors.verticalCenter: parent.verticalCenter; visible: !hiIn.text; text: "auto"; color: theme.faint; font.pixelSize: 11; font.family: "monospace" } } }
+                                                    Rectangle { implicitWidth: 28; implicitHeight: 28; radius: 6
+                                                        color: hiEdm.containsMouse ? theme.a(theme.iris, 0.2) : theme.a(theme.line, 0.4)
+                                                        border.width: 1; border.color: theme.a(theme.iris, 0.16)
+                                                        Sym { anchors.centerIn: parent; text: "colorize"; sz: 14; color: theme.frost }
+                                                        MouseArea { id: hiEdm; anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { root.pickingTarget = "hyprInactive"; colorPickerProc.running = true } } } }
+                                                Flow { Layout.fillWidth: true; spacing: 4; Layout.leftMargin: 54
+                                                    Repeater { model: root.accents.concat(root.matugenPalette)
+                                                        delegate: Rectangle { required property var modelData; width: 16; height: 16; radius: 8; color: modelData; border.width: 1; border.color: theme.a(theme.text, 0.2)
+                                                            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { root.ovrHyprInactive = modelData; root.toggleOverride("hyprland") } } } } } } } }
+                                    // Kitty terminal
+                                    Rectangle { Layout.fillWidth: true; implicitHeight: kittyCol.implicitHeight + 20; radius: 9
+                                        color: theme.a(theme.line,0.4); border.width: 1; border.color: root.ovrKitty?theme.a(theme.iris,0.5):theme.a(theme.iris,0.16)
+                                        ColumnLayout { id: kittyCol; anchors.fill: parent; anchors.margins: 10; spacing: 8
+                                            RowLayout { Layout.fillWidth: true; spacing: 10
+                                                Sym { text: "terminal"; sz: 18; color: root.ovrKitty?theme.frost:theme.faint }
+                                                ColumnLayout { spacing: 1; Layout.fillWidth: true
+                                                    Text { text: "kitty terminal"; color: theme.text; font.pixelSize: 13; font.family: root.apFont }
+                                                    Text { text: "terminal colour palette and background"; color: theme.faint; font.pixelSize: 10; font.family: root.apFont } }
+                                                Rectangle { implicitWidth: 46; implicitHeight: 22; radius: 11
+                                                    color: root.ovrKitty?theme.iris:theme.a(theme.line,0.85); border.width: 1; border.color: root.ovrKitty?theme.iris:theme.a(theme.iris,0.3)
+                                                    Rectangle { width: 16; height: 16; radius: 8; y: 3; x: root.ovrKitty?27:3; color: theme.frost; Behavior on x { NumberAnimation { duration: 120 } } }
+                                                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { root.ovrKitty=!root.ovrKitty; root.toggleOverride("kitty") } } } }
+                                            // custom kitty colors
+                                            ColumnLayout { Layout.fillWidth: true; spacing: 6; visible: !root.ovrKitty
+                                                RowLayout { Layout.fillWidth: true; spacing: 8
+                                                    Text { text: "accent"; color: theme.sub; font.pixelSize: 11; font.family: root.apFont; Layout.minimumWidth: 46 }
+                                                    Rectangle { implicitWidth: 16; implicitHeight: 16; radius: 4; color: root.ovrKittyAccent || root.apAccent; border.width: 1; border.color: theme.a(theme.text,0.2) }
+                                                    Rectangle { Layout.fillWidth: true; implicitHeight: 28; radius: 6; color: theme.a(theme.line,0.5); border.width: 1; border.color: kaIn.activeFocus?theme.iris:theme.a(theme.iris,0.2)
+                                                        TextInput { id: kaIn; anchors.fill: parent; anchors.leftMargin: 8; anchors.rightMargin: 8; verticalAlignment: TextInput.AlignVCenter
+                                                            color: theme.text; font.pixelSize: 11; font.family: "monospace"; clip: true; selectByMouse: true; text: root.ovrKittyAccent
+                                                            onEditingFinished: { root.ovrKittyAccent=text.trim(); root.toggleOverride("kitty") }
+                                                            Text { anchors.verticalCenter: parent.verticalCenter; visible: !kaIn.text; text: "auto"; color: theme.faint; font.pixelSize: 11; font.family: "monospace" } } }
+                                                    Rectangle { implicitWidth: 28; implicitHeight: 28; radius: 6
+                                                        color: kaEdm.containsMouse ? theme.a(theme.iris, 0.2) : theme.a(theme.line, 0.4)
+                                                        border.width: 1; border.color: theme.a(theme.iris, 0.16)
+                                                        Sym { anchors.centerIn: parent; text: "colorize"; sz: 14; color: theme.frost }
+                                                        MouseArea { id: kaEdm; anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { root.pickingTarget = "kittyAccent"; colorPickerProc.running = true } } } }
+                                                Flow { Layout.fillWidth: true; spacing: 4; Layout.leftMargin: 54
+                                                    Repeater { model: root.accents.concat(root.matugenPalette)
+                                                        delegate: Rectangle { required property var modelData; width: 16; height: 16; radius: 8; color: modelData; border.width: 1; border.color: theme.a(theme.text, 0.2)
+                                                            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { root.ovrKittyAccent = modelData; root.toggleOverride("kitty") } } } } }
+                                                RowLayout { Layout.fillWidth: true; spacing: 8
+                                                    Text { text: "bg"; color: theme.sub; font.pixelSize: 11; font.family: root.apFont; Layout.minimumWidth: 46 }
+                                                    Rectangle { implicitWidth: 16; implicitHeight: 16; radius: 4; color: root.ovrKittyBg || "#171729"; border.width: 1; border.color: theme.a(theme.text,0.2) }
+                                                    Rectangle { Layout.fillWidth: true; implicitHeight: 28; radius: 6; color: theme.a(theme.line,0.5); border.width: 1; border.color: kbIn.activeFocus?theme.iris:theme.a(theme.iris,0.2)
+                                                        TextInput { id: kbIn; anchors.fill: parent; anchors.leftMargin: 8; anchors.rightMargin: 8; verticalAlignment: TextInput.AlignVCenter
+                                                            color: theme.text; font.pixelSize: 11; font.family: "monospace"; clip: true; selectByMouse: true; text: root.ovrKittyBg
+                                                            onEditingFinished: { root.ovrKittyBg=text.trim(); root.toggleOverride("kitty") }
+                                                            Text { anchors.verticalCenter: parent.verticalCenter; visible: !kbIn.text; text: "auto"; color: theme.faint; font.pixelSize: 11; font.family: "monospace" } } }
+                                                    Rectangle { implicitWidth: 28; implicitHeight: 28; radius: 6
+                                                        color: kbEdm.containsMouse ? theme.a(theme.iris, 0.2) : theme.a(theme.line, 0.4)
+                                                        border.width: 1; border.color: theme.a(theme.iris, 0.16)
+                                                        Sym { anchors.centerIn: parent; text: "colorize"; sz: 14; color: theme.frost }
+                                                        MouseArea { id: kbEdm; anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { root.pickingTarget = "kittyBg"; colorPickerProc.running = true } } } }
+                                                Flow { Layout.fillWidth: true; spacing: 4; Layout.leftMargin: 54
+                                                    Repeater { model: ["#0f141d","#171729","#1a1b26","#1e1e2e","#282828","#000000"].concat(root.matugenPalette)
+                                                        delegate: Rectangle { required property var modelData; width: 16; height: 16; radius: 8; color: modelData; border.width: 1; border.color: theme.a(theme.text, 0.2)
+                                                            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { root.ovrKittyBg = modelData; root.toggleOverride("kitty") } } } } } } } }
+                                    // Fastfetch
+                                    Rectangle { Layout.fillWidth: true; implicitHeight: ffCol.implicitHeight + 20; radius: 9
+                                        color: theme.a(theme.line,0.4); border.width: 1; border.color: root.ovrFastfetch?theme.a(theme.iris,0.5):theme.a(theme.iris,0.16)
+                                        ColumnLayout { id: ffCol; anchors.fill: parent; anchors.margins: 10; spacing: 8
+                                            RowLayout { Layout.fillWidth: true; spacing: 10
+                                                Sym { text: "info"; sz: 18; color: root.ovrFastfetch?theme.frost:theme.faint }
+                                                ColumnLayout { spacing: 1; Layout.fillWidth: true
+                                                    Text { text: "fastfetch"; color: theme.text; font.pixelSize: 13; font.family: root.apFont }
+                                                    Text { text: "system info key + logo accent colour"; color: theme.faint; font.pixelSize: 10; font.family: root.apFont } }
+                                                Rectangle { implicitWidth: 46; implicitHeight: 22; radius: 11
+                                                    color: root.ovrFastfetch?theme.iris:theme.a(theme.line,0.85); border.width: 1; border.color: root.ovrFastfetch?theme.iris:theme.a(theme.iris,0.3)
+                                                    Rectangle { width: 16; height: 16; radius: 8; y: 3; x: root.ovrFastfetch?27:3; color: theme.frost; Behavior on x { NumberAnimation { duration: 120 } } }
+                                                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { root.ovrFastfetch=!root.ovrFastfetch; root.toggleOverride("fastfetch") } } } }
+                                            // custom fastfetch accent
+                                            ColumnLayout { Layout.fillWidth: true; spacing: 6; visible: !root.ovrFastfetch
+                                                RowLayout { Layout.fillWidth: true; spacing: 8
+                                                    Text { text: "accent"; color: theme.sub; font.pixelSize: 11; font.family: root.apFont; Layout.minimumWidth: 46 }
+                                                    Rectangle { implicitWidth: 16; implicitHeight: 16; radius: 4; color: root.ovrFastfetchAccent || root.apAccent; border.width: 1; border.color: theme.a(theme.text,0.2) }
+                                                    Rectangle { Layout.fillWidth: true; implicitHeight: 28; radius: 6; color: theme.a(theme.line,0.5); border.width: 1; border.color: ffaIn.activeFocus?theme.iris:theme.a(theme.iris,0.2)
+                                                        TextInput { id: ffaIn; anchors.fill: parent; anchors.leftMargin: 8; anchors.rightMargin: 8; verticalAlignment: TextInput.AlignVCenter
+                                                            color: theme.text; font.pixelSize: 11; font.family: "monospace"; clip: true; selectByMouse: true; text: root.ovrFastfetchAccent
+                                                            onEditingFinished: { root.ovrFastfetchAccent=text.trim(); root.toggleOverride("fastfetch") }
+                                                            Text { anchors.verticalCenter: parent.verticalCenter; visible: !ffaIn.text; text: "auto"; color: theme.faint; font.pixelSize: 11; font.family: "monospace" } } }
+                                                    Rectangle { implicitWidth: 28; implicitHeight: 28; radius: 6
+                                                        color: ffEdm.containsMouse ? theme.a(theme.iris, 0.2) : theme.a(theme.line, 0.4)
+                                                        border.width: 1; border.color: theme.a(theme.iris, 0.16)
+                                                        Sym { anchors.centerIn: parent; text: "colorize"; sz: 14; color: theme.frost }
+                                                        MouseArea { id: ffEdm; anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { root.pickingTarget = "fastfetch"; colorPickerProc.running = true } } } }
+                                                Flow { Layout.fillWidth: true; spacing: 4; Layout.leftMargin: 54
+                                                    Repeater { model: root.accents.concat(root.matugenPalette)
+                                                        delegate: Rectangle { required property var modelData; width: 16; height: 16; radius: 8; color: modelData; border.width: 1; border.color: theme.a(theme.text, 0.2)
+                                                            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { root.ovrFastfetchAccent = modelData; root.toggleOverride("fastfetch") } } } } } } } }
+                                    // Starship prompt
+                                    Rectangle { Layout.fillWidth: true; implicitHeight: ssCol.implicitHeight + 20; radius: 9
+                                        color: theme.a(theme.line,0.4); border.width: 1; border.color: root.ovrStarship?theme.a(theme.iris,0.5):theme.a(theme.iris,0.16)
+                                        ColumnLayout { id: ssCol; anchors.fill: parent; anchors.margins: 10; spacing: 8
+                                            RowLayout { Layout.fillWidth: true; spacing: 10
+                                                Sym { text: "star"; sz: 18; color: root.ovrStarship?theme.frost:theme.faint }
+                                                ColumnLayout { spacing: 1; Layout.fillWidth: true
+                                                    Text { text: "starship prompt"; color: theme.text; font.pixelSize: 13; font.family: root.apFont }
+                                                    Text { text: "terminal prompt accent colours"; color: theme.faint; font.pixelSize: 10; font.family: root.apFont } }
+                                                Rectangle { implicitWidth: 46; implicitHeight: 22; radius: 11
+                                                    color: root.ovrStarship?theme.iris:theme.a(theme.line,0.85); border.width: 1; border.color: root.ovrStarship?theme.iris:theme.a(theme.iris,0.3)
+                                                    Rectangle { width: 16; height: 16; radius: 8; y: 3; x: root.ovrStarship?27:3; color: theme.frost; Behavior on x { NumberAnimation { duration: 120 } } }
+                                                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { root.ovrStarship=!root.ovrStarship; root.toggleOverride("starship") } } } }
+                                            // custom starship accent
+                                            ColumnLayout { Layout.fillWidth: true; spacing: 6; visible: !root.ovrStarship
+                                                RowLayout { Layout.fillWidth: true; spacing: 8
+                                                    Text { text: "accent"; color: theme.sub; font.pixelSize: 11; font.family: root.apFont; Layout.minimumWidth: 46 }
+                                                    Rectangle { implicitWidth: 16; implicitHeight: 16; radius: 4; color: root.ovrStarshipAccent || root.apAccent; border.width: 1; border.color: theme.a(theme.text,0.2) }
+                                                    Rectangle { Layout.fillWidth: true; implicitHeight: 28; radius: 6; color: theme.a(theme.line,0.5); border.width: 1; border.color: ssaIn.activeFocus?theme.iris:theme.a(theme.iris,0.2)
+                                                        TextInput { id: ssaIn; anchors.fill: parent; anchors.leftMargin: 8; anchors.rightMargin: 8; verticalAlignment: TextInput.AlignVCenter
+                                                            color: theme.text; font.pixelSize: 11; font.family: "monospace"; clip: true; selectByMouse: true; text: root.ovrStarshipAccent
+                                                            onEditingFinished: { root.ovrStarshipAccent=text.trim(); root.toggleOverride("starship") }
+                                                            Text { anchors.verticalCenter: parent.verticalCenter; visible: !ssaIn.text; text: "auto"; color: theme.faint; font.pixelSize: 11; font.family: "monospace" } } }
+                                                    Rectangle { implicitWidth: 28; implicitHeight: 28; radius: 6
+                                                        color: ssEdm.containsMouse ? theme.a(theme.iris, 0.2) : theme.a(theme.line, 0.4)
+                                                        border.width: 1; border.color: theme.a(theme.iris, 0.16)
+                                                        Sym { anchors.centerIn: parent; text: "colorize"; sz: 14; color: theme.frost }
+                                                        MouseArea { id: ssEdm; anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { root.pickingTarget = "starship"; colorPickerProc.running = true } } } }
+                                                Flow { Layout.fillWidth: true; spacing: 4; Layout.leftMargin: 54
+                                                    Repeater { model: root.accents.concat(root.matugenPalette)
+                                                        delegate: Rectangle { required property var modelData; width: 16; height: 16; radius: 8; color: modelData; border.width: 1; border.color: theme.a(theme.text, 0.2)
+                                                            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { root.ovrStarshipAccent = modelData; root.toggleOverride("starship") } } } } } } } }
+                                }
+                            }
+
+                            // SUB-TAB 3: Fonts
+                            ColumnLayout {
+                                visible: root.apSubTab === 3; Layout.fillWidth: true; spacing: 14
+                                Section { title: "font"; icon: "font_download" }
+                                Flow { Layout.fillWidth: true; spacing: 7
+                                    Repeater { model: root.fontPresets
+                                        delegate: Rectangle { required property var modelData; readonly property bool sel: root.apFont===modelData
+                                            implicitWidth: ft.implicitWidth+20; implicitHeight: 32; radius: 8
+                                            color: sel?theme.iris:(fmm.containsMouse?theme.a(theme.iris,0.16):theme.a(theme.line,0.4)); border.width: 1; border.color: sel?theme.iris:theme.a(theme.iris,0.16)
+                                            Text { id: ft; anchors.centerIn: parent; text: modelData; color: sel?theme.bg:theme.text; font.pixelSize: 12; font.family: modelData; font.bold: sel }
+                                            MouseArea { id: fmm; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: { root.apFont=modelData; root.saveAppearance() } } } } }
+                                // custom font entry
+                                Rectangle { Layout.fillWidth: true; implicitHeight: 38; radius: 9
+                                    color: theme.a(theme.line,0.4); border.width: 1; border.color: fontIn.activeFocus?theme.iris:theme.a(theme.iris,0.16)
+                                    TextInput { id: fontIn; anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 12; verticalAlignment: TextInput.AlignVCenter
+                                        color: theme.text; font.pixelSize: 13; font.family: root.apFont; clip: true; selectByMouse: true; selectionColor: theme.a(theme.iris,0.4)
+                                        Component.onCompleted: text = root.apFont
+                                        onAccepted: root.addCustomFont(text)
+                                        Text { anchors.verticalCenter: parent.verticalCenter; visible: fontIn.text===""; text: "type a font name, ↵ to save it as a chip"; color: theme.faint; font.pixelSize: 13; font.family: root.apFont } } }
+                                Text { text: "changes apply to the bar live"; color: theme.faint; font.pixelSize: 10; font.family: root.apFont }
+                            }
+                        }
+
+                        // ================= BAR WIDGETS =================
+                        ColumnLayout {
+                            visible: root.tab === 12; Layout.fillWidth: true; spacing: 14
+                            Section { title: "bar widgets"; icon: "widgets" }
+                            Text {
+                                text: "toggle which widgets are displayed on the top-bar. Hidden widgets release layout space instantly."
+                                color: theme.faint; font.pixelSize: 11; font.family: root.apFont; Layout.bottomMargin: 6
+                            }
+                            ColumnLayout {
+                                Layout.fillWidth: true; spacing: 8
+                                Repeater {
+                                    model: [
+                                        { prop: "wgMpris",     i: "play_circle",            l: "Media Player",             d: "Shows current track info and playback controls in the bar center" },
+                                        { prop: "wgTray",      i: "grid_view",              l: "System Tray",              d: "Collapsible area for background app status notifier icons" },
+                                        { prop: "wgWeather",   i: "cloud",                  l: "Weather",                  d: "Displays current temperature and weather conditions" },
+                                        { prop: "wgClipboard", i: "content_paste",          l: "Clipboard Manager",        d: "Quick access button to clipboard history search popup" },
+                                        { prop: "wgNotif",     i: "notifications",          l: "Notification Bell",        d: "Displays a badge with unread notification count" },
+                                        { prop: "wgWifi",      i: "wifi",                   l: "Wi-Fi Connection",        d: "Displays network status and wireless signal strength" },
+                                        { prop: "wgBluetooth", i: "bluetooth",              l: "Bluetooth Status",         d: "Displays adapter status and toggles connected devices list" },
+                                        { prop: "wgCaffeine",  i: "coffee",                 l: "Caffeine / Caffeine Lock", d: "Prevents screen dimming and automatic suspension" },
+                                        { prop: "wgSystem",    i: "speed",                  l: "System Monitor",           d: "Displays live CPU usage and system load metric" },
+                                        { prop: "wgVolume",    i: "volume_up",              l: "Volume Control",           d: "Displays sound volume level and output selector" },
+                                        { prop: "wgBattery",   i: "battery_charging_full",  l: "Battery Status",           d: "Monitors remaining power levels for laptops" },
+                                        { prop: "wgClock",     i: "schedule",               l: "Clock & Calendar",         d: "Shows current date and time with upcoming calendar events" },
+                                        { prop: "wgPower",     i: "power_settings_new",     l: "Power Actions",            d: "Power icon for locking, logging out, restarting, or shutting down" }
+                                    ]
+                                    delegate: Rectangle {
+                                        required property var modelData
+                                        readonly property bool enabledVal: root[modelData.prop]
+                                        Layout.fillWidth: true; implicitHeight: 52; radius: 9
+                                        color: theme.a(theme.line, 0.4); border.width: 1; border.color: enabledVal ? theme.a(theme.iris, 0.5) : theme.a(theme.iris, 0.16)
+                                        RowLayout {
+                                            anchors.fill: parent; anchors.leftMargin: 14; anchors.rightMargin: 14; spacing: 12
+                                            Sym { text: modelData.i; sz: 19; color: enabledVal ? theme.frost : theme.faint }
+                                            ColumnLayout {
+                                                spacing: 1; Layout.fillWidth: true
+                                                Text { text: modelData.l; color: theme.text; font.pixelSize: 13; font.family: root.apFont }
+                                                Text { text: modelData.d; color: theme.faint; font.pixelSize: 10; font.family: root.apFont }
+                                            }
+                                            Rectangle {
+                                                implicitWidth: 46; implicitHeight: 22; radius: 11
+                                                color: enabledVal ? theme.iris : theme.a(theme.line, 0.85); border.width: 1; border.color: enabledVal ? theme.iris : theme.a(theme.iris, 0.3)
+                                                Rectangle {
+                                                    width: 16; height: 16; radius: 8; y: 3; x: enabledVal ? 27 : 3
+                                                    color: theme.frost; Behavior on x { NumberAnimation { duration: 120 } }
+                                                }
+                                                MouseArea {
+                                                    anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                                                    onClicked: {
+                                                        root[modelData.prop] = !enabledVal;
+                                                        root.saveAppearance();
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // ================= THEME PROFILES =================
+                        ColumnLayout {
+                            visible: root.tab === 13; Layout.fillWidth: true; spacing: 14
+                            Section { title: "theme profiles & presets"; icon: "auto_awesome" }
+                            Text {
+                                text: "save your active layout configuration as a custom preset, or load an existing preset profile."
+                                color: theme.faint; font.pixelSize: 11; font.family: root.apFont; Layout.bottomMargin: 6
+                            }
+                            
+                            // Save section
+                            RowLayout {
+                                Layout.fillWidth: true; spacing: 10
+                                Rectangle {
+                                    Layout.fillWidth: true; implicitHeight: 36; radius: 7
+                                    color: theme.a(theme.line, 0.4); border.width: 1; border.color: profNameIn.activeFocus ? theme.iris : theme.a(theme.iris, 0.16)
+                                    TextInput {
+                                        id: profNameIn; anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 12
+                                        verticalAlignment: TextInput.AlignVCenter
+                                        color: theme.text; font.pixelSize: 12; font.family: root.apFont
+                                        Text { anchors.verticalCenter: parent.verticalCenter; visible: !profNameIn.text; text: "Enter preset name..."; color: theme.faint; font.pixelSize: 12 }
+                                    }
+                                }
+                                Rectangle {
+                                    implicitWidth: 120; implicitHeight: 36; radius: 7
+                                    color: savePrMa.containsMouse ? theme.iris : theme.a(theme.line, 0.6)
+                                    border.width: 1; border.color: theme.a(theme.iris, 0.16)
+                                    Text { anchors.centerIn: parent; text: "Save Preset"; color: savePrMa.containsMouse ? theme.bg : theme.frost; font.pixelSize: 11; font.bold: true; font.family: root.apFont }
+                                    MouseArea {
+                                        id: savePrMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                        onClicked: {
+                                            if (profNameIn.text.trim() !== "") {
+                                                root.saveProfile(profNameIn.text);
+                                                profNameIn.text = "";
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            
+                            // Saved Profiles List
+                            ColumnLayout {
+                                Layout.fillWidth: true; spacing: 8
+                                visible: root.profilesList.length > 0
+                                Text { text: "SAVED PRESETS"; color: theme.faint; font.pixelSize: 9; font.bold: true; font.letterSpacing: 1; Layout.topMargin: 10 }
+                                
+                                Repeater {
+                                    model: root.profilesList
+                                    delegate: Rectangle {
+                                        required property var modelData
+                                        required property int index
+                                        Layout.fillWidth: true; implicitHeight: 52; radius: 9
+                                        color: theme.a(theme.line, 0.4); border.width: 1; border.color: theme.a(theme.iris, 0.16)
+                                        RowLayout {
+                                            anchors.fill: parent; anchors.leftMargin: 14; anchors.rightMargin: 14; spacing: 12
+                                            Sym { text: "palette"; sz: 19; color: theme.frost }
+                                            ColumnLayout {
+                                                spacing: 1; Layout.fillWidth: true
+                                                Text { text: modelData.name; color: theme.text; font.pixelSize: 13; font.bold: true; font.family: root.apFont }
+                                                Text {
+                                                    text: "font: " + modelData.font + " · radius: " + modelData.radius + "px · accent: " + modelData.accent
+                                                    color: theme.faint; font.pixelSize: 10; font.family: root.apFont
+                                                }
+                                            }
+                                            
+                                            // Apply Preset
+                                            Rectangle {
+                                                implicitWidth: 80; implicitHeight: 28; radius: 6
+                                                color: applyMa.containsMouse ? theme.iris : theme.a(theme.line, 0.6)
+                                                Text { anchors.centerIn: parent; text: "Load"; color: applyMa.containsMouse ? theme.bg : theme.text; font.pixelSize: 11; font.family: root.apFont }
+                                                MouseArea {
+                                                    id: applyMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                                    onClicked: root.loadProfile(modelData)
+                                                }
+                                            }
+                                            
+                                            // Delete Preset
+                                            Rectangle {
+                                                implicitWidth: 32; implicitHeight: 28; radius: 6
+                                                color: delPrMa.containsMouse ? theme.bad : theme.a(theme.line, 0.6)
+                                                Sym { anchors.centerIn: parent; text: "delete"; sz: 15; color: delPrMa.containsMouse ? theme.bg : theme.faint }
+                                                MouseArea {
+                                                    id: delPrMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.deleteProfile(index)
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            
+                            // Placeholder
+                            Text {
+                                text: "no presets saved yet."
+                                visible: root.profilesList.length === 0
+                                color: theme.faint; font.pixelSize: 11; font.family: root.apFont; Layout.topMargin: 20; horizontalAlignment: Text.AlignHCenter; Layout.fillWidth: true
+                            }
                         }
 
                         // ================= ACTIONS =================
@@ -2351,165 +2932,317 @@ Scope {
                         // ================= IDLE & LOCK =================
                         ColumnLayout {
                             visible: root.tab === 10; Layout.fillWidth: true; spacing: 14
-                            Section { title: "idle daemon"; icon: "bedtime" }
+
+                            // segmented horizontal navigation bar for Idle & Lock sub-menus
                             RowLayout {
-                                Layout.fillWidth: true; spacing: 10
-                                Sym { text: root.idleOn ? "bedtime" : "coffee"; sz: 18; color: root.idleOn ? theme.iris : theme.warn }
-                                ColumnLayout { spacing: 0; Layout.fillWidth: true
-                                    Text { text: root.idleOn ? "idle daemon running" : "caffeine mode — idle daemon stopped"; color: theme.text; font.pixelSize: 13; font.family: "monospace" }
-                                    Text { text: root.idleOn ? "dim " + (root.lockDim / 60).toFixed(1) + "m · lock " + (root.lockLock / 60).toFixed(1) + "m · screen off " + (root.lockDpms / 60).toFixed(1) + "m" + (root.lockSuspendEnabled ? " · suspend " + (root.lockSuspend / 60).toFixed(1) + "m" : "") : "screen stays on until you turn hypridle back on"
-                                        color: theme.faint; font.pixelSize: 10; font.family: "monospace" } }
-                                Rectangle { implicitWidth: 46; implicitHeight: 22; radius: 11
-                                    color: root.idleOn ? theme.a(theme.iris, 0.35) : theme.a(theme.warn, 0.3)
-                                    border.width: 1; border.color: root.idleOn ? theme.iris : theme.warn
-                                    Rectangle { width: 16; height: 16; radius: 8; y: 3
-                                        x: root.idleOn ? parent.width - 19 : 3
-                                        color: root.idleOn ? theme.frost : theme.warn
-                                        Behavior on x { NumberAnimation { duration: 120 } } }
-                                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.toggleIdle() } }
-                            }
-
-                            Section { title: "timeouts"; icon: "timer" }
-                            
-                            // Dim Backlight Slider
-                            RowLayout { Layout.fillWidth: true; spacing: 10
-                                Sym { text: "brightness_medium"; sz: 20 }
-                                Text { text: "dim display"; color: theme.sub; font.pixelSize: 12; font.family: "monospace"; Layout.minimumWidth: 100 }
-                                Slider { value: (root.lockDim - 10) / (600 - 10); onMoved: (v) => { root.lockDim = Math.round(10 + v * (600 - 10)) } }
-                                Text { text: root.lockDim + "s"; color: theme.sub; font.pixelSize: 12; font.family: "monospace"; Layout.minimumWidth: 46; horizontalAlignment: Text.AlignRight } }
-
-                            // Lock Screen Slider
-                            RowLayout { Layout.fillWidth: true; spacing: 10
-                                Sym { text: "lock"; sz: 20 }
-                                Text { text: "lock screen"; color: theme.sub; font.pixelSize: 12; font.family: "monospace"; Layout.minimumWidth: 100 }
-                                Slider { value: (root.lockLock - 30) / (1800 - 30); onMoved: (v) => { root.lockLock = Math.round(30 + v * (1800 - 30)) } }
-                                Text { text: (root.lockLock / 60).toFixed(1) + "m"; color: theme.sub; font.pixelSize: 12; font.family: "monospace"; Layout.minimumWidth: 46; horizontalAlignment: Text.AlignRight } }
-
-                            // Screen Off (DPMS) Slider
-                            RowLayout { Layout.fillWidth: true; spacing: 10
-                                Sym { text: "settings_brightness"; sz: 20 }
-                                Text { text: "screen off"; color: theme.sub; font.pixelSize: 12; font.family: "monospace"; Layout.minimumWidth: 100 }
-                                Slider { value: (root.lockDpms - 60) / (3600 - 60); onMoved: (v) => { root.lockDpms = Math.round(60 + v * (3600 - 60)) } }
-                                Text { text: (root.lockDpms / 60).toFixed(1) + "m"; color: theme.sub; font.pixelSize: 12; font.family: "monospace"; Layout.minimumWidth: 46; horizontalAlignment: Text.AlignRight } }
-
-                            // Suspend Toggle + Slider
-                            RowLayout { Layout.fillWidth: true; spacing: 10
-                                Sym { text: "power"; sz: 20; color: root.lockSuspendEnabled ? theme.frost : theme.faint }
-                                Text { text: "suspend system"; color: root.lockSuspendEnabled ? theme.sub : theme.faint; font.pixelSize: 12; font.family: "monospace"; Layout.minimumWidth: 100 }
-                                Slider {
-                                    fill: theme.bad
-                                    enabled: root.lockSuspendEnabled
-                                    value: (root.lockSuspend - 300) / (7200 - 300)
-                                    onMoved: (v) => { root.lockSuspend = Math.round(300 + v * (7200 - 300)) }
-                                }
-                                Text {
-                                    text: (root.lockSuspend / 60).toFixed(0) + "m"
-                                    color: root.lockSuspendEnabled ? theme.sub : theme.faint
-                                    font.pixelSize: 12; font.family: "monospace"; Layout.minimumWidth: 46; horizontalAlignment: Text.AlignRight
-                                }
-                                Rectangle { implicitWidth: 40; implicitHeight: 20; radius: 10
-                                    color: root.lockSuspendEnabled ? theme.a(theme.iris, 0.35) : theme.a(theme.line, 0.3)
-                                    border.width: 1; border.color: root.lockSuspendEnabled ? theme.iris : theme.faint
-                                    Rectangle { width: 14; height: 14; radius: 7; y: 3
-                                        x: root.lockSuspendEnabled ? parent.width - 17 : 3
-                                        color: root.lockSuspendEnabled ? theme.frost : theme.faint
-                                        Behavior on x { NumberAnimation { duration: 120 } } }
-                                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.lockSuspendEnabled = !root.lockSuspendEnabled } }
-                            }
-
-                            Section { title: "lock screen options"; icon: "security" }
-
-                            // Grace period Slider
-                            RowLayout { Layout.fillWidth: true; spacing: 10
-                                Sym { text: "av_timer"; sz: 20 }
-                                Text { text: "grace period"; color: theme.sub; font.pixelSize: 12; font.family: "monospace"; Layout.minimumWidth: 110 }
-                                Slider { value: root.lockGrace / 10; onMoved: (v) => { root.lockGrace = Math.round(v * 10) } }
-                                Text { text: root.lockGrace + "s"; color: theme.sub; font.pixelSize: 12; font.family: "monospace"; Layout.minimumWidth: 36; horizontalAlignment: Text.AlignRight } }
-
-                            // Hide cursor Toggle
-                            RowLayout { Layout.fillWidth: true; spacing: 10
-                                Sym { text: "navigation"; sz: 20 }
-                                Text { text: "hide cursor on lock"; color: theme.sub; font.pixelSize: 12; font.family: "monospace"; Layout.fillWidth: true }
-                                Rectangle { implicitWidth: 40; implicitHeight: 20; radius: 10
-                                    color: root.lockHideCursor ? theme.a(theme.iris, 0.35) : theme.a(theme.line, 0.3)
-                                    border.width: 1; border.color: root.lockHideCursor ? theme.iris : theme.faint
-                                    Rectangle { width: 14; height: 14; radius: 7; y: 3
-                                        x: root.lockHideCursor ? parent.width - 17 : 3
-                                        color: root.lockHideCursor ? theme.frost : theme.faint
-                                        Behavior on x { NumberAnimation { duration: 120 } } }
-                                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.lockHideCursor = !root.lockHideCursor } }
-                            }
-
-                            // Ignore empty input Toggle
-                            RowLayout { Layout.fillWidth: true; spacing: 10
-                                Sym { text: "space_bar"; sz: 20 }
-                                Text { text: "ignore empty input"; color: theme.sub; font.pixelSize: 12; font.family: "monospace"; Layout.fillWidth: true }
-                                Rectangle { implicitWidth: 40; implicitHeight: 20; radius: 10
-                                    color: root.lockIgnoreEmpty ? theme.a(theme.iris, 0.35) : theme.a(theme.line, 0.3)
-                                    border.width: 1; border.color: root.lockIgnoreEmpty ? theme.iris : theme.faint
-                                    Rectangle { width: 14; height: 14; radius: 7; y: 3
-                                        x: root.lockIgnoreEmpty ? parent.width - 17 : 3
-                                        color: root.lockIgnoreEmpty ? theme.frost : theme.faint
-                                        Behavior on x { NumberAnimation { duration: 120 } } }
-                                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.lockIgnoreEmpty = !root.lockIgnoreEmpty } }
-                            }
-
-                            Section { title: "blur & background"; icon: "wallpaper" }
-
-                            // Blur Passes Slider
-                            RowLayout { Layout.fillWidth: true; spacing: 10
-                                Sym { text: "blur_on"; sz: 20 }
-                                Text { text: "blur passes"; color: theme.sub; font.pixelSize: 12; font.family: "monospace"; Layout.minimumWidth: 110 }
-                                Slider { value: root.lockBlurPasses / 10; onMoved: (v) => { root.lockBlurPasses = Math.round(v * 10) } }
-                                Text { text: root.lockBlurPasses.toString(); color: theme.sub; font.pixelSize: 12; font.family: "monospace"; Layout.minimumWidth: 36; horizontalAlignment: Text.AlignRight } }
-
-                            // Blur Size Slider
-                            RowLayout { Layout.fillWidth: true; spacing: 10
-                                Sym { text: "photo_size_select_large"; sz: 20 }
-                                Text { text: "blur size"; color: theme.sub; font.pixelSize: 12; font.family: "monospace"; Layout.minimumWidth: 110 }
-                                Slider { value: root.lockBlurSize / 20; onMoved: (v) => { root.lockBlurSize = Math.round(v * 20) } }
-                                Text { text: root.lockBlurSize.toString(); color: theme.sub; font.pixelSize: 12; font.family: "monospace"; Layout.minimumWidth: 36; horizontalAlignment: Text.AlignRight } }
-
-                            // Vibrancy Slider
-                            RowLayout { Layout.fillWidth: true; spacing: 10
-                                Sym { text: "vignette"; sz: 20 }
-                                Text { text: "vibrancy"; color: theme.sub; font.pixelSize: 12; font.family: "monospace"; Layout.minimumWidth: 110 }
-                                Slider { value: root.lockVibrancy; onMoved: (v) => { root.lockVibrancy = v } }
-                                Text { text: root.lockVibrancy.toFixed(2); color: theme.sub; font.pixelSize: 12; font.family: "monospace"; Layout.minimumWidth: 36; horizontalAlignment: Text.AlignRight } }
-
-                            // Wallpaper path text input
-                            Text { text: "wallpaper image path"; color: theme.faint; font.pixelSize: 10; font.family: "monospace"; Layout.topMargin: 4 }
-                            RowLayout {
-                                Layout.fillWidth: true; spacing: 10
-                                Rectangle {
-                                    Layout.fillWidth: true; implicitHeight: 36; radius: 8
-                                    color: theme.a(theme.line, 0.4); border.width: 1
-                                    border.color: bgIn.activeFocus ? theme.iris : theme.a(theme.iris, 0.16)
-                                    TextInput {
-                                        id: bgIn
-                                        anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 12
-                                        verticalAlignment: TextInput.AlignVCenter
-                                        color: theme.text; font.pixelSize: 12; font.family: "monospace"
-                                        clip: true; selectByMouse: true; selectionColor: theme.a(theme.iris, 0.4)
-                                        text: root.lockBg
-                                        onTextChanged: root.lockBg = text
+                                Layout.fillWidth: true; spacing: 6; Layout.bottomMargin: 8
+                                Repeater {
+                                    model: [
+                                        { i: "timer", l: "timeouts" },
+                                        { i: "security", l: "lockscreen style" }
+                                    ]
+                                    delegate: Rectangle {
+                                        required property var modelData; required property int index
+                                        readonly property bool sel: root.idlSubTab === index
+                                        Layout.fillWidth: true; implicitHeight: 34; radius: 8
+                                        color: sel ? theme.iris : (subIdMa.containsMouse ? theme.a(theme.iris, 0.16) : theme.a(theme.line, 0.4))
+                                        border.width: 1; border.color: sel ? theme.iris : theme.a(theme.iris, 0.14)
+                                        RowLayout {
+                                            anchors.centerIn: parent; spacing: 6
+                                            Sym { text: modelData.i; sz: 14; color: sel ? theme.bg : theme.frost }
+                                            Text { text: modelData.l; color: sel ? theme.bg : theme.text; font.pixelSize: 11; font.family: root.apFont; font.bold: sel }
+                                        }
+                                        MouseArea { id: subIdMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.idlSubTab = index }
                                     }
                                 }
-                                Rectangle {
-                                    implicitWidth: 36; implicitHeight: 36; radius: 8
-                                    color: bgBrowseMa.containsMouse ? theme.a(theme.iris, 0.25) : theme.a(theme.line, 0.4)
-                                    border.width: 1; border.color: theme.a(theme.iris, 0.25)
-                                    Sym { anchors.centerIn: parent; text: "folder_open"; sz: 16; color: theme.frost }
-                                    MouseArea {
-                                        id: bgBrowseMa
-                                        anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
-                                        onClicked: {
-                                            root.pickFile("Select Wallpaper Image", "Images (*.png *.jpg *.jpeg) | *.png;*.jpg;*.jpeg", function(path) {
-                                                bgIn.text = path;
-                                            }); } } }
                             }
 
-                            // Save & Actions Row
+                            // SUB-TAB 0: Timeouts
+                            ColumnLayout {
+                                visible: root.idlSubTab === 0; Layout.fillWidth: true; spacing: 14
+                                Section { title: "idle daemon"; icon: "bedtime" }
+                                RowLayout {
+                                    Layout.fillWidth: true; spacing: 10
+                                    Sym { text: root.idleOn ? "bedtime" : "coffee"; sz: 18; color: root.idleOn ? theme.iris : theme.warn }
+                                    ColumnLayout { spacing: 0; Layout.fillWidth: true
+                                        Text { text: root.idleOn ? "idle daemon running" : "caffeine mode — idle daemon stopped"; color: theme.text; font.pixelSize: 13; font.family: root.apFont }
+                                        Text {
+                                            text: {
+                                                if (!root.idleOn) return "screen stays on until you turn hypridle back on";
+                                                var d = root.lockDim >= 60 ? (root.lockDim / 60).toFixed(0) + "m" : root.lockDim + "s";
+                                                var l = (root.lockLock / 60).toFixed(0) + "m";
+                                                var o = (root.lockDpms / 60).toFixed(0) + "m";
+                                                var s = root.lockSuspendEnabled ? " · suspend " + (root.lockSuspend / 60).toFixed(0) + "m" : "";
+                                                return "dim " + d + " · lock " + l + " · screen off " + o + s;
+                                            }
+                                            color: theme.faint; font.pixelSize: 10; font.family: root.apFont
+                                        }
+                                    }
+                                    Rectangle { implicitWidth: 46; implicitHeight: 22; radius: 11
+                                        color: root.idleOn ? theme.a(theme.iris, 0.35) : theme.a(theme.warn, 0.3)
+                                        border.width: 1; border.color: root.idleOn ? theme.iris : theme.warn
+                                        Rectangle { width: 16; height: 16; radius: 8; y: 3
+                                            x: root.idleOn ? parent.width - 19 : 3
+                                            color: root.idleOn ? theme.frost : theme.warn
+                                            Behavior on x { NumberAnimation { duration: 120 } } }
+                                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.toggleIdle() } }
+                                }
+
+                                Section { title: "timeouts"; icon: "timer" }
+                                
+                                // Dim Backlight
+                                RowLayout { Layout.fillWidth: true; spacing: 10
+                                    Sym { text: "brightness_medium"; sz: 20 }
+                                    Text { text: "dim display"; color: theme.sub; font.pixelSize: 12; font.family: root.apFont; Layout.minimumWidth: 100 }
+                                    Item { Layout.fillWidth: true }
+                                    RowLayout { spacing: 6
+                                        Repeater {
+                                            model: [{l:"15s",v:15},{l:"30s",v:30},{l:"1m",v:60},{l:"2m",v:120},{l:"5m",v:300}]
+                                            delegate: Rectangle { required property var modelData; readonly property bool sel: root.lockDim === modelData.v
+                                                implicitWidth: chipDim.implicitWidth+14; implicitHeight: 26; radius: 6
+                                                color: sel ? theme.iris : (chipDimMa.containsMouse ? theme.a(theme.iris, 0.16) : theme.a(theme.line, 0.4))
+                                                border.width: 1; border.color: sel ? theme.iris : theme.a(theme.iris, 0.14)
+                                                Text { id: chipDim; anchors.centerIn: parent; text: modelData.l; color: sel ? theme.bg : theme.sub; font.pixelSize: 11; font.family: root.apFont; font.bold: sel }
+                                                MouseArea { id: chipDimMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.lockDim = modelData.v } } }
+                                        Rectangle { implicitWidth: 64; implicitHeight: 26; radius: 6; color: theme.a(theme.line, 0.5)
+                                            border.width: 1; border.color: customDimIn.activeFocus ? theme.iris : theme.a(theme.iris, 0.2)
+                                            TextInput { id: customDimIn; anchors.fill: parent; horizontalAlignment: TextInput.AlignHCenter; verticalAlignment: TextInput.AlignVCenter
+                                                color: theme.text; font.pixelSize: 11; font.family: "monospace"; text: root.lockDim.toString(); selectByMouse: true
+                                                onEditingFinished: { var v = parseInt(text); if(!isNaN(v)) root.lockDim = Math.max(1, v) }
+                                                Text { anchors.right: parent.right; anchors.rightMargin: 6; anchors.verticalCenter: parent.verticalCenter; visible: !customDimIn.activeFocus; text: "s"; color: theme.faint; font.pixelSize: 10 } } } }
+                                }
+
+                                // Lock Screen
+                                RowLayout { Layout.fillWidth: true; spacing: 10
+                                    Sym { text: "lock"; sz: 20 }
+                                    Text { text: "lock screen"; color: theme.sub; font.pixelSize: 12; font.family: root.apFont; Layout.minimumWidth: 100 }
+                                    Item { Layout.fillWidth: true }
+                                    RowLayout { spacing: 6
+                                        Repeater {
+                                            model: [{l:"1m",v:60},{l:"2m",v:120},{l:"5m",v:300},{l:"10m",v:600},{l:"30m",v:1800}]
+                                            delegate: Rectangle { required property var modelData; readonly property bool sel: root.lockLock === modelData.v
+                                                implicitWidth: chipLck.implicitWidth+14; implicitHeight: 26; radius: 6
+                                                color: sel ? theme.iris : (chipLckMa.containsMouse ? theme.a(theme.iris, 0.16) : theme.a(theme.line, 0.4))
+                                                border.width: 1; border.color: sel ? theme.iris : theme.a(theme.iris, 0.14)
+                                                Text { id: chipLck; anchors.centerIn: parent; text: modelData.l; color: sel ? theme.bg : theme.sub; font.pixelSize: 11; font.family: root.apFont; font.bold: sel }
+                                                MouseArea { id: chipLckMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.lockLock = modelData.v } } }
+                                        Rectangle { implicitWidth: 64; implicitHeight: 26; radius: 6; color: theme.a(theme.line, 0.5)
+                                            border.width: 1; border.color: customLckIn.activeFocus ? theme.iris : theme.a(theme.iris, 0.2)
+                                            TextInput { id: customLckIn; anchors.fill: parent; horizontalAlignment: TextInput.AlignHCenter; verticalAlignment: TextInput.AlignVCenter
+                                                color: theme.text; font.pixelSize: 11; font.family: "monospace"; text: Math.round(root.lockLock / 60).toString(); selectByMouse: true
+                                                onEditingFinished: { var v = parseInt(text); if(!isNaN(v)) root.lockLock = Math.max(1, v * 60) }
+                                                Text { anchors.right: parent.right; anchors.rightMargin: 6; anchors.verticalCenter: parent.verticalCenter; visible: !customLckIn.activeFocus; text: "m"; color: theme.faint; font.pixelSize: 10 } } } }
+                                }
+
+                                // Screen Off (DPMS)
+                                RowLayout { Layout.fillWidth: true; spacing: 10
+                                    Sym { text: "settings_brightness"; sz: 20 }
+                                    Text { text: "screen off"; color: theme.sub; font.pixelSize: 12; font.family: root.apFont; Layout.minimumWidth: 100 }
+                                    Item { Layout.fillWidth: true }
+                                    RowLayout { spacing: 6
+                                        Repeater {
+                                            model: [{l:"1m",v:60},{l:"2m",v:120},{l:"5m",v:300},{l:"10m",v:600},{l:"30m",v:1800}]
+                                            delegate: Rectangle { required property var modelData; readonly property bool sel: root.lockDpms === modelData.v
+                                                implicitWidth: chipDpms.implicitWidth+14; implicitHeight: 26; radius: 6
+                                                color: sel ? theme.iris : (chipDpmsMa.containsMouse ? theme.a(theme.iris, 0.16) : theme.a(theme.line, 0.4))
+                                                border.width: 1; border.color: sel ? theme.iris : theme.a(theme.iris, 0.14)
+                                                Text { id: chipDpms; anchors.centerIn: parent; text: modelData.l; color: sel ? theme.bg : theme.sub; font.pixelSize: 11; font.family: root.apFont; font.bold: sel }
+                                                MouseArea { id: chipDpmsMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.lockDpms = modelData.v } } }
+                                        Rectangle { implicitWidth: 64; implicitHeight: 26; radius: 6; color: theme.a(theme.line, 0.5)
+                                            border.width: 1; border.color: customDpmsIn.activeFocus ? theme.iris : theme.a(theme.iris, 0.2)
+                                            TextInput { id: customDpmsIn; anchors.fill: parent; horizontalAlignment: TextInput.AlignHCenter; verticalAlignment: TextInput.AlignVCenter
+                                                color: theme.text; font.pixelSize: 11; font.family: "monospace"; text: Math.round(root.lockDpms / 60).toString(); selectByMouse: true
+                                                onEditingFinished: { var v = parseInt(text); if(!isNaN(v)) root.lockDpms = Math.max(1, v * 60) }
+                                                Text { anchors.right: parent.right; anchors.rightMargin: 6; anchors.verticalCenter: parent.verticalCenter; visible: !customDpmsIn.activeFocus; text: "m"; color: theme.faint; font.pixelSize: 10 } } } }
+                                }
+
+                                // Suspend
+                                RowLayout { Layout.fillWidth: true; spacing: 10
+                                    Sym { text: "power"; sz: 20; color: root.lockSuspendEnabled ? theme.frost : theme.faint }
+                                    Text { text: "suspend system"; color: root.lockSuspendEnabled ? theme.sub : theme.faint; font.pixelSize: 12; font.family: root.apFont; Layout.minimumWidth: 100 }
+                                    Item { Layout.fillWidth: true }
+                                    RowLayout { spacing: 6; visible: root.lockSuspendEnabled
+                                        Repeater {
+                                            model: [{l:"10m",v:600},{l:"30m",v:1800},{l:"1h",v:3600},{l:"2h",v:7200}]
+                                            delegate: Rectangle { required property var modelData; readonly property bool sel: root.lockSuspend === modelData.v
+                                                implicitWidth: chipSsp.implicitWidth+14; implicitHeight: 26; radius: 6
+                                                color: sel ? theme.iris : (chipSspMa.containsMouse ? theme.a(theme.iris, 0.16) : theme.a(theme.line, 0.4))
+                                                border.width: 1; border.color: sel ? theme.iris : theme.a(theme.iris, 0.14)
+                                                Text { id: chipSsp; anchors.centerIn: parent; text: modelData.l; color: sel ? theme.bg : theme.sub; font.pixelSize: 11; font.family: root.apFont; font.bold: sel }
+                                                MouseArea { id: chipSspMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.lockSuspend = modelData.v } } }
+                                        Rectangle { implicitWidth: 64; implicitHeight: 26; radius: 6; color: theme.a(theme.line, 0.5)
+                                            border.width: 1; border.color: customSspIn.activeFocus ? theme.iris : theme.a(theme.iris, 0.2)
+                                            TextInput { id: customSspIn; anchors.fill: parent; horizontalAlignment: TextInput.AlignHCenter; verticalAlignment: TextInput.AlignVCenter
+                                                color: theme.text; font.pixelSize: 11; font.family: "monospace"; text: Math.round(root.lockSuspend / 60).toString(); selectByMouse: true
+                                                onEditingFinished: { var v = parseInt(text); if(!isNaN(v)) root.lockSuspend = Math.max(1, v * 60) }
+                                                Text { anchors.right: parent.right; anchors.rightMargin: 6; anchors.verticalCenter: parent.verticalCenter; visible: !customSspIn.activeFocus; text: "m"; color: theme.faint; font.pixelSize: 10 } } } }
+                                    Rectangle { implicitWidth: 40; implicitHeight: 20; radius: 10
+                                        color: root.lockSuspendEnabled ? theme.a(theme.iris, 0.35) : theme.a(theme.line, 0.3)
+                                        border.width: 1; border.color: root.lockSuspendEnabled ? theme.iris : theme.faint
+                                        Rectangle { width: 14; height: 14; radius: 7; y: 3
+                                            x: root.lockSuspendEnabled ? parent.width - 17 : 3
+                                            color: root.lockSuspendEnabled ? theme.frost : theme.faint
+                                            Behavior on x { NumberAnimation { duration: 120 } } }
+                                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.lockSuspendEnabled = !root.lockSuspendEnabled } }
+                                }
+                            }
+
+                            // SUB-TAB 1: Style & Wallpaper
+                            ColumnLayout {
+                                visible: root.idlSubTab === 1; Layout.fillWidth: true; spacing: 14
+                                Section { title: "lock screen options"; icon: "security" }
+
+                                // Grace period
+                                RowLayout { Layout.fillWidth: true; spacing: 10
+                                    Sym { text: "av_timer"; sz: 20 }
+                                    Text { text: "grace period"; color: theme.sub; font.pixelSize: 12; font.family: root.apFont; Layout.minimumWidth: 110 }
+                                    Item { Layout.fillWidth: true }
+                                    RowLayout { spacing: 6
+                                        Repeater {
+                                            model: [{l:"0s",v:0},{l:"2s",v:2},{l:"5s",v:5},{l:"10s",v:10}]
+                                            delegate: Rectangle { required property var modelData; readonly property bool sel: root.lockGrace === modelData.v
+                                                implicitWidth: chipGrc.implicitWidth+14; implicitHeight: 26; radius: 6
+                                                color: sel ? theme.iris : (chipGrcMa.containsMouse ? theme.a(theme.iris, 0.16) : theme.a(theme.line, 0.4))
+                                                border.width: 1; border.color: sel ? theme.iris : theme.a(theme.iris, 0.14)
+                                                Text { id: chipGrc; anchors.centerIn: parent; text: modelData.l; color: sel ? theme.bg : theme.sub; font.pixelSize: 11; font.family: root.apFont; font.bold: sel }
+                                                MouseArea { id: chipGrcMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.lockGrace = modelData.v } } }
+                                        Rectangle { implicitWidth: 64; implicitHeight: 26; radius: 6; color: theme.a(theme.line, 0.5)
+                                            border.width: 1; border.color: customGrcIn.activeFocus ? theme.iris : theme.a(theme.iris, 0.2)
+                                            TextInput { id: customGrcIn; anchors.fill: parent; horizontalAlignment: TextInput.AlignHCenter; verticalAlignment: TextInput.AlignVCenter
+                                                color: theme.text; font.pixelSize: 11; font.family: "monospace"; text: root.lockGrace.toString(); selectByMouse: true
+                                                onEditingFinished: { var v = parseInt(text); if(!isNaN(v)) root.lockGrace = Math.max(0, v) }
+                                                Text { anchors.right: parent.right; anchors.rightMargin: 6; anchors.verticalCenter: parent.verticalCenter; visible: !customGrcIn.activeFocus; text: "s"; color: theme.faint; font.pixelSize: 10 } } } }
+                                }
+
+                                // Hide cursor Toggle
+                                RowLayout { Layout.fillWidth: true; spacing: 10
+                                    Sym { text: "navigation"; sz: 20 }
+                                    Text { text: "hide cursor on lock"; color: theme.sub; font.pixelSize: 12; font.family: root.apFont; Layout.fillWidth: true }
+                                    Rectangle { implicitWidth: 40; implicitHeight: 20; radius: 10
+                                        color: root.lockHideCursor ? theme.a(theme.iris, 0.35) : theme.a(theme.line, 0.3)
+                                        border.width: 1; border.color: root.lockHideCursor ? theme.iris : theme.faint
+                                        Rectangle { width: 14; height: 14; radius: 7; y: 3
+                                            x: root.lockHideCursor ? parent.width - 17 : 3
+                                            color: root.lockHideCursor ? theme.frost : theme.faint
+                                            Behavior on x { NumberAnimation { duration: 120 } } }
+                                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.lockHideCursor = !root.lockHideCursor } }
+                                }
+
+                                // Ignore empty input Toggle
+                                RowLayout { Layout.fillWidth: true; spacing: 10
+                                    Sym { text: "space_bar"; sz: 20 }
+                                    Text { text: "ignore empty input"; color: theme.sub; font.pixelSize: 12; font.family: root.apFont; Layout.fillWidth: true }
+                                    Rectangle { implicitWidth: 40; implicitHeight: 20; radius: 10
+                                        color: root.lockIgnoreEmpty ? theme.a(theme.iris, 0.35) : theme.a(theme.line, 0.3)
+                                        border.width: 1; border.color: root.lockIgnoreEmpty ? theme.iris : theme.faint
+                                        Rectangle { width: 14; height: 14; radius: 7; y: 3
+                                            x: root.lockIgnoreEmpty ? parent.width - 17 : 3
+                                            color: root.lockIgnoreEmpty ? theme.frost : theme.faint
+                                            Behavior on x { NumberAnimation { duration: 120 } } }
+                                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.lockIgnoreEmpty = !root.lockIgnoreEmpty } }
+                                }
+
+                                Section { title: "blur & background"; icon: "wallpaper" }
+
+                                // Blur Passes
+                                RowLayout { Layout.fillWidth: true; spacing: 10
+                                    Sym { text: "blur_on"; sz: 20 }
+                                    Text { text: "blur passes"; color: theme.sub; font.pixelSize: 12; font.family: root.apFont; Layout.minimumWidth: 110 }
+                                    Item { Layout.fillWidth: true }
+                                    RowLayout { spacing: 6
+                                        Repeater {
+                                            model: [{l:"1",v:1},{l:"2",v:2},{l:"3",v:3},{l:"5",v:5},{l:"8",v:8}]
+                                            delegate: Rectangle { required property var modelData; readonly property bool sel: root.lockBlurPasses === modelData.v
+                                                implicitWidth: chipPas.implicitWidth+14; implicitHeight: 26; radius: 6
+                                                color: sel ? theme.iris : (chipPasMa.containsMouse ? theme.a(theme.iris, 0.16) : theme.a(theme.line, 0.4))
+                                                border.width: 1; border.color: sel ? theme.iris : theme.a(theme.iris, 0.14)
+                                                Text { id: chipPas; anchors.centerIn: parent; text: modelData.l.toString(); color: sel ? theme.bg : theme.sub; font.pixelSize: 11; font.family: root.apFont; font.bold: sel }
+                                                MouseArea { id: chipPasMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.lockBlurPasses = modelData.v } } }
+                                        Rectangle { implicitWidth: 64; implicitHeight: 26; radius: 6; color: theme.a(theme.line, 0.5)
+                                            border.width: 1; border.color: customPasIn.activeFocus ? theme.iris : theme.a(theme.iris, 0.2)
+                                            TextInput { id: customPasIn; anchors.fill: parent; horizontalAlignment: TextInput.AlignHCenter; verticalAlignment: TextInput.AlignVCenter
+                                                color: theme.text; font.pixelSize: 11; font.family: "monospace"; text: root.lockBlurPasses.toString(); selectByMouse: true
+                                                onEditingFinished: { var v = parseInt(text); if(!isNaN(v)) root.lockBlurPasses = Math.max(0, v) } } } }
+                                }
+
+                                // Blur Size
+                                RowLayout { Layout.fillWidth: true; spacing: 10
+                                    Sym { text: "photo_size_select_large"; sz: 20 }
+                                    Text { text: "blur size"; color: theme.sub; font.pixelSize: 12; font.family: root.apFont; Layout.minimumWidth: 110 }
+                                    Item { Layout.fillWidth: true }
+                                    RowLayout { spacing: 6
+                                        Repeater {
+                                            model: [{l:"2px",v:2},{l:"4px",v:4},{l:"8px",v:8},{l:"12px",v:12},{l:"16px",v:16}]
+                                            delegate: Rectangle { required property var modelData; readonly property bool sel: root.lockBlurSize === modelData.v
+                                                implicitWidth: chipSz.implicitWidth+14; implicitHeight: 26; radius: 6
+                                                color: sel ? theme.iris : (chipSzMa.containsMouse ? theme.a(theme.iris, 0.16) : theme.a(theme.line, 0.4))
+                                                border.width: 1; border.color: sel ? theme.iris : theme.a(theme.iris, 0.14)
+                                                Text { id: chipSz; anchors.centerIn: parent; text: modelData.l; color: sel ? theme.bg : theme.sub; font.pixelSize: 11; font.family: root.apFont; font.bold: sel }
+                                                MouseArea { id: chipSzMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.lockBlurSize = modelData.v } } }
+                                        Rectangle { implicitWidth: 64; implicitHeight: 26; radius: 6; color: theme.a(theme.line, 0.5)
+                                            border.width: 1; border.color: customSzIn.activeFocus ? theme.iris : theme.a(theme.iris, 0.2)
+                                            TextInput { id: customSzIn; anchors.fill: parent; horizontalAlignment: TextInput.AlignHCenter; verticalAlignment: TextInput.AlignVCenter
+                                                color: theme.text; font.pixelSize: 11; font.family: "monospace"; text: root.lockBlurSize.toString(); selectByMouse: true
+                                                onEditingFinished: { var v = parseInt(text); if(!isNaN(v)) root.lockBlurSize = Math.max(0, v) }
+                                                Text { anchors.right: parent.right; anchors.rightMargin: 6; anchors.verticalCenter: parent.verticalCenter; visible: !customSzIn.activeFocus; text: "px"; color: theme.faint; font.pixelSize: 10 } } } }
+                                }
+
+                                // Vibrancy
+                                RowLayout { Layout.fillWidth: true; spacing: 10
+                                    Sym { text: "vignette"; sz: 20 }
+                                    Text { text: "vibrancy"; color: theme.sub; font.pixelSize: 12; font.family: root.apFont; Layout.minimumWidth: 110 }
+                                    Item { Layout.fillWidth: true }
+                                    RowLayout { spacing: 6
+                                        Repeater {
+                                            model: [{l:"0%",v:0.0},{l:"25%",v:0.25},{l:"50%",v:0.5},{l:"75%",v:0.75},{l:"100%",v:1.0}]
+                                            delegate: Rectangle { required property var modelData; readonly property bool sel: Math.abs(root.lockVibrancy - modelData.v) < 0.02
+                                                implicitWidth: chipVib.implicitWidth+14; implicitHeight: 26; radius: 6
+                                                color: sel ? theme.iris : (chipVibMa.containsMouse ? theme.a(theme.iris, 0.16) : theme.a(theme.line, 0.4))
+                                                border.width: 1; border.color: sel ? theme.iris : theme.a(theme.iris, 0.14)
+                                                Text { id: chipVib; anchors.centerIn: parent; text: modelData.l; color: sel ? theme.bg : theme.sub; font.pixelSize: 11; font.family: root.apFont; font.bold: sel }
+                                                MouseArea { id: chipVibMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.lockVibrancy = modelData.v } } }
+                                        Rectangle { implicitWidth: 64; implicitHeight: 26; radius: 6; color: theme.a(theme.line, 0.5)
+                                            border.width: 1; border.color: customVibIn.activeFocus ? theme.iris : theme.a(theme.iris, 0.2)
+                                            TextInput { id: customVibIn; anchors.fill: parent; horizontalAlignment: TextInput.AlignHCenter; verticalAlignment: TextInput.AlignVCenter
+                                                color: theme.text; font.pixelSize: 11; font.family: "monospace"; text: Math.round(root.lockVibrancy * 100).toString(); selectByMouse: true
+                                                onEditingFinished: { var v = parseFloat(text); if(!isNaN(v)) root.lockVibrancy = Math.max(0, Math.min(100, v)) / 100 }
+                                                Text { anchors.right: parent.right; anchors.rightMargin: 6; anchors.verticalCenter: parent.verticalCenter; visible: !customVibIn.activeFocus; text: "%"; color: theme.faint; font.pixelSize: 10 } } } }
+                                }
+
+                                // Wallpaper path text input
+                                Text { text: "wallpaper image path"; color: theme.faint; font.pixelSize: 10; font.family: root.apFont; Layout.topMargin: 4 }
+                                RowLayout {
+                                    Layout.fillWidth: true; spacing: 10
+                                    Rectangle {
+                                        Layout.fillWidth: true; implicitHeight: 36; radius: 8
+                                        color: theme.a(theme.line, 0.4); border.width: 1
+                                        border.color: bgIn.activeFocus ? theme.iris : theme.a(theme.iris, 0.16)
+                                        TextInput {
+                                            id: bgIn
+                                            anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 12
+                                            verticalAlignment: TextInput.AlignVCenter
+                                            color: theme.text; font.pixelSize: 12; font.family: "monospace"
+                                            clip: true; selectByMouse: true; selectionColor: theme.a(theme.iris, 0.4)
+                                            text: root.lockBg
+                                            onTextChanged: root.lockBg = text
+                                        }
+                                    }
+                                    Rectangle {
+                                        implicitWidth: 36; implicitHeight: 36; radius: 8
+                                        color: bgBrowseMa.containsMouse ? theme.a(theme.iris, 0.25) : theme.a(theme.line, 0.4)
+                                        border.width: 1; border.color: theme.a(theme.iris, 0.25)
+                                        Sym { anchors.centerIn: parent; text: "folder_open"; sz: 16; color: theme.frost }
+                                        MouseArea {
+                                            id: bgBrowseMa
+                                            anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                            onClicked: {
+                                                root.pickFile("Select Wallpaper Image", "Images (*.png *.jpg *.jpeg) | *.png;*.jpg;*.jpeg", function(path) {
+                                                    bgIn.text = path;
+                                                }); } } }
+                                }
+                            }
+
+                            // Save & Actions Row (always visible at bottom of tab)
                             RowLayout {
                                 Layout.fillWidth: true; spacing: 10; Layout.topMargin: 8
                                 Rectangle {
@@ -2519,7 +3252,7 @@ Scope {
                                     RowLayout {
                                         anchors.centerIn: parent; spacing: 6
                                         Sym { text: "save"; sz: 16; color: svLockM.containsMouse ? theme.bg : theme.frost }
-                                        Text { text: "Apply & Restart Daemon"; color: svLockM.containsMouse ? theme.bg : theme.text; font.pixelSize: 13; font.family: "monospace"; font.bold: true }
+                                        Text { text: "Apply & Restart Daemon"; color: svLockM.containsMouse ? theme.bg : theme.text; font.pixelSize: 13; font.family: root.apFont; font.bold: true }
                                     }
                                     MouseArea {
                                         id: svLockM
@@ -2540,7 +3273,7 @@ Scope {
                                     RowLayout {
                                         anchors.centerIn: parent; spacing: 6
                                         Sym { text: "lock"; sz: 16; color: lkNowM.containsMouse ? theme.bg : theme.warn }
-                                        Text { text: "Lock Now"; color: lkNowM.containsMouse ? theme.bg : theme.text; font.pixelSize: 13; font.family: "monospace" }
+                                        Text { text: "Lock Now"; color: lkNowM.containsMouse ? theme.bg : theme.text; font.pixelSize: 13; font.family: root.apFont }
                                     }
                                     MouseArea {
                                         id: lkNowM

@@ -12,20 +12,88 @@ cfg="$HOME/.config/sea-shell/appearance.json"
 kitty="$HOME/.config/sea-shell/kitty-matugen.conf"
 mkdir -p "$HOME/.config/sea-shell"
 reload_kitty() { pkill -USR1 -x kitty 2>/dev/null || true; }
+overrides="$HOME/.config/sea-shell/matugen-overrides.json"
 
-# recolour the two things outside quickshell that also want the accent:
-#   • Hyprland window borders — written to a file Hyprland sources (persists across reload/login)
-#     AND applied live via hyprctl.  active = frost→accent gradient, inactive = muted accent.
-#   • fastfetch key + logo colour — patched to the exact accent (truecolor) in the user's config.
+# Read per-target overrides from JSON config.
+# Outputs: HYPRLAND=1 KITTY=1 FASTFETCH=1 STARSHIP=1 HYPR_CUSTOM_ACTIVE='' HYPR_CUSTOM_INACTIVE=''
+# All targets default to enabled if the file is missing or unreadable.
+read_overrides() {
+    python3 - "$overrides" <<'OVPY'
+import json, sys
+p = sys.argv[1]
+try:
+    d = json.load(open(p))
+except Exception:
+    d = {}
+def flag(key):
+    sec = d.get(key, {})
+    return '1' if sec.get('enabled', True) else '0'
+def val(key, prop):
+    sec = d.get(key, {})
+    if sec.get('enabled', True): return ''
+    return sec.get(prop, '') or ''
+print('HYPRLAND=%s KITTY=%s FASTFETCH=%s STARSHIP=%s HYPR_CUSTOM_ACTIVE=%s HYPR_CUSTOM_INACTIVE=%s KITTY_CUSTOM_ACCENT=%s KITTY_CUSTOM_BG=%s FASTFETCH_CUSTOM_ACCENT=%s STARSHIP_CUSTOM_ACCENT=%s' % (
+    flag('hyprland'), flag('kitty'), flag('fastfetch'), flag('starship'),
+    repr(val('hyprland', 'customActive')),
+    repr(val('hyprland', 'customInactive')),
+    repr(val('kitty', 'customAccent')),
+    repr(val('kitty', 'customBg')),
+    repr(val('fastfetch', 'customAccent')),
+    repr(val('starship', 'customAccent')),
+))
+OVPY
+}
+
+# Apply Hyprland border colours.
 # $1 = accent (#hex), $2 = frost (#hex)
-apply_extras() {
+# Honours HYPR_CUSTOM_ACTIVE / HYPR_CUSTOM_INACTIVE overrides if set.
+apply_hyprland() {
     local a="$1" f="$2" aa ff
     [ -z "$a" ] && return
     aa=${a#\#}; ff=${f#\#}; [ -z "$ff" ] && ff="$aa"
+    # custom border colours from overrides JSON take priority
+    local cust_a_hex="${HYPR_CUSTOM_ACTIVE:-}" cust_i_hex="${HYPR_CUSTOM_INACTIVE:-}"
+    local active_val inactive_val
+    if [ -n "$cust_a_hex" ]; then
+        local ca=${cust_a_hex#\#}
+        active_val="rgba(${ca}ee)"
+    else
+        active_val="rgba(${ff}ee) rgba(${aa}ee) 45deg"
+    fi
+    if [ -n "$cust_i_hex" ]; then
+        local ci=${cust_i_hex#\#}
+        inactive_val="rgba(${ci}55)"
+    else
+        inactive_val="rgba(${aa}55)"
+    fi
     local hd="$HOME/.config/hypr/sea-shell"; mkdir -p "$hd"
-    printf 'general {\n    col.active_border = rgba(%see) rgba(%see) 45deg\n    col.inactive_border = rgba(%s55)\n}\n' "$ff" "$aa" "$aa" > "$hd/matugen.conf"
-    hyprctl keyword general:col.active_border "rgba(${ff}ee) rgba(${aa}ee) 45deg" >/dev/null 2>&1
-    hyprctl keyword general:col.inactive_border "rgba(${aa}55)" >/dev/null 2>&1
+    printf 'general {\n    col.active_border = %s\n    col.inactive_border = %s\n}\n' "$active_val" "$inactive_val" > "$hd/matugen.conf"
+    hyprctl keyword general:col.active_border "$active_val" >/dev/null 2>&1
+    hyprctl keyword general:col.inactive_border "$inactive_val" >/dev/null 2>&1
+}
+
+# Apply hyprlock colours.
+# $1 = accent (#hex), $2 = frost (#hex)
+apply_hyprlock() {
+    local a="$1" f="$2" aa ff
+    [ -z "$a" ] && return
+    aa=${a#\#}; ff=${f#\#}; [ -z "$ff" ] && ff="$aa"
+    local hl_conf="$HOME/.config/hypr/sea-shell/hyprlock-colors.conf"
+    mkdir -p "$(dirname "$hl_conf")"
+    cat <<EOF > "$hl_conf"
+# sea-shell matugen lockscreen colors
+\$accent = rgba(${aa}cc)
+\$accentAlpha = ${aa}
+\$frost = rgba(${ff}ff)
+\$frostAlpha = ${ff}
+EOF
+}
+
+# Patch fastfetch config with the accent colour.
+# $1 = accent (#hex)
+apply_fastfetch() {
+    local a="$1"
+    [ -z "$a" ] && return
     local ffc="$HOME/.config/fastfetch/config.jsonc"
     [ -f "$ffc" ] && python3 - "$ffc" "$a" <<'PY'
 import json, sys
@@ -79,38 +147,59 @@ star="$HOME/.config/starship.toml"
 sdef="$HOME/.config/sea-shell/starship-default.toml"
 
 if [ "$1" = "--reset" ]; then
+    eval "$(read_overrides)"
     set_accent "$DEFAULT"
-    : > "$kitty"                       # empty → kitty falls back to sea-cyan.conf defaults
-    : > "$HOME/.config/sea-shell/kitty-matugen-light.conf"   # clear the light variant too
-    [ -f "$sdef" ] && cp "$sdef" "$star" 2>/dev/null   # restore the default sea prompt
-    apply_extras "$DEFAULT" "#a2e2e8"                  # borders + fastfetch back to sea cyan
-    reload_kitty
+    if [ "$KITTY" = 1 ]; then
+        : > "$kitty"                       # empty → kitty falls back to sea-cyan.conf defaults
+        : > "$HOME/.config/sea-shell/kitty-matugen-light.conf"   # clear the light variant too
+    fi
+    [ "$STARSHIP" = 1 ] && [ -f "$sdef" ] && cp "$sdef" "$star" 2>/dev/null
+    [ "$HYPRLAND" = 1 ] && apply_hyprland "$DEFAULT" "#a2e2e8"
+    apply_hyprlock "$DEFAULT" "#a2e2e8"
+    [ "$FASTFETCH" = 1 ] && apply_fastfetch "$DEFAULT"
+    [ "$KITTY" = 1 ] && reload_kitty
     notify-send 'sea-shell' 'Colours reset to sea cyan' 2>/dev/null
     exit 0
 fi
 
-wp="$1"
-[ -z "$wp" ] && wp=$(cat "$HOME/.config/sea-shell/wallpaper" 2>/dev/null)
-[ -z "$wp" ] && exit 1
-case "$wp" in
-    *.mp4|*.webm|*.mkv|*.mov|*.gif)
-        f=/tmp/sea-matugen-frame.png
-        ffmpeg -y -i "$wp" -vframes 1 "$f" >/dev/null 2>&1 && wp="$f" ;;
-esac
+matugen_enabled=$(python3 -c "import json,sys; print(str(json.load(open(sys.argv[1])).get('matugen', False)))" "$cfg" 2>/dev/null)
 
-# colour-scheme algorithm (picked in the control center) — default tonal-spot
-scheme=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('scheme','scheme-tonal-spot'))" "$cfg" 2>/dev/null)
-case "$scheme" in scheme-*) ;; *) scheme="scheme-tonal-spot" ;; esac
-json=$(matugen --json hex --type "$scheme" --prefer saturation image "$wp" 2>/dev/null)
-[ -z "$json" ] && exit 1
-# stash the JSON in a temp file — stdin is taken by the heredoc program below
+if [ "$matugen_enabled" = "True" ]; then
+    wp=$(printf '%s' "$1" | tr -d '\n\r')
+    [ -z "$wp" ] && wp=$(cat "$HOME/.config/sea-shell/wallpaper" 2>/dev/null | tr -d '\n\r')
+    [ -z "$wp" ] && exit 1
+    case "$wp" in
+        *.mp4|*.webm|*.mkv|*.mov|*.gif)
+            f=/tmp/sea-matugen-frame.png
+            ffmpeg -y -i "$wp" -vframes 1 "$f" >/dev/null 2>&1 && wp="$f" ;;
+    esac
+fi
+
+# check if auto colours from wallpaper (matugen) is enabled globally
 jf=$(mktemp) || exit 1
-printf '%s' "$json" > "$jf"
+
+if [ "$matugen_enabled" = "True" ]; then
+    scheme=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('scheme','scheme-tonal-spot'))" "$cfg" 2>/dev/null)
+    case "$scheme" in scheme-*) ;; *) scheme="scheme-tonal-spot" ;; esac
+    json=$(matugen --json hex --type "$scheme" --prefer saturation image "$wp" 2>/dev/null)
+    if [ -n "$json" ]; then
+        printf '%s' "$json" > "$jf"
+    else
+        manual_accent=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('accent','#63c7dd'))" "$cfg" 2>/dev/null)
+        printf '{"colors":{"primary":{"default":{"color":"%s"}}}}' "$manual_accent" > "$jf"
+    fi
+else
+    manual_accent=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('accent','#63c7dd'))" "$cfg" 2>/dev/null)
+    printf '{"colors":{"primary":{"default":{"color":"%s"}}}}' "$manual_accent" > "$jf"
+fi
 
 # accent = Material `primary`; kitty ANSI palette = the base16 scheme (dark variant).
 # prints "<accent> <frost>" on stdout so the shell can also recolour starship.
-pal=$(python3 - "$cfg" "$kitty" "$DEFAULT" "$jf" <<'PY'
-import json, sys
+# ── per-target overrides ─────────────────────────────────────────────────────
+eval "$(read_overrides)"
+
+pal=$(WRITE_KITTY="$KITTY" KITTY_CUSTOM_ACCENT="$KITTY_CUSTOM_ACCENT" KITTY_CUSTOM_BG="$KITTY_CUSTOM_BG" python3 - "$cfg" "$kitty" "$DEFAULT" "$jf" <<'PY'
+import json, sys, os
 cfg, kitty, default, jf = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 data = json.load(open(jf))
 def pick(node):
@@ -121,11 +210,16 @@ def lighten(hx, amt=0.30):
     return '#%02x%02x%02x' % (int(r+(255-r)*amt), int(g+(255-g)*amt), int(b_+(255-b_)*amt))
 colors = data.get('colors', {}); b = data.get('base16', {})
 def bb(k, fb): return pick(b.get(k)) or fb
-accent = pick(colors.get('primary')) or default
+
+custom_acc = os.environ.get('KITTY_CUSTOM_ACCENT', '').strip()
+custom_bg = os.environ.get('KITTY_CUSTOM_BG', '').strip()
+
+global_accent = pick(colors.get('primary')) or default
+kitty_accent = custom_acc if custom_acc else global_accent
 
 try: d = json.load(open(cfg))
 except Exception: d = {"radius": 14, "opacity": 0.82, "height": 42, "font": "monospace"}
-d["accent"] = accent
+d["accent"] = global_accent
 json.dump(d, open(cfg, "w"))
 
 # Terminal palettes are built with a CONTRAST-AWARE, hue-preserving algorithm rather than
@@ -150,7 +244,7 @@ def readable(col, bg, target, up):        # nudge lightness until it clears the 
         l = l + 0.012 if up else l - 0.012
         if l>=1.0 or l<=0.0: break
     return H(hh, s, max(0.0,min(1.0,l)))
-AH, ASAT, _AL = _hsl(accent)              # wallpaper accent HUE drives every tint
+AH, ASAT, _AL = _hsl(kitty_accent)              # wallpaper accent HUE drives every tint
 
 def kitty_rows(dark, opacity):
     # Background carries the wallpaper HUE at real saturation + enough lightness to actually
@@ -158,11 +252,13 @@ def kitty_rows(dark, opacity):
     # by a near-white/near-black foreground whose contrast is *enforced*, plus contrast-checked
     # ANSI — so a saturated bg is fine (white-on-teal, white-on-plum … all read clean).
     if dark:
-        bg=H(AH, min(max(ASAT,0.28),0.55), 0.125); fg=readable(H(AH,0.08,0.94), bg, 9.0, True)
+        bg=custom_bg if custom_bg else H(AH, min(max(ASAT,0.28),0.55), 0.125)
+        fg=readable(H(AH,0.08,0.94), bg, 9.0, True)
         c0=H(AH,0.32,0.24); c8=H(AH,0.22,0.44); c7=H(AH,0.09,0.83); c15=H(AH,0.05,0.98)
         nL,bL,S,up = 0.66, 0.76, 0.62, True
     else:
-        bg=H(AH, min(max(ASAT,0.14),0.28), 0.955); fg=readable(H(AH,0.45,0.12), bg, 8.0, False)
+        bg=custom_bg if custom_bg else H(AH, min(max(ASAT,0.14),0.28), 0.955)
+        fg=readable(H(AH,0.45,0.12), bg, 8.0, False)
         c0=H(AH,0.30,0.40); c8=H(AH,0.22,0.54); c7=H(AH,0.24,0.28); c15=H(AH,0.55,0.09)
         nL,bL,S,up = 0.44, 0.52, 0.70, False
     # ANSI hues nudged toward the accent (short-arc blend) so they carry the theme too, but not
@@ -171,7 +267,7 @@ def kitty_rows(dark, opacity):
         d=(AH-h+0.5)%1.0-0.5; return (h+d*amt)%1.0
     R,Y,G,Cy,Bl,M = tint(0.00), tint(0.12), tint(0.34), tint(0.50), AH, tint(0.83)
     def C(hue,l): return readable(H(hue,S,l), bg, 4.2, up)
-    acc = readable(accent, bg, 3.0, up)                  # accent kept readable for cursor/borders
+    acc = readable(kitty_accent, bg, 3.0, up)                  # accent kept readable for cursor/borders
     return [
       ('foreground',fg),('background',bg),
       ('selection_foreground',bg),('selection_background',acc),
@@ -194,9 +290,10 @@ def write_kitty(path, dark, opacity):
     with open(path,'w') as f:
         f.write('# sea-shell matugen — contrast-aware %s variant (readable on any wallpaper)\n' % ('dark' if dark else 'light'))
         for k, v in kitty_rows(dark, opacity): f.write('%-22s %s\n' % (k, v))
+import os
 write_kitty(kitty, True, '0.92')
 write_kitty((kitty[:-5] if kitty.endswith('.conf') else kitty) + '-light.conf', False, '0.94')
-print(accent, lighten(accent))
+print(global_accent, lighten(global_accent))
 PY
 )
 rm -f "$jf"
@@ -204,19 +301,40 @@ rm -f "$jf"
 # starship — swap the sea accents (#63c7dd / #a2e2e8) for the wallpaper palette.
 # Seed a pristine default once (deref the symlink), then always generate from it.
 set -- $pal; accent="$1"; frost="$2"
-[ -f "$sdef" ] || { [ -e "$star" ] && cp -L "$star" "$sdef" 2>/dev/null; }
-if [ -f "$sdef" ] && [ -n "$accent" ] && [ -n "$frost" ]; then
-    sed -e "s/#63c7dd/$accent/g" -e "s/#a2e2e8/$frost/g" "$sdef" > "$star.tmp" 2>/dev/null && mv "$star.tmp" "$star"
+apply_hyprlock "$accent" "$frost"
+if [ "$STARSHIP" = 1 ]; then
+    [ -f "$sdef" ] || { [ -e "$star" ] && cp -L "$star" "$sdef" 2>/dev/null; }
+    if [ -f "$sdef" ] && [ -n "$accent" ] && [ -n "$frost" ]; then
+        sed -e "s/#63c7dd/$accent/g" -e "s/#a2e2e8/$frost/g" "$sdef" > "$star.tmp" 2>/dev/null && mv "$star.tmp" "$star"
+    fi
+else
+    [ -f "$sdef" ] || { [ -e "$star" ] && cp -L "$star" "$sdef" 2>/dev/null; }
+    target_starship_acc="${STARSHIP_CUSTOM_ACCENT:-$accent}"
+    custom_light=$(python3 -c "import sys; h=sys.argv[1].lstrip('#'); r,g,b=int(h[0:2],16),int(h[2:4],16),int(h[4:6],16); print('#%02x%02x%02x' % (int(r+(255-r)*0.3), int(g+(255-g)*0.3), int(b+(255-b)*0.3)))" "$target_starship_acc" 2>/dev/null)
+    sed -e "s/#63c7dd/$target_starship_acc/g" -e "s/#a2e2e8/$custom_light/g" "$sdef" > "$star.tmp" 2>/dev/null && mv "$star.tmp" "$star"
 fi
 
-# Hyprland borders + fastfetch follow the accent too
-apply_extras "$accent" "$frost"
+# Hyprland borders + fastfetch follow the accent too (per-target gated)
+if [ "$HYPRLAND" = 1 ]; then
+    apply_hyprland "$accent" "$frost"
+else
+    active_col="${HYPR_CUSTOM_ACTIVE:-$accent}"
+    inactive_col="${HYPR_CUSTOM_INACTIVE:-$accent}"
+    # derive active border second gradient stop if no custom inactive is set
+    active_frost=$(python3 -c "import sys; h=sys.argv[1].lstrip('#'); r,g,b=int(h[0:2],16),int(h[2:4],16),int(h[4:6],16); print('#%02x%02x%02x' % (int(r+(255-r)*0.3), int(g+(255-g)*0.3), int(b+(255-b)*0.3)))" "$active_col" 2>/dev/null)
+    apply_hyprland "$active_col" "$active_frost"
+fi
+
+if [ "$FASTFETCH" = 1 ]; then
+    apply_fastfetch "$accent"
+else
+    apply_fastfetch "${FASTFETCH_CUSTOM_ACCENT:-$accent}"
+fi
 
 # if the shell is currently in light mode, refresh the live override too (kitty-mode.conf is a
 # copy of the light palette that sea-apply-mode.sh makes on toggle — keep it current so a
 # running light-mode kitty picks up the new colours without a re-toggle)
 mode=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('mode','dark'))" "$cfg" 2>/dev/null)
 [ "$mode" = "light" ] && cp "$HOME/.config/sea-shell/kitty-matugen-light.conf" "$HOME/.config/sea-shell/kitty-mode.conf" 2>/dev/null
-
 reload_kitty
 notify-send 'sea-shell' 'Colours matched to wallpaper 🎨' 2>/dev/null

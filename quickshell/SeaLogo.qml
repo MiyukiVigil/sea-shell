@@ -28,6 +28,9 @@ Item {
 
         Shape {
             anchors.fill: parent
+            // analytic per-pixel AA — stays crisp when scaled down to `size`, where the
+            // default GeometryRenderer needs surface MSAA and otherwise fringes/jags.
+            preferredRendererType: Shape.CurveRenderer
             ShapePath { fillColor: "transparent"; capStyle: ShapePath.RoundCap; strokeWidth: 3.4
                 strokeColor: Qt.rgba(root.highlight.r, root.highlight.g, root.highlight.b, 0.92)
                 PathSvg { path: "M11 24 q5.25 -6 10.5 0 t10.5 0 t10.5 0 t10.5 0" } }

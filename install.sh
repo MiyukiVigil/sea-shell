@@ -205,6 +205,7 @@ do_install() {
   mkdir -p "$DATA_DIR"
   # seed the (empty) matugen border override so sea.conf's `source` of it never dangles
   mkdir -p "$HYPR_DEST"; [ -e "$HYPR_DEST/matugen.conf" ] || : > "$HYPR_DEST/matugen.conf"
+  [ -e "$HYPR_DEST/hyprlock-colors.conf" ] || printf '# sea-shell default lockscreen colors\n$accent = rgba(63c7ddcc)\n$accentAlpha = 63c7dd\n$frost = rgba(a2e2e8ff)\n$frostAlpha = a2e2e8\n' > "$HYPR_DEST/hyprlock-colors.conf"
   # remember where the repo lives so GUI edits (keybind rebinds) can sync back to it
   printf '%s' "$SCRIPT_DIR" > "$DATA_DIR/.repo"
 

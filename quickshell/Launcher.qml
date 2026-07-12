@@ -122,12 +122,62 @@ Scope {
         } catch(err) { return null }
     }
 
+    // ---------- unit / currency / temp conversion ----------
+    function parseConversion(q) {
+        var m = q.toLowerCase().match(/^(\d+(?:\.\d+)?)\s*([a-z°]+)\s+to\s+([a-z°]+)$/);
+        if (!m) return null;
+        var val = parseFloat(m[1]);
+        var from = m[2];
+        var to = m[3];
+        
+        // Temperatures
+        if ((from === "c" || from === "°c" || from === "celsius") && (to === "f" || to === "°f" || to === "fahrenheit")) {
+            return (val * 9/5 + 32).toFixed(1) + " °F";
+        }
+        if ((from === "f" || from === "°f" || from === "fahrenheit") && (to === "c" || to === "°c" || to === "celsius")) {
+            return ((val - 32) * 5/9).toFixed(1) + " °C";
+        }
+        
+        // Weights
+        if ((from === "lbs" || from === "lb" || from === "pounds" || from === "pound") && (to === "kg" || to === "kilograms" || to === "kilogram")) {
+            return (val * 0.453592).toFixed(2) + " kg";
+        }
+        if ((from === "kg" || from === "kilograms" || from === "kilogram") && (to === "lbs" || to === "lb" || to === "pounds" || to === "pound")) {
+            return (val * 2.20462).toFixed(2) + " lbs";
+        }
+
+        // Lengths
+        if ((from === "in" || from === "inch" || from === "inches") && (to === "cm" || to === "centimeter" || to === "centimeters")) {
+            return (val * 2.54).toFixed(2) + " cm";
+        }
+        if ((from === "cm" || from === "centimeter" || from === "centimeters") && (to === "in" || to === "inch" || to === "inches")) {
+            return (val / 2.54).toFixed(2) + " in";
+        }
+        if ((from === "mi" || from === "mile" || from === "miles") && (to === "km" || to === "kilometer" || to === "kilometers")) {
+            return (val * 1.60934).toFixed(2) + " km";
+        }
+        if ((from === "km" || from === "kilometer" || from === "kilometers") && (to === "mi" || to === "mile" || to === "miles")) {
+            return (val / 1.60934).toFixed(2) + " mi";
+        }
+
+        // Currency (USD base rates)
+        var rates = { usd: 1.0, eur: 0.92, gbp: 0.79, jpy: 158.0, cad: 1.36, aud: 1.50, sgd: 1.35 };
+        if (rates[from] !== undefined && rates[to] !== undefined) {
+            var usdVal = val / rates[from];
+            var result = usdVal * rates[to];
+            return result.toFixed(2) + " " + to.toUpperCase();
+        }
+        
+        return null;
+     }
+
     // ---------- system actions (: mode) ----------
     readonly property var sysActions: [
         {l:"Settings",        s:"sea-shell control center",  i:"tune",               c:"~/.config/quickshell/sea-shell/sea-toggle.sh settings"},
         {l:"Wallpaper",       s:"wallpaper picker",         i:"wallpaper",          c:"~/.config/quickshell/sea-shell/sea-toggle.sh wallpaper"},
         {l:"Keybinds",        s:"cheat-sheet",              i:"keyboard",           c:"~/.config/quickshell/sea-shell/sea-toggle.sh keybinds"},
         {l:"Power menu",      s:"lock · suspend · off",     i:"power_settings_new", c:"~/.config/quickshell/sea-shell/sea-toggle.sh power"},
+        {l:"Caffeine mode",   s:"toggle screen idle sleeping",i:"coffee",            c:"qs -c sea-shell ipc call shell toggleIdle"},
         {l:"Lock",            s:"loginctl lock-session",    i:"lock",               c:"~/.config/quickshell/sea-shell/sea-lock.sh"},
         {l:"Suspend",         s:"systemctl suspend",        i:"bedtime",            c:"systemctl suspend"},
         {l:"Reboot",          s:"systemctl reboot",         i:"restart_alt",        c:"systemctl reboot", warn:true},
@@ -191,9 +241,34 @@ Scope {
                           sub: img ? "⏎ copy image" : "⏎ copy text", mi: img ? "image" : "content_paste", exec: cid});
             }
             if (!out.length) out = [{type:"hint", title:"clipboard history", sub: root.clipLines.length ? "no match" : "history is empty", mi:"content_paste"}];
-        } else if (q.startsWith("?")) {
-            var w = q.slice(1).trim();
-            out = [{type:"web", title: w==="" ? "search the web" : esc(w), sub:"DuckDuckGo  ·  ⏎ opens browser", mi:"travel_explore", exec:w}];
+        } else if (q.startsWith("?") || q.toLowerCase().startsWith("g ") || q.toLowerCase().startsWith("yt ") || q.toLowerCase().startsWith("gh ")) {
+            var w = q;
+            var title = "";
+            var url = "";
+            var engine = "DuckDuckGo";
+            var icon = "travel_explore";
+            
+            if (q.toLowerCase().startsWith("g ")) {
+                w = q.slice(2).trim();
+                title = w === "" ? "search Google" : "Search Google for \"" + w + "\"";
+                url = "https://google.com/search?q=" + encodeURIComponent(w);
+                engine = "Google";
+            } else if (q.toLowerCase().startsWith("yt ")) {
+                w = q.slice(3).trim();
+                title = w === "" ? "search YouTube" : "Search YouTube for \"" + w + "\"";
+                url = "https://youtube.com/results?search_query=" + encodeURIComponent(w);
+                engine = "YouTube";
+            } else if (q.toLowerCase().startsWith("gh ")) {
+                w = q.slice(3).trim();
+                title = w === "" ? "search GitHub" : "Search GitHub for \"" + w + "\"";
+                url = "https://github.com/search?q=" + encodeURIComponent(w);
+                engine = "GitHub";
+            } else {
+                w = q.slice(1).trim();
+                title = w === "" ? "search the web" : "Search DuckDuckGo for \"" + w + "\"";
+                url = "https://duckduckgo.com/?q=" + encodeURIComponent(w);
+            }
+            out = [{type:"web", title: title, sub: engine + "  ·  ⏎ opens browser", mi: icon, exec: url}];
         } else if (q.startsWith(":")) {
             var aq = q.slice(1).trim();
             root.sysActions.forEach(a => {
@@ -203,6 +278,13 @@ Scope {
         } else {
             // auto-calculator on plain math ("2+2", "(9*9)/4")
             if (/^[0-9(.\-]/.test(q) && /[\d)]/.test(q)) { var cv = calc(q); if (cv !== null) out.push({type:"calc", title:"= "+esc(cv), sub:"⏎ copy result", mi:"calculate", exec:cv}); }
+            
+            // auto-conversion (e.g. "120 usd to eur", "32 c to f")
+            var conv = parseConversion(q);
+            if (conv !== null) {
+                out.push({type:"calc", title: "= " + esc(conv), sub: "⏎ copy result", mi:"currency_exchange", exec:conv});
+            }
+
             var apps = DesktopEntries.applications.values, scored = [];
             for (i=0;i<apps.length;i++) {
                 var a = apps[i]; if (a.noDisplay) continue;
@@ -238,7 +320,7 @@ Scope {
         if (r.type === "calc") Quickshell.execDetached(["sh","-c","printf %s '" + r.exec.replace(/'/g,"") + "' | wl-copy"])
         if (r.type === "file") Quickshell.execDetached(["sh","-c","xdg-open \"$HOME/\"'" + r.exec.replace(/'/g,"'\\''") + "'"])
         if (r.type === "clip") Quickshell.execDetached(["sh","-c","cliphist decode " + r.exec + " | wl-copy"])
-        if (r.type === "web")  { if (r.exec==="") return; Quickshell.execDetached(["xdg-open","https://duckduckgo.com/?q=" + encodeURIComponent(r.exec)]) }
+        if (r.type === "web")  { if (r.exec==="") return; Quickshell.execDetached(["xdg-open", r.exec]) }
         if (r.type === "act")  Quickshell.execDetached(["sh","-c",r.exec])
         root.close();
     }
