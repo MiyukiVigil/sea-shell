@@ -856,7 +856,7 @@ ShellRoot {
         implicitHeight: pill.vert ? (pr.implicitHeight + 12) : 26
         // vertical pills share ONE width (derived from bar thickness) so they stack into a
         // clean column with flush edges instead of a ragged centre-aligned zigzag
-        implicitWidth:  pill.vert ? Math.max(30, root.cfgHeight - 12) : (pr.implicitWidth + 20)
+        implicitWidth:  pill.vert ? Math.max(30, root.cfgHeight - 12) : (pr.implicitWidth + 14)
         // uniform rounded-rectangle corners on a vertical bar (not a per-pill capsule, which
         // would make short pills horizontal ovals and tall ones vertical ovals)
         radius: pill.vert ? Math.min(13, height/2) : height/2
@@ -1057,10 +1057,10 @@ ShellRoot {
                 Grid {
                     id: leftGroup
                     columns: root.barVertical ? 1 : 99
-                    rowSpacing: 9; columnSpacing: 9
+                    rowSpacing: 7; columnSpacing: 7
                     horizontalItemAlignment: Grid.AlignHCenter; verticalItemAlignment: Grid.AlignVCenter
                     anchors.left:   root.barVertical ? undefined : parent.left
-                    anchors.leftMargin: 12
+                    anchors.leftMargin: 10
                     anchors.top:    root.barVertical ? parent.top : undefined
                     anchors.topMargin: 12
                     anchors.verticalCenter:   root.barVertical ? undefined : parent.verticalCenter
@@ -1092,9 +1092,11 @@ ShellRoot {
                         }
                     }
                     Text {
-                        // the horizontal window title has no room in a narrow vertical bar
+                        // the horizontal window title has no room in a narrow vertical bar.
+                        // Capped short so a long app class (e.g. electron apps) can't grow into
+                        // the centre and push the media pill out of existence — it's only a hint.
                         visible: !root.barVertical
-                        width: Math.min(implicitWidth, 240); elide: Text.ElideRight
+                        width: Math.min(implicitWidth, 130); elide: Text.ElideRight
                         color: theme.faint; font.pixelSize: 12; font.family: root.cfgFont
                         text: (Hyprland.activeToplevel && Hyprland.activeToplevel.lastIpcObject) ? (Hyprland.activeToplevel.lastIpcObject.class || "") : ""
                     }
@@ -1111,10 +1113,10 @@ ShellRoot {
                         var half = barBg.width / 2;
                         var leftEnd = leftGroup.x + leftGroup.width;    // right edge of left cluster
                         var rightStart = rightGroup.x;                  // left edge of right cluster
-                        var room = Math.min(half - leftEnd, rightStart - half) - 12;   // per-side gap
-                        return room * 2 - 46;                           // both halves, minus icon+padding
+                        var room = Math.min(half - leftEnd, rightStart - half) - 8;    // per-side gap
+                        return room * 2 - 42;                           // both halves, minus icon+padding
                     }
-                    visible: root.player !== null && freeText >= 40
+                    visible: root.player !== null && freeText >= 26
                     key: "mpris"
                     scrollText: true
                     maxTextW: Math.max(0, Math.min(180, freeText))
@@ -1295,13 +1297,13 @@ ShellRoot {
                 Grid {
                     id: rightGroup
                     columns: root.barVertical ? 1 : 99
-                    rowSpacing: 9; columnSpacing: 9
+                    rowSpacing: 7; columnSpacing: 7
                     horizontalItemAlignment: Grid.AlignHCenter; verticalItemAlignment: Grid.AlignVCenter
                     // horizontal axis via anchors; vertical position via manual y. Anchoring a
                     // content-sized Grid's `bottom` collapses it (height reads 0 at anchor time),
                     // so we compute y from implicitHeight: bottom-pinned when vertical, centred when not.
                     anchors.right:  root.barVertical ? undefined : parent.right
-                    anchors.rightMargin: 12
+                    anchors.rightMargin: 10
                     anchors.horizontalCenter: root.barVertical ? parent.horizontalCenter : undefined
                     y: root.barVertical ? (parent.height - implicitHeight - 12)
                                         : (parent.height - implicitHeight) / 2
@@ -1318,7 +1320,7 @@ ShellRoot {
                             color: tcm.containsMouse ? theme.a(theme.iris,0.18) : "transparent"
                             Sym { anchors.centerIn: parent; text: root.barVertical ? (root.trayCollapsed ? "expand_less" : "expand_more") : (root.trayCollapsed ? "chevron_left" : "chevron_right"); sz: 16; color: theme.sub }
                             MouseArea { id: tcm; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.trayCollapsed = !root.trayCollapsed } }
-                        Grid { columns: root.barVertical ? 1 : 99; rowSpacing: 9; columnSpacing: 9; visible: !root.trayCollapsed
+                        Grid { columns: root.barVertical ? 1 : 99; rowSpacing: 7; columnSpacing: 7; visible: !root.trayCollapsed
                             horizontalItemAlignment: Grid.AlignHCenter; verticalItemAlignment: Grid.AlignVCenter
                             Repeater { model: SystemTray.items
                                 delegate: Item { id: trayItem; required property SystemTrayItem modelData; width: 18; height: 18
