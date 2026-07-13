@@ -128,9 +128,28 @@ ShellRoot {
                     cellWidth: (width - 1) / Math.max(1, Math.floor(width / 220)); cellHeight: cellWidth * 0.6
                     model: root.papers
                     delegate: Item {
+                        id: cell
                         required property var modelData
                         readonly property bool vid: root.isVideo(modelData)
+                        property string thumbPath: ""     // set once the poster frame is extracted
+                        property bool thumbReady: false
                         width: GridView.view.cellWidth; height: GridView.view.cellHeight
+
+                        // Image can't decode video — extract a cached poster frame with ffmpeg
+                        // (seek 1s to skip black intros; fall back to frame 0 for very short clips),
+                        // then reveal it. Cached under ~/.cache, so re-opening the picker is instant.
+                        Process {
+                            running: cell.vid
+                            command: ["sh","-c",
+                                "d=\"$HOME/.cache/sea-shell/wallthumbs\"; mkdir -p \"$d\"; " +
+                                "t=\"$d/" + root.base(modelData) + ".jpg\"; " +
+                                "if [ ! -s \"$t\" ]; then " +
+                                "ffmpeg -y -loglevel error -ss 1 -i '" + modelData + "' -frames:v 1 -vf scale=400:-2 \"$t\" </dev/null 2>/dev/null || " +
+                                "ffmpeg -y -loglevel error -i '" + modelData + "' -frames:v 1 -vf scale=400:-2 \"$t\" </dev/null 2>/dev/null; fi; " +
+                                "[ -s \"$t\" ] && printf '%s' \"$t\""]
+                            stdout: StdioCollector { id: tOut; onStreamFinished: { var p = tOut.text.trim(); if (p) { cell.thumbPath = p; cell.thumbReady = true } } }
+                        }
+
                         Rectangle {
                             anchors.fill: parent; anchors.margins: 6; radius: 10; clip: true
                             color: theme.line
@@ -138,16 +157,23 @@ ShellRoot {
                             border.color: wm.containsMouse ? theme.iris : theme.a(theme.iris, 0.2)
                             Image {
                                 anchors.fill: parent; anchors.margins: 1
-                                visible: !parent.parent.vid
-                                source: parent.parent.vid ? "" : "file://" + modelData
+                                visible: cell.vid ? cell.thumbReady : true
+                                source: cell.vid ? (cell.thumbReady ? "file://" + cell.thumbPath : "") : "file://" + modelData
                                 fillMode: Image.PreserveAspectCrop
                                 asynchronous: true; cache: true
                                 sourceSize.width: 400
                             }
-                            // animated wallpaper → film-icon placeholder (can't decode as image)
+                            // still extracting (or ffmpeg unavailable) → film-icon placeholder
                             Text {
-                                anchors.centerIn: parent; visible: parent.parent.vid
+                                anchors.centerIn: parent; visible: cell.vid && !cell.thumbReady
                                 text: "movie"; font.family: "Material Symbols Outlined"; font.pixelSize: 40; color: theme.iris
+                            }
+                            // little play badge marks a card as an animated wallpaper
+                            Rectangle {
+                                visible: cell.vid && cell.thumbReady
+                                anchors { top: parent.top; left: parent.left; margins: 6 }
+                                width: 22; height: 22; radius: 11; color: Qt.rgba(0, 0, 0, 0.5)
+                                Text { anchors.centerIn: parent; text: "play_arrow"; font.family: "Material Symbols Outlined"; font.pixelSize: 15; color: theme.frost }
                             }
                             Rectangle {
                                 anchors.bottom: parent.bottom; width: parent.width; height: 24

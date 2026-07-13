@@ -2212,7 +2212,7 @@ ShellRoot {
         
         // dim background scrim
         Rectangle {
-            anchors.fill: parent; color: theme.a(theme.bg, theme.light ? 0.96 : 0.94)
+            anchors.fill: parent; color: theme.bg          // fully opaque — a focus mode, no desktop bleed-through
             MouseArea { anchors.fill: parent; onClicked: root.exposeActive = false }
             
             FocusScope {
@@ -2268,7 +2268,10 @@ ShellRoot {
                                             var out = [];
                                             for (var i = 0; i < m.length; i++) {
                                                 var t = m[i];
-                                                if (t && t.lastIpcObject && t.lastIpcObject.workspace && t.lastIpcObject.workspace.id === modelData.id) {
+                                                // use the LIVE .workspace ref, not lastIpcObject.workspace —
+                                                // the latter is a stale snapshot, so windows land in the wrong
+                                                // card (or none) after they move or are created post-launch.
+                                                if (t && t.workspace && t.workspace.id === modelData.id) {
                                                     out.push(t);
                                                 }
                                             }

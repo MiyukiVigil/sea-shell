@@ -178,7 +178,7 @@ ShellRoot {
         // frosted background scrim
         Rectangle {
             anchors.fill: parent
-            color: theme.a(theme.bg, theme.light ? 0.96 : 0.94)
+            color: theme.light ? Qt.rgba(0.96, 0.96, 0.97, 0.98) : Qt.rgba(0.05, 0.06, 0.08, 0.98) // high opacity - no app text bleed-through
             MouseArea { anchors.fill: parent; onClicked: Qt.quit() }
             
             // ESC key to close
@@ -197,39 +197,23 @@ ShellRoot {
                         ColumnLayout {
                             spacing: 2
                             Text {
-                                text: cmdTime.timeText
+                                id: timeTextLabel
+                                property string timeText: Qt.formatDateTime(new Date(), "HH:mm")
+                                text: timeText
                                 color: theme.text; font.pixelSize: 34; font.bold: true; font.family: root.cfgFont
-                                Component.onCompleted: {
-                                    var d = new Date();
-                                    var h = d.getHours();
-                                    var m = d.getMinutes();
-                                    timeText = (h < 10 ? "0" : "") + h + ":" + (m < 10 ? "0" : "") + m;
-                                }
                                 Timer {
-                                    id: cmdTime; property string timeText: "00:00"
                                     interval: 1000; running: true; repeat: true
-                                    onTriggered: {
-                                        var d = new Date();
-                                        var h = d.getHours();
-                                        var m = d.getMinutes();
-                                        timeText = (h < 10 ? "0" : "") + h + ":" + (m < 10 ? "0" : "") + m;
-                                    }
+                                    onTriggered: timeTextLabel.timeText = Qt.formatDateTime(new Date(), "HH:mm")
                                 }
                             }
                             Text {
-                                text: cmdDate.dateText
+                                id: dateTextLabel
+                                property string dateText: Qt.formatDateTime(new Date(), "dddd, d MMMM")
+                                text: dateText
                                 color: theme.faint; font.pixelSize: 13; font.family: root.cfgFont
-                                Component.onCompleted: {
-                                    var opts = { weekday: 'long', day: 'numeric', month: 'long' };
-                                    dateText = new Date().toLocaleDateString('en-US', opts);
-                                }
                                 Timer {
-                                    id: cmdDate; property string dateText: "Sunday, 1 January"
                                     interval: 60000; running: true; repeat: true
-                                    onTriggered: {
-                                        var opts = { weekday: 'long', day: 'numeric', month: 'long' };
-                                        dateText = new Date().toLocaleDateString('en-US', opts);
-                                    }
+                                    onTriggered: dateTextLabel.dateText = Qt.formatDateTime(new Date(), "dddd, d MMMM")
                                 }
                             }
                         }
@@ -251,7 +235,7 @@ ShellRoot {
                         
                         // Left column
                         ColumnLayout {
-                            Layout.fillHeight: true; Layout.minimumWidth: 360; spacing: 16
+                            Layout.fillWidth: true; Layout.fillHeight: true; Layout.preferredWidth: 360; spacing: 16
                             
                             // Resource card
                             Rectangle {
@@ -403,7 +387,7 @@ ShellRoot {
                         
                         // Right column (Todo list)
                         Rectangle {
-                            Layout.fillWidth: true; Layout.fillHeight: true; radius: root.cfgRadius
+                            Layout.fillWidth: true; Layout.fillHeight: true; Layout.preferredWidth: 360; radius: root.cfgRadius
                             color: theme.a(theme.line, 0.35); border.width: 1; border.color: theme.a(theme.iris, 0.12)
                             ColumnLayout {
                                 anchors.fill: parent; anchors.margins: 14; spacing: 10
