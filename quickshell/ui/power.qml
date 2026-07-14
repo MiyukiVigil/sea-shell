@@ -15,9 +15,16 @@ ShellRoot {
     property string up: ""
     property string accent: "#63c7dd"
     property bool cfgLight: false
-    // follow the bar's appearance config (accent + light/dark)
+    property real cfgScale: 0     // 0 = auto (per-monitor), >0 = manual UI-scale multiplier
+    function uiFor(scr) {          // matches shell.qml: ≤1440p → 1×, grows past it, capped 2.5×
+        if (root.cfgScale > 0) return root.cfgScale;
+        var h = (scr && scr.height) ? scr.height : 0;
+        if (h <= 1440) return 1.0;
+        return Math.min(2.5, h / 1080);
+    }
+    // follow the bar's appearance config (accent + light/dark + UI scale)
     Process { running: true; command: ["sh","-c","cat \"$HOME/.config/sea-shell/appearance.json\" 2>/dev/null"]
-        stdout: StdioCollector { id: apOut; onStreamFinished: { try { var j=JSON.parse(apOut.text); if(j.accent) root.accent=j.accent; if(j.mode!==undefined) root.cfgLight=(""+j.mode==="light") } catch(e){} } } }
+        stdout: StdioCollector { id: apOut; onStreamFinished: { try { var j=JSON.parse(apOut.text); if(j.accent) root.accent=j.accent; if(j.scale!==undefined) root.cfgScale=j.scale; if(j.mode!==undefined) root.cfgLight=(""+j.mode==="light") } catch(e){} } } }
 
     QtObject {
         id: theme
@@ -55,12 +62,17 @@ ShellRoot {
         stdout: StdioCollector { id: uOut; onStreamFinished: { var p = uOut.text.split("|"); root.who = p[0]||""; root.up = p[1]||"" } } }
 
     PanelWindow {
+        id: win
+        readonly property real ui: root.uiFor(win.screen)
         anchors { top: true; bottom: true; left: true; right: true }
         color: "transparent"
         WlrLayershell.namespace: "sea-shell:power"
         WlrLayershell.layer: WlrLayer.Overlay
         WlrLayershell.keyboardFocus: WlrKeyboardFocus.Exclusive
         exclusionMode: ExclusionMode.Ignore
+        // scale the whole overlay up on big displays; centred content stays centred (default
+        // transformOrigin is the centre, i.e. the screen centre for this full-screen surface)
+        Binding { target: win.contentItem; property: "scale"; value: win.ui }
 
         Rectangle { anchors.fill: parent; color: Qt.rgba(0,0,0,0.6); MouseArea { anchors.fill: parent; onClicked: Qt.quit() } }
         Item {

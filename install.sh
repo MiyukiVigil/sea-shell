@@ -92,6 +92,30 @@ link_dir() {
   ln -sfn "$src" "$dest"
   ok "linked ${dest/#$HOME/\~} → ${src/#$HOME/\~}"
 }
+# lay the quickshell/ tree down FLAT into $QS_DEST. The repo is organised into subfolders
+# (ui/ · scripts/{wallpaper,theme,lock,…} · assets/) for sanity, but the runtime resolves
+# every .qml component and helper script as a flat sibling in one directory, so we flatten
+# on deploy — recursively, at any depth, so new subfolders added later just work. Basenames
+# must stay unique across the tree (a collision is warned + skipped, not silently merged).
+# $1 = copy (self-contained) | link (--dev, live-edit the repo).
+deploy_qs() {
+  local mode="$1" src="$SCRIPT_DIR/quickshell" dest="$QS_DEST" f name seen=" "
+  [ -L "$dest" ] && rm -f "$dest"        # replace an old --dev symlink
+  if [ -d "$dest" ] && [ ! -f "$dest/.sea-shell" ]; then
+    mv "$dest" "$dest.bak-$STAMP"; info "backed up ${dest/#$HOME/\~} → .bak-$STAMP"
+  fi
+  rm -rf "$dest"; mkdir -p "$dest"
+  while IFS= read -r f; do
+    name="$(basename "$f")"
+    case "$seen" in *" $name "*) warn "duplicate basename '$name' (${f#$src/}) — skipped"; continue ;; esac
+    seen="$seen$name "
+    if [ "$mode" = "link" ]; then ln -sfn "$f" "$dest/$name"
+    else install -m 644 "$f" "$dest/$name"; fi
+  done < <(find "$src" -type f ! -name '.sea-shell' | sort)
+  touch "$dest/.sea-shell"
+  chmod +x "$dest"/*.sh "$dest"/*.py 2>/dev/null
+  ok "installed ${dest/#$HOME/\~}/ (${mode}, flattened)"
+}
 
 check_deps() {
   local missing=() optional=()
@@ -100,7 +124,7 @@ check_deps() {
   done
   # used by the bar / launcher / keybinds — everything still works without them,
   # just with that feature missing
-  for d in grim slurp wl-copy cliphist fd playerctl brightnessctl hyprlock hypridle; do
+  for d in grim slurp wl-copy cliphist fd playerctl brightnessctl hyprlock hypridle hyprsunset; do
     command -v "$d" >/dev/null 2>&1 || optional+=("$d")
   done
   # static wallpapers want swww (or its awww fork); animated ones want mpvpaper
@@ -118,7 +142,7 @@ check_deps() {
 # ---------- package installation (Arch only) ----------
 # Official-repo packages — installed with pacman (fast, no build).
 REPO_PKGS=(
-  hyprland hypridle hyprlock hyprpolkitagent          # compositor + idle/lock/polkit
+  hyprland hypridle hyprlock hyprpolkitagent hyprsunset  # compositor + idle/lock/polkit/night-light
   kitty fish starship fastfetch                       # terminal · shell · prompt · fetch
   pipewire wireplumber pipewire-pulse                 # audio (the bar's volume/OSD)
   networkmanager bluez bluez-utils upower             # net · bluetooth · battery
@@ -211,7 +235,7 @@ do_install() {
 
   if [ "${DEV:-0}" = "1" ]; then
     # ---- developer mode: live-edit the repo, configs follow instantly ----
-    link_dir "$SCRIPT_DIR/quickshell" "$QS_DEST"
+    deploy_qs link
     add_block "$CFG/hypr/hyprland.conf" "$(hypr_block "$SCRIPT_DIR/hypr")"
     add_block "$CFG/kitty/kitty.conf" "include $SCRIPT_DIR/kitty/sea-cyan.conf"
     mkdir -p "$CFG"
@@ -223,7 +247,7 @@ do_install() {
   else
     # ---- normal mode: self-contained copies in ~/.config ----
     # 0) Quickshell bar + overlays + helper scripts (run with `qs -c sea-shell`)
-    copy_dir "$SCRIPT_DIR/quickshell" "$QS_DEST"
+    deploy_qs copy
     # 1) Hyprland look + keybinds, sourced from ~/.config/hypr/sea-shell
     mkdir -p "$HYPR_DEST"
     copy_file "$SCRIPT_DIR/hypr/sea.conf" "$HYPR_DEST/sea.conf"
@@ -266,7 +290,7 @@ set_wallpaper() {
   local IM; IM="$(command -v magick || command -v convert)"
   "$IM" -size 3840x2160 gradient:'#12507a-#0a1420' "$out" && ok "wallpaper → $out"
   printf '%s' "$out" > "$DATA_DIR/wallpaper"
-  if "$SCRIPT_DIR/quickshell/sea-wallpaper-restore.sh" 2>/dev/null; then
+  if "$SCRIPT_DIR/quickshell/scripts/wallpaper/sea-wallpaper-restore.sh" 2>/dev/null; then
     ok "wallpaper set (and restored on every login)"
   else warn "install 'swww' (or awww) for the wallpaper to apply + restore on login"; fi
 }

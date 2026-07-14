@@ -14,10 +14,18 @@ ShellRoot {
     property var papers: []
     property string accent: "#63c7dd"
     property bool cfgLight: false
-    // follow the bar's appearance config (accent + light/dark + the persisted matugen flag)
+    property real cfgScale: 0     // 0 = auto (per-monitor), >0 = manual UI-scale multiplier
+    function uiFor(scr) {          // matches shell.qml: ≤1440p → 1×, grows past it, capped 2.5×
+        if (root.cfgScale > 0) return root.cfgScale;
+        var h = (scr && scr.height) ? scr.height : 0;
+        if (h <= 1440) return 1.0;
+        return Math.min(2.5, h / 1080);
+    }
+    // follow the bar's appearance config (accent + light/dark + matugen flag + UI scale)
     Process { running: true; command: ["sh","-c","cat \"$HOME/.config/sea-shell/appearance.json\" 2>/dev/null"]
         stdout: StdioCollector { id: apOut; onStreamFinished: { try { var j=JSON.parse(apOut.text);
             if(j.accent) root.accent=j.accent;
+            if(j.scale!==undefined) root.cfgScale=j.scale;
             if(j.mode!==undefined) root.cfgLight=(""+j.mode==="light");
             if(j.matugen!==undefined) root.matchColors=!!j.matugen; } catch(e){} } } }
 
@@ -82,19 +90,23 @@ ShellRoot {
     }
 
     PanelWindow {
+        id: win
+        readonly property real ui: root.uiFor(win.screen)
         anchors { top: true; bottom: true; left: true; right: true }
         color: "transparent"
         WlrLayershell.layer: WlrLayer.Overlay
         WlrLayershell.keyboardFocus: WlrKeyboardFocus.Exclusive
         exclusionMode: ExclusionMode.Ignore
+        // scale the centred picker up on big displays (content stays centred)
+        Binding { target: win.contentItem; property: "scale"; value: win.ui }
 
         Rectangle { anchors.fill: parent; color: Qt.rgba(0, 0, 0, 0.55); MouseArea { anchors.fill: parent; onClicked: Qt.quit() } }
         Item { anchors.fill: parent; focus: true; Keys.onEscapePressed: Qt.quit() }
 
         Rectangle {
             anchors.centerIn: parent
-            width: Math.min(parent.width - 80, 900)
-            height: Math.min(parent.height - 80, 620)
+            width: Math.min(parent.width / win.ui - 80, 900)
+            height: Math.min(parent.height / win.ui - 80, 620)
             radius: 18
             color: theme.a(theme.bg, 0.98)
             border.width: 1; border.color: theme.a(theme.iris, 0.34)

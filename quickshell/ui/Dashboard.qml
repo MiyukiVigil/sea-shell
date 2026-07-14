@@ -12,6 +12,13 @@ ShellRoot {
     property string accent: "#63c7dd"
     property bool cfgLight: false
     property real cfgRadius: 14
+    property real cfgScale: 0     // 0 = auto (per-monitor), >0 = manual UI-scale multiplier
+    function uiFor(scr) {          // matches shell.qml: ≤1440p → 1×, grows past it, capped 2.5×
+        if (root.cfgScale > 0) return root.cfgScale;
+        var h = (scr && scr.height) ? scr.height : 0;
+        if (h <= 1440) return 1.0;
+        return Math.min(2.5, h / 1080);
+    }
 
     property var cpuHistory: [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
     property var ramHistory: [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
@@ -103,6 +110,7 @@ ShellRoot {
                     var j=JSON.parse(apOut.text);
                     if(j.accent) root.accent=j.accent;
                     if(j.radius!==undefined) root.cfgRadius=j.radius;
+                    if(j.scale!==undefined) root.cfgScale=j.scale;
                     if(j.font!==undefined) root.cfgFont=j.font;
                     if(j.mode!==undefined) root.cfgLight=(""+j.mode==="light");
                 } catch(e){}
@@ -166,6 +174,7 @@ ShellRoot {
 
     PanelWindow {
         id: dWin
+        readonly property real ui: root.uiFor(dWin.screen)
         visible: true
         anchors { top: true; bottom: true; left: true; right: true }
         color: "transparent"
@@ -174,6 +183,8 @@ ShellRoot {
         WlrLayershell.keyboardFocus: WlrKeyboardFocus.Exclusive
         exclusionMode: ExclusionMode.Ignore
         onVisibleChanged: if (visible) tdIn.forceActiveFocus()
+        // scale the whole dashboard up on big displays; centred layout stays centred
+        Binding { target: dWin.contentItem; property: "scale"; value: dWin.ui }
         
         // frosted background scrim
         Rectangle {

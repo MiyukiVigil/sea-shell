@@ -7,6 +7,7 @@
 //   ~query      file search in $HOME (fd)  ⏎ opens with xdg-open
 //   ?query      web search                 ⏎ opens the browser
 //   ;query      clipboard history (cliphist)           ⏎ copies the entry
+//   .query      emoji picker (search by name)          ⏎ copies the emoji
 //   :           system actions (settings · wallpaper · power · lock · …)
 //
 // Esc / click-outside closes. ↑↓/Tab navigate · PgUp/PgDn jump · ALT+1..9 quick-launch.
@@ -21,6 +22,14 @@ Scope {
     property string accent: "#63c7dd"
     property bool cfgLight: false
     property real cfgRadius: 14
+    property real cfgScale: 0     // 0 = auto (per-monitor), >0 = manual UI-scale multiplier
+    // matches shell.qml uiFor(): ≤1440p untouched, grows past it, capped at 2.5×
+    function uiFor(scr) {
+        if (root.cfgScale > 0) return root.cfgScale;
+        var h = (scr && scr.height) ? scr.height : 0;
+        if (h <= 1440) return 1.0;
+        return Math.min(2.5, h / 1080);
+    }
     property string query: ""
     property int sel: 0
     property var results: []
@@ -67,7 +76,7 @@ Scope {
 
     // accent follows the bar's appearance config
     Process { id: apProc; running: true; command: ["sh","-c","cat \"$HOME/.config/sea-shell/appearance.json\" 2>/dev/null"]
-        stdout: StdioCollector { id: apOut; onStreamFinished: { try { var j=JSON.parse(apOut.text); if(j.accent) root.accent=j.accent; if(j.radius!==undefined) root.cfgRadius=j.radius; if(j.mode!==undefined) root.cfgLight=(""+j.mode==="light") } catch(e){} } } }
+        stdout: StdioCollector { id: apOut; onStreamFinished: { try { var j=JSON.parse(apOut.text); if(j.accent) root.accent=j.accent; if(j.radius!==undefined) root.cfgRadius=j.radius; if(j.scale!==undefined) root.cfgScale=j.scale; if(j.mode!==undefined) root.cfgLight=(""+j.mode==="light") } catch(e){} } } }
 
     // ---------- frecency history ----------
     Process { running: true; command: ["sh","-c","d=\"$HOME/.config/sea-shell\"; mkdir -p \"$d\"; cat \"$d/launcher-history.json\" 2>/dev/null; printf '\\n%s/launcher-history.json' \"$d\" >&2"]
@@ -122,54 +131,77 @@ Scope {
         } catch(err) { return null }
     }
 
-    // ---------- unit / currency / temp conversion ----------
+    // ---------- unit / currency / temp conversion ----------  ("10 km to mi", "72 f to c", "5 gb to mb")
     function parseConversion(q) {
-        var m = q.toLowerCase().match(/^(\d+(?:\.\d+)?)\s*([a-z°]+)\s+to\s+([a-z°]+)$/);
+        var m = q.toLowerCase().match(/^(-?\d+(?:\.\d+)?)\s*([a-z°\/]+)\s+to\s+([a-z°\/]+)$/);
         if (!m) return null;
-        var val = parseFloat(m[1]);
-        var from = m[2];
-        var to = m[3];
-        
-        // Temperatures
-        if ((from === "c" || from === "°c" || from === "celsius") && (to === "f" || to === "°f" || to === "fahrenheit")) {
-            return (val * 9/5 + 32).toFixed(1) + " °F";
-        }
-        if ((from === "f" || from === "°f" || from === "fahrenheit") && (to === "c" || to === "°c" || to === "celsius")) {
-            return ((val - 32) * 5/9).toFixed(1) + " °C";
-        }
-        
-        // Weights
-        if ((from === "lbs" || from === "lb" || from === "pounds" || from === "pound") && (to === "kg" || to === "kilograms" || to === "kilogram")) {
-            return (val * 0.453592).toFixed(2) + " kg";
-        }
-        if ((from === "kg" || from === "kilograms" || from === "kilogram") && (to === "lbs" || to === "lb" || to === "pounds" || to === "pound")) {
-            return (val * 2.20462).toFixed(2) + " lbs";
+        var val = parseFloat(m[1]), from = m[2], to = m[3];
+
+        // temperatures (non-linear — normalise through Celsius)
+        var temp = { c: ["c","°c","celsius"], f: ["f","°f","fahrenheit"], k: ["k","kelvin"] };
+        function tkind(u) { for (var kk in temp) if (temp[kk].indexOf(u) >= 0) return kk; return null; }
+        var tf = tkind(from), tt = tkind(to);
+        if (tf && tt) {
+            var cc = tf === "c" ? val : tf === "f" ? (val - 32) * 5/9 : val - 273.15;
+            var tr = tt === "c" ? cc : tt === "f" ? (cc * 9/5 + 32) : cc + 273.15;
+            return tr.toFixed(1) + " " + (tt === "c" ? "°C" : tt === "f" ? "°F" : "K");
         }
 
-        // Lengths
-        if ((from === "in" || from === "inch" || from === "inches") && (to === "cm" || to === "centimeter" || to === "centimeters")) {
-            return (val * 2.54).toFixed(2) + " cm";
-        }
-        if ((from === "cm" || from === "centimeter" || from === "centimeters") && (to === "in" || to === "inch" || to === "inches")) {
-            return (val / 2.54).toFixed(2) + " in";
-        }
-        if ((from === "mi" || from === "mile" || from === "miles") && (to === "km" || to === "kilometer" || to === "kilometers")) {
-            return (val * 1.60934).toFixed(2) + " km";
-        }
-        if ((from === "km" || from === "kilometer" || from === "kilometers") && (to === "mi" || to === "mile" || to === "miles")) {
-            return (val / 1.60934).toFixed(2) + " mi";
+        // linear units — factor to a base unit within each category
+        var cats = [
+            { u: { mm:0.001, cm:0.01, m:1, km:1000, in:0.0254, inch:0.0254, inches:0.0254, ft:0.3048, foot:0.3048, feet:0.3048, yd:0.9144, yard:0.9144, mi:1609.34, mile:1609.34, miles:1609.34, nmi:1852 } },
+            { u: { mg:0.001, g:1, gram:1, grams:1, kg:1000, kilogram:1000, kilograms:1000, oz:28.3495, ounce:28.3495, ounces:28.3495, lb:453.592, lbs:453.592, pound:453.592, pounds:453.592, st:6350.29, stone:6350.29, ton:1e6, tonne:1e6, tonnes:1e6 } },
+            { u: { ml:0.001, l:1, litre:1, liter:1, litres:1, liters:1, tsp:0.00492892, tbsp:0.0147868, cup:0.236588, cups:0.236588, pt:0.473176, pint:0.473176, qt:0.946353, quart:0.946353, gal:3.78541, gallon:3.78541, gallons:3.78541, floz:0.0295735 } },
+            { u: { b:1, byte:1, bytes:1, kb:1e3, mb:1e6, gb:1e9, tb:1e12, pb:1e15, kib:1024, mib:1048576, gib:1073741824, tib:1099511627776, bit:0.125, bits:0.125, kbit:125, mbit:125000, gbit:125000000 } },
+            { u: { "m/s":1, mps:1, kmh:0.277778, kph:0.277778, "km/h":0.277778, mph:0.44704, "mi/h":0.44704, knot:0.514444, knots:0.514444, kn:0.514444, fps:0.3048 } },
+            { u: { ms:0.001, s:1, sec:1, secs:1, second:1, seconds:1, min:60, mins:60, minute:60, minutes:60, h:3600, hr:3600, hrs:3600, hour:3600, hours:3600, day:86400, days:86400, week:604800, weeks:604800, month:2629800, months:2629800, year:31557600, years:31557600 } }
+        ];
+        for (var i = 0; i < cats.length; i++) {
+            var uu = cats[i].u;
+            if (uu[from] !== undefined && uu[to] !== undefined)
+                return (Math.round((val * uu[from] / uu[to]) * 10000) / 10000) + " " + to;
         }
 
-        // Currency (USD base rates)
-        var rates = { usd: 1.0, eur: 0.92, gbp: 0.79, jpy: 158.0, cad: 1.36, aud: 1.50, sgd: 1.35 };
-        if (rates[from] !== undefined && rates[to] !== undefined) {
-            var usdVal = val / rates[from];
-            var result = usdVal * rates[to];
-            return result.toFixed(2) + " " + to.toUpperCase();
-        }
-        
+        // currency (USD-base static rates — offline, approximate)
+        var rates = { usd:1.0, eur:0.92, gbp:0.79, jpy:158.0, cad:1.36, aud:1.50, sgd:1.35, inr:83.3, cny:7.24, chf:0.88, nzd:1.64, mxn:17.0, brl:5.1, krw:1370, rub:90, zar:18.5, hkd:7.8, sek:10.6, nok:10.7, aed:3.67 };
+        if (rates[from] !== undefined && rates[to] !== undefined)
+            return ((val / rates[from]) * rates[to]).toFixed(2) + " " + to.toUpperCase();
+
         return null;
      }
+
+    // ---------- emoji picker (. mode) — search a curated set by keyword, ⏎ copies ----------
+    readonly property var emojiDB: [
+        {e:"😀",k:"grinning smile happy face"},{e:"😄",k:"smile happy laugh"},{e:"😁",k:"grin beaming"},{e:"😂",k:"joy laugh tears lol funny"},{e:"🤣",k:"rofl rolling laughing"},
+        {e:"😊",k:"blush smile happy"},{e:"🙂",k:"slight smile"},{e:"😉",k:"wink"},{e:"😍",k:"heart eyes love"},{e:"🥰",k:"love hearts adore"},{e:"😘",k:"kiss blow"},
+        {e:"😎",k:"cool sunglasses"},{e:"🤩",k:"star struck excited wow"},{e:"🥳",k:"party celebrate hooray"},{e:"😏",k:"smirk"},{e:"😇",k:"angel innocent halo"},
+        {e:"🙃",k:"upside down silly"},{e:"😌",k:"relieved calm"},{e:"😴",k:"sleep tired zzz"},{e:"🤤",k:"drool yum"},{e:"😐",k:"neutral meh"},{e:"😑",k:"expressionless"},
+        {e:"🙄",k:"eye roll annoyed"},{e:"😒",k:"unamused meh"},{e:"😔",k:"sad pensive"},{e:"😞",k:"disappointed sad"},{e:"😢",k:"cry sad tear"},{e:"😭",k:"sob cry bawl"},
+        {e:"😤",k:"huff triumph steam"},{e:"😠",k:"angry mad"},{e:"😡",k:"rage furious mad"},{e:"🤬",k:"cursing swearing angry"},{e:"🤯",k:"mind blown exploding"},
+        {e:"😳",k:"flushed embarrassed shock"},{e:"🥵",k:"hot heat sweat"},{e:"🥶",k:"cold freezing"},{e:"😱",k:"scream shock fear"},{e:"😨",k:"fearful scared"},
+        {e:"😰",k:"anxious sweat nervous"},{e:"🤔",k:"thinking hmm"},{e:"🤨",k:"raised eyebrow suspicious"},{e:"😬",k:"grimace awkward"},{e:"🤒",k:"sick ill fever"},
+        {e:"🤕",k:"hurt injured bandage"},{e:"🤢",k:"nauseous sick gross"},{e:"🤮",k:"vomit puke sick"},{e:"🤧",k:"sneeze sick"},{e:"😷",k:"mask sick"},
+        {e:"🥺",k:"pleading puppy eyes cute"},{e:"😅",k:"sweat smile nervous relief"},{e:"👍",k:"thumbs up like yes approve ok"},{e:"👎",k:"thumbs down dislike no"},
+        {e:"👌",k:"ok perfect"},{e:"🤌",k:"pinched fingers italian"},{e:"✌️",k:"peace victory"},{e:"🤞",k:"fingers crossed luck"},{e:"🤟",k:"love you rock"},
+        {e:"🤙",k:"call me hang loose shaka"},{e:"👏",k:"clap applause bravo"},{e:"🙌",k:"raised hands praise hooray"},{e:"🙏",k:"pray please thanks thank you"},
+        {e:"🤝",k:"handshake deal agree"},{e:"💪",k:"muscle strong flex"},{e:"👀",k:"eyes look watch"},{e:"🫶",k:"heart hands love"},{e:"👋",k:"wave hi hello bye"},
+        {e:"❤️",k:"heart love red"},{e:"🧡",k:"orange heart"},{e:"💛",k:"yellow heart"},{e:"💚",k:"green heart"},{e:"💙",k:"blue heart"},{e:"💜",k:"purple heart"},
+        {e:"🖤",k:"black heart"},{e:"🤍",k:"white heart"},{e:"💔",k:"broken heart"},{e:"💕",k:"two hearts love"},{e:"💯",k:"hundred perfect keep it"},{e:"🔥",k:"fire lit hot flame"},
+        {e:"✨",k:"sparkles shiny clean magic"},{e:"⭐",k:"star"},{e:"🌟",k:"glowing star"},{e:"⚡",k:"lightning bolt zap fast"},{e:"💥",k:"boom collision explode"},
+        {e:"🎉",k:"party tada celebrate congrats"},{e:"🎊",k:"confetti party"},{e:"🎁",k:"gift present"},{e:"🏆",k:"trophy win winner champion"},{e:"🥇",k:"gold medal first"},
+        {e:"✅",k:"check tick done yes correct"},{e:"❌",k:"cross x no wrong"},{e:"⚠️",k:"warning caution"},{e:"❓",k:"question"},{e:"❗",k:"exclamation important"},
+        {e:"💡",k:"idea bulb light"},{e:"📌",k:"pin"},{e:"📍",k:"location pin"},{e:"🔒",k:"lock secure"},{e:"🔓",k:"unlock"},{e:"🔑",k:"key"},{e:"🔔",k:"bell notification"},
+        {e:"💰",k:"money bag cash"},{e:"💸",k:"money flying spend"},{e:"💳",k:"card credit"},{e:"📈",k:"chart up growth"},{e:"📉",k:"chart down loss"},
+        {e:"⏰",k:"alarm clock time"},{e:"⏳",k:"hourglass wait time"},{e:"📅",k:"calendar date"},{e:"📎",k:"paperclip attach"},{e:"✏️",k:"pencil edit write"},
+        {e:"📝",k:"memo note write"},{e:"📖",k:"book read"},{e:"💻",k:"laptop computer code"},{e:"🖥️",k:"desktop computer monitor"},{e:"⌨️",k:"keyboard"},{e:"🖱️",k:"mouse"},
+        {e:"📱",k:"phone mobile"},{e:"🔋",k:"battery"},{e:"🔌",k:"plug power"},{e:"💾",k:"save floppy disk"},{e:"🗑️",k:"trash delete bin"},{e:"🐛",k:"bug insect error"},
+        {e:"⚙️",k:"gear settings config"},{e:"🔧",k:"wrench fix tool"},{e:"🔨",k:"hammer build"},{e:"🚀",k:"rocket launch ship fast"},{e:"🛠️",k:"tools build"},
+        {e:"☕",k:"coffee tea cafe"},{e:"🍺",k:"beer drink"},{e:"🍕",k:"pizza food"},{e:"🍔",k:"burger food"},{e:"🎂",k:"cake birthday"},{e:"🍎",k:"apple fruit"},
+        {e:"🌈",k:"rainbow"},{e:"☀️",k:"sun sunny weather"},{e:"🌙",k:"moon night"},{e:"⛅",k:"cloud weather"},{e:"🌧️",k:"rain weather"},{e:"❄️",k:"snow cold winter"},
+        {e:"🐱",k:"cat kitten"},{e:"🐶",k:"dog puppy"},{e:"🦊",k:"fox"},{e:"🐢",k:"turtle slow"},{e:"🦄",k:"unicorn magic"},{e:"🐧",k:"penguin linux"},
+        {e:"👀",k:"eyes look"},{e:"🧠",k:"brain smart think"},{e:"🫡",k:"salute respect yes sir"},{e:"🤖",k:"robot bot ai"},{e:"👻",k:"ghost boo spooky"},
+        {e:"💀",k:"skull dead dying"},{e:"🎯",k:"target dart bullseye goal"},{e:"🧩",k:"puzzle piece"},{e:"🔗",k:"link chain url"},{e:"📢",k:"announce megaphone loud"}
+    ]
 
     // ---------- system actions (: mode) ----------
     readonly property var sysActions: [
@@ -275,6 +307,16 @@ Scope {
                 var m = aq==="" ? {score:0,pos:[]} : fuzzy(aq, a.l);
                 if (m) out.push({type:"act", title:highlight(a.l, m.pos), sub:a.s, mi:a.i, exec:a.c, warn:!!a.warn});
             });
+        } else if (q.startsWith(".")) {
+            // emoji picker: ".fire", ".heart" … ⏎ copies the glyph
+            var eq = q.slice(1).trim().toLowerCase();
+            for (var ei = 0; ei < root.emojiDB.length && out.length < 48; ei++) {
+                var em = root.emojiDB[ei];
+                if (eq === "" || em.k.indexOf(eq) >= 0) {
+                    var words = em.k.split(" ");
+                    out.push({ type:"emoji", emoji: em.e, title: words.slice(0,3).join(" "), sub: "⏎ copy  " + em.e, exec: em.e });
+                }
+            }
         } else {
             // auto-calculator on plain math ("2+2", "(9*9)/4")
             if (/^[0-9(.\-]/.test(q) && /[\d)]/.test(q)) { var cv = calc(q); if (cv !== null) out.push({type:"calc", title:"= "+esc(cv), sub:"⏎ copy result", mi:"calculate", exec:cv}); }
@@ -317,7 +359,7 @@ Scope {
         if (r.type === "app")  { bump(r.entry.id); r.entry.execute() }
         if (r.type === "run")  Quickshell.execDetached(["sh","-c",r.exec])
         if (r.type === "term") Quickshell.execDetached(["kitty","--hold","sh","-c",r.exec])
-        if (r.type === "calc") Quickshell.execDetached(["sh","-c","printf %s '" + r.exec.replace(/'/g,"") + "' | wl-copy"])
+        if (r.type === "calc" || r.type === "emoji") Quickshell.execDetached(["sh","-c","printf %s '" + r.exec.replace(/'/g,"") + "' | wl-copy"])
         if (r.type === "file") Quickshell.execDetached(["sh","-c","xdg-open \"$HOME/\"'" + r.exec.replace(/'/g,"'\\''") + "'"])
         if (r.type === "clip") Quickshell.execDetached(["sh","-c","cliphist decode " + r.exec + " | wl-copy"])
         if (r.type === "web")  { if (r.exec==="") return; Quickshell.execDetached(["xdg-open", r.exec]) }
@@ -332,10 +374,11 @@ Scope {
 
     readonly property string modeBadge: query.startsWith(">") ? "RUN" : query.startsWith("=") ? "CALC"
         : (query.startsWith("~")||query.startsWith("/")) ? "FILES" : query.startsWith("?") ? "WEB"
-        : query.startsWith(";") ? "CLIP" : query.startsWith(":") ? "SYS" : "APPS"
+        : query.startsWith(";") ? "CLIP" : query.startsWith(":") ? "SYS" : query.startsWith(".") ? "EMOJI" : "APPS"
 
     PanelWindow {
         id: win
+        readonly property real ui: root.uiFor(win.screen)
         visible: root.shown || root.held
         anchors { top: true; bottom: true; left: true; right: true }
         color: "transparent"
@@ -369,7 +412,10 @@ Scope {
             // quickshell 0.3 exit silently on layer surfaces, so we drive it via Connections.)
             property real openF: 0.0
             opacity: openF
-            scale: 0.975 + 0.025 * openF
+            // combine the open-animation tile-in with the global UI scale; grow from the top
+            // so the card stays pinned at y (16% down) and centred horizontally on big displays
+            transformOrigin: Item.Top
+            scale: win.ui * (0.975 + 0.025 * openF)
             NumberAnimation { id: cardIn; target: card; property: "openF"; to: 1.0
                 duration: 200; easing.type: Easing.OutCubic }
             Connections { target: root; function onShownChanged() {
@@ -399,7 +445,7 @@ Scope {
                     color: theme.text; font.pixelSize: 16; font.family: "monospace"
                     clip: true
                     onTextChanged: root.query = text
-                    Text { text: "apps  ·  >run  =calc  ~files  ?web  ;clip  :sys"; visible: field.text===""
+                    Text { text: "apps  ·  >run  =calc  ~files  ?web  ;clip  :sys  .emoji"; visible: field.text===""
                         color: theme.faint; font.pixelSize: 14; font.family: "monospace"; anchors.verticalCenter: parent.verticalCenter }
                     Keys.onEscapePressed: root.close()
                     Keys.onReturnPressed: (e)=> {
@@ -445,11 +491,13 @@ Scope {
                         id: ic; width: 30; height: 30
                         anchors { left: parent.left; leftMargin: 12; verticalCenter: parent.verticalCenter }
                         property string ip: modelData.entry ? Quickshell.iconPath(modelData.entry.icon, true) : ""
-                        IconImage { anchors.fill: parent; visible: ic.ip!==""; source: ic.ip }
-                        Text { anchors.centerIn: parent; visible: ic.ip==="" && !!modelData.mi; text: modelData.mi||""
+                        IconImage { anchors.fill: parent; visible: ic.ip!=="" && !modelData.emoji; source: ic.ip }
+                        // emoji glyph (from the . picker) rendered in the system emoji font
+                        Text { anchors.centerIn: parent; visible: !!modelData.emoji; text: modelData.emoji||""; font.pixelSize: 24 }
+                        Text { anchors.centerIn: parent; visible: ic.ip==="" && !!modelData.mi && !modelData.emoji; text: modelData.mi||""
                             font.family: "Material Symbols Outlined"; font.pixelSize: 22
                             color: modelData.warn ? theme.bad : theme.iris }
-                        Rectangle { anchors.fill: parent; radius: 8; visible: ic.ip==="" && !modelData.mi
+                        Rectangle { anchors.fill: parent; radius: 8; visible: ic.ip==="" && !modelData.mi && !modelData.emoji
                             color: theme.a(theme.iris,0.18); border.width: 1; border.color: theme.a(theme.iris,0.4)
                             Text { anchors.centerIn: parent; text: (modelData.entry?modelData.entry.name:"?").charAt(0).toUpperCase()
                                 color: theme.frost; font.pixelSize: 15; font.bold: true; font.family: "monospace" } }

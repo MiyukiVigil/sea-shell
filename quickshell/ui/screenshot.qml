@@ -14,15 +14,22 @@ ShellRoot {
     property string winTitle: ""
     property string accent: "#63c7dd"
     property bool cfgLight: false
+    property real cfgScale: 0     // 0 = auto (per-monitor), >0 = manual UI-scale multiplier
+    function uiFor(scr) {          // matches shell.qml: ≤1440p → 1×, grows past it, capped 2.5×
+        if (root.cfgScale > 0) return root.cfgScale;
+        var h = (scr && scr.height) ? scr.height : 0;
+        if (h <= 1440) return 1.0;
+        return Math.min(2.5, h / 1080);
+    }
 
     // pin the bar's focus grab so an open dropdown (music player etc.) survives
     // both this widget taking focus AND the later slurp/grim capture
-    Component.onCompleted: Quickshell.execDetached(["qs","-c","sea-shell","ipc","call","shell","pin"])
-    function cancel() { Quickshell.execDetached(["qs","-c","sea-shell","ipc","call","shell","unpin"]); Qt.quit() }
+    Component.onCompleted: Quickshell.execDetached(["quickshell","-c","sea-shell","ipc","call","shell","pin"])
+    function cancel() { Quickshell.execDetached(["quickshell","-c","sea-shell","ipc","call","shell","unpin"]); Qt.quit() }
 
     // follow the shell's accent + light/dark (same appearance.json every other surface reads)
     Process { running: true; command: ["sh","-c","cat \"$HOME/.config/sea-shell/appearance.json\" 2>/dev/null"]
-        stdout: StdioCollector { id: apOut; onStreamFinished: { try { var j=JSON.parse(apOut.text); if(j.accent) root.accent=j.accent; if(j.mode!==undefined) root.cfgLight=(""+j.mode==="light") } catch(e){} } } }
+        stdout: StdioCollector { id: apOut; onStreamFinished: { try { var j=JSON.parse(apOut.text); if(j.accent) root.accent=j.accent; if(j.scale!==undefined) root.cfgScale=j.scale; if(j.mode!==undefined) root.cfgLight=(""+j.mode==="light") } catch(e){} } } }
 
     QtObject {
         id: theme
@@ -56,12 +63,10 @@ ShellRoot {
               : kind === "win"    ? "grim -g '" + root.winGeo + "'"
               : kind === "all"    ? "grim"
               :                     "grim -g \"$(slurp)\"";
-        var cmd = root.save
-            ? "f=~/Pictures/$(date +%Y%m%d-%H%M%S).png; " + g + " \"$f\" && wl-copy < \"$f\" && notify-send 'sea-shell' \"Saved $f + copied\""
-            : g + " - | wl-copy && notify-send 'sea-shell' 'Screenshot copied to clipboard'";
+        var cmd = g + " /tmp/sea-capture.png && quickshell -p ~/.config/quickshell/sea-shell/screenshot-editor.qml";
         // leave time for the compositor to unmap this widget before the capture,
-        // and release the dropdown pin once the shot is done (success or not)
-        Quickshell.execDetached(["sh","-c","sleep 0.3; " + cmd + "; qs -c sea-shell ipc call shell unpin"]);
+        // then invoke the editor HUD
+        Quickshell.execDetached(["sh","-c","sleep 0.3; " + cmd]);
         Qt.quit();
     }
 
@@ -90,12 +95,16 @@ ShellRoot {
     }
 
     PanelWindow {
+        id: win
+        readonly property real ui: root.uiFor(win.screen)
         anchors { top: true; bottom: true; left: true; right: true }
         color: "transparent"
         WlrLayershell.namespace: "sea-shell:shot"
         WlrLayershell.layer: WlrLayer.Overlay
         WlrLayershell.keyboardFocus: WlrKeyboardFocus.Exclusive
         exclusionMode: ExclusionMode.Ignore
+        // scale the centred picker up on big displays (content stays centred)
+        Binding { target: win.contentItem; property: "scale"; value: win.ui }
 
         Rectangle { anchors.fill: parent; color: Qt.rgba(0,0,0,0.45); MouseArea { anchors.fill: parent; onClicked: root.cancel() } }
         Item {

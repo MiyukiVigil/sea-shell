@@ -97,9 +97,15 @@ Native, **resident inside the bar process** — opens instantly, no spawn delay
 
 An overlay panel (Esc / click-outside to close): **Audio** (output & mic sliders,
 mute, device selection, per-app volume) · **Display** (brightness) · **Network**
-(wi-fi) · **Bluetooth** · **Appearance** (radius / opacity / height / accent / font)
-· **Weather** · **Keybinds** · **Idle & lock** · **Actions** (reload, restart bar,
-terminal, wallpaper, screenshot) · **Power**.
+(wi-fi) · **Bluetooth** · **Appearance** (radius / opacity / height / accent /
+font) · **Weather** · **Keybinds** · **Idle & lock** · **Actions** (reload,
+restart bar, terminal, wallpaper, screenshot) · **Power**.
+
+**Big screens / TVs / projectors** — under *Display → display scale*, the shell
+sizes itself to each monitor automatically (a 4K TV scales up, a 1080p/1440p
+display stays 1×). Turn off *auto scale* to set the multiplier by hand (0.75×–2.5×)
+if a projected picture still reads too small. Stored in
+`~/.config/sea-shell/appearance.json` as `"scale"` (`0` = auto).
 
 ## Power menu  ·  `SUPER+ESC`
 ![the power menu — user@host, uptime, five session cards](https://seashell.miyukivigil.tech/images/power-menu.webp)

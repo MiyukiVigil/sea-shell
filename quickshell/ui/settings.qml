@@ -17,7 +17,7 @@ import QtQuick.Layouts
 Scope {
     id: root
     property string repo: Qt.resolvedUrl(".").toString().replace("file://", "").replace(/\/$/, "")
-    readonly property string seaVersion: "2.0"     // sea-shell release — mirrored in the repo VERSION file
+    readonly property string seaVersion: "3.0"     // sea-shell release — mirrored in the repo VERSION file
     property int tab: 8                             // land on the System / About dashboard
 
     // ---- resident lifecycle: the panel is hidden until shown, so it costs ~nothing closed ----
@@ -297,8 +297,10 @@ Scope {
     // ---------- keybinds tab: live binds + rebind (same engine as keybinds.qml) ----------
     property var kbBinds: []
     property string kbQuery: ""
-    property var kbRec: null          // bind being rebound
+    property var kbRec: null          // bind being rebound (edit-popup open when non-null)
     property var kbRecMods: []
+    property string kbRecKey: ""      // staged new base key for the rebind
+    property bool kbRecRecording: false
     property string kbConflict: ""
 
     // Add new bind state variables
@@ -378,6 +380,21 @@ Scope {
         root.kbAddKey = "";
         root.kbAddMods = ["SUPER"];
         kbRefetch.start();
+    }
+    // ---- keybind editor popup: open in edit or add mode, and close ----
+    function kbOpenEdit(bind) {
+        root.kbAdding = false;
+        root.kbRec = bind; root.kbRecMods = bind.mods.slice(); root.kbRecKey = bind.key;
+        root.kbRecRecording = false; root.kbConflict = "";
+    }
+    function kbOpenAdd() {
+        root.kbRec = null; root.kbConflict = "";
+        root.kbAdding = true; root.kbAddRecording = false;
+        root.kbAddDesc = ""; root.kbAddAction = "exec, "; root.kbAddKey = ""; root.kbAddMods = ["SUPER"];
+    }
+    function kbCloseEditor() {
+        root.kbRec = null; root.kbAdding = false;
+        root.kbRecRecording = false; root.kbAddRecording = false; root.kbConflict = "";
     }
 
     QtObject {
@@ -501,6 +518,98 @@ Scope {
     property real apRadius: 14
     property real apOpacity: 0.80
     property int  apHeight: 42
+    property real apScale: 0                 // UI scale: 0 = auto (per-monitor), >0 = manual multiplier
+    // effective scale used for the live preview + the settings window itself (mirrors shell.qml)
+    function autoScaleEstimate() {
+        var h = 0, s = Quickshell.screens;
+        for (var i = 0; i < s.length; i++) if (s[i] && s[i].height > h) h = s[i].height;
+        if (h <= 1440) return 1.0;
+        return Math.min(2.5, h / 1080);
+    }
+    function uiScale() { return root.apScale > 0 ? root.apScale : root.autoScaleEstimate(); }
+    // per-monitor overrides — { name: { bar: bool, scale: number(0=inherit) } } (mirrors shell.qml cfgMonitors)
+    property var apMonitors: ({})
+    function monBarAp(name)   { var m = name ? root.apMonitors[name] : null; return !(m && m.bar === false); }
+    function monScaleAp(name) { var m = name ? root.apMonitors[name] : null; return (m && m.scale > 0) ? m.scale : 0; }
+    function setMon(name, key, val) {
+        if (!name) return;
+        var m = {};
+        for (var kk in root.apMonitors) m[kk] = { bar: root.apMonitors[kk].bar, scale: root.apMonitors[kk].scale };
+        if (!m[name]) m[name] = { bar: true, scale: 0 };
+        m[name][key] = val;
+        root.apMonitors = m; root.saveAppearance();
+    }
+    property bool apAutoHide: false          // auto-hide the bar (reveal on hover)
+    property bool apHideFullscreen: false     // hide the bar while a window is fullscreen
+    property bool apNight: false             // night light on/off (manual)
+    property int  apNightTemp: 4000          // night-light colour temperature (K)
+    property bool apNightAuto: false         // night light follows dark mode
+    // drag-reorderable order of the bar widgets (mirrors shell.qml cfgWidgetOrder)
+    readonly property var defaultWidgetOrder: ["wgMpris","wgTray","wgQuick","wgWeather","wgClipboard","wgNotif","wgWifi","wgBluetooth","wgCaffeine","wgNight","wgSystem","wgVolume","wgBattery","wgRec","wgClock","wgPower"]
+    property var apWidgetOrder: root.defaultWidgetOrder
+    // left cluster order (mirrors shell.qml cfgLeftOrder)
+    readonly property var defaultLeftOrder: ["lgLogo","lgWork","lgTitle"]
+    property var apLeftOrder: root.defaultLeftOrder
+    readonly property var lgMeta: ({
+        lgLogo:  { i: "sailing",  l: "Logo",         d: "The sea-shell mark — click opens the launcher" },
+        lgWork:  { i: "apps",     l: "Workspaces",   d: "Hyprland workspace indicators" },
+        lgTitle: { i: "title",    l: "Window Title", d: "Class of the focused window" }
+    })
+    // append any ids missing from a saved order (e.g. new ones added in an update)
+    function wgReconcile(order, def) {
+        def = def || root.defaultWidgetOrder;
+        var res = order.slice();
+        for (var i = 0; i < def.length; i++)
+            if (res.indexOf(def[i]) < 0) res.push(def[i]);
+        return res;
+    }
+    // metadata for each widget id (icon · label · description · toggle-prop; "" prop = no toggle)
+    readonly property var wgMeta: ({
+        wgMpris:     { i: "play_circle",           l: "Media Player",      d: "Track info + controls — always sits in the bar centre", prop: "wgMpris" },
+        wgTray:      { i: "grid_view",             l: "System Tray",       d: "Collapsible background app status-notifier icons",      prop: "wgTray" },
+        wgQuick:     { i: "tune",                  l: "Control Center",    d: "Quick toggles (dark · caffeine · DND · Wi-Fi · BT) + power profile", prop: "wgQuick" },
+        wgWeather:   { i: "cloud",                 l: "Weather",           d: "Current temperature and conditions",                    prop: "wgWeather" },
+        wgClipboard: { i: "content_paste",         l: "Clipboard Manager", d: "Opens the clipboard-history search",                    prop: "wgClipboard" },
+        wgNotif:     { i: "notifications",         l: "Notification Bell", d: "Unread-count badge + notification centre",              prop: "wgNotif" },
+        wgWifi:      { i: "wifi",                   l: "Wi-Fi",             d: "Network status and signal strength",                    prop: "wgWifi" },
+        wgBluetooth: { i: "bluetooth",             l: "Bluetooth",         d: "Adapter status + connected-devices list",               prop: "wgBluetooth" },
+        wgCaffeine:  { i: "coffee",                l: "Caffeine",          d: "Prevents screen dimming and auto-suspend",              prop: "wgCaffeine" },
+        wgNight:     { i: "nightlight",            l: "Night light",       d: "One-tap warm-screen toggle on the bar",                 prop: "wgNight" },
+        wgSystem:    { i: "speed",                 l: "System Monitor",    d: "Live CPU usage and system load",                        prop: "wgSystem" },
+        wgVolume:    { i: "volume_up",             l: "Volume",            d: "Sound level and output selector",                       prop: "wgVolume" },
+        wgBattery:   { i: "battery_charging_full", l: "Battery",           d: "Remaining charge (laptops)",                            prop: "wgBattery" },
+        wgRec:       { i: "videocam",              l: "Screen Recorder",   d: "Shows only while recording — no toggle",                 prop: "" },
+        wgClock:     { i: "schedule",              l: "Clock & Calendar",  d: "Date/time with upcoming events",                        prop: "wgClock" },
+        wgPower:     { i: "power_settings_new",    l: "Power",             d: "Lock, log out, reboot, or shut down",                   prop: "wgPower" }
+    })
+    // reorder helpers for the drag list (ListModel move → commit back to apWidgetOrder + save)
+    function wgCommitOrder() {
+        var a = []; for (var i = 0; i < wgOrderModel.count; i++) a.push(wgOrderModel.get(i).wid);
+        root.apWidgetOrder = a; root.saveAppearance();
+    }
+    function wgSyncModel() {
+        wgOrderModel.clear();
+        for (var i = 0; i < root.apWidgetOrder.length; i++) {
+            var w = root.apWidgetOrder[i]; if (root.wgMeta[w]) wgOrderModel.append({ wid: w });
+        }
+    }
+    ListModel { id: wgOrderModel }
+    Component.onCompleted: { root.wgSyncModel(); root.lgSyncModel() }
+    onApWidgetOrderChanged: if (!root.wgDragging) root.wgSyncModel()
+    property bool wgDragging: false
+    // left-cluster reorder helpers (parallel to the widget ones)
+    function lgCommitOrder() {
+        var a = []; for (var i = 0; i < lgOrderModel.count; i++) a.push(lgOrderModel.get(i).wid);
+        root.apLeftOrder = a; root.saveAppearance();
+    }
+    function lgSyncModel() {
+        lgOrderModel.clear();
+        for (var i = 0; i < root.apLeftOrder.length; i++) {
+            var w = root.apLeftOrder[i]; if (root.lgMeta[w]) lgOrderModel.append({ wid: w });
+        }
+    }
+    ListModel { id: lgOrderModel }
+    onApLeftOrderChanged: if (!root.wgDragging) root.lgSyncModel()
     property string apAccent: "#63c7dd"
     property string apFont: "monospace"
     property bool apLight: false            // dark (default) ↔ light palette
@@ -508,8 +617,8 @@ Scope {
     property string apScheme: "scheme-tonal-spot"   // matugen colour-scheme algorithm
     readonly property var schemes: ["scheme-tonal-spot","scheme-content","scheme-neutral","scheme-expressive","scheme-fidelity","scheme-monochrome","scheme-rainbow","scheme-fruit-salad"]
     property string apBarFill: "matugen"            // top-bar fill: matugen · black · white
-    property string apEdge: "top"                   // bar dock edge: top or bottom
-    readonly property var edges: ["top","bottom"]
+    property string apEdge: "top"                   // bar dock edge: top, bottom, left, right
+    readonly property var edges: ["top","bottom","left","right"]
     property bool apAutoDark: false         // auto-switch dark/light by time of day
     property string apDarkStart: "19:00"    // dark begins
     property string apDarkEnd: "07:00"      // dark ends (light begins)
@@ -531,6 +640,8 @@ Scope {
     property bool wgBattery: true
     property bool wgClock: true
     property bool wgPower: true
+    property bool wgQuick: true
+    property bool wgNight: false
     // ---------- matugen per-target overrides ----------
     property bool ovrHyprland: true
     property bool ovrKitty: true
@@ -560,12 +671,12 @@ Scope {
     Process { id: apReadProc; running: true; command: ["sh","-c","cat \"$HOME/.config/sea-shell/appearance.json\" 2>/dev/null"]
         stdout: StdioCollector { id: apOut; onStreamFinished: { try { var j=JSON.parse(apOut.text);
             if(j.radius!==undefined) root.apRadius=j.radius; if(j.opacity!==undefined) root.apOpacity=j.opacity;
-            if(j.height!==undefined) root.apHeight=j.height; if(j.accent!==undefined) root.apAccent=j.accent;
+            if(j.height!==undefined) root.apHeight=j.height; if(j.scale!==undefined) root.apScale=j.scale; if(j.accent!==undefined) root.apAccent=j.accent;
             if(j.font!==undefined) root.apFont=j.font; if(j.customFonts!==undefined) root.apCustomFonts=j.customFonts;
             if(j.mode!==undefined) root.apLight=(""+j.mode==="light"); if(j.matugen!==undefined) root.apMatugen=!!j.matugen;
             if(j.scheme!==undefined && (""+j.scheme).length>0) root.apScheme=j.scheme;
             if(j.barFill!==undefined && (""+j.barFill).length>0) root.apBarFill=j.barFill;
-            if(j.edge==="top"||j.edge==="bottom") root.apEdge=j.edge;   // horizontal bar only
+            if(j.edge==="top"||j.edge==="bottom"||j.edge==="left"||j.edge==="right") root.apEdge=j.edge;
             if(j.autoDark!==undefined) root.apAutoDark=!!j.autoDark; if(j.darkStart!==undefined) root.apDarkStart=j.darkStart; if(j.darkEnd!==undefined) root.apDarkEnd=j.darkEnd;
             if(j.appMode!==undefined && (j.appMode==="auto"||j.appMode==="dark"||j.appMode==="light")) root.apAppMode=j.appMode;
             if(j.wgMpris!==undefined) root.wgMpris=!!j.wgMpris;
@@ -581,6 +692,16 @@ Scope {
             if(j.wgBattery!==undefined) root.wgBattery=!!j.wgBattery;
             if(j.wgClock!==undefined) root.wgClock=!!j.wgClock;
             if(j.wgPower!==undefined) root.wgPower=!!j.wgPower;
+            if(j.wgQuick!==undefined) root.wgQuick=!!j.wgQuick;
+            if(j.wgNight!==undefined) root.wgNight=!!j.wgNight;
+            if(j.autoHide!==undefined) root.apAutoHide=!!j.autoHide;
+            if(j.hideFullscreen!==undefined) root.apHideFullscreen=!!j.hideFullscreen;
+            if(j.night!==undefined) root.apNight=!!j.night;
+            if(j.nightTemp!==undefined) root.apNightTemp=j.nightTemp;
+            if(j.nightAuto!==undefined) root.apNightAuto=!!j.nightAuto;
+            if(j.widgetOrder!==undefined && Array.isArray(j.widgetOrder) && j.widgetOrder.length>0) root.apWidgetOrder=root.wgReconcile(j.widgetOrder);
+            if(j.leftOrder!==undefined && Array.isArray(j.leftOrder) && j.leftOrder.length>0) root.apLeftOrder=root.wgReconcile(j.leftOrder, root.defaultLeftOrder);
+            if(j.monitors!==undefined && j.monitors && typeof j.monitors==="object") root.apMonitors=j.monitors;
         } catch(e){} root.apLoaded = true; } } }
     // gates the window until the saved palette is read, so it fades in with the user's
     // matugen colours instead of flashing the default sea-cyan for a frame first
@@ -599,6 +720,7 @@ Scope {
             radius: root.apRadius,
             opacity: root.apOpacity,
             height: root.apHeight,
+            scale: root.apScale,
             font: root.apFont,
             mode: root.apLight ? "light" : "dark",
             matugen: root.apMatugen,
@@ -621,7 +743,17 @@ Scope {
             wgVolume: root.wgVolume,
             wgBattery: root.wgBattery,
             wgClock: root.wgClock,
-            wgPower: root.wgPower
+            wgPower: root.wgPower,
+            wgQuick: root.wgQuick,
+            wgNight: root.wgNight,
+            autoHide: root.apAutoHide,
+            hideFullscreen: root.apHideFullscreen,
+            night: root.apNight,
+            nightTemp: root.apNightTemp,
+            nightAuto: root.apNightAuto,
+            widgetOrder: root.apWidgetOrder,
+            leftOrder: root.apLeftOrder,
+            monitors: root.apMonitors
         };
         var list = root.profilesList.slice();
         var idx = -1;
@@ -640,6 +772,7 @@ Scope {
         if (p.radius !== undefined) root.apRadius = p.radius;
         if (p.opacity !== undefined) root.apOpacity = p.opacity;
         if (p.height !== undefined) root.apHeight = p.height;
+        if (p.scale !== undefined) root.apScale = p.scale;
         if (p.font !== undefined) root.apFont = p.font;
         if (p.matugen !== undefined) root.apMatugen = p.matugen;
         if (p.scheme !== undefined) root.apScheme = p.scheme;
@@ -664,7 +797,17 @@ Scope {
         if (p.wgBattery !== undefined) root.wgBattery = p.wgBattery;
         if (p.wgClock !== undefined) root.wgClock = p.wgClock;
         if (p.wgPower !== undefined) root.wgPower = p.wgPower;
-        
+        if (p.wgQuick !== undefined) root.wgQuick = p.wgQuick;
+        if (p.wgNight !== undefined) root.wgNight = p.wgNight;
+        if (p.autoHide !== undefined) root.apAutoHide = p.autoHide;
+        if (p.hideFullscreen !== undefined) root.apHideFullscreen = p.hideFullscreen;
+        if (p.night !== undefined) root.apNight = p.night;
+        if (p.nightTemp !== undefined) root.apNightTemp = p.nightTemp;
+        if (p.nightAuto !== undefined) root.apNightAuto = p.nightAuto;
+        if (Array.isArray(p.widgetOrder) && p.widgetOrder.length > 0) root.apWidgetOrder = root.wgReconcile(p.widgetOrder);
+        if (Array.isArray(p.leftOrder) && p.leftOrder.length > 0) root.apLeftOrder = root.wgReconcile(p.leftOrder, root.defaultLeftOrder);
+        if (p.monitors && typeof p.monitors === "object") root.apMonitors = p.monitors;
+
         root.saveAppearance();
     }
 
@@ -675,9 +818,37 @@ Scope {
         var base64 = Qt.btoa(JSON.stringify(list));
         run("mkdir -p \"$HOME/.config/sea-shell\" && echo '" + base64 + "' | base64 -d > \"$HOME/.config/sea-shell/profiles.json\"");
     }
+
+    // ---------- bar layout presets (just the bar: widget order · left order · widget on/off) ----------
+    readonly property var barToggleKeys: ["wgMpris","wgTray","wgWeather","wgClipboard","wgNotif","wgWifi","wgBluetooth","wgCaffeine","wgNight","wgSystem","wgVolume","wgBattery","wgClock","wgPower","wgQuick"]
+    property var barLayouts: []
+    Process { id: barLayoutsReadProc; running: true; command: ["sh","-c","cat \"$HOME/.config/sea-shell/bar-layouts.json\" 2>/dev/null || echo '[]'"]
+        stdout: StdioCollector { id: blOut; onStreamFinished: { try { root.barLayouts = JSON.parse(blOut.text) } catch(e){ root.barLayouts = [] } } } }
+    function saveBarLayout(name) {
+        if (!name.trim()) return;
+        var p = { name: name.trim(), widgetOrder: root.apWidgetOrder, leftOrder: root.apLeftOrder, toggles: {} };
+        for (var i = 0; i < root.barToggleKeys.length; i++) p.toggles[root.barToggleKeys[i]] = root[root.barToggleKeys[i]];
+        var list = root.barLayouts.slice(); var idx = -1;
+        for (var j = 0; j < list.length; j++) if (list[j].name === name.trim()) { idx = j; break; }
+        if (idx >= 0) list[idx] = p; else list.push(p);
+        root.barLayouts = list;
+        var b64 = Qt.btoa(JSON.stringify(list));
+        run("mkdir -p \"$HOME/.config/sea-shell\" && echo '" + b64 + "' | base64 -d > \"$HOME/.config/sea-shell/bar-layouts.json\"");
+    }
+    function loadBarLayout(p) {
+        if (Array.isArray(p.widgetOrder) && p.widgetOrder.length > 0) root.apWidgetOrder = root.wgReconcile(p.widgetOrder);
+        if (Array.isArray(p.leftOrder) && p.leftOrder.length > 0) root.apLeftOrder = root.wgReconcile(p.leftOrder, root.defaultLeftOrder);
+        if (p.toggles) for (var i = 0; i < root.barToggleKeys.length; i++) { var k = root.barToggleKeys[i]; if (p.toggles[k] !== undefined) root[k] = p.toggles[k]; }
+        root.saveAppearance();
+    }
+    function deleteBarLayout(idx) {
+        var list = root.barLayouts.slice(); list.splice(idx, 1); root.barLayouts = list;
+        var b64 = Qt.btoa(JSON.stringify(list));
+        run("mkdir -p \"$HOME/.config/sea-shell\" && echo '" + b64 + "' | base64 -d > \"$HOME/.config/sea-shell/bar-layouts.json\"");
+    }
     function saveAppearance() {
         var cf = '['; for(var i=0;i<root.apCustomFonts.length;i++){ cf += (i?',':'') + '\"'+root.apCustomFonts[i]+'\"'; } cf += ']';
-        var j = '{\"radius\":'+Math.round(root.apRadius)+',\"opacity\":'+root.apOpacity.toFixed(2)+',\"height\":'+Math.round(root.apHeight)+',\"accent\":\"'+root.apAccent+'\",\"font\":\"'+root.apFont+'\",\"customFonts\":'+cf+',\"mode\":\"'+(root.apLight?'light':'dark')+'\",\"matugen\":'+(root.apMatugen?'true':'false')+',\"scheme\":\"'+root.apScheme+'\",\"barFill\":\"'+root.apBarFill+'\",\"edge\":\"'+root.apEdge+'\",\"autoDark\":'+(root.apAutoDark?'true':'false')+',\"darkStart\":\"'+root.apDarkStart+'\",\"darkEnd\":\"'+root.apDarkEnd+'\",\"appMode\":\"'+root.apAppMode+'\",\"wgMpris\":'+(root.wgMpris?'true':'false')+',\"wgTray\":'+(root.wgTray?'true':'false')+',\"wgWeather\":'+(root.wgWeather?'true':'false')+',\"wgClipboard\":'+(root.wgClipboard?'true':'false')+',\"wgNotif\":'+(root.wgNotif?'true':'false')+',\"wgWifi\":'+(root.wgWifi?'true':'false')+',\"wgBluetooth\":'+(root.wgBluetooth?'true':'false')+',\"wgCaffeine\":'+(root.wgCaffeine?'true':'false')+',\"wgSystem\":'+(root.wgSystem?'true':'false')+',\"wgVolume\":'+(root.wgVolume?'true':'false')+',\"wgBattery\":'+(root.wgBattery?'true':'false')+',\"wgClock\":'+(root.wgClock?'true':'false')+',\"wgPower\":'+(root.wgPower?'true':'false')+'}';
+        var j = '{\"radius\":'+Math.round(root.apRadius)+',\"opacity\":'+root.apOpacity.toFixed(2)+',\"height\":'+Math.round(root.apHeight)+',\"scale\":'+root.apScale.toFixed(2)+',\"accent\":\"'+root.apAccent+'\",\"font\":\"'+root.apFont+'\",\"customFonts\":'+cf+',\"mode\":\"'+(root.apLight?'light':'dark')+'\",\"matugen\":'+(root.apMatugen?'true':'false')+',\"scheme\":\"'+root.apScheme+'\",\"barFill\":\"'+root.apBarFill+'\",\"edge\":\"'+root.apEdge+'\",\"autoDark\":'+(root.apAutoDark?'true':'false')+',\"darkStart\":\"'+root.apDarkStart+'\",\"darkEnd\":\"'+root.apDarkEnd+'\",\"appMode\":\"'+root.apAppMode+'\",\"wgMpris\":'+(root.wgMpris?'true':'false')+',\"wgTray\":'+(root.wgTray?'true':'false')+',\"wgWeather\":'+(root.wgWeather?'true':'false')+',\"wgClipboard\":'+(root.wgClipboard?'true':'false')+',\"wgNotif\":'+(root.wgNotif?'true':'false')+',\"wgWifi\":'+(root.wgWifi?'true':'false')+',\"wgBluetooth\":'+(root.wgBluetooth?'true':'false')+',\"wgCaffeine\":'+(root.wgCaffeine?'true':'false')+',\"wgSystem\":'+(root.wgSystem?'true':'false')+',\"wgVolume\":'+(root.wgVolume?'true':'false')+',\"wgBattery\":'+(root.wgBattery?'true':'false')+',\"wgClock\":'+(root.wgClock?'true':'false')+',\"wgPower\":'+(root.wgPower?'true':'false')+',\"wgQuick\":'+(root.wgQuick?'true':'false')+',\"wgNight\":'+(root.wgNight?'true':'false')+',\"autoHide\":'+(root.apAutoHide?'true':'false')+',\"hideFullscreen\":'+(root.apHideFullscreen?'true':'false')+',\"night\":'+(root.apNight?'true':'false')+',\"nightTemp\":'+Math.round(root.apNightTemp)+',\"nightAuto\":'+(root.apNightAuto?'true':'false')+',\"widgetOrder\":'+JSON.stringify(root.apWidgetOrder)+',\"leftOrder\":'+JSON.stringify(root.apLeftOrder)+',\"monitors\":'+JSON.stringify(root.apMonitors)+'}';
         run("mkdir -p \"$HOME/.config/sea-shell\" && printf '%s' '"+j+"' > \"$HOME/.config/sea-shell/appearance.json\"");
     }
     // apply the system app dark/light preference independently from the shell theme
@@ -995,12 +1166,12 @@ Scope {
     component Section: ColumnLayout {
         property string title: ""
         property string icon: ""
-        Layout.fillWidth: true
+        Layout.fillWidth: true; Layout.leftMargin: 14; Layout.topMargin: 4
         spacing: 10
         RowLayout {
             spacing: 8
-            Sym { text: icon; sz: 18; color: theme.iris }
-            Text { text: title; color: theme.iris; font.pixelSize: 12; font.family: "monospace"; font.bold: true }
+            Sym { text: icon; sz: 17; color: theme.iris }
+            Text { text: title; color: theme.iris; font.pixelSize: 12; font.family: "monospace"; font.bold: true; font.letterSpacing: 0.4 }
             Rectangle { Layout.fillWidth: true; height: 1; color: theme.a(theme.iris, 0.18) }
         }
     }
@@ -1032,6 +1203,99 @@ Scope {
             onPressed: (e) => { var v = sl.clamp(e.x / sl.width); sl.value = v; sl.moved(v) }
             onPositionChanged: (e) => { if (pressed) { var v = sl.clamp(e.x / sl.width); sl.value = v; sl.moved(v) } }
         }
+    }
+
+    // ---- consistent form controls: spacing is baked in so every tab aligns by construction ----
+    // on/off switch — bind `on`, handle `toggled`
+    component Toggle: Rectangle {
+        id: tg
+        property bool on: false
+        signal toggled()
+        implicitWidth: 44; implicitHeight: 24; radius: 12
+        color: on ? theme.iris : theme.a(theme.line, 0.85)
+        border.width: 1; border.color: on ? theme.iris : theme.a(theme.iris, 0.3)
+        Behavior on color { ColorAnimation { duration: 120 } }
+        Rectangle { width: 18; height: 18; radius: 9; y: 3; x: tg.on ? tg.width - width - 3 : 3
+            color: theme.frost; Behavior on x { NumberAnimation { duration: 130; easing.type: Easing.OutCubic } } }
+        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: tg.toggled() }
+    }
+
+    // full-width setting row with a built-in switch: icon · title · description · toggle.
+    // The whole row is clickable. Border lights up while `on`.
+    component ToggleCard: Rectangle {
+        id: tc
+        property string icon: ""
+        property string title: ""
+        property string desc: ""
+        property bool on: false
+        signal toggled()
+        Layout.fillWidth: true
+        implicitHeight: Math.max(52, tcRow.implicitHeight + 18)
+        radius: 10
+        color: tcMa.containsMouse ? theme.a(theme.line, 0.55) : theme.a(theme.line, 0.4)
+        border.width: 1; border.color: tc.on ? theme.a(theme.iris, 0.5) : theme.a(theme.iris, 0.14)
+        Behavior on color { ColorAnimation { duration: 110 } }
+        RowLayout {
+            id: tcRow
+            anchors.fill: parent; anchors.leftMargin: 14; anchors.rightMargin: 14; spacing: 12
+            Sym { visible: tc.icon !== ""; text: tc.icon; sz: 19; color: tc.on ? theme.frost : theme.sub; Layout.alignment: Qt.AlignVCenter }
+            ColumnLayout { spacing: 2; Layout.fillWidth: true; Layout.alignment: Qt.AlignVCenter
+                Text { visible: tc.title !== ""; text: tc.title; color: theme.text; font.pixelSize: 13; font.family: "monospace"; Layout.fillWidth: true; elide: Text.ElideRight }
+                Text { visible: tc.desc !== ""; text: tc.desc; color: theme.faint; font.pixelSize: 10; font.family: "monospace"; Layout.fillWidth: true; wrapMode: Text.WordWrap } }
+            Toggle { on: tc.on; onToggled: tc.toggled(); Layout.alignment: Qt.AlignVCenter }
+        }
+        MouseArea { id: tcMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: tc.toggled() }
+    }
+
+    // icon · fixed-width label · slider · fixed-width readout — columns line up across every slider
+    component SliderRow: RowLayout {
+        id: sr
+        property string icon: ""
+        property string label: ""
+        property real value: 0
+        property string readout: ""
+        property color tint: theme.iris
+        signal moved(real v)
+        Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; spacing: 12
+        Sym { text: sr.icon; sz: 18; color: theme.sub; Layout.alignment: Qt.AlignVCenter }
+        Text { text: sr.label; color: theme.sub; font.pixelSize: 12; font.family: "monospace"; Layout.minimumWidth: 76 }
+        Slider { fill: sr.tint; value: sr.value; onMoved: (v) => sr.moved(v) }
+        Text { text: sr.readout; color: theme.sub; font.pixelSize: 12; font.family: "monospace"; Layout.minimumWidth: 48; horizontalAlignment: Text.AlignRight }
+    }
+
+    // selectable pill for choice groups (resolution, scheme, profile, …)
+    component Chip: Rectangle {
+        id: ch
+        property string label: ""
+        property string icon: ""
+        property bool on: false
+        signal picked()
+        implicitWidth: chRow.implicitWidth + 24; implicitHeight: 32; radius: 8
+        color: on ? theme.iris : (chMa.containsMouse ? theme.a(theme.iris, 0.16) : theme.a(theme.line, 0.4))
+        border.width: 1; border.color: on ? theme.iris : theme.a(theme.iris, 0.16)
+        Behavior on color { ColorAnimation { duration: 100 } }
+        Row { id: chRow; anchors.centerIn: parent; spacing: 6
+            Sym { visible: ch.icon !== ""; anchors.verticalCenter: parent.verticalCenter; text: ch.icon; sz: 15; color: ch.on ? theme.bg : theme.frost }
+            Text { anchors.verticalCenter: parent.verticalCenter; text: ch.label; color: ch.on ? theme.bg : theme.text; font.pixelSize: 12; font.family: "monospace"; font.bold: ch.on } }
+        MouseArea { id: chMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: ch.picked() }
+    }
+
+    // accent action button (Apply, Save, …)
+    component AccentBtn: Rectangle {
+        id: ab
+        property string label: ""
+        property string icon: ""
+        property bool enabled: true
+        signal clicked()
+        Layout.fillWidth: true; implicitHeight: 40; radius: 9
+        opacity: ab.enabled ? 1 : 0.45
+        color: abMa.containsMouse && ab.enabled ? theme.iris : theme.a(theme.iris, 0.22)
+        border.width: 1; border.color: theme.iris
+        Behavior on color { ColorAnimation { duration: 110 } }
+        RowLayout { anchors.centerIn: parent; spacing: 8
+            Sym { visible: ab.icon !== ""; text: ab.icon; sz: 17; color: abMa.containsMouse && ab.enabled ? theme.bg : theme.frost }
+            Text { text: ab.label; color: abMa.containsMouse && ab.enabled ? theme.bg : theme.text; font.pixelSize: 13; font.family: "monospace"; font.bold: true } }
+        MouseArea { id: abMa; anchors.fill: parent; hoverEnabled: true; enabled: ab.enabled; cursorShape: Qt.PointingHandCursor; onClicked: ab.clicked() }
     }
 
     component Row2: RowLayout {
@@ -1129,11 +1393,14 @@ Scope {
 
         Rectangle { anchors.fill: parent; color: Qt.rgba(0, 0, 0, 0.5); MouseArea { anchors.fill: parent; onClicked: root.closePanel() } }
         Item { anchors.fill: parent; focus: root.shown; Keys.onEscapePressed: root.closePanel() }
+        // scale the whole settings window with the UI scale — live-previews as the slider moves.
+        // Content is authored native; clamps are in native space so it always fits the screen.
+        Binding { target: panel.contentItem; property: "scale"; value: root.uiScale() }
 
         Rectangle {
             anchors.centerIn: parent
-            width: Math.min(parent.width - 60, 960)
-            height: Math.min(parent.height - 60, 780)
+            width: Math.min(parent.width / root.uiScale() - 60, 960)
+            height: Math.min(parent.height / root.uiScale() - 60, 780)
             radius: 18
             // fade in once the saved palette is read — no default sea-cyan flash first
             opacity: root.apLoaded ? 1 : 0
@@ -1212,179 +1479,149 @@ Scope {
 
                         // ================= AUDIO =================
                         ColumnLayout {
-                            visible: root.tab === 0; Layout.fillWidth: true; spacing: 14
+                            visible: root.tab === 0; Layout.fillWidth: true; spacing: 12
                             Section { title: "output"; icon: "volume_up" }
-                            RowLayout {
-                                Layout.fillWidth: true; spacing: 10
-                                Sym {
-                                    text: (root.curSink && root.curSink.audio && root.curSink.audio.muted) ? "volume_off" : "volume_up"
-                                    sz: 20; color: (root.curSink && root.curSink.audio && root.curSink.audio.muted) ? theme.faint : theme.frost
-                                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
-                                        onClicked: { if (root.curSink && root.curSink.audio) root.curSink.audio.muted = !root.curSink.audio.muted } }
-                                }
-                                Slider {
-                                    value: (root.curSink && root.curSink.audio) ? root.curSink.audio.volume : 0
-                                    onMoved: (v) => { if (root.curSink && root.curSink.audio) { root.curSink.audio.muted = false; root.curSink.audio.volume = v } }
-                                }
+                            RowLayout { Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; spacing: 12
+                                Sym { text: (root.curSink && root.curSink.audio && root.curSink.audio.muted) ? "volume_off" : "volume_up"; sz: 18
+                                    color: (root.curSink && root.curSink.audio && root.curSink.audio.muted) ? theme.faint : theme.sub; Layout.alignment: Qt.AlignVCenter
+                                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { if (root.curSink && root.curSink.audio) root.curSink.audio.muted = !root.curSink.audio.muted } } }
+                                Text { text: "volume"; color: theme.sub; font.pixelSize: 12; font.family: "monospace"; Layout.minimumWidth: 76 }
+                                Slider { value: (root.curSink && root.curSink.audio) ? root.curSink.audio.volume : 0
+                                    onMoved: (v) => { if (root.curSink && root.curSink.audio) { root.curSink.audio.muted = false; root.curSink.audio.volume = v } } }
                                 Text { text: (root.curSink && root.curSink.audio) ? Math.round(root.curSink.audio.volume * 100) + "%" : "—"
-                                       color: theme.sub; font.pixelSize: 12; font.family: "monospace"; Layout.minimumWidth: 38; horizontalAlignment: Text.AlignRight }
-                            }
-                            RowLayout {
-                                Layout.fillWidth: true; spacing: 10
-                                visible: root.curSource && root.curSource.audio
-                                Sym {
-                                    text: (root.curSource && root.curSource.audio && root.curSource.audio.muted) ? "mic_off" : "mic"
-                                    sz: 20; color: (root.curSource && root.curSource.audio && root.curSource.audio.muted) ? theme.faint : theme.frost
-                                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
-                                        onClicked: { if (root.curSource && root.curSource.audio) root.curSource.audio.muted = !root.curSource.audio.muted } }
-                                }
-                                Slider {
-                                    fill: theme.good
-                                    value: (root.curSource && root.curSource.audio) ? root.curSource.audio.volume : 0
-                                    onMoved: (v) => { if (root.curSource && root.curSource.audio) { root.curSource.audio.muted = false; root.curSource.audio.volume = v } }
-                                }
+                                    color: theme.sub; font.pixelSize: 12; font.family: "monospace"; Layout.minimumWidth: 48; horizontalAlignment: Text.AlignRight } }
+                            RowLayout { visible: root.curSource && root.curSource.audio; Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; spacing: 12
+                                Sym { text: (root.curSource && root.curSource.audio && root.curSource.audio.muted) ? "mic_off" : "mic"; sz: 18
+                                    color: (root.curSource && root.curSource.audio && root.curSource.audio.muted) ? theme.faint : theme.sub; Layout.alignment: Qt.AlignVCenter
+                                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { if (root.curSource && root.curSource.audio) root.curSource.audio.muted = !root.curSource.audio.muted } } }
+                                Text { text: "microphone"; color: theme.sub; font.pixelSize: 12; font.family: "monospace"; Layout.minimumWidth: 76 }
+                                Slider { fill: theme.good; value: (root.curSource && root.curSource.audio) ? root.curSource.audio.volume : 0
+                                    onMoved: (v) => { if (root.curSource && root.curSource.audio) { root.curSource.audio.muted = false; root.curSource.audio.volume = v } } }
                                 Text { text: (root.curSource && root.curSource.audio) ? Math.round(root.curSource.audio.volume * 100) + "%" : "—"
-                                       color: theme.sub; font.pixelSize: 12; font.family: "monospace"; Layout.minimumWidth: 38; horizontalAlignment: Text.AlignRight }
-                            }
-                            Text { text: "output device"; color: theme.faint; font.pixelSize: 10; font.family: "monospace" }
-                            ColumnLayout {
-                                Layout.fillWidth: true; spacing: 6
-                                Repeater {
-                                    model: root.sinks
-                                    delegate: Rectangle {
-                                        required property var modelData
-                                        readonly property bool cur: root.curSink && root.curSink.id === modelData.id
-                                        Layout.fillWidth: true; implicitHeight: 34; radius: 8
-                                        color: cur ? theme.a(theme.iris, 0.2) : (dma.containsMouse ? theme.a(theme.line, 0.5) : theme.a(theme.line, 0.3))
-                                        border.width: 1; border.color: cur ? theme.iris : theme.a(theme.iris, 0.12)
-                                        RowLayout {
-                                            anchors.fill: parent; anchors.leftMargin: 11; anchors.rightMargin: 11; spacing: 8
+                                    color: theme.sub; font.pixelSize: 12; font.family: "monospace"; Layout.minimumWidth: 48; horizontalAlignment: Text.AlignRight } }
+                            Text { text: "output device"; color: theme.faint; font.pixelSize: 10; font.family: "monospace"; Layout.leftMargin: 14; Layout.topMargin: 2 }
+                            ColumnLayout { Layout.fillWidth: true; spacing: 6
+                                Repeater { model: root.sinks
+                                    delegate: Rectangle { required property var modelData; readonly property bool cur: root.curSink && root.curSink.id === modelData.id
+                                        Layout.fillWidth: true; implicitHeight: 38; radius: 8
+                                        color: cur ? theme.a(theme.iris, 0.2) : (dma.containsMouse ? theme.a(theme.line, 0.5) : theme.a(theme.line, 0.32))
+                                        border.width: 1; border.color: cur ? theme.a(theme.iris,0.5) : theme.a(theme.iris, 0.12)
+                                        RowLayout { anchors.fill: parent; anchors.leftMargin: 14; anchors.rightMargin: 14; spacing: 10
                                             Sym { text: cur ? "radio_button_checked" : "radio_button_unchecked"; sz: 16; color: cur ? theme.iris : theme.faint }
-                                            Text { text: root.nodeName(modelData); color: theme.text; font.pixelSize: 12; font.family: "monospace"; elide: Text.ElideRight; Layout.fillWidth: true }
-                                        }
-                                        MouseArea { id: dma; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
-                                            onClicked: Pipewire.preferredDefaultAudioSink = modelData }
-                                    }
-                                }
-                            }
-                            Text { text: "input device"; color: theme.faint; font.pixelSize: 10; font.family: "monospace" }
-                            ColumnLayout {
-                                Layout.fillWidth: true; spacing: 6
-                                Repeater {
-                                    model: root.sources
-                                    delegate: Rectangle {
-                                        required property var modelData
-                                        readonly property bool cur: root.curSource && root.curSource.id === modelData.id
-                                        Layout.fillWidth: true; implicitHeight: 34; radius: 8
-                                        color: cur ? theme.a(theme.iris, 0.2) : (sma.containsMouse ? theme.a(theme.line, 0.5) : theme.a(theme.line, 0.3))
-                                        border.width: 1; border.color: cur ? theme.iris : theme.a(theme.iris, 0.12)
-                                        RowLayout {
-                                            anchors.fill: parent; anchors.leftMargin: 11; anchors.rightMargin: 11; spacing: 8
+                                            Text { text: root.nodeName(modelData); color: theme.text; font.pixelSize: 12; font.family: "monospace"; elide: Text.ElideRight; Layout.fillWidth: true } }
+                                        MouseArea { id: dma; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: Pipewire.preferredDefaultAudioSink = modelData } } } }
+                            Text { text: "input device"; color: theme.faint; font.pixelSize: 10; font.family: "monospace"; Layout.leftMargin: 14; Layout.topMargin: 2 }
+                            ColumnLayout { Layout.fillWidth: true; spacing: 6
+                                Repeater { model: root.sources
+                                    delegate: Rectangle { required property var modelData; readonly property bool cur: root.curSource && root.curSource.id === modelData.id
+                                        Layout.fillWidth: true; implicitHeight: 38; radius: 8
+                                        color: cur ? theme.a(theme.iris, 0.2) : (sma.containsMouse ? theme.a(theme.line, 0.5) : theme.a(theme.line, 0.32))
+                                        border.width: 1; border.color: cur ? theme.a(theme.iris,0.5) : theme.a(theme.iris, 0.12)
+                                        RowLayout { anchors.fill: parent; anchors.leftMargin: 14; anchors.rightMargin: 14; spacing: 10
                                             Sym { text: cur ? "radio_button_checked" : "radio_button_unchecked"; sz: 16; color: cur ? theme.iris : theme.faint }
-                                            Text { text: root.nodeName(modelData); color: theme.text; font.pixelSize: 12; font.family: "monospace"; elide: Text.ElideRight; Layout.fillWidth: true }
-                                        }
-                                        MouseArea { id: sma; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
-                                            onClicked: Pipewire.preferredDefaultAudioSource = modelData }
-                                    }
-                                }
-                            }
+                                            Text { text: root.nodeName(modelData); color: theme.text; font.pixelSize: 12; font.family: "monospace"; elide: Text.ElideRight; Layout.fillWidth: true } }
+                                        MouseArea { id: sma; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: Pipewire.preferredDefaultAudioSource = modelData } } } }
                             Section { title: "per-app volume"; icon: "graphic_eq" }
-                            Text { visible: root.streams.length === 0; text: "nothing is playing"; color: theme.faint; font.pixelSize: 11; font.family: "monospace" }
-                            ColumnLayout {
-                                Layout.fillWidth: true; spacing: 8
-                                Repeater {
-                                    model: root.streams
-                                    delegate: RowLayout {
-                                        required property var modelData
-                                        Layout.fillWidth: true; spacing: 10
-                                        Sym { text: "music_note"; sz: 16; color: theme.frost }
-                                        Text { text: root.streamName(modelData); color: theme.sub; font.pixelSize: 11; font.family: "monospace"
-                                            elide: Text.ElideRight; Layout.preferredWidth: 130 }
-                                        Slider {
-                                            fill: theme.iris
-                                            value: modelData.audio ? modelData.audio.volume : 0
-                                            onMoved: (v) => { if (modelData.audio) modelData.audio.volume = v }
-                                        }
-                                        Text { text: modelData.audio ? Math.round(modelData.audio.volume * 100) + "%" : "—"
-                                               color: theme.sub; font.pixelSize: 11; font.family: "monospace"; Layout.minimumWidth: 36; horizontalAlignment: Text.AlignRight }
-                                    }
-                                }
-                            }
+                            Text { visible: root.streams.length === 0; text: "nothing is playing"; color: theme.faint; font.pixelSize: 11; font.family: "monospace"; Layout.leftMargin: 14 }
+                            ColumnLayout { Layout.fillWidth: true; spacing: 8
+                                Repeater { model: root.streams
+                                    delegate: RowLayout { required property var modelData; Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; spacing: 12
+                                        Sym { text: "music_note"; sz: 16; color: theme.sub; Layout.alignment: Qt.AlignVCenter }
+                                        Text { text: root.streamName(modelData); color: theme.sub; font.pixelSize: 11; font.family: "monospace"; elide: Text.ElideRight; Layout.preferredWidth: 120 }
+                                        Slider { fill: theme.iris; value: modelData.audio ? modelData.audio.volume : 0; onMoved: (v) => { if (modelData.audio) modelData.audio.volume = v } }
+                                        Text { text: modelData.audio ? Math.round(modelData.audio.volume * 100) + "%" : "—"; color: theme.sub; font.pixelSize: 11; font.family: "monospace"; Layout.minimumWidth: 48; horizontalAlignment: Text.AlignRight } } } }
                         }
 
                         // ================= DISPLAY =================
                         ColumnLayout {
-                            visible: root.tab === 1; Layout.fillWidth: true; spacing: 14
+                            visible: root.tab === 1; Layout.fillWidth: true; spacing: 12
+
+                            // ---- brightness ----
                             Section { title: "brightness"; icon: "brightness_6" }
-                            RowLayout {
-                                Layout.fillWidth: true; spacing: 10
-                                Sym { text: "brightness_low"; sz: 20 }
-                                Slider {
-                                    fill: theme.frost
-                                    value: root.brightness >= 0 ? root.brightness / 100 : 0
-                                    onMoved: (v) => root.setBrightness(v * 100)
-                                }
-                                Text { text: root.brightness >= 0 ? root.brightness + "%" : "n/a"
-                                       color: theme.sub; font.pixelSize: 12; font.family: "monospace"; Layout.minimumWidth: 38; horizontalAlignment: Text.AlignRight }
-                            }
-                            Text { visible: root.brightness < 0; text: "brightnessctl found no backlight (desktop monitor?)"; color: theme.faint; font.pixelSize: 11; font.family: "monospace" }
+                            SliderRow { icon: "brightness_low"; label: "level"; tint: theme.frost
+                                value: root.brightness >= 0 ? root.brightness / 100 : 0
+                                readout: root.brightness >= 0 ? root.brightness + "%" : "n/a"
+                                onMoved: (v) => root.setBrightness(v * 100) }
+                            Text { visible: root.brightness < 0; text: "brightnessctl found no backlight (desktop monitor?)"
+                                color: theme.faint; font.pixelSize: 11; font.family: "monospace"; Layout.leftMargin: 14 }
 
-                            // ---- monitor configuration ----
+                            // ---- monitor mode ----
                             Section { title: "monitor"; icon: "monitor" }
-                            // monitor selector (when more than one)
-                            RowLayout {
-                                Layout.fillWidth: true; spacing: 8; visible: root.monitors.length > 1
+                            Flow { visible: root.monitors.length > 1; Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; spacing: 7
                                 Repeater { model: root.monitors
-                                    delegate: Rectangle { required property var modelData; required property int index
-                                        readonly property bool sel: root.monSel === index
-                                        Layout.fillWidth: true; implicitHeight: 30; radius: 8
-                                        color: sel ? theme.a(theme.iris,0.2) : theme.a(theme.line,0.4); border.width: 1; border.color: sel?theme.iris:theme.a(theme.iris,0.14)
-                                        Text { anchors.centerIn: parent; text: modelData.name; color: sel?theme.frost:theme.text; font.pixelSize: 12; font.family: "monospace" }
-                                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { root.monSel=index; root.selRes=""; root.reloadMonitors() } } } }
-                            }
+                                    delegate: Chip { required property var modelData; required property int index
+                                        label: modelData.name; on: root.monSel === index
+                                        onPicked: { root.monSel = index; root.selRes = ""; root.reloadMonitors() } } } }
                             Text { text: root.curMon ? (root.curMon.desc + "  ·  now " + root.curMon.curRes + "@" + root.curMon.hz + "Hz") : "reading monitors…"
-                                   color: theme.faint; font.pixelSize: 11; font.family: "monospace" }
+                                color: theme.faint; font.pixelSize: 11; font.family: "monospace"; Layout.leftMargin: 14 }
 
-                            // resolution
-                            Text { text: "resolution"; color: theme.faint; font.pixelSize: 10; font.family: "monospace" }
-                            Flow { Layout.fillWidth: true; spacing: 7
+                            Text { text: "resolution"; color: theme.faint; font.pixelSize: 10; font.family: "monospace"; Layout.leftMargin: 14; Layout.topMargin: 2 }
+                            Flow { Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; spacing: 7
                                 Repeater { model: root.uniqueRes(root.curMon)
-                                    delegate: Rectangle { required property var modelData; readonly property bool sel: root.selRes===modelData
-                                        implicitWidth: rt.implicitWidth+20; implicitHeight: 32; radius: 8
-                                        color: sel?theme.iris:(rmm.containsMouse?theme.a(theme.iris,0.16):theme.a(theme.line,0.4)); border.width: 1; border.color: sel?theme.iris:theme.a(theme.iris,0.16)
-                                        Text { id: rt; anchors.centerIn: parent; text: modelData; color: sel?theme.bg:theme.text; font.pixelSize: 12; font.family: "monospace"; font.bold: sel }
-                                        MouseArea { id: rmm; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
-                                            onClicked: { root.selRes=modelData; var hs=root.hzFor(root.curMon,modelData); if(hs.length) root.selHz=hs[0] } } } }
-                            }
-                            // refresh rate
-                            Text { text: "refresh rate"; color: theme.faint; font.pixelSize: 10; font.family: "monospace" }
-                            Flow { Layout.fillWidth: true; spacing: 7
+                                    delegate: Chip { required property var modelData; label: modelData; on: root.selRes === modelData
+                                        onPicked: { root.selRes = modelData; var hs = root.hzFor(root.curMon, modelData); if (hs.length) root.selHz = hs[0] } } } }
+
+                            Text { text: "refresh rate"; color: theme.faint; font.pixelSize: 10; font.family: "monospace"; Layout.leftMargin: 14; Layout.topMargin: 2 }
+                            Flow { Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; spacing: 7
                                 Repeater { model: root.hzFor(root.curMon, root.selRes)
-                                    delegate: Rectangle { required property var modelData; readonly property bool sel: root.selHz===modelData
-                                        implicitWidth: ht.implicitWidth+20; implicitHeight: 32; radius: 8
-                                        color: sel?theme.iris:(hmm.containsMouse?theme.a(theme.iris,0.16):theme.a(theme.line,0.4)); border.width: 1; border.color: sel?theme.iris:theme.a(theme.iris,0.16)
-                                        Text { id: ht; anchors.centerIn: parent; text: Math.round(parseFloat(modelData))+" Hz"; color: sel?theme.bg:theme.text; font.pixelSize: 12; font.family: "monospace"; font.bold: sel }
-                                        MouseArea { id: hmm; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.selHz=modelData } } }
-                            }
-                            // orientation
-                            Text { text: "orientation"; color: theme.faint; font.pixelSize: 10; font.family: "monospace" }
-                            RowLayout { Layout.fillWidth: true; spacing: 7
-                                Repeater { model: [{t:0,i:"stay_current_landscape",l:"landscape"},{t:1,i:"stay_current_portrait",l:"portrait"},{t:2,i:"screen_rotation",l:"land ↕"},{t:3,i:"screen_rotation",l:"port ↕"}]
-                                    delegate: Rectangle { required property var modelData; readonly property bool sel: root.selTransform===modelData.t
-                                        Layout.fillWidth: true; implicitHeight: 40; radius: 9
-                                        color: sel?theme.iris:(omm.containsMouse?theme.a(theme.iris,0.16):theme.a(theme.line,0.4)); border.width: 1; border.color: sel?theme.iris:theme.a(theme.iris,0.16)
-                                        RowLayout { anchors.centerIn: parent; spacing: 6
-                                            Sym { text: modelData.i; sz: 16; color: sel?theme.bg:theme.frost }
-                                            Text { text: modelData.l; color: sel?theme.bg:theme.text; font.pixelSize: 11; font.family: "monospace"; font.bold: sel } }
-                                        MouseArea { id: omm; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.selTransform=modelData.t } } }
-                            }
-                            // apply
-                            Rectangle { Layout.fillWidth: true; implicitHeight: 40; radius: 9; visible: root.curMon!==null
-                                color: apm.containsMouse ? theme.iris : theme.a(theme.iris,0.22); border.width: 1; border.color: theme.iris
-                                RowLayout { anchors.centerIn: parent; spacing: 8
-                                    Sym { text: "check"; sz: 17; color: apm.containsMouse?theme.bg:theme.frost }
-                                    Text { text: "Apply " + root.selRes + "@" + Math.round(parseFloat(root.selHz||"0")) + "Hz"; color: apm.containsMouse?theme.bg:theme.text; font.pixelSize: 13; font.family: "monospace" } }
-                                MouseArea { id: apm; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.applyDisplay() } }
+                                    delegate: Chip { required property var modelData; label: Math.round(parseFloat(modelData)) + " Hz"; on: root.selHz === modelData
+                                        onPicked: root.selHz = modelData } } }
+
+                            Text { text: "orientation"; color: theme.faint; font.pixelSize: 10; font.family: "monospace"; Layout.leftMargin: 14; Layout.topMargin: 2 }
+                            Flow { Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; spacing: 7
+                                Repeater { model: [{t:0,i:"stay_current_landscape",l:"landscape"},{t:1,i:"stay_current_portrait",l:"portrait"}]
+                                    delegate: Chip { required property var modelData; label: modelData.l; icon: modelData.i; on: root.selTransform === modelData.t
+                                        onPicked: root.selTransform = modelData.t } } }
+
+                            AccentBtn { visible: root.curMon !== null; Layout.leftMargin: 14; Layout.rightMargin: 14; Layout.topMargin: 4
+                                icon: "check"; label: "Apply " + root.selRes + "@" + Math.round(parseFloat(root.selHz || "0")) + "Hz"
+                                onClicked: root.applyDisplay() }
+
+                            // ---- per-monitor rules ----
+                            Section { visible: root.curMon !== null; title: "this monitor" + (root.monitors.length > 1 && root.curMon ? " · " + root.curMon.name : ""); icon: "tv_options_edit_channels" }
+                            ToggleCard { visible: root.curMon !== null
+                                icon: (root.curMon && root.monBarAp(root.curMon.name)) ? "web_asset" : "web_asset_off"
+                                title: "show bar"; desc: "display the sea-shell bar on this output"
+                                on: root.curMon ? root.monBarAp(root.curMon.name) : true
+                                onToggled: if (root.curMon) root.setMon(root.curMon.name, "bar", !root.monBarAp(root.curMon.name)) }
+                            ToggleCard { id: ovrScaleCard; visible: root.curMon !== null
+                                icon: "zoom_out_map"; title: "override scale"
+                                desc: ovrScaleCard.on ? ("this monitor: " + root.monScaleAp(root.curMon.name).toFixed(2) + "×") : "use the global / auto scale"
+                                on: root.curMon ? (root.monScaleAp(root.curMon.name) > 0) : false
+                                onToggled: if (root.curMon) root.setMon(root.curMon.name, "scale", root.monScaleAp(root.curMon.name) > 0 ? 0 : Math.max(1.0, root.autoScaleEstimate())) }
+                            SliderRow { visible: root.curMon !== null && root.monScaleAp(root.curMon.name) > 0
+                                icon: "aspect_ratio"; label: "scale"
+                                value: root.curMon ? (root.monScaleAp(root.curMon.name) - 0.75) / 1.75 : 0
+                                readout: (root.curMon ? root.monScaleAp(root.curMon.name).toFixed(2) : "1.00") + "×"
+                                onMoved: (v) => { if (root.curMon) root.setMon(root.curMon.name, "scale", Math.round((0.75 + v * 1.75) * 20) / 20) } }
+
+                            // ---- global display scale ----
+                            Section { title: "display scale"; icon: "aspect_ratio" }
+                            ToggleCard { icon: "aspect_ratio"; title: "auto scale (match display)"
+                                desc: "sizes the whole shell per monitor — a 4K TV scales up, 1080p stays 1×"
+                                on: root.apScale === 0
+                                onToggled: { root.apScale = (root.apScale === 0) ? Math.max(1.0, root.autoScaleEstimate()) : 0; root.saveAppearance() } }
+                            SliderRow { visible: root.apScale > 0; icon: "zoom_out_map"; label: "UI scale"
+                                value: (root.apScale - 0.75) / 1.75; readout: root.apScale.toFixed(2) + "×"
+                                onMoved: (v) => { root.apScale = Math.round((0.75 + v * 1.75) * 20) / 20; root.saveAppearance() } }
+                            Text { visible: root.apScale > 0; text: "bump this up when projecting to a TV and everything looks too small"
+                                color: theme.faint; font.pixelSize: 10; font.family: "monospace"; Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; wrapMode: Text.WordWrap }
+
+                            // ---- night light ----
+                            Section { title: "night light"; icon: "nightlight" }
+                            ToggleCard { icon: "routine"; title: "follow dark mode"
+                                desc: "warm the screen automatically whenever the shell is in dark mode"
+                                on: root.apNightAuto
+                                onToggled: { root.apNightAuto = !root.apNightAuto; root.saveAppearance() } }
+                            ToggleCard { visible: !root.apNightAuto; icon: "nightlight"; title: "night light"
+                                desc: "warm the screen now (also toggleable from the Control Center)"
+                                on: root.apNight
+                                onToggled: { root.apNight = !root.apNight; root.saveAppearance() } }
+                            SliderRow { icon: "thermostat"; label: "warmth"; tint: theme.warn
+                                value: (6000 - root.apNightTemp) / 3500; readout: root.apNightTemp + "K"
+                                onMoved: (v) => { root.apNightTemp = Math.round((6000 - v * 3500) / 100) * 100; root.saveAppearance() } }
+                            Text { text: "lower = warmer/oranger. Needs the hyprsunset package (bundled with the installer)."
+                                color: theme.faint; font.pixelSize: 10; font.family: "monospace"; Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; wrapMode: Text.WordWrap }
                         }
 
                         // ================= NETWORK =================
@@ -1828,161 +2065,94 @@ Scope {
 
                             // SUB-TAB 0: Bar Theme
                             ColumnLayout {
-                                visible: root.apSubTab === 0; Layout.fillWidth: true; spacing: 14
+                                visible: root.apSubTab === 0; Layout.fillWidth: true; spacing: 12
                                 Section { title: "theme"; icon: "contrast" }
-                                RowLayout { Layout.fillWidth: true; spacing: 8
-                                    Repeater { model: [{k:false,l:"Dark",i:"dark_mode"},{k:true,l:"Light",i:"light_mode"}]
-                                        delegate: Rectangle { required property var modelData; readonly property bool sel: root.apLight===modelData.k
-                                            Layout.fillWidth: true; implicitHeight: 40; radius: 9
-                                            color: sel?theme.iris:(thmMa.containsMouse?theme.a(theme.iris,0.16):theme.a(theme.line,0.4)); border.width: 1; border.color: sel?theme.iris:theme.a(theme.iris,0.16)
-                                            RowLayout { anchors.centerIn: parent; spacing: 7
-                                                Sym { text: modelData.i; sz: 17; color: sel?theme.bg:theme.frost }
-                                                Text { text: modelData.l; color: sel?theme.bg:theme.text; font.pixelSize: 13; font.family: root.apFont; font.bold: sel } }
-                                            MouseArea { id: thmMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: { root.apLight=modelData.k; root.saveAppearance() } } } } }
-                                // auto dark mode by time of day
-                                Rectangle { Layout.fillWidth: true; implicitHeight: 46; radius: 9
-                                    color: theme.a(theme.line,0.4); border.width: 1; border.color: root.apAutoDark?theme.a(theme.iris,0.5):theme.a(theme.iris,0.16)
-                                    RowLayout { anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 12; spacing: 10
-                                        Sym { text: "bedtime"; sz: 18; color: root.apAutoDark?theme.frost:theme.faint }
-                                        ColumnLayout { spacing: 1; Layout.fillWidth: true
-                                            Text { text: "auto dark by time"; color: theme.text; font.pixelSize: 13; font.family: root.apFont }
-                                            Text { text: "dark inside the window · overrides the manual pick + the SUPER+⇧+D key"; color: theme.faint; font.pixelSize: 10; font.family: root.apFont } }
-                                        Rectangle { implicitWidth: 46; implicitHeight: 22; radius: 11
-                                            color: root.apAutoDark?theme.iris:theme.a(theme.line,0.85); border.width: 1; border.color: root.apAutoDark?theme.iris:theme.a(theme.iris,0.3)
-                                            Rectangle { width: 16; height: 16; radius: 8; y: 3; x: root.apAutoDark?27:3; color: theme.frost; Behavior on x { NumberAnimation { duration: 120 } } }
-                                            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { root.apAutoDark=!root.apAutoDark; root.saveAppearance() } } } } }
-                                RowLayout { Layout.fillWidth: true; spacing: 10; visible: root.apAutoDark
-                                    Sym { text: "schedule"; sz: 18 }
-                                    Text { text: "dark from"; color: theme.sub; font.pixelSize: 12; font.family: root.apFont }
+                                Flow { Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; spacing: 7
+                                    Repeater { model: [{k:false,l:"dark",i:"dark_mode"},{k:true,l:"light",i:"light_mode"}]
+                                        delegate: Chip { required property var modelData; label: modelData.l; icon: modelData.i; on: root.apLight===modelData.k
+                                            onPicked: { root.apLight=modelData.k; root.saveAppearance() } } } }
+                                ToggleCard { icon: "bedtime"; title: "auto dark by time"
+                                    desc: "dark inside the window · overrides the manual pick + the SUPER+⇧+D key"
+                                    on: root.apAutoDark; onToggled: { root.apAutoDark=!root.apAutoDark; root.saveAppearance() } }
+                                RowLayout { visible: root.apAutoDark; Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; spacing: 10
+                                    Sym { text: "schedule"; sz: 18; color: theme.sub }
+                                    Text { text: "dark from"; color: theme.sub; font.pixelSize: 12; font.family: "monospace" }
                                     Rectangle { implicitWidth: 68; implicitHeight: 32; radius: 8; color: theme.a(theme.line,0.5); border.width: 1; border.color: dstart.activeFocus?theme.iris:theme.a(theme.iris,0.2)
                                         TextInput { id: dstart; anchors.fill: parent; horizontalAlignment: TextInput.AlignHCenter; verticalAlignment: TextInput.AlignVCenter
-                                            color: theme.text; font.pixelSize: 13; font.family: root.apFont; inputMask: "99:99;_"; text: root.apDarkStart
+                                            color: theme.text; font.pixelSize: 13; font.family: "monospace"; inputMask: "99:99;_"; text: root.apDarkStart
                                             onEditingFinished: { root.apDarkStart = text; root.saveAppearance() } } }
-                                    Text { text: "to"; color: theme.sub; font.pixelSize: 12; font.family: root.apFont }
+                                    Text { text: "to"; color: theme.sub; font.pixelSize: 12; font.family: "monospace" }
                                     Rectangle { implicitWidth: 68; implicitHeight: 32; radius: 8; color: theme.a(theme.line,0.5); border.width: 1; border.color: dend.activeFocus?theme.iris:theme.a(theme.iris,0.2)
                                         TextInput { id: dend; anchors.fill: parent; horizontalAlignment: TextInput.AlignHCenter; verticalAlignment: TextInput.AlignVCenter
-                                            color: theme.text; font.pixelSize: 13; font.family: root.apFont; inputMask: "99:99;_"; text: root.apDarkEnd
+                                            color: theme.text; font.pixelSize: 13; font.family: "monospace"; inputMask: "99:99;_"; text: root.apDarkEnd
                                             onEditingFinished: { root.apDarkEnd = text; root.saveAppearance() } } }
                                     Item { Layout.fillWidth: true } }
-                                // system app dark/light preference — independent from shell theme
+
                                 Section { title: "app preference"; icon: "apps" }
-                                Text { text: "controls GTK / Qt app themes independently from the shell"; color: theme.faint; font.pixelSize: 10; font.family: root.apFont }
-                                RowLayout { Layout.fillWidth: true; spacing: 8
-                                    Repeater { model: [{k:"auto",l:"Auto",i:"sync"},{k:"dark",l:"Dark",i:"dark_mode"},{k:"light",l:"Light",i:"light_mode"}]
-                                        delegate: Rectangle { required property var modelData; readonly property bool sel: root.apAppMode===modelData.k
-                                            Layout.fillWidth: true; implicitHeight: 40; radius: 9
-                                            color: sel?theme.iris:(amMa.containsMouse?theme.a(theme.iris,0.16):theme.a(theme.line,0.4)); border.width: 1; border.color: sel?theme.iris:theme.a(theme.iris,0.16)
-                                            RowLayout { anchors.centerIn: parent; spacing: 7
-                                                Sym { text: modelData.i; sz: 17; color: sel?theme.bg:theme.frost }
-                                                Text { text: modelData.l; color: sel?theme.bg:theme.text; font.pixelSize: 13; font.family: root.apFont; font.bold: sel } }
-                                            MouseArea { id: amMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: { root.apAppMode=modelData.k; root.saveAppearance(); root.applyAppMode() } } } } }
-                                Text { visible: root.apAppMode!=="auto"; text: "apps will stay " + root.apAppMode + " regardless of shell theme"; color: theme.iris; font.pixelSize: 10; font.family: root.apFont }
+                                Text { text: "controls GTK / Qt app themes independently from the shell"; color: theme.faint; font.pixelSize: 10; font.family: "monospace"; Layout.leftMargin: 14 }
+                                Flow { Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; spacing: 7
+                                    Repeater { model: [{k:"auto",l:"auto",i:"sync"},{k:"dark",l:"dark",i:"dark_mode"},{k:"light",l:"light",i:"light_mode"}]
+                                        delegate: Chip { required property var modelData; label: modelData.l; icon: modelData.i; on: root.apAppMode===modelData.k
+                                            onPicked: { root.apAppMode=modelData.k; root.saveAppearance(); root.applyAppMode() } } } }
+                                Text { visible: root.apAppMode!=="auto"; text: "apps will stay " + root.apAppMode + " regardless of shell theme"; color: theme.iris; font.pixelSize: 10; font.family: "monospace"; Layout.leftMargin: 14 }
+
                                 Section { title: "bar shape"; icon: "tune" }
-                                // roundness
-                                RowLayout { Layout.fillWidth: true; spacing: 10
-                                    Sym { text: "rounded_corner"; sz: 20 }
-                                    Text { text: "roundness"; color: theme.sub; font.pixelSize: 12; font.family: "monospace"; Layout.minimumWidth: 82 }
-                                    Slider { value: root.apRadius/26; onMoved: (v)=>{ root.apRadius = v*26; root.saveAppearance() } }
-                                    Text { text: Math.round(root.apRadius)+"px"; color: theme.sub; font.pixelSize: 12; font.family: "monospace"; Layout.minimumWidth: 40; horizontalAlignment: Text.AlignRight } }
-                                // bar position — which screen edge the bar docks to (left/right = vertical bar)
-                                RowLayout { Layout.fillWidth: true; spacing: 10
-                                    Sym { text: "dock_to_right"; sz: 20 }
-                                    Text { text: "position"; color: theme.sub; font.pixelSize: 12; font.family: "monospace"; Layout.minimumWidth: 82 }
-                                    RowLayout { Layout.fillWidth: true; spacing: 6
+                                SliderRow { icon: "rounded_corner"; label: "roundness"; value: root.apRadius/26; readout: Math.round(root.apRadius)+"px"
+                                    onMoved: (v)=>{ root.apRadius = v*26; root.saveAppearance() } }
+                                RowLayout { Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; spacing: 12
+                                    Sym { text: "dock_to_right"; sz: 18; color: theme.sub; Layout.alignment: Qt.AlignVCenter }
+                                    Text { text: "position"; color: theme.sub; font.pixelSize: 12; font.family: "monospace"; Layout.minimumWidth: 76 }
+                                    Flow { Layout.fillWidth: true; spacing: 6
                                         Repeater { model: root.edges
-                                            delegate: Rectangle { required property var modelData
-                                                readonly property bool sel: root.apEdge===modelData
-                                                Layout.fillWidth: true; implicitHeight: 30; radius: 8
-                                                color: sel ? theme.iris : (edMa.containsMouse ? theme.a(theme.iris,0.16) : theme.a(theme.line,0.4))
-                                                border.width: 1; border.color: sel ? theme.iris : theme.a(theme.iris,0.14)
-                                                Text { anchors.centerIn: parent; text: modelData; color: sel ? theme.bg : theme.sub; font.pixelSize: 11; font.family: "monospace"; font.bold: sel }
-                                                MouseArea { id: edMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: { root.apEdge=modelData; root.saveAppearance() } } } } } }
-                                // transparency — 0% leaves only the pill buttons floating
-                                RowLayout { Layout.fillWidth: true; spacing: 10
-                                    Sym { text: "opacity"; sz: 20 }
-                                    Text { text: "opacity"; color: theme.sub; font.pixelSize: 12; font.family: "monospace"; Layout.minimumWidth: 82 }
-                                    Slider { fill: theme.frost; value: root.apOpacity; onMoved: (v)=>{ root.apOpacity = v; root.saveAppearance() } }
-                                    Text { text: Math.round(root.apOpacity*100)+"%"; color: theme.sub; font.pixelSize: 12; font.family: "monospace"; Layout.minimumWidth: 40; horizontalAlignment: Text.AlignRight } }
-                                Text { visible: root.apOpacity < 0.06
-                                    text: "↑ 0% hides the bar background — only the buttons show"; color: theme.faint; font.pixelSize: 10; font.family: "monospace"; Layout.fillWidth: true }
-                                // bar fill — a clean solid black/white, or the matugen accent tint (most obvious at 100% opacity)
-                                RowLayout { Layout.fillWidth: true; spacing: 10
-                                    Sym { text: "format_color_fill"; sz: 20 }
-                                    Text { text: "bar fill"; color: theme.sub; font.pixelSize: 12; font.family: "monospace"; Layout.minimumWidth: 82 }
-                                    RowLayout { Layout.fillWidth: true; spacing: 6
+                                            delegate: Chip { required property var modelData; label: modelData; on: root.apEdge===modelData
+                                                onPicked: { root.apEdge=modelData; root.saveAppearance() } } } } }
+                                SliderRow { icon: "opacity"; label: "opacity"; tint: theme.frost; value: root.apOpacity; readout: Math.round(root.apOpacity*100)+"%"
+                                    onMoved: (v)=>{ root.apOpacity = v; root.saveAppearance() } }
+                                Text { visible: root.apOpacity < 0.06; text: "↑ 0% hides the bar background — only the buttons show"; color: theme.faint; font.pixelSize: 10; font.family: "monospace"; Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14 }
+                                RowLayout { Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; spacing: 12
+                                    Sym { text: "format_color_fill"; sz: 18; color: theme.sub; Layout.alignment: Qt.AlignVCenter }
+                                    Text { text: "bar fill"; color: theme.sub; font.pixelSize: 12; font.family: "monospace"; Layout.minimumWidth: 76 }
+                                    Flow { Layout.fillWidth: true; spacing: 6
                                         Repeater { model: [{k:"matugen",l:"matugen"},{k:"black",l:"black"},{k:"white",l:"white"}]
-                                            delegate: Rectangle { required property var modelData
-                                                readonly property bool sel: root.apBarFill===modelData.k
-                                                Layout.fillWidth: true; implicitHeight: 30; radius: 8
-                                                color: sel ? theme.iris : (bfMa.containsMouse ? theme.a(theme.iris,0.16) : theme.a(theme.line,0.4))
-                                                border.width: 1; border.color: sel ? theme.iris : theme.a(theme.iris,0.14)
-                                                Text { anchors.centerIn: parent; text: modelData.l; color: sel ? theme.bg : theme.sub; font.pixelSize: 11; font.family: "monospace"; font.bold: sel }
-                                                MouseArea { id: bfMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: { root.apBarFill=modelData.k; root.saveAppearance() } } } } } }
-                                Text { visible: root.apBarFill!=="matugen" && root.apOpacity<0.99
-                                    text: "↑ set opacity to 100% for a solid " + root.apBarFill + " bar"; color: theme.faint; font.pixelSize: 10; font.family: "monospace"; Layout.fillWidth: true }
-                                // height
-                                RowLayout { Layout.fillWidth: true; spacing: 10
-                                    Sym { text: "height"; sz: 20 }
-                                    Text { text: "bar height"; color: theme.sub; font.pixelSize: 12; font.family: "monospace"; Layout.minimumWidth: 82 }
-                                    Slider { fill: theme.good; value: (root.apHeight-34)/20; onMoved: (v)=>{ root.apHeight = 34 + v*20; root.saveAppearance() } }
-                                    Text { text: Math.round(root.apHeight)+"px"; color: theme.sub; font.pixelSize: 12; font.family: "monospace"; Layout.minimumWidth: 40; horizontalAlignment: Text.AlignRight } }
+                                            delegate: Chip { required property var modelData; label: modelData.l; on: root.apBarFill===modelData.k
+                                                onPicked: { root.apBarFill=modelData.k; root.saveAppearance() } } } } }
+                                Text { visible: root.apBarFill!=="matugen" && root.apOpacity<0.99; text: "↑ set opacity to 100% for a solid " + root.apBarFill + " bar"; color: theme.faint; font.pixelSize: 10; font.family: "monospace"; Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14 }
+                                SliderRow { icon: "height"; label: "bar height"; tint: theme.good; value: (root.apHeight-34)/20; readout: Math.round(root.apHeight)+"px"
+                                    onMoved: (v)=>{ root.apHeight = 34 + v*20; root.saveAppearance() } }
+                                ToggleCard { icon: "swipe_up"; title: "auto-hide bar"; desc: "tucks the bar away · push the cursor to the edge to reveal it"
+                                    on: root.apAutoHide; onToggled: { root.apAutoHide=!root.apAutoHide; root.saveAppearance() } }
+                                ToggleCard { visible: !root.apAutoHide; icon: "fullscreen"; title: "hide when fullscreen"; desc: "only auto-hides while a window is fullscreen (e.g. video, games)"
+                                    on: root.apHideFullscreen; onToggled: { root.apHideFullscreen=!root.apHideFullscreen; root.saveAppearance() } }
                             }
 
                             // SUB-TAB 1: Colors
                             ColumnLayout {
-                                visible: root.apSubTab === 1; Layout.fillWidth: true; spacing: 14
+                                visible: root.apSubTab === 1; Layout.fillWidth: true; spacing: 12
                                 Section { title: "accent colour"; icon: "palette" }
-                                Flow { Layout.fillWidth: true; spacing: 10
+                                Flow { Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; spacing: 10
                                     Repeater { model: root.accents
                                         delegate: Rectangle { required property var modelData; readonly property bool sel: root.apAccent.toLowerCase()===modelData.toLowerCase()
                                             width: 40; height: 40; radius: 20; color: modelData
                                             border.width: sel?3:1; border.color: sel?theme.text:theme.a(theme.text,0.2)
                                             Sym { anchors.centerIn: parent; visible: parent.sel; text: "check"; sz: 20; color: "#0d1420" }
                                             MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { root.apAccent=modelData; root.saveAppearance(); run("sh '"+root.matugenScript+"'") } } } } }
-                                // matugen AUTO — persisted; recolours the whole shell + kitty from the wallpaper (off = sea cyan)
-                                Rectangle { Layout.fillWidth: true; implicitHeight: 48; radius: 9
-                                    color: theme.a(theme.line,0.4); border.width: 1; border.color: root.apMatugen?theme.a(theme.iris,0.5):theme.a(theme.iris,0.16)
-                                    RowLayout { anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 12; spacing: 10
-                                        Sym { text: "colorize"; sz: 18; color: root.apMatugen?theme.frost:theme.faint }
-                                        ColumnLayout { spacing: 1; Layout.fillWidth: true
-                                            Text { text: "auto colours from wallpaper"; color: theme.text; font.pixelSize: 13; font.family: root.apFont }
-                                            Text { text: "recolours the shell + kitty on every wallpaper · off = sea cyan"; color: theme.faint; font.pixelSize: 10; font.family: root.apFont } }
-                                        Rectangle { implicitWidth: 46; implicitHeight: 22; radius: 11
-                                            color: root.apMatugen?theme.iris:theme.a(theme.line,0.85); border.width: 1; border.color: root.apMatugen?theme.iris:theme.a(theme.iris,0.3)
-                                            Rectangle { width: 16; height: 16; radius: 8; y: 3; x: root.apMatugen?27:3; color: theme.frost; Behavior on x { NumberAnimation { duration: 120 } } }
-                                            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.toggleMatugen() } } } }
-                                // matugen scheme — which Material You algorithm builds the palette (only shown when auto is on)
-                                ColumnLayout { Layout.fillWidth: true; spacing: 6; visible: root.apMatugen
-                                    RowLayout { Layout.fillWidth: true; spacing: 6
+                                ToggleCard { icon: "colorize"; title: "auto colours from wallpaper"
+                                    desc: "recolours the shell + kitty on every wallpaper · off = sea cyan"
+                                    on: root.apMatugen; onToggled: root.toggleMatugen() }
+                                ColumnLayout { Layout.fillWidth: true; spacing: 8; visible: root.apMatugen
+                                    RowLayout { Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; spacing: 8
                                         Sym { text: "tune"; sz: 15; color: theme.faint }
-                                        Text { text: "colour scheme"; color: theme.sub; font.pixelSize: 12; font.family: root.apFont }
+                                        Text { text: "colour scheme"; color: theme.sub; font.pixelSize: 12; font.family: "monospace" }
                                         Item { Layout.fillWidth: true }
-                                        Text { text: root.apScheme.replace("scheme-",""); color: theme.frost; font.pixelSize: 11; font.family: root.apFont } }
-                                    Flow { Layout.fillWidth: true; spacing: 7
+                                        Text { text: root.apScheme.replace("scheme-",""); color: theme.frost; font.pixelSize: 11; font.family: "monospace" } }
+                                    Flow { Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; spacing: 7
                                         Repeater { model: root.schemes
-                                            delegate: Rectangle { required property var modelData
-                                                readonly property bool sel: root.apScheme===modelData
-                                                implicitWidth: scTxt.implicitWidth + 20; implicitHeight: 30; radius: 8
-                                                color: sel ? theme.iris : (scMa.containsMouse ? theme.a(theme.iris,0.16) : theme.a(theme.line,0.4))
-                                                border.width: 1; border.color: sel ? theme.iris : theme.a(theme.iris,0.14)
-                                                Text { id: scTxt; anchors.centerIn: parent; text: (""+modelData).replace("scheme-",""); color: sel ? theme.bg : theme.sub; font.pixelSize: 11; font.family: root.apFont; font.bold: sel }
-                                                MouseArea { id: scMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.setScheme(modelData) } } } } }
-                                // matugen — one-off: derive a palette from the wallpaper or pick with eyedropper
-                                RowLayout { Layout.fillWidth: true; spacing: 8
-                                    Rectangle { Layout.fillWidth: true; implicitHeight: 40; radius: 9
-                                        color: mgm.containsMouse ? theme.iris : theme.a(theme.iris,0.18); border.width: 1; border.color: theme.iris
-                                        RowLayout { anchors.centerIn: parent; spacing: 8
-                                            Sym { text: root.matugenBusy?"sync":"auto_awesome"; sz: 17; color: mgm.containsMouse?theme.bg:theme.frost }
-                                            Text { text: root.matugenBusy ? "matching…" : "pick a palette from wallpaper"; color: mgm.containsMouse?theme.bg:theme.text; font.pixelSize: 12; font.family: root.apFont } }
-                                        MouseArea { id: mgm; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.matchWallpaper() } }
-                                    Rectangle { implicitWidth: 100; implicitHeight: 40; radius: 9
-                                        color: edm.containsMouse ? theme.iris : theme.a(theme.iris,0.18); border.width: 1; border.color: theme.iris
-                                        RowLayout { anchors.centerIn: parent; spacing: 6
-                                            Sym { text: "colorize"; sz: 17; color: edm.containsMouse?theme.bg:theme.frost }
-                                            Text { text: "picker"; color: edm.containsMouse?theme.bg:theme.text; font.pixelSize: 12; font.family: root.apFont } }
-                                        MouseArea { id: edm; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: { root.pickingTarget = "accent"; colorPickerProc.running = true } } } }
-                                // extracted palette — pick any colour
-                                Flow { Layout.fillWidth: true; spacing: 9; visible: root.matugenPalette.length>0
+                                            delegate: Chip { required property var modelData; label: (""+modelData).replace("scheme-",""); on: root.apScheme===modelData
+                                                onPicked: root.setScheme(modelData) } } } }
+                                RowLayout { Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; spacing: 8
+                                    AccentBtn { icon: root.matugenBusy?"sync":"auto_awesome"; label: root.matugenBusy ? "matching…" : "pick a palette from wallpaper"; onClicked: root.matchWallpaper() }
+                                    AccentBtn { Layout.fillWidth: false; implicitWidth: 104; icon: "colorize"; label: "picker"; onClicked: { root.pickingTarget = "accent"; colorPickerProc.running = true } } }
+                                Flow { Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; spacing: 9; visible: root.matugenPalette.length>0
                                     Repeater { model: root.matugenPalette
                                         delegate: Rectangle { required property var modelData; readonly property bool sel: root.apAccent.toLowerCase()===modelData.toLowerCase()
                                             width: 36; height: 36; radius: 18; color: modelData
@@ -2165,24 +2335,23 @@ Scope {
 
                             // SUB-TAB 3: Fonts
                             ColumnLayout {
-                                visible: root.apSubTab === 3; Layout.fillWidth: true; spacing: 14
+                                visible: root.apSubTab === 3; Layout.fillWidth: true; spacing: 12
                                 Section { title: "font"; icon: "font_download" }
-                                Flow { Layout.fillWidth: true; spacing: 7
+                                Flow { Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; spacing: 7
                                     Repeater { model: root.fontPresets
                                         delegate: Rectangle { required property var modelData; readonly property bool sel: root.apFont===modelData
-                                            implicitWidth: ft.implicitWidth+20; implicitHeight: 32; radius: 8
+                                            implicitWidth: ft.implicitWidth+22; implicitHeight: 32; radius: 8
                                             color: sel?theme.iris:(fmm.containsMouse?theme.a(theme.iris,0.16):theme.a(theme.line,0.4)); border.width: 1; border.color: sel?theme.iris:theme.a(theme.iris,0.16)
                                             Text { id: ft; anchors.centerIn: parent; text: modelData; color: sel?theme.bg:theme.text; font.pixelSize: 12; font.family: modelData; font.bold: sel }
                                             MouseArea { id: fmm; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: { root.apFont=modelData; root.saveAppearance() } } } } }
-                                // custom font entry
-                                Rectangle { Layout.fillWidth: true; implicitHeight: 38; radius: 9
+                                Rectangle { Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; implicitHeight: 38; radius: 9
                                     color: theme.a(theme.line,0.4); border.width: 1; border.color: fontIn.activeFocus?theme.iris:theme.a(theme.iris,0.16)
                                     TextInput { id: fontIn; anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 12; verticalAlignment: TextInput.AlignVCenter
                                         color: theme.text; font.pixelSize: 13; font.family: root.apFont; clip: true; selectByMouse: true; selectionColor: theme.a(theme.iris,0.4)
                                         Component.onCompleted: text = root.apFont
                                         onAccepted: root.addCustomFont(text)
                                         Text { anchors.verticalCenter: parent.verticalCenter; visible: fontIn.text===""; text: "type a font name, ↵ to save it as a chip"; color: theme.faint; font.pixelSize: 13; font.family: root.apFont } } }
-                                Text { text: "changes apply to the bar live"; color: theme.faint; font.pixelSize: 10; font.family: root.apFont }
+                                Text { text: "changes apply to the bar live"; color: theme.faint; font.pixelSize: 10; font.family: "monospace"; Layout.leftMargin: 14 }
                             }
                         }
 
@@ -2191,57 +2360,209 @@ Scope {
                             visible: root.tab === 12; Layout.fillWidth: true; spacing: 14
                             Section { title: "bar widgets"; icon: "widgets" }
                             Text {
-                                text: "toggle which widgets are displayed on the top-bar. Hidden widgets release layout space instantly."
+                                text: "toggle widgets on/off, and drag the ⠿ handle to reorder where they sit on the bar. Media Player always stays centred."
                                 color: theme.faint; font.pixelSize: 11; font.family: root.apFont; Layout.bottomMargin: 6
+                                Layout.fillWidth: true; wrapMode: Text.WordWrap
                             }
-                            ColumnLayout {
-                                Layout.fillWidth: true; spacing: 8
-                                Repeater {
-                                    model: [
-                                        { prop: "wgMpris",     i: "play_circle",            l: "Media Player",             d: "Shows current track info and playback controls in the bar center" },
-                                        { prop: "wgTray",      i: "grid_view",              l: "System Tray",              d: "Collapsible area for background app status notifier icons" },
-                                        { prop: "wgWeather",   i: "cloud",                  l: "Weather",                  d: "Displays current temperature and weather conditions" },
-                                        { prop: "wgClipboard", i: "content_paste",          l: "Clipboard Manager",        d: "Quick access button to clipboard history search popup" },
-                                        { prop: "wgNotif",     i: "notifications",          l: "Notification Bell",        d: "Displays a badge with unread notification count" },
-                                        { prop: "wgWifi",      i: "wifi",                   l: "Wi-Fi Connection",        d: "Displays network status and wireless signal strength" },
-                                        { prop: "wgBluetooth", i: "bluetooth",              l: "Bluetooth Status",         d: "Displays adapter status and toggles connected devices list" },
-                                        { prop: "wgCaffeine",  i: "coffee",                 l: "Caffeine / Caffeine Lock", d: "Prevents screen dimming and automatic suspension" },
-                                        { prop: "wgSystem",    i: "speed",                  l: "System Monitor",           d: "Displays live CPU usage and system load metric" },
-                                        { prop: "wgVolume",    i: "volume_up",              l: "Volume Control",           d: "Displays sound volume level and output selector" },
-                                        { prop: "wgBattery",   i: "battery_charging_full",  l: "Battery Status",           d: "Monitors remaining power levels for laptops" },
-                                        { prop: "wgClock",     i: "schedule",               l: "Clock & Calendar",         d: "Shows current date and time with upcoming calendar events" },
-                                        { prop: "wgPower",     i: "power_settings_new",     l: "Power Actions",            d: "Power icon for locking, logging out, restarting, or shutting down" }
-                                    ]
-                                    delegate: Rectangle {
-                                        required property var modelData
-                                        readonly property bool enabledVal: root[modelData.prop]
-                                        Layout.fillWidth: true; implicitHeight: 52; radius: 9
-                                        color: theme.a(theme.line, 0.4); border.width: 1; border.color: enabledVal ? theme.a(theme.iris, 0.5) : theme.a(theme.iris, 0.16)
+                            // drag-to-reorder list. ListView (non-interactive so the settings page still
+                            // scrolls) over wgOrderModel; dragging the handle moves rows via ListModel.move
+                            // and commits the new order to apWidgetOrder on release.
+                            ListView {
+                                id: wgList
+                                Layout.fillWidth: true
+                                Layout.preferredHeight: contentHeight
+                                interactive: false
+                                spacing: 8
+                                cacheBuffer: 100000
+                                model: wgOrderModel
+                                displaced: Transition { NumberAnimation { properties: "y"; duration: 150; easing.type: Easing.OutCubic } }
+                                delegate: Item {
+                                    id: wrap
+                                    required property int index
+                                    required property string wid
+                                    readonly property var meta: root.wgMeta[wrap.wid] || ({})
+                                    readonly property bool hasToggle: (wrap.meta.prop || "") !== ""
+                                    readonly property bool enabledVal: wrap.hasToggle ? root[wrap.meta.prop] : true
+                                    property bool held: false
+                                    width: wgList.width; height: 52
+                                    z: held ? 2 : 1
+
+                                    Rectangle {
+                                        id: card
+                                        width: wrap.width; height: wrap.height; radius: 9
+                                        anchors.horizontalCenter: parent.horizontalCenter
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        color: theme.a(theme.line, wrap.held ? 0.75 : 0.4)
+                                        border.width: 1; border.color: wrap.held ? theme.iris : (wrap.enabledVal ? theme.a(theme.iris, 0.5) : theme.a(theme.iris, 0.16))
+                                        Drag.active: wrap.held
+                                        Drag.source: wrap
+                                        Drag.hotSpot.x: width / 2; Drag.hotSpot.y: height / 2
+                                        states: State {
+                                            when: wrap.held
+                                            ParentChange { target: card; parent: wgList }
+                                            AnchorChanges { target: card; anchors.horizontalCenter: undefined; anchors.verticalCenter: undefined }
+                                        }
                                         RowLayout {
-                                            anchors.fill: parent; anchors.leftMargin: 14; anchors.rightMargin: 14; spacing: 12
-                                            Sym { text: modelData.i; sz: 19; color: enabledVal ? theme.frost : theme.faint }
+                                            anchors.fill: parent; anchors.leftMargin: 8; anchors.rightMargin: 14; spacing: 10
+                                            // drag handle — grabbing this reorders the row
+                                            MouseArea {
+                                                id: handle
+                                                Layout.preferredWidth: 24; Layout.fillHeight: true
+                                                cursorShape: Qt.SizeVerCursor
+                                                drag.target: card; drag.axis: Drag.YAxis
+                                                onPressed: { root.wgDragging = true; wrap.held = true }
+                                                onReleased: { wrap.held = false; root.wgCommitOrder(); root.wgDragging = false }
+                                                Sym { anchors.centerIn: parent; text: "drag_indicator"; sz: 18; color: wrap.held ? theme.iris : theme.faint }
+                                            }
+                                            Sym { text: wrap.meta.i || "widgets"; sz: 19; color: wrap.enabledVal ? theme.frost : theme.faint }
                                             ColumnLayout {
                                                 spacing: 1; Layout.fillWidth: true
-                                                Text { text: modelData.l; color: theme.text; font.pixelSize: 13; font.family: root.apFont }
-                                                Text { text: modelData.d; color: theme.faint; font.pixelSize: 10; font.family: root.apFont }
+                                                Text { text: wrap.meta.l || wrap.wid; color: theme.text; font.pixelSize: 13; font.family: root.apFont
+                                                    Layout.fillWidth: true; elide: Text.ElideRight }
+                                                Text { text: wrap.meta.d || ""; color: theme.faint; font.pixelSize: 10; font.family: root.apFont
+                                                    Layout.fillWidth: true; elide: Text.ElideRight }
                                             }
+                                            // toggle (hidden for no-toggle widgets like the recorder)
                                             Rectangle {
+                                                visible: wrap.hasToggle
+                                                Layout.alignment: Qt.AlignVCenter
                                                 implicitWidth: 46; implicitHeight: 22; radius: 11
-                                                color: enabledVal ? theme.iris : theme.a(theme.line, 0.85); border.width: 1; border.color: enabledVal ? theme.iris : theme.a(theme.iris, 0.3)
+                                                color: wrap.enabledVal ? theme.iris : theme.a(theme.line, 0.85); border.width: 1; border.color: wrap.enabledVal ? theme.iris : theme.a(theme.iris, 0.3)
                                                 Rectangle {
-                                                    width: 16; height: 16; radius: 8; y: 3; x: enabledVal ? 27 : 3
+                                                    width: 16; height: 16; radius: 8; y: 3; x: wrap.enabledVal ? 27 : 3
                                                     color: theme.frost; Behavior on x { NumberAnimation { duration: 120 } }
                                                 }
                                                 MouseArea {
                                                     anchors.fill: parent; cursorShape: Qt.PointingHandCursor
-                                                    onClicked: {
-                                                        root[modelData.prop] = !enabledVal;
-                                                        root.saveAppearance();
-                                                    }
+                                                    onClicked: { if (wrap.hasToggle) { root[wrap.meta.prop] = !wrap.enabledVal; root.saveAppearance() } }
                                                 }
                                             }
                                         }
                                     }
+                                    DropArea {
+                                        anchors.fill: parent
+                                        onEntered: (drag) => {
+                                            var from = drag.source.index; var to = wrap.index;
+                                            if (from !== to && from >= 0) wgOrderModel.move(from, to, 1);
+                                        }
+                                    }
+                                }
+                            }
+                            // ---- left cluster order (logo · workspaces · window-title) ----
+                            Section { title: "left side"; icon: "align_horizontal_left"; Layout.topMargin: 8 }
+                            Text {
+                                text: "drag to reorder the items on the left of the bar."
+                                color: theme.faint; font.pixelSize: 11; font.family: root.apFont; Layout.bottomMargin: 6
+                                Layout.fillWidth: true; wrapMode: Text.WordWrap
+                            }
+                            ListView {
+                                id: lgList
+                                Layout.fillWidth: true
+                                Layout.preferredHeight: contentHeight
+                                interactive: false
+                                spacing: 8
+                                cacheBuffer: 100000
+                                model: lgOrderModel
+                                displaced: Transition { NumberAnimation { properties: "y"; duration: 150; easing.type: Easing.OutCubic } }
+                                delegate: Item {
+                                    id: lwrap
+                                    required property int index
+                                    required property string wid
+                                    readonly property var meta: root.lgMeta[lwrap.wid] || ({})
+                                    property bool held: false
+                                    width: lgList.width; height: 46
+                                    z: held ? 2 : 1
+                                    Rectangle {
+                                        id: lcard
+                                        width: lwrap.width; height: lwrap.height; radius: 9
+                                        anchors.horizontalCenter: parent.horizontalCenter
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        color: theme.a(theme.line, lwrap.held ? 0.75 : 0.4)
+                                        border.width: 1; border.color: lwrap.held ? theme.iris : theme.a(theme.iris, 0.5)
+                                        Drag.active: lwrap.held
+                                        Drag.source: lwrap
+                                        Drag.hotSpot.x: width / 2; Drag.hotSpot.y: height / 2
+                                        states: State {
+                                            when: lwrap.held
+                                            ParentChange { target: lcard; parent: lgList }
+                                            AnchorChanges { target: lcard; anchors.horizontalCenter: undefined; anchors.verticalCenter: undefined }
+                                        }
+                                        RowLayout {
+                                            anchors.fill: parent; anchors.leftMargin: 8; anchors.rightMargin: 14; spacing: 10
+                                            MouseArea {
+                                                id: lhandle
+                                                Layout.preferredWidth: 24; Layout.fillHeight: true
+                                                cursorShape: Qt.SizeVerCursor
+                                                drag.target: lcard; drag.axis: Drag.YAxis
+                                                onPressed: { root.wgDragging = true; lwrap.held = true }
+                                                onReleased: { lwrap.held = false; root.lgCommitOrder(); root.wgDragging = false }
+                                                Sym { anchors.centerIn: parent; text: "drag_indicator"; sz: 18; color: lwrap.held ? theme.iris : theme.faint }
+                                            }
+                                            Sym { text: lwrap.meta.i || "widgets"; sz: 19; color: theme.frost }
+                                            ColumnLayout {
+                                                spacing: 1; Layout.fillWidth: true
+                                                Text { text: lwrap.meta.l || lwrap.wid; color: theme.text; font.pixelSize: 13; font.family: root.apFont
+                                                    Layout.fillWidth: true; elide: Text.ElideRight }
+                                                Text { text: lwrap.meta.d || ""; color: theme.faint; font.pixelSize: 10; font.family: root.apFont
+                                                    Layout.fillWidth: true; elide: Text.ElideRight }
+                                            }
+                                        }
+                                    }
+                                    DropArea {
+                                        anchors.fill: parent
+                                        onEntered: (drag) => {
+                                            var from = drag.source.index; var to = lwrap.index;
+                                            if (from !== to && from >= 0) lgOrderModel.move(from, to, 1);
+                                        }
+                                    }
+                                }
+                            }
+                            // ---- bar layout presets (save/restore the whole bar layout) ----
+                            Section { title: "layout presets"; icon: "bookmarks"; Layout.topMargin: 8 }
+                            Text {
+                                text: "save the current widget order, left-side order and on/off toggles as a named preset, then restore it in one click."
+                                color: theme.faint; font.pixelSize: 11; font.family: root.apFont; Layout.bottomMargin: 4
+                                Layout.fillWidth: true; wrapMode: Text.WordWrap
+                            }
+                            RowLayout {
+                                Layout.fillWidth: true; spacing: 10
+                                Rectangle {
+                                    Layout.fillWidth: true; implicitHeight: 36; radius: 7
+                                    color: theme.a(theme.line, 0.4); border.width: 1; border.color: blNameIn.activeFocus ? theme.iris : theme.a(theme.iris, 0.16)
+                                    TextInput {
+                                        id: blNameIn; anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 12
+                                        verticalAlignment: TextInput.AlignVCenter
+                                        color: theme.text; font.pixelSize: 12; font.family: root.apFont; clip: true
+                                        onAccepted: { root.saveBarLayout(text); text = "" }
+                                        Text { anchors.verticalCenter: parent.verticalCenter; visible: !blNameIn.text; text: "layout name…"; color: theme.faint; font.pixelSize: 12; font.family: root.apFont }
+                                    }
+                                }
+                                Rectangle {
+                                    implicitWidth: 84; implicitHeight: 36; radius: 7
+                                    color: blSaveMa.containsMouse ? theme.iris : theme.a(theme.iris, 0.22); border.width: 1; border.color: theme.iris
+                                    enabled: blNameIn.text.trim() !== ""; opacity: enabled ? 1 : 0.5
+                                    Row { anchors.centerIn: parent; spacing: 5
+                                        Sym { anchors.verticalCenter: parent.verticalCenter; text: "save"; sz: 15; color: blSaveMa.containsMouse ? theme.bg : theme.frost }
+                                        Text { anchors.verticalCenter: parent.verticalCenter; text: "save"; color: blSaveMa.containsMouse ? theme.bg : theme.text; font.pixelSize: 12; font.family: root.apFont } }
+                                    MouseArea { id: blSaveMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: { root.saveBarLayout(blNameIn.text); blNameIn.text = "" } }
+                                }
+                            }
+                            Text { visible: root.barLayouts.length === 0; text: "no saved layouts yet."; color: theme.faint; font.pixelSize: 11; font.family: root.apFont; Layout.topMargin: 2 }
+                            Repeater { model: root.barLayouts
+                                delegate: Rectangle { required property var modelData; required property int index
+                                    Layout.fillWidth: true; implicitHeight: 44; radius: 9
+                                    color: theme.a(theme.line, 0.4); border.width: 1; border.color: theme.a(theme.iris, 0.16)
+                                    RowLayout { anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 10; spacing: 8
+                                        Sym { text: "bookmark"; sz: 17; color: theme.frost }
+                                        Text { text: modelData.name; color: theme.text; font.pixelSize: 13; font.family: root.apFont; Layout.fillWidth: true; elide: Text.ElideRight }
+                                        Rectangle { implicitWidth: 70; implicitHeight: 28; radius: 7
+                                            color: blLoadMa.containsMouse ? theme.iris : theme.a(theme.iris, 0.18); border.width: 1; border.color: theme.a(theme.iris, 0.4)
+                                            Text { anchors.centerIn: parent; text: "load"; color: blLoadMa.containsMouse ? theme.bg : theme.text; font.pixelSize: 11; font.family: root.apFont }
+                                            MouseArea { id: blLoadMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.loadBarLayout(modelData) } }
+                                        Rectangle { implicitWidth: 30; implicitHeight: 28; radius: 7
+                                            color: blDelMa.containsMouse ? theme.a(theme.bad, 0.25) : theme.a(theme.line, 0.5)
+                                            Sym { anchors.centerIn: parent; text: "delete"; sz: 15; color: blDelMa.containsMouse ? theme.bad : theme.faint }
+                                            MouseArea { id: blDelMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.deleteBarLayout(index) } } }
                                 }
                             }
                         }
@@ -2379,34 +2700,14 @@ Scope {
                                         anchors { left: kbLens.right; leftMargin: 8; right: parent.right; rightMargin: 10; verticalCenter: parent.verticalCenter }
                                         color: theme.text; font.pixelSize: 13; font.family: "monospace"; clip: true
                                         onTextChanged: root.kbQuery = text
-                                        Text { text: "type to filter · click a bind to rebind it"; visible: kbField.text===""
+                                        Text { text: "type to filter · click a bind to edit it"; visible: kbField.text===""
                                             color: theme.faint; font.pixelSize: 12; font.family: "monospace"; anchors.verticalCenter: parent.verticalCenter }
                                         Keys.onPressed: (e)=> {
-                                            if (e.key === Qt.Key_Escape) {
-                                                if (root.kbRec) { root.kbRec = null; root.kbConflict = "" }
-                                                else if (root.kbAddRecording) { root.kbAddRecording = false }
-                                                else if (root.kbAdding) { root.kbAdding = false }
-                                                else root.closePanel();
-                                                e.accepted = true;
-                                                return;
-                                            }
-                                            if (root.kbRec) {
-                                                if (e.key===Qt.Key_Shift||e.key===Qt.Key_Control||e.key===Qt.Key_Alt||e.key===Qt.Key_Meta) { e.accepted=true; return }
-                                                var n = root.kbKeyName(e);
-                                                if (n) root.kbApply(n); else root.kbConflict = "unsupported key";
-                                                e.accepted = true;
-                                                return;
-                                            }
-                                            if (root.kbAddRecording) {
-                                                if (e.key===Qt.Key_Shift||e.key===Qt.Key_Control||e.key===Qt.Key_Alt||e.key===Qt.Key_Meta) { e.accepted=true; return }
-                                                var k = root.kbKeyName(e);
-                                                if (k) { root.kbAddKey = k; root.kbAddRecording = false }
-                                                e.accepted = true;
-                                            }
+                                            if (e.key === Qt.Key_Escape) { root.closePanel(); e.accepted = true; }
                                         }
                                     }
                                 }
-                                // Add Button
+                                // Add Button → opens the editor popup in "add" mode
                                 Rectangle {
                                     implicitWidth: 32; implicitHeight: 32; radius: 8
                                     color: kbAddBtnMa.containsMouse ? theme.iris : theme.a(theme.line, 0.4)
@@ -2415,173 +2716,11 @@ Scope {
                                     MouseArea {
                                         id: kbAddBtnMa
                                         anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
-                                        onClicked: { root.kbAdding = !root.kbAdding; root.kbAddRecording = false; kbField.forceActiveFocus() }
+                                        onClicked: root.kbOpenAdd()
                                     }
                                 }
                             }
 
-                            // ================= ADD BIND PANEL =================
-                            Rectangle {
-                                visible: root.kbAdding
-                                Layout.fillWidth: true
-                                implicitHeight: kbAddFormCol.implicitHeight + 20
-                                radius: 10
-                                color: theme.a(theme.line, 0.2)
-                                border.width: 1; border.color: theme.a(theme.iris, 0.2)
-                                ColumnLayout {
-                                    id: kbAddFormCol
-                                    anchors.fill: parent; anchors.margins: 14; spacing: 12
-                                    
-                                    // Description
-                                    ColumnLayout {
-                                        spacing: 4; Layout.fillWidth: true
-                                        Text { text: "description"; color: theme.faint; font.pixelSize: 10; font.family: "monospace" }
-                                        Rectangle {
-                                            Layout.fillWidth: true; implicitHeight: 32; radius: 6
-                                            color: theme.a(theme.line, 0.4); border.width: 1
-                                            border.color: kbDescIn.activeFocus ? theme.iris : theme.a(theme.iris, 0.1)
-                                            TextInput {
-                                                id: kbDescIn
-                                                anchors.fill: parent; anchors.leftMargin: 8; anchors.rightMargin: 8
-                                                verticalAlignment: TextInput.AlignVCenter
-                                                color: theme.text; font.pixelSize: 12; font.family: "monospace"
-                                                text: root.kbAddDesc
-                                                onTextChanged: root.kbAddDesc = text
-                                                Text { text: "e.g. Launch Firefox"; visible: kbDescIn.text===""; color: theme.faint; font.pixelSize: 12; font.family: "monospace"; anchors.verticalCenter: parent.verticalCenter }
-                                            }
-                                        }
-                                    }
-                                    
-                                    // Action / Command
-                                    ColumnLayout {
-                                        spacing: 4; Layout.fillWidth: true
-                                        Text { text: "action / command"; color: theme.faint; font.pixelSize: 10; font.family: "monospace" }
-                                        Rectangle {
-                                            Layout.fillWidth: true; implicitHeight: 32; radius: 6
-                                            color: theme.a(theme.line, 0.4); border.width: 1
-                                            border.color: kbActionIn.activeFocus ? theme.iris : theme.a(theme.iris, 0.1)
-                                            TextInput {
-                                                id: kbActionIn
-                                                anchors.fill: parent; anchors.leftMargin: 8; anchors.rightMargin: 8
-                                                verticalAlignment: TextInput.AlignVCenter
-                                                color: theme.text; font.pixelSize: 12; font.family: "monospace"
-                                                text: root.kbAddAction
-                                                onTextChanged: root.kbAddAction = text
-                                            }
-                                        }
-                                    }
-
-                                    // Shortcut combination
-                                    ColumnLayout {
-                                        spacing: 4; Layout.fillWidth: true
-                                        Text { text: "shortcut combination"; color: theme.faint; font.pixelSize: 10; font.family: "monospace" }
-                                        RowLayout {
-                                            spacing: 10; Layout.fillWidth: true
-                                            // Modifier chips
-                                            Row {
-                                                spacing: 6
-                                                Repeater {
-                                                    model: ["SUPER","CTRL","ALT","SHIFT"]
-                                                    delegate: Rectangle {
-                                                        required property string modelData
-                                                        readonly property bool on: root.kbAddMods.indexOf(modelData) >= 0
-                                                        width: kamc.width + 14; height: 22; radius: 11
-                                                        color: on ? theme.a(theme.iris,0.3) : theme.a(theme.line,0.5)
-                                                        border.width: 1; border.color: on ? theme.iris : theme.a(theme.line,0.9)
-                                                        Text { id: kamc; anchors.centerIn: parent; text: modelData
-                                                            color: on ? theme.frost : theme.faint; font.pixelSize: 10; font.family: "monospace"; font.bold: on }
-                                                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
-                                                            onClicked: { var m = root.kbAddMods.slice(); var i = m.indexOf(modelData);
-                                                                if (i >= 0) m.splice(i,1); else m.push(modelData);
-                                                                root.kbAddMods = ["SUPER","CTRL","ALT","SHIFT"].filter(x => m.indexOf(x) >= 0);
-                                                                kbField.forceActiveFocus() } }
-                                                    }
-                                                }
-                                            }
-                                            
-                                            Text { text: "+"; color: theme.faint; font.pixelSize: 12; font.family: "monospace" }
-
-                                            // Key capture button
-                                            Rectangle {
-                                                implicitWidth: 120; implicitHeight: 24; radius: 6
-                                                color: root.kbAddRecording ? theme.a(theme.bad, 0.2) : theme.a(theme.line, 0.4)
-                                                border.width: 1; border.color: root.kbAddRecording ? theme.bad : theme.a(theme.iris, 0.3)
-                                                Text {
-                                                    anchors.centerIn: parent
-                                                    text: root.kbAddRecording ? "press key…" : (root.kbAddKey ? root.kbAddKey : "set key combo")
-                                                    color: root.kbAddRecording ? theme.bad : theme.frost
-                                                    font.pixelSize: 11; font.family: "monospace"; font.bold: true
-                                                }
-                                                MouseArea {
-                                                    anchors.fill: parent; cursorShape: Qt.PointingHandCursor
-                                                    onClicked: { root.kbAddRecording = true; kbField.forceActiveFocus() }
-                                                }
-                                            }
-                                            Item { Layout.fillWidth: true }
-                                        }
-                                    }
-                                    
-                                    // Control buttons (Save / Cancel)
-                                    RowLayout {
-                                        Layout.fillWidth: true; spacing: 10; Layout.topMargin: 4
-                                        Item { Layout.fillWidth: true }
-                                        
-                                        // Cancel button
-                                        Rectangle {
-                                            implicitWidth: 70; implicitHeight: 28; radius: 6
-                                            color: kbcancelBtnMa.containsMouse ? theme.a(theme.bad, 0.15) : "transparent"
-                                            border.width: 1; border.color: kbcancelBtnMa.containsMouse ? theme.bad : theme.a(theme.line, 0.5)
-                                            Text { anchors.centerIn: parent; text: "Cancel"; color: kbcancelBtnMa.containsMouse ? theme.bad : theme.text; font.pixelSize: 11; font.family: "monospace" }
-                                            MouseArea {
-                                                id: kbcancelBtnMa
-                                                anchors.fill: parent; cursorShape: Qt.PointingHandCursor
-                                                onClicked: { root.kbAdding = false; root.kbAddRecording = false; kbField.forceActiveFocus() }
-                                            }
-                                        }
-                                        
-                                        // Save button
-                                        Rectangle {
-                                            readonly property bool valid: root.kbAddDesc.trim() !== "" && root.kbAddKey !== "" && root.kbAddAction.trim() !== ""
-                                            implicitWidth: 90; implicitHeight: 28; radius: 6
-                                            color: valid ? (kbsaveBtnMa.containsMouse ? theme.iris : theme.a(theme.iris, 0.2)) : theme.a(theme.line, 0.2)
-                                            border.width: 1; border.color: valid ? theme.iris : theme.a(theme.line, 0.5)
-                                            Text { anchors.centerIn: parent; text: "Save Bind"; color: parent.valid ? (kbsaveBtnMa.containsMouse ? theme.bg : theme.text) : theme.faint; font.pixelSize: 11; font.family: "monospace"; font.bold: true }
-                                            MouseArea {
-                                                id: kbsaveBtnMa
-                                                anchors.fill: parent; enabled: parent.valid; cursorShape: parent.valid ? Qt.PointingHandCursor : Qt.ArrowCursor
-                                                onClicked: root.kbApplyAddBind()
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-
-                            // recording bar: modifier chips + status
-                            RowLayout {
-                                visible: root.kbRec !== null; Layout.fillWidth: true; spacing: 8
-                                Text { text: "rebind “" + (root.kbRec ? root.kbRec.desc : "") + "”:"
-                                    color: theme.text; font.pixelSize: 11; font.family: "monospace"; font.bold: true }
-                                Repeater {
-                                    model: ["SUPER","CTRL","ALT","SHIFT"]
-                                    delegate: Rectangle {
-                                        required property string modelData
-                                        readonly property bool on: root.kbRecMods.indexOf(modelData) >= 0
-                                        implicitWidth: kmc.width + 14; implicitHeight: 22; radius: 11
-                                        color: on ? theme.a(theme.iris,0.3) : theme.a(theme.line,0.5)
-                                        border.width: 1; border.color: on ? theme.iris : theme.a(theme.line,0.9)
-                                        Text { id: kmc; anchors.centerIn: parent; text: modelData
-                                            color: on ? theme.frost : theme.faint; font.pixelSize: 10; font.family: "monospace"; font.bold: on }
-                                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
-                                            onClicked: { var m = root.kbRecMods.slice(); var i = m.indexOf(modelData);
-                                                if (i >= 0) m.splice(i,1); else m.push(modelData);
-                                                root.kbRecMods = ["SUPER","CTRL","ALT","SHIFT"].filter(x => m.indexOf(x) >= 0);
-                                                root.kbConflict = ""; kbField.forceActiveFocus() } }
-                                    }
-                                }
-                                Text { Layout.fillWidth: true; elide: Text.ElideRight
-                                    text: root.kbConflict !== "" ? root.kbConflict : "press the new key · esc cancels"
-                                    color: root.kbConflict !== "" ? theme.bad : theme.sub; font.pixelSize: 11; font.family: "monospace" }
-                            }
                             // bind rows
                             ColumnLayout {
                                 Layout.fillWidth: true; spacing: 6
@@ -2603,9 +2742,7 @@ Scope {
                                         }
                                         MouseArea { id: kbh; anchors.fill: parent; hoverEnabled: true
                                             cursorShape: modelData.canEdit ? Qt.PointingHandCursor : Qt.ArrowCursor
-                                            onClicked: { if (!modelData.canEdit) return;
-                                                root.kbRec = modelData; root.kbRecMods = modelData.mods.slice(); root.kbConflict = "";
-                                                kbField.forceActiveFocus() } }
+                                            onClicked: { if (modelData.canEdit) root.kbOpenEdit(modelData) } }
                                     }
                                 }
                             }
@@ -3331,6 +3468,123 @@ Scope {
                         }
                     }
                 }
+
+            // ================= KEYBIND EDITOR POPUP =================
+            Item {
+                id: kbModal
+                anchors.fill: parent
+                visible: root.kbRec !== null || root.kbAdding
+                // dim backdrop — clicking it cancels
+                Rectangle { anchors.fill: parent; radius: 18; color: Qt.rgba(0,0,0,0.55)
+                    MouseArea { anchors.fill: parent; onClicked: root.kbCloseEditor() } }
+                // focus sink: captures the key press while recording a shortcut
+                Item {
+                    id: kbCapture
+                    anchors.fill: parent
+                    focus: kbModal.visible
+                    Keys.onPressed: (e) => {
+                        if (e.key === Qt.Key_Escape) { root.kbCloseEditor(); e.accepted = true; return; }
+                        if (e.key===Qt.Key_Shift||e.key===Qt.Key_Control||e.key===Qt.Key_Alt||e.key===Qt.Key_Meta) { e.accepted = true; return; }
+                        if (root.kbRec && root.kbRecRecording) {
+                            var n = root.kbKeyName(e);
+                            if (n) { root.kbRecKey = n; root.kbRecRecording = false; root.kbConflict = ""; } else root.kbConflict = "unsupported key";
+                            e.accepted = true;
+                        } else if (root.kbAdding && root.kbAddRecording) {
+                            var k = root.kbKeyName(e);
+                            if (k) { root.kbAddKey = k; root.kbAddRecording = false; }
+                            e.accepted = true;
+                        }
+                    }
+                }
+                // dialog card
+                Rectangle {
+                    anchors.centerIn: parent
+                    width: Math.min(parent.width - 80, 440)
+                    implicitHeight: kbDlg.implicitHeight + 36
+                    height: implicitHeight
+                    radius: 14
+                    color: theme.a(theme.panel, 0.99)
+                    border.width: 1; border.color: theme.a(theme.iris, 0.4)
+                    MouseArea { anchors.fill: parent }   // swallow clicks so they don't hit the dim
+                    ColumnLayout {
+                        id: kbDlg
+                        anchors { left: parent.left; right: parent.right; verticalCenter: parent.verticalCenter; leftMargin: 18; rightMargin: 18 }
+                        spacing: 12
+                        // header
+                        RowLayout { Layout.fillWidth: true; spacing: 10
+                            Sym { text: root.kbAdding ? "add_circle" : "keyboard"; sz: 20; color: theme.frost }
+                            Text { Layout.fillWidth: true; elide: Text.ElideRight
+                                text: root.kbAdding ? "new keybind" : (root.kbRec ? root.kbRec.desc : "")
+                                color: theme.text; font.pixelSize: 15; font.family: "monospace"; font.bold: true }
+                            Rectangle { implicitWidth: 28; implicitHeight: 28; radius: 14
+                                color: kbXMa.containsMouse ? theme.a(theme.bad,0.25) : "transparent"
+                                Sym { anchors.centerIn: parent; text: "close"; sz: 16; color: kbXMa.containsMouse ? theme.bad : theme.faint }
+                                MouseArea { id: kbXMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.kbCloseEditor() } }
+                        }
+                        // add-mode only: description + action inputs
+                        ColumnLayout { visible: root.kbAdding; spacing: 4; Layout.fillWidth: true
+                            Text { text: "description"; color: theme.faint; font.pixelSize: 10; font.family: "monospace" }
+                            Rectangle { Layout.fillWidth: true; implicitHeight: 32; radius: 6; color: theme.a(theme.line,0.4); border.width: 1; border.color: kbDescIn2.activeFocus ? theme.iris : theme.a(theme.iris,0.14)
+                                TextInput { id: kbDescIn2; anchors.fill: parent; anchors.leftMargin: 8; anchors.rightMargin: 8; verticalAlignment: TextInput.AlignVCenter; color: theme.text; font.pixelSize: 12; font.family: "monospace"; clip: true; text: root.kbAddDesc; onTextChanged: root.kbAddDesc = text
+                                    Text { visible: kbDescIn2.text===""; text: "e.g. Launch Firefox"; color: theme.faint; font.pixelSize: 12; font.family: "monospace"; anchors.verticalCenter: parent.verticalCenter } } }
+                            Text { text: "action / command"; color: theme.faint; font.pixelSize: 10; font.family: "monospace"; Layout.topMargin: 4 }
+                            Rectangle { Layout.fillWidth: true; implicitHeight: 32; radius: 6; color: theme.a(theme.line,0.4); border.width: 1; border.color: kbActIn2.activeFocus ? theme.iris : theme.a(theme.iris,0.14)
+                                TextInput { id: kbActIn2; anchors.fill: parent; anchors.leftMargin: 8; anchors.rightMargin: 8; verticalAlignment: TextInput.AlignVCenter; color: theme.text; font.pixelSize: 12; font.family: "monospace"; clip: true; text: root.kbAddAction; onTextChanged: root.kbAddAction = text } }
+                        }
+                        // shortcut picker (both modes)
+                        Text { text: "shortcut"; color: theme.faint; font.pixelSize: 10; font.family: "monospace" }
+                        Flow { Layout.fillWidth: true; spacing: 6
+                            Repeater { model: ["SUPER","CTRL","ALT","SHIFT"]
+                                delegate: Rectangle { required property string modelData
+                                    readonly property var mods: root.kbAdding ? root.kbAddMods : root.kbRecMods
+                                    readonly property bool on: mods.indexOf(modelData) >= 0
+                                    width: kmcT.width + 16; height: 26; radius: 8
+                                    color: on ? theme.a(theme.iris,0.3) : theme.a(theme.line,0.5); border.width: 1; border.color: on ? theme.iris : theme.a(theme.line,0.9)
+                                    Text { id: kmcT; anchors.centerIn: parent; text: modelData; color: on ? theme.frost : theme.faint; font.pixelSize: 11; font.family: "monospace"; font.bold: on }
+                                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                                        onClicked: {
+                                            if (root.kbAdding) { var m = root.kbAddMods.slice(); var i = m.indexOf(modelData); if(i>=0)m.splice(i,1); else m.push(modelData); root.kbAddMods = ["SUPER","CTRL","ALT","SHIFT"].filter(x=>m.indexOf(x)>=0); }
+                                            else { var m2 = root.kbRecMods.slice(); var j = m2.indexOf(modelData); if(j>=0)m2.splice(j,1); else m2.push(modelData); root.kbRecMods = ["SUPER","CTRL","ALT","SHIFT"].filter(x=>m2.indexOf(x)>=0); root.kbConflict=""; }
+                                        } } }
+                            }
+                        }
+                        // key capture
+                        RowLayout { Layout.fillWidth: true; spacing: 10
+                            Text { text: "key"; color: theme.faint; font.pixelSize: 10; font.family: "monospace"; Layout.minimumWidth: 30 }
+                            Rectangle { id: kbKeyBox; Layout.fillWidth: true; implicitHeight: 34; radius: 8
+                                readonly property bool rec: root.kbAdding ? root.kbAddRecording : root.kbRecRecording
+                                readonly property string keyv: root.kbAdding ? root.kbAddKey : root.kbRecKey
+                                color: rec ? theme.a(theme.bad,0.18) : theme.a(theme.line,0.4); border.width: 1; border.color: rec ? theme.bad : theme.a(theme.iris,0.3)
+                                Text { anchors.centerIn: parent
+                                    text: kbKeyBox.rec ? "press a key…" : (kbKeyBox.keyv ? root.kbPretty(kbKeyBox.keyv) : "click, then press a key")
+                                    color: kbKeyBox.rec ? theme.bad : (kbKeyBox.keyv ? theme.frost : theme.faint); font.pixelSize: 12; font.family: "monospace"; font.bold: true }
+                                MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                                    onClicked: { if (root.kbAdding) root.kbAddRecording = true; else root.kbRecRecording = true; kbCapture.forceActiveFocus() } }
+                            }
+                        }
+                        // conflict / hint
+                        Text { Layout.fillWidth: true; wrapMode: Text.WordWrap
+                            text: root.kbConflict !== "" ? root.kbConflict : "pick modifiers, click the key box and press a key"
+                            color: root.kbConflict !== "" ? theme.bad : theme.faint; font.pixelSize: 10; font.family: "monospace" }
+                        // actions
+                        RowLayout { Layout.fillWidth: true; spacing: 10; Layout.topMargin: 2
+                            Item { Layout.fillWidth: true }
+                            Rectangle { implicitWidth: 76; implicitHeight: 32; radius: 7
+                                color: kbCanMa.containsMouse ? theme.a(theme.bad,0.14) : "transparent"; border.width: 1; border.color: kbCanMa.containsMouse ? theme.bad : theme.a(theme.line,0.6)
+                                Text { anchors.centerIn: parent; text: "cancel"; color: kbCanMa.containsMouse ? theme.bad : theme.text; font.pixelSize: 12; font.family: "monospace" }
+                                MouseArea { id: kbCanMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.kbCloseEditor() } }
+                            Rectangle { id: kbOkBtn
+                                readonly property bool valid: root.kbAdding ? (root.kbAddDesc.trim()!=="" && root.kbAddKey!=="" && root.kbAddAction.trim()!=="") : (root.kbRecKey!=="")
+                                implicitWidth: 92; implicitHeight: 32; radius: 7
+                                color: kbOkBtn.valid ? (kbOkMa.containsMouse ? theme.iris : theme.a(theme.iris,0.22)) : theme.a(theme.line,0.3); border.width: 1; border.color: kbOkBtn.valid ? theme.iris : theme.a(theme.line,0.5)
+                                Text { anchors.centerIn: parent; text: root.kbAdding ? "add bind" : "save"; color: kbOkBtn.valid ? (kbOkMa.containsMouse ? theme.bg : theme.text) : theme.faint; font.pixelSize: 12; font.family: "monospace"; font.bold: true }
+                                MouseArea { id: kbOkMa; anchors.fill: parent; enabled: kbOkBtn.valid; hoverEnabled: true; cursorShape: kbOkBtn.valid ? Qt.PointingHandCursor : Qt.ArrowCursor
+                                    onClicked: { if (root.kbAdding) root.kbApplyAddBind(); else root.kbApply(root.kbRecKey); } }
+                            }
+                        }
+                    }
+                }
+            }
 
             // ================= NATIVE FILE BROWSER OVERLAY =================
             Rectangle {
