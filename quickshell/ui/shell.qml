@@ -32,6 +32,10 @@ ShellRoot {
     // the bar at login; the item lands ~½s after startup, long before the user opens it.
     Loader { id: settingsLoader; asynchronous: true; active: true; source: Qt.resolvedUrl("settings.qml") }
     function openSettings(tab) { if (settingsLoader.item) settingsLoader.item.openTab(tab) }
+
+    // Moondrop DAC parametric-EQ panel — resident overlay, toggled via its "dac" IPC
+    // (SUPER+SHIFT+E). No-ops gracefully when no Moondrop device is connected.
+    DacPanel { id: dacPanel }
     property string openPop: ""      // only one dropdown open at a time
     property var openBar: null       // …and only on the monitor whose pill was clicked
     // one shared click-outside grab covering every monitor's bar + dropdowns.
@@ -2664,10 +2668,7 @@ ShellRoot {
         id: notifWin
         readonly property real ui: root.uiFor(notifWin.screen)
         readonly property real baseW: 370
-        anchors { top: true; right: true }
-        margins { top: 50 * notifWin.ui; right: 12 * notifWin.ui }
-        implicitWidth: notifWin.baseW * notifWin.ui
-        implicitHeight: Math.max(1, popCol.implicitHeight * notifWin.ui)
+        anchors { top: true; bottom: true; left: true; right: true }
         color: "transparent"
         WlrLayershell.layer: WlrLayer.Top
         WlrLayershell.namespace: "sea-shell:notif"
@@ -2676,8 +2677,15 @@ ShellRoot {
         mask: Region { item: popCol }
         // stack authored at native width; scaled up as a whole, pinned to the top-right corner
         Column {
-            id: popCol; anchors.top: parent.top; anchors.right: parent.right; width: notifWin.baseW; spacing: 8
-            transformOrigin: Item.TopRight; scale: notifWin.ui
+            id: popCol
+            anchors.top: parent.top
+            anchors.right: parent.right
+            anchors.topMargin: 50 * notifWin.ui
+            anchors.rightMargin: 12 * notifWin.ui
+            width: notifWin.baseW
+            spacing: 8
+            transformOrigin: Item.TopRight
+            scale: notifWin.ui
             Repeater {
                 model: popupModel
                 delegate: Rectangle {

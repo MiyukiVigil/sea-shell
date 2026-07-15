@@ -136,6 +136,7 @@ check_deps() {
   [ ${#optional[@]} -gt 0 ] && info "grab them all:  sudo pacman -S ${optional[*]}"
   # NB: no `grep -q` here — with pipefail, its early exit SIGPIPEs fc-list into a false warning
   fc-list 2>/dev/null | grep -i "material symbols" >/dev/null || warn "font 'Material Symbols Outlined' not found — bar icons will be boxes (yay -S ttf-material-symbols-variable)"
+  fc-list 2>/dev/null | grep -i "symbols nerd font" >/dev/null || warn "font 'Symbols Nerd Font' not found — distro/brand logos on the System page will be boxes (sudo pacman -S ttf-nerd-fonts-symbols)"
   return 0
 }
 
@@ -151,6 +152,8 @@ REPO_PKGS=(
   brightnessctl playerctl cliphist wl-clipboard       # brightness · media · clipboard
   grim slurp cava                                     # screenshots · audio visualiser
   libnotify python fd ffmpeg imagemagick curl         # notifications + helpers used by scripts
+  ttf-nerd-fonts-symbols                              # brand/distro logo glyphs on the System page
+  python-hidapi                                       # Moondrop DAC EQ panel (USB-HID control)
 )
 # AUR packages — need an AUR helper (paru/yay); bootstrapped below if absent.
 AUR_PKGS=(
@@ -206,7 +209,23 @@ install_deps() {
     warn "  ${AUR_PKGS[*]}"
   fi
   enable_services
+  install_moondrop_udev
   ok "packages done"
+}
+
+# Grant the logged-in user raw-HID access to Moondrop DACs so the EQ panel works
+# without root. Harmless if you don't own one. Idempotent.
+install_moondrop_udev() {
+  local src="$SCRIPT_DIR/moondrophub_reverse/99-moondrop.rules"
+  [ -f "$src" ] || return 0
+  info "installing Moondrop DAC udev rule (raw-HID access without root)…"
+  if sudo install -m 644 "$src" /etc/udev/rules.d/99-moondrop.rules 2>/dev/null; then
+    sudo udevadm control --reload-rules 2>/dev/null || true
+    sudo udevadm trigger 2>/dev/null || true
+    ok "Moondrop udev rule installed (replug the DAC if it's connected)"
+  else
+    warn "couldn't install the Moondrop udev rule — the EQ panel will need root until you add it"
+  fi
 }
 
 hypr_block() {

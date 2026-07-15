@@ -123,6 +123,30 @@ Scope {
 
     // ---------- system overview (System tab) ----------
     property var sysInfo: ({ gpus: [] })
+
+    // brand glyphs from "Symbols Nerd Font" (Font Logos range) — recolour like any icon
+    readonly property string nfKernel:  "\uf31a"   // Tux
+    readonly property string nfHypr:    "\uf359"   // Hyprland
+    readonly property string nfWayland: "\uf367"   // Wayland
+    readonly property string nfXorg:    "\uf369"   // Xorg (X11 sessions)
+    // distro id → logo glyph. CachyOS has no glyph (drawn by CachyLogo instead); falls
+    // back through ID_LIKE (e.g. "arch") and finally to Tux for anything unknown.
+    function distroGlyph(id, idlike) {
+        var m = { arch:"\uf303", endeavouros:"\uf322", manjaro:"\uf312", artix:"\uf31f",
+                  garuda:"\uf337", archcraft:"\uf345", arcolinux:"\uf346", archlabs:"\uf31e",
+                  debian:"\uf306", ubuntu:"\uf31b", pop:"\uf32a", linuxmint:"\uf30e",
+                  elementary:"\uf309", zorin:"\uf32f", kali:"\uf327", parrot:"\uf329",
+                  fedora:"\uf30a", rhel:"\uf316", centos:"\uf304", almalinux:"\uf31d",
+                  rocky:"\uf32b", nixos:"\uf313", gentoo:"\uf30d", void:"\uf32e",
+                  opensuse:"\uf314", "opensuse-tumbleweed":"\uf314", "opensuse-leap":"\uf314",
+                  alpine:"\uf300", solus:"\uf32d", devuan:"\uf307", raspbian:"\uf315" };
+        id = (id || "").toLowerCase();
+        if (m[id]) return m[id];
+        var like = (idlike || "").toLowerCase().split(/\s+/);
+        for (var i = 0; i < like.length; i++) if (m[like[i]]) return m[like[i]];
+        return nfKernel;   // Tux
+    }
+
     Process { id: sysProc; running: true
         command: ["bash", root.repo + "/sea-sysinfo.sh"]
         stdout: StdioCollector { id: sysOut; onStreamFinished: {
@@ -1348,13 +1372,14 @@ Scope {
     // one key/value tile for the About/System dashboard
     component InfoTile: Rectangle {
         property string icon: ""
+        property string iconFont: "Material Symbols Outlined"   // set "Symbols Nerd Font" for brand/distro glyphs
         property string label: ""
         property string value: "…"
         Layout.fillWidth: true; implicitHeight: 46; radius: 11
         color: theme.a(theme.line, 0.24); border.width: 1; border.color: theme.a(theme.iris, 0.10)
         RowLayout {
             anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 12; spacing: 11
-            Sym { text: icon; sz: 19; color: theme.iris }
+            Sym { text: icon; sz: 19; color: theme.iris; font.family: iconFont }
             ColumnLayout {
                 spacing: 1; Layout.fillWidth: true
                 Text { text: label; color: theme.faint; font.pixelSize: 9; font.family: "monospace"; font.bold: true; font.letterSpacing: 1 }
@@ -2778,7 +2803,10 @@ Scope {
                                         RowLayout { spacing: 7
                                             Sym { text: "person"; sz: 14; color: theme.frost }
                                             Text { text: root.sysInfo.host || "…"; color: theme.frost; font.pixelSize: 13; font.family: "monospace" }
-                                            Sym { text: "deployed_code"; sz: 14; color: theme.faint; Layout.leftMargin: 6 }
+                                            // distro logo: CachyOS is drawn (no Nerd glyph exists); everything else uses the Font Logos glyph
+                                            CachyLogo { visible: root.sysInfo.id === "cachyos"; size: 15; color: theme.faint; Layout.leftMargin: 6 }
+                                            Text { visible: root.sysInfo.id !== "cachyos"; text: root.distroGlyph(root.sysInfo.id, root.sysInfo.idlike)
+                                                font.family: "Symbols Nerd Font"; font.pixelSize: 14; color: theme.faint; Layout.leftMargin: 6 }
                                             Text { text: root.sysInfo.os || "…"; color: theme.sub; font.pixelSize: 12; font.family: "monospace"; elide: Text.ElideRight; Layout.fillWidth: true }
                                         }
                                     }
@@ -2793,9 +2821,11 @@ Scope {
                             Section { title: "system"; icon: "monitor_heart" }
                             GridLayout {
                                 Layout.fillWidth: true; columns: 2; columnSpacing: 10; rowSpacing: 8
-                                InfoTile { icon: "terminal";        label: "KERNEL";     value: root.sysInfo.kernel || "…" }
-                                InfoTile { icon: "dashboard";       label: "COMPOSITOR"; value: root.sysInfo.wm ? ("Hyprland " + root.sysInfo.wm) : "Hyprland" }
-                                InfoTile { icon: "desktop_windows"; label: "SESSION";    value: root.sysInfo.session ? (root.sysInfo.session.charAt(0).toUpperCase() + root.sysInfo.session.slice(1)) : "Wayland" }
+                                InfoTile { icon: root.nfKernel; iconFont: "Symbols Nerd Font"; label: "KERNEL"; value: root.sysInfo.kernel || "…" }
+                                InfoTile { icon: root.nfHypr;   iconFont: "Symbols Nerd Font"; label: "COMPOSITOR"; value: root.sysInfo.wm ? ("Hyprland " + root.sysInfo.wm) : "Hyprland" }
+                                InfoTile { iconFont: "Symbols Nerd Font"; label: "SESSION"
+                                    icon: (root.sysInfo.session === "x11" || root.sysInfo.session === "tty") ? root.nfXorg : root.nfWayland
+                                    value: root.sysInfo.session ? (root.sysInfo.session.charAt(0).toUpperCase() + root.sysInfo.session.slice(1)) : "Wayland" }
                                 InfoTile { icon: "aspect_ratio";    label: "RESOLUTION"; value: root.sysInfo.res || "…" }
                                 InfoTile { icon: "code";            label: "SHELL";      value: root.sysInfo.shell || "…" }
                                 InfoTile { icon: "inventory_2";     label: "PACKAGES";   value: root.sysInfo.pkgs ? (root.sysInfo.pkgs + "  ·  pacman") : "…" }

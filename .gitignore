@@ -1,0 +1,3 @@
+# Python virtualenv for the Moondrop DAC tool — machine-local, never committed
+# (the tool runs fine against the system `python-hidapi`; the venv is optional/dev-only)
+moondrophub_reverse

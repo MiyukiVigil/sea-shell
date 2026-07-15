@@ -35,6 +35,8 @@ Scope {
     property var results: []
     property var fileHits: []      // async fd results for ~ mode
     property var clipLines: []     // cached `cliphist list` lines for ; mode
+    readonly property string clipThumbDir: "/tmp/sea-clip-thumbs"  // decoded image previews, keyed by cliphist id
+    property int clipThumbTick: 0  // bumps when thumbs finish generating → image rows reload their source
     property var hist: ({})        // app id → {n: launches, t: last epoch} (frecency)
     property string histPath: ""
     property bool shown: false     // logical open state
@@ -42,6 +44,7 @@ Scope {
 
     function open(prefix) {
         clipProc.running = true                     // refresh clipboard cache on every open
+        clipThumbProc.running = true                // (re)generate image previews for ; mode
         apProc.running = true                       // re-read accent + light/dark each open
         field.text = prefix; root.query = prefix; root.sel = 0
         root.shown = true
@@ -242,6 +245,17 @@ Scope {
             root.clipLines = out; if (root.query.startsWith(";")) root.refresh();
         } } }
 
+    // decode every image entry to a small square thumbnail (cached by cliphist id) so the
+    // ; picker shows real previews instead of a generic glyph. Always overwrites — ids can
+    // be reused after a `cliphist wipe`, so a stale cache would show the wrong image.
+    Process { id: clipThumbProc
+        command: ["sh","-c",
+            "d=" + root.clipThumbDir + "; mkdir -p \"$d\"; " +
+            "cliphist list 2>/dev/null | head -80 | awk -F'\\t' '$2 ~ /^\\[\\[ binary data/{print $1}' | " +
+            "while read -r id; do cliphist decode \"$id\" 2>/dev/null | " +
+            "magick - -thumbnail 120x120^ -gravity center -extent 120x120 png:\"$d/$id.png\" 2>/dev/null; done; echo ok"]
+        stdout: StdioCollector { onStreamFinished: root.clipThumbTick++ } }
+
     // ---------- build the result list for the current query ----------
     function refresh() {
         var q = root.query, out = [], i;
@@ -270,7 +284,7 @@ Scope {
                 var m = cq==="" ? {score:0,pos:[]} : fuzzy(cq, label);
                 if (!m) continue;
                 out.push({type:"clip", title: img ? esc(label) : highlight(label, m.pos),
-                          sub: img ? "⏎ copy image" : "⏎ copy text", mi: img ? "image" : "content_paste", exec: cid});
+                          sub: img ? "⏎ copy image" : "⏎ copy text", mi: img ? "image" : "content_paste", exec: cid, clipImg: img});
             }
             if (!out.length) out = [{type:"hint", title:"clipboard history", sub: root.clipLines.length ? "no match" : "history is empty", mi:"content_paste"}];
         } else if (q.startsWith("?") || q.toLowerCase().startsWith("g ") || q.toLowerCase().startsWith("yt ") || q.toLowerCase().startsWith("gh ")) {
@@ -492,9 +506,17 @@ Scope {
                         anchors { left: parent.left; leftMargin: 12; verticalCenter: parent.verticalCenter }
                         property string ip: modelData.entry ? Quickshell.iconPath(modelData.entry.icon, true) : ""
                         IconImage { anchors.fill: parent; visible: ic.ip!=="" && !modelData.emoji; source: ic.ip }
+                        // clipboard image entry → live thumbnail (decoded from cliphist); falls back to the glyph until it's ready
+                        Rectangle { visible: !!modelData.clipImg; anchors.fill: parent; radius: 7; clip: true
+                            color: theme.a(theme.iris, 0.10); border.width: 1; border.color: theme.a(theme.iris, 0.35)
+                            Image { id: thumbImg; anchors.fill: parent; anchors.margins: 1; asynchronous: true; cache: false
+                                fillMode: Image.PreserveAspectCrop; sourceSize.width: 60; sourceSize.height: 60
+                                source: modelData.clipImg ? ("file://" + root.clipThumbDir + "/" + modelData.exec + ".png?t=" + root.clipThumbTick) : "" }
+                            Text { anchors.centerIn: parent; visible: thumbImg.status !== Image.Ready
+                                text: "image"; font.family: "Material Symbols Outlined"; font.pixelSize: 18; color: theme.iris } }
                         // emoji glyph (from the . picker) rendered in the system emoji font
                         Text { anchors.centerIn: parent; visible: !!modelData.emoji; text: modelData.emoji||""; font.pixelSize: 24 }
-                        Text { anchors.centerIn: parent; visible: ic.ip==="" && !!modelData.mi && !modelData.emoji; text: modelData.mi||""
+                        Text { anchors.centerIn: parent; visible: ic.ip==="" && !!modelData.mi && !modelData.emoji && !modelData.clipImg; text: modelData.mi||""
                             font.family: "Material Symbols Outlined"; font.pixelSize: 22
                             color: modelData.warn ? theme.bad : theme.iris }
                         Rectangle { anchors.fill: parent; radius: 8; visible: ic.ip==="" && !modelData.mi && !modelData.emoji

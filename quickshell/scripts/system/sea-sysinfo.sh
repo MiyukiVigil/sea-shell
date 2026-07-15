@@ -7,6 +7,8 @@
 . /etc/os-release 2>/dev/null
 
 printf 'os=%s\n'     "${PRETTY_NAME:-Linux}"
+printf 'id=%s\n'     "${ID:-linux}"          # distro id (cachyos, arch, …) → picks the logo glyph
+printf 'idlike=%s\n' "${ID_LIKE:-}"          # fallback family (e.g. "arch") when id has no glyph
 printf 'host=%s@%s\n' "$USER" "$(hostnamectl hostname 2>/dev/null || hostname 2>/dev/null)"
 printf 'kernel=%s\n' "$(uname -r)"
 printf 'arch=%s\n'   "$(uname -m)"

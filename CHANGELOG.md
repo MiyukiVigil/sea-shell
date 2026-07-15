@@ -5,6 +5,75 @@ All notable changes to **sea-shell** are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [3.1.0] — 2026-07-15
+
+A DAC release. The Moondrop equaliser lands in full — one-tap presets, an in-shell
+import for AutoEQ files, a revert that actually works, and a **software EQ** escape
+hatch so the same curves run on hardware this panel can't drive. Plus clipboard
+thumbnails and real brand logos on the System page.
+
+### Added
+
+- **Moondrop DAC equaliser** — a native control panel (SUPER+SHIFT+E) for Moondrop
+  USB DACs / DSP cables (DAWN PRO2, FreeDSP, Rays, MOONRIVER 3, …). Full 8-band
+  parametric EQ with a **live, region-labelled frequency-response graph** (SUB →
+  AIR zones so you can see what each part tunes) — drag any band point to set
+  frequency/gain, scroll to change Q — an **all-bands column editor** (type · gain ·
+  freq · Q per band), pre-gain, global offset, and save-to-flash. Edits apply to the
+  DSP in real time and persist only when you save. Built on a reverse-engineered
+  USB-HID protocol; the installer adds `python-hidapi` and a udev rule so it works
+  without root. No-ops gracefully with no DAC connected.
+- **One-tap presets** — eight starting curves (Flat, Bass, V-shape, Vocals, Warm,
+  Air, Podcast, Loudness) fill every band and set a matching pre-gain, ready to
+  tweak. Each preset is checked against the firmware's coefficient range, so none
+  of them get silently altered on the way to the DAC.
+- **Import, in-shell** — pick an AutoEQ / REW `ParametricEQ.txt` (or a previously
+  exported `.json`) from a file dialog and it's applied live, so you can audition a
+  measured preset for your headphones before committing it to flash.
+- **Revert** — undo unsaved edits back to the DAC's last saved state. Reloading
+  can't do this: edits go to the DSP live, so re-reading only ever returns what you
+  just wrote, never what flash still holds. The panel keeps its own snapshot.
+- **Universal (software) EQ — works on any output device** — the bands above run on
+  the DAC's own chip, so they only exist on supported Moondrop hardware. The same
+  curves can now be rendered as a PipeWire filter-chain instead, which applies to
+  *anything*: another brand's DAC, laptop speakers, Bluetooth. Needs no Moondrop
+  device at all — feed it an AutoEQ file directly:
+
+  ```
+  moondrop_control.py --to-pipewire eq.conf --from-rew ParametricEQ.txt
+  cp eq.conf ~/.config/pipewire/pipewire.conf.d/
+  systemctl --user restart pipewire pipewire-pulse
+  ```
+
+  Then select the “Universal EQ” sink. Software biquads are floating point, so the
+  handful of shelf gains the DAC's fixed-point DSP has to refuse work fine here.
+- **Built-in “how to tune” guide** — for anyone who's never touched an EQ: four
+  rules, what each frequency region does (colour-matched to the graph), and quick
+  recipes. Every filter shape and recipe is illustrated with a real response curve
+  drawn from the same maths as the main graph, so the pictures can't drift from
+  what the filters actually do.
+- **Image thumbnails in the clipboard picker** — copied images now show a live
+  preview in the `;` clipboard history (launcher) instead of a generic icon. Each
+  image entry is decoded from `cliphist` to a small cached thumbnail
+  (`/tmp/sea-clip-thumbs`, keyed by id), rendered rounded with an accent border;
+  text entries are unchanged. Uses the existing `imagemagick` dependency.
+
+### Changed
+
+- **Real brand logos on the System page** — the *Settings → System* overview now
+  shows proper logos instead of generic glyphs: the **distro** (CachyOS, Arch,
+  EndeavourOS, Manjaro, Fedora, NixOS, … — ~30 mapped, with a Tux fallback for the
+  rest), the **kernel** (Tux), the **compositor** (Hyprland), and the **session**
+  (Wayland / Xorg). They recolour with the theme accent like every other icon.
+  CachyOS ships no icon-font glyph, so its mark is drawn natively (`CachyLogo.qml`).
+  Adds a dependency on `ttf-nerd-fonts-symbols` (the installer now pulls it in and
+  warns if it's missing).
+
+### Fixed
+- Notification when multiple appears and close will have a rectangle shadow like box coming out when closing (hard to describe forgive me)
+
 ## [3.0.0] — 2026-07-14
 
 The 3.0 release makes the shell comfortable on any display and hands you far more
