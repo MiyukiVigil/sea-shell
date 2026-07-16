@@ -7,6 +7,99 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.2.0] — 2026-07-16
+
+A recorder and an equaliser release. **Screen recording** stops being a blind region
+drag: pick what to capture and which audio — including mic and system together, which
+wf-recorder can't do alone — and it no longer interrupts anything. The **equaliser stops
+needing a DAC**: with no Moondrop plugged in the same panel runs the filters in PipeWire
+instead, on your speakers or anything else. And it gains **Moondrop Hub's community
+library** — ~59,700 user-made curves, searchable, previewed before you apply.
+
+### Added
+
+- **The EQ panel no longer needs a DAC.** With a supported Moondrop device the filters run
+  on its DSP as before; without one, the same panel drives a **software EQ** through a
+  PipeWire filter-chain — laptop speakers, another brand's DAC, bluetooth. It picks
+  automatically, and a `DAC | software` toggle forces software even with a DAC plugged in
+  (software has no Q2.30 limit, so the shelf gains the DAC must refuse work there).
+  Community presets, AutoEQ import, the graph and the preset row all work either way.
+  DAC-only controls (device slot, global offset) hide themselves in software rather than
+  sitting there doing nothing.
+- **`sea-eq.py`** — the software EQ is now sea-shell's own script, standalone: pipewire only,
+  no Moondrop code, no `hidapi` import, usable from a terminal without this shell
+  (`sea-eq.py --apply --from-rew ParametricEQ.txt`). It previously lived in
+  `moondrop_control.py`, which is vendored from hub_moon and had no business knowing about
+  pipewire — that file is now purely a USB-HID DAC controller. Its response maths is an
+  independent standard-RBJ implementation (the DAC's uses Moondrop's swapped coefficient
+  layout, which would be wrong here); checked against the old one across 12 real community
+  presets, agreeing to within 0.42 dB — the difference 48 kHz vs 96 kHz explains.
+- **Software EQ setup is managed, and doesn't interrupt anything** — the first apply asks,
+  then writes one config to `filter-chain.conf.d` and starts `filter-chain.service`. That's
+  a *separate* pipewire instance, so unlike the usual `pipewire.conf.d` recipe the main
+  daemon is never restarted and no stream on the machine is dropped. Verified: main
+  pipewire's pid is unchanged across install, apply, re-apply and remove.
+  Editing is apply-based: pipewire 1.6 still advertises per-band control params but
+  silently ignores writes to them (the graph moved under `audioconvert.filter-graph`), so
+  a change re-renders and reloads — ~1s, on that sink alone. The panel says so.
+
+- **Community presets in the DAC panel** — a *community* button opens a browser over
+  the ~59,700-curve public library behind Moondrop Hub, searchable by name, author or
+  description (the search runs over the whole library, not just the page you can see),
+  sorted by downloads. Applying one fills every band through the same path the built-in
+  presets use. You get your device family's whole pool — a DAWN PRO2 sees ~6,900 curves,
+  not just its own 1,270 — because the server pools by shared config group. Reads need
+  no account, and the panel never publishes or likes. Browsing opens no hidraw handle,
+  so it can't collide with a band write in flight.
+- **Preview before you apply** — clicking a preset draws its response; only the *apply*
+  button touches the DAC. Titles like "三角洲" tell you nothing about what happens at
+  3 kHz, and auditioning 59,700 strangers' curves one write at a time is not a plan.
+  The preview also reports whether that curve would clip at your current pre-gain, which
+  a published preset can't tell you — they carry bands and nothing else.
+- **Back to top** in the preset list, once you're scrolled past the first rows.
+- **Official-style response readout** — the graph gets a toggle (top-right) between the
+  editor and the readout `hub.moondroplab.tech` draws: normalised so the flat reference
+  sits at 60 dB, one curve, pre-gain paid for. Verified against the official app's own
+  chart for the same preset — same dip at 200 Hz, same peak at 5.5 kHz, same rolloff.
+  The editor view now also shows the *Flat* reference and a dashed **output** curve with
+  pre-gain applied, so a +6 dB boost no longer looks free.
+- **Screen recorder, rebuilt** (`SUPER+R`) — a chooser instead of an instant region
+  drag: pick **what to capture** (region · focused screen · a named output) and **which
+  audio** (none · microphone · system · **mic + system together**), plus framerate,
+  container (mp4/mkv/webm) and CPU/GPU (VAAPI) encoding. Choices persist to
+  `~/.config/sea-shell/recorder.json` and are passed as flags too, so a bare
+  `sea-record.sh start` in a terminal reproduces exactly what the panel last did.
+  `SUPER+R` stops a running recording rather than opening the chooser.
+- **Mic + system audio at once** — wf-recorder takes exactly one `--audio` device, so
+  the shell builds the mix itself (null sink + two loopbacks, recorded via its monitor).
+  Torn down on stop, and swept on the next start *and* on the bar's status tick, so a
+  killed recording can't strand a loopback holding the microphone open. The default sink
+  is saved and restored across the mix, so loading it can't silently re-point playback.
+- **Bit-perfect warning** — a player holding the DAC directly over ALSA bypasses
+  pipewire, which makes the monitor system audio records from real, readable and
+  *silent*. The chooser detects the exclusive hold and says so before you record.
+- **Countdown** (off/3s/5s) drawn by the shell, click-through so it can't steal the
+  pointer from whatever you're about to record, and gone before the first frame.
+- **Recorder pill** — pulsing red dot + timer. Left-click stops and keeps (path to the
+  clipboard, file size in the notification); right-click discards, arming first and
+  showing `discard?` so a stray click can't delete a take.
+- Device names in the chooser resolve the way a person would name them: a card with one
+  output *is* the device ("DAWN PRO2"), a card with several is named by port ("Speaker",
+  "HDMI / DisplayPort 2 Output") — instead of four chips all reading "Alder Lake PCH-P…".
+
+### Fixed
+
+- **The recorder could SIGTERM an unrelated process.** Liveness was `kill -0 <pid>`,
+  which after the recorder exits is a question about whoever the kernel handed that pid
+  to next. Stopping a dead recording would signal that stranger, then SIGKILL it five
+  seconds later; status would also report a phantom recording forever. It now verifies
+  the pid is still `wf-recorder` via `/proc/<pid>/comm`.
+- `sea-record.sh status` exited non-zero when idle, breaking `&&` chains.
+- A recording that fails to start (bad codec, missing render node, busy device) now says
+  why, instead of silently never showing the pill.
+- `wf-recorder` and `jq` were missing from the installer's package list, so screen
+  recording was quietly unavailable on a fresh install.
+
 ## [3.1.0] — 2026-07-15
 
 A DAC release. The Moondrop equaliser lands in full — one-tap presets, an in-shell
@@ -29,9 +122,14 @@ thumbnails and real brand logos on the System page.
   Air, Podcast, Loudness) fill every band and set a matching pre-gain, ready to
   tweak. Each preset is checked against the firmware's coefficient range, so none
   of them get silently altered on the way to the DAC.
-- **Import, in-shell** — pick an AutoEQ / REW `ParametricEQ.txt` (or a previously
-  exported `.json`) from a file dialog and it's applied live, so you can audition a
-  measured preset for your headphones before committing it to flash.
+- **Import and export, with a file browser built into the panel** — no external
+  dialog: the panel is a layer-shell overlay holding exclusive keyboard focus, so a
+  zenity/portal window would open *underneath* it and never take focus. Browse
+  straight from the panel instead (Home / Downloads / Documents shortcuts, folder
+  navigation, filtered listing). **Import** an AutoEQ / REW `ParametricEQ.txt` or a
+  saved `.json` — applied live, so you can audition a measured preset for your
+  headphones before committing it to flash. **Export** either a full JSON backup or
+  a ready-to-use PipeWire software-EQ config.
 - **Revert** — undo unsaved edits back to the DAC's last saved state. Reloading
   can't do this: edits go to the DSP live, so re-reading only ever returns what you
   just wrote, never what flash still holds. The panel keeps its own snapshot.

@@ -124,7 +124,7 @@ check_deps() {
   done
   # used by the bar / launcher / keybinds — everything still works without them,
   # just with that feature missing
-  for d in grim slurp wl-copy cliphist fd playerctl brightnessctl hyprlock hypridle hyprsunset; do
+  for d in grim slurp wl-copy cliphist fd playerctl brightnessctl hyprlock hypridle hyprsunset wf-recorder jq; do
     command -v "$d" >/dev/null 2>&1 || optional+=("$d")
   done
   # static wallpapers want swww (or its awww fork); animated ones want mpvpaper
@@ -151,7 +151,8 @@ REPO_PKGS=(
   xdg-desktop-portal-gtk adw-gtk-theme                # GTK/Qt/browser light-dark follows the shell
   brightnessctl playerctl cliphist wl-clipboard       # brightness · media · clipboard
   grim slurp cava                                     # screenshots · audio visualiser
-  libnotify python fd ffmpeg imagemagick curl         # notifications + helpers used by scripts
+  wf-recorder                                         # screen recording (SUPER+R)
+  libnotify python fd ffmpeg imagemagick curl jq      # notifications + helpers used by scripts
   ttf-nerd-fonts-symbols                              # brand/distro logo glyphs on the System page
   python-hidapi                                       # Moondrop DAC EQ panel (USB-HID control)
 )

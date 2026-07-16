@@ -36,6 +36,18 @@ ShellRoot {
     // Moondrop DAC parametric-EQ panel — resident overlay, toggled via its "dac" IPC
     // (SUPER+SHIFT+E). No-ops gracefully when no Moondrop device is connected.
     DacPanel { id: dacPanel }
+
+    // Screen recorder chooser — resident overlay, toggled via its "recorder" IPC
+    // (SUPER+R). It owns the whole SUPER+R semantic: stops a running recording,
+    // otherwise opens. `recording` is fed from the status poll above so it knows which.
+    // The exclusive hold is passed through so it can warn that system audio recorded
+    // from a monitor will be silent while a DAC is playing bit-perfect past pipewire.
+    RecorderPanel {
+        id: recPanel
+        recording: root.recordingActive
+        exclusiveHold: root.dacExclusive
+        exclusiveName: root.dacModel
+    }
     property string openPop: ""      // only one dropdown open at a time
     property var openBar: null       // …and only on the monitor whose pill was clicked
     // one shared click-outside grab covering every monitor's bar + dropdowns.
@@ -118,6 +130,7 @@ ShellRoot {
     property string cfgBarFill: "matugen"    // top-bar fill: matugen (accent-tinted) · black · white
     property string cfgEdge: "top"           // which screen edge the bar docks to: top or bottom
     property bool cfgMpris: true
+    property bool cfgDac: true
     property bool cfgTray: true
     property bool cfgWeather: true
     property bool cfgClipboard: true
@@ -138,16 +151,29 @@ ShellRoot {
     // Values are the widget ids; the bar positions each right-group pill by its index here,
     // so reordering this list reorders the pills. Unknown/absent ids fall to the far end.
     // wgMpris is the centre pill and ignores its position; wgRec is the transient recorder.
-    readonly property var defaultWidgetOrder: ["wgMpris","wgTray","wgQuick","wgWeather","wgClipboard","wgNotif","wgWifi","wgBluetooth","wgCaffeine","wgNight","wgSystem","wgVolume","wgBattery","wgRec","wgClock","wgPower"]
+    readonly property var defaultWidgetOrder: ["wgMpris","wgTray","wgQuick","wgWeather","wgClipboard","wgNotif","wgWifi","wgBluetooth","wgCaffeine","wgNight","wgSystem","wgDac","wgVolume","wgBattery","wgRec","wgClock","wgPower"]
     property var cfgWidgetOrder: root.defaultWidgetOrder
     // left cluster order (logo · workspaces · window-title) — drag-reorder in Settings → Bar widgets
     readonly property var defaultLeftOrder: ["lgLogo","lgWork","lgTitle"]
     property var cfgLeftOrder: root.defaultLeftOrder
     // append any ids missing from a saved order (e.g. new ones added in an update)
+    // Merge widgets added by an update into a saved order. They land where the
+    // default order says they belong -- immediately after the nearest earlier
+    // default-neighbour the saved order already has -- rather than being pushed
+    // onto the end. Appending was wrong on a right-anchored bar: the end is past
+    // the power button, which is deliberately last, so every new widget arrived
+    // in the one position nothing should occupy.
     function reconcileOrder(order, def) {
         var res = order.slice();
-        for (var i = 0; i < def.length; i++)
-            if (res.indexOf(def[i]) < 0) res.push(def[i]);
+        for (var i = 0; i < def.length; i++) {
+            if (res.indexOf(def[i]) >= 0) continue;
+            var at = res.length;                       // nothing to anchor to → end
+            for (var j = i - 1; j >= 0; j--) {
+                var k = res.indexOf(def[j]);
+                if (k >= 0) { at = k + 1; break; }
+            }
+            res.splice(at, 0, def[i]);
+        }
         return res;
     }
     // horizontal bar only — left/right (a vertical bar) was removed; this shell was never
@@ -202,6 +228,7 @@ ShellRoot {
             if (j.font    !== undefined && (""+j.font).length>0)   root.cfgFont   = j.font;
             if (j.mode    !== undefined) root.cfgLight = (""+j.mode === "light");
             if (j.wgMpris !== undefined) root.cfgMpris = !!j.wgMpris;
+            if (j.wgDac !== undefined) root.cfgDac = !!j.wgDac;
             if (j.wgTray !== undefined) root.cfgTray = !!j.wgTray;
             if (j.wgWeather !== undefined) root.cfgWeather = !!j.wgWeather;
             if (j.wgClipboard !== undefined) root.cfgClipboard = !!j.wgClipboard;
@@ -342,6 +369,110 @@ ShellRoot {
     property var sinks: (Pipewire.nodes ? Pipewire.nodes.values : []).filter(function (n) { return n && n.isSink && !n.isStream && n.audio })
     PwObjectTracker { objects: { var a = []; if (Pipewire.defaultAudioSink) a.push(Pipewire.defaultAudioSink); for (var i=0;i<root.sinks.length;i++) a.push(root.sinks[i]); return a } }
     function nodeName(n) { return n ? (n.description || n.nickname || n.name || "device") : "" }
+
+    // ---------- moondrop dac ----------
+    // Identifying the DAC rides entirely on PipeWire, and deliberately never opens
+    // the device. ALSA publishes a USB card's vendor/product as "USB<vid>:<pid>" in
+    // alsa.components ("USB35d8:011d" for a DAWN PRO2) -- exactly the key the
+    // script's registry is indexed by -- so a passive indicator needs no hidraw at
+    // all. That matters: DacPanel serialises every call through one queue because
+    // two processes on the same hidraw pick up each other's replies. A pill that
+    // polled --json would be the second process.
+    //
+    // The registry itself comes from the script (--registry is the one flag that
+    // touches no hardware), so this file never hardcodes a product ID.
+    readonly property string _dacScript: Qt.resolvedUrl("moondrop_control.py").toString().replace("file://","")
+    property var dacRegistry: null
+    Process {
+        id: dacRegProc
+        command: ["python3", root._dacScript, "--registry"]
+        running: true
+        stdout: StdioCollector { id: dacRegOut; onStreamFinished: {
+            try { root.dacRegistry = JSON.parse(dacRegOut.text.trim() || "null"); }
+            catch (e) { root.dacRegistry = null; }   // no registry → no pill, rather than a guess
+        } }
+    }
+
+    // "USB35d8:011d" → "011d". Empty for anything that isn't this vendor.
+    function dacPidOf(node) {
+        if (!node || !node.properties || !root.dacRegistry) return "";
+        var comp = node.properties["alsa.components"] || "";
+        var m = new RegExp("USB" + root.dacRegistry.vendor_id + ":([0-9a-fA-F]{4})", "i").exec(comp);
+        return m ? m[1].toLowerCase() : "";
+    }
+    readonly property var dacNode: {
+        if (!root.dacRegistry) return null;
+        var ns = root.sinks;
+        for (var i = 0; i < ns.length; i++) if (root.dacPidOf(ns[i]) !== "") return ns[i];
+        return null;
+    }
+    readonly property string dacPidPw: root.dacPidOf(root.dacNode)
+    // ---- exclusive / bit-perfect playback ----
+    // PipeWire is NOT the source of truth for playback. A bit-perfect player (SONE,
+    // TIDAL) opens the card directly via exclusive ALSA: the graph never sees the
+    // stream, defaultAudioSink cheerfully reports "Speaker" while the music is
+    // physically going through the DAC, and PipeWire may not even keep a node for
+    // a card it cannot open. So identification here goes around PipeWire entirely —
+    // the kernel says who holds the card, and /proc/asound/cardN/usbid says what
+    // that card IS ("35d8:011d"), which is the same USB pair the script's registry
+    // is keyed by. One scan answers both "is anything bypassing the graph" and
+    // "is that thing a Moondrop".
+    property string exclCard: ""     // ALSA card index held outside pipewire
+    property string exclUsbId: ""    // its "vid:pid", empty for non-USB cards
+    property string exclHolder: ""   // owning process name, e.g. "alsa-writer"
+    Process {
+        id: dacExclProc
+        command: ["sh","-c",
+            "for d in /proc/asound/card*/pcm*p/sub*; do " +
+              "[ -f \"$d/status\" ] || continue; " +
+              "s=$(head -1 \"$d/status\"); case \"$s\" in *closed*) continue;; esac; " +
+              "pid=$(awk '/owner_pid/{print $3}' \"$d/status\"); " +
+              "comm=$(cat /proc/$pid/comm 2>/dev/null); " +
+              "case \"$comm\" in pipewire*|wireplumber*) continue;; esac; " +
+              "c=${d#/proc/asound/card}; c=${c%%/*}; " +
+              "printf '%s|%s|%s' \"$c\" \"$(cat /proc/asound/card$c/usbid 2>/dev/null)\" \"$comm\"; " +
+              "exit 0; " +
+            "done"]
+        stdout: StdioCollector { id: dacExclOut; onStreamFinished: {
+            var p = dacExclOut.text.trim().split("|");
+            root.exclCard = p[0] || ""; root.exclUsbId = (p[1] || "").toLowerCase(); root.exclHolder = p[2] || "";
+        } } }
+    // Cannot be gated on dacPresent: presence now partly DEPENDS on this scan, and
+    // a timer waiting on its own result never fires. It is a few /proc reads.
+    Timer { interval: 2000; running: true; repeat: true; triggeredOnStart: true
+            onTriggered: dacExclProc.running = true }
+
+    // The exclusively-held card, named through the script's registry — "" when
+    // nothing bypasses pipewire, or when what does isn't a DAC we know.
+    readonly property string dacPidExcl: {
+        if (!root.dacRegistry || root.exclUsbId === "") return "";
+        var p = root.exclUsbId.split(":");
+        if (p.length !== 2 || p[0] !== root.dacRegistry.vendor_id) return "";
+        return root.dacRegistry.supported[p[1]] ? p[1] : "";
+    }
+    // Prefer PipeWire's answer (reactive, no polling); fall back to the ALSA scan,
+    // which is the only one that still works once the card has been taken.
+    readonly property string dacPid: root.dacPidPw !== "" ? root.dacPidPw : root.dacPidExcl
+    readonly property bool dacPresent: root.dacPid !== ""
+    readonly property bool dacExclusive: root.dacPidExcl !== ""
+    // Two ways it counts as the output: PipeWire routes to it, or something
+    // bypassed PipeWire and took the card for itself.
+    readonly property bool dacActive: root.dacExclusive
+                                      || (root.dacNode !== null && Pipewire.defaultAudioSink !== null
+                                          && Pipewire.defaultAudioSink.id === root.dacNode.id)
+    // Whichever path found it, the NAME comes from the script's registry — nothing
+    // here hardcodes a product ID.
+    readonly property string dacModel: (root.dacRegistry && root.dacPid && root.dacRegistry.supported[root.dacPid]) || ""
+    // Recognised-but-not-driveable (the Old Fashioned) stays out of the pill: it is
+    // a Moondrop, but the panel cannot tune it, so claiming otherwise would lie.
+    readonly property bool dacSupported: root.dacModel !== ""
+
+    // Short name for a sink: the nickname ("Speaker") beats the description
+    // ("Alder Lake PCH-P High Definition Audio Controller Speaker") on a bar.
+    function sinkShort(n) { return n ? (n.nickname || n.description || n.name || "output") : "—" }
+    readonly property string outputLabel:
+        root.dacActive ? (root.dacModel + (root.dacExclusive ? " · exclusive" : ""))
+                       : root.sinkShort(Pipewire.defaultAudioSink)
 
     // ---------- wifi ----------
     property var wifiList: []
@@ -722,8 +853,13 @@ ShellRoot {
     function fmtTime(s) { s = Math.max(0, Math.floor(s||0)); var m = Math.floor(s/60); var ss = s%60; return m + ":" + (ss<10?"0":"") + ss }
 
     // ---------- screen recording status poll ----------
+    // This poll is also sea-record.sh's cleanup tick: its status branch sweeps the
+    // pipewire mix a crashed "both" recording would otherwise strand (which holds the
+    // microphone open). So it stays running even when nothing is being recorded.
     property bool recordingActive: false
     property string recordingTime: "00:00"
+    property string recordingAudio: ""     // none | mic | system | both
+    property string recordingWhat: ""      // region, or the output name
     Timer {
         interval: 1000; running: true; repeat: true; triggeredOnStart: true
         onTriggered: recStatusProc.running = true
@@ -744,9 +880,25 @@ ShellRoot {
                     var m = Math.floor(sec / 60);
                     var s = sec % 60;
                     root.recordingTime = (m < 10 ? "0" : "") + m + ":" + (s < 10 ? "0" : "") + s;
+                    root.recordingAudio = parts[3] !== undefined ? parts[2] : "";
+                    root.recordingWhat  = parts[3] !== undefined ? parts[3] : "";
                 }
             }
         }
+    }
+    // Right-clicking the pill throws the recording away, so it arms first and commits on
+    // the second click — the pill visibly says "discard?" in between. An accidental
+    // right-click on a bar you click at all day should not be able to delete a take.
+    property bool recDiscardArmed: false
+    Timer { id: recDisarm; interval: 2500; onTriggered: root.recDiscardArmed = false }
+    onRecordingActiveChanged: if (!root.recordingActive) { root.recDiscardArmed = false; recDisarm.stop() }
+    // the pill's dot breathes while recording
+    property real recPulse: 1.0
+    SequentialAnimation on recPulse {
+        running: root.recordingActive && !root.recDiscardArmed
+        loops: Animation.Infinite
+        NumberAnimation { to: 0.3; duration: 750; easing.type: Easing.InOutQuad }
+        NumberAnimation { to: 1.0; duration: 750; easing.type: Easing.InOutQuad }
     }
 
     // ---------- bit-perfect quality readout ----------
@@ -796,7 +948,76 @@ ShellRoot {
     property string lyricsKey: ""
     readonly property string trackKey: root.player ? (root.player.trackArtist||"")+"|"+(root.player.trackTitle||"") : ""
     onTrackKeyChanged: { root.lyricsState = "idle"; root.lyrics = []; root.plainLyrics = "";
-        if (root.lyricsOpen && root.openPop==="mpris") root.fetchLyrics() }
+        if (root.lyricsOpen && root.openPop==="mpris") root.fetchLyrics();
+        root.metaState = "idle"; root.metaReleased = ""; root.metaLabel = "";
+        if (root.infoOpen && root.openPop==="mpris") root.fetchMeta() }
+
+    // ---------- track metadata (MusicBrainz) ----------
+    // MPRIS carries what the player happens to tag; it has no idea WHEN a thing
+    // came out. MusicBrainz does, needs no API key, and is already the same shape
+    // of favour lrclib does for lyrics — so this only runs while the details
+    // sidecar is open, once per track, exactly like fetchLyrics.
+    property string metaKey: ""
+    property string metaState: "idle"   // idle | loading | ok | none
+    property string metaReleased: ""
+    property string metaLabel: ""       // release the recording first appeared on
+    function fetchMeta(force) {
+        if (!root.player) return;
+        if (!force && root.metaKey === root.trackKey && root.metaState !== "idle") return;
+        root.metaKey = root.trackKey; root.metaState = "loading";
+        root.metaReleased = ""; root.metaLabel = "";
+        metaProc.running = false;
+        // env-array → artist/title never touch shell quoting, same as fetchLyrics
+        metaProc.command = ["env",
+            "A=" + (root.player.trackArtist||""), "T=" + (root.player.trackTitle||""),
+            "AL=" + (root.player.trackAlbum||""),
+            // Escalating, each step only if the last found nothing:
+            //   1. title + artist
+            //   2. title alone — MPRIS romanises where MusicBrainz indexes the
+            //      original script ("Tamari" vs "珠梨"), the same mismatch the
+            //      lyrics fetch works around
+            //   3. title with a leading "<album> - " stripped: some players put the
+            //      album in front of the track name, which matches nothing
+            // Reply is prefixed with the track key it was issued for, so a slow
+            // answer for a previous track can't overwrite the current one.
+            "sh","-c",
+            "printf '%s\\x1f' \"$A|$T\"; " +
+            "UA='sea-shell/3.2 (+https://seashell.miyukivigil.tech)'; " +
+            "q() { curl -sG --max-time 8 --compressed -A \"$UA\" https://musicbrainz.org/ws/2/recording " +
+              "--data-urlencode \"query=$1\" --data-urlencode fmt=json --data-urlencode limit=1; }; " +
+            "R=$(q \"recording:\\\"$T\\\" AND artist:\\\"$A\\\"\"); " +
+            "case $R in *'\"recordings\":[{'*) printf '%s' \"$R\"; exit 0;; esac; " +
+            "R=$(q \"recording:\\\"$T\\\"\"); " +
+            "case $R in *'\"recordings\":[{'*) printf '%s' \"$R\"; exit 0;; esac; " +
+            "T2=${T#\"$AL\"}; T2=${T2# }; T2=${T2#-}; T2=${T2#–}; T2=${T2# }; " +
+            "[ -n \"$T2\" ] && [ \"$T2\" != \"$T\" ] && q \"recording:\\\"$T2\\\"\""]
+        metaProc.running = true;
+    }
+    Process { id: metaProc
+        stdout: StdioCollector { id: metaOut; onStreamFinished: root.parseMeta(metaOut.text) } }
+
+    function parseMeta(txt) {
+        var i = txt.indexOf("\x1f");
+        if (i < 0) { root.metaState = "none"; return }
+        if (txt.slice(0, i) !== root.metaKey) return;   // reply for a track we've left
+        var body = txt.slice(i + 1).trim();
+        if (body === "") { root.metaState = "none"; return }
+        try {
+            var recs = (JSON.parse(body).recordings) || [];
+            var r = recs[0];
+            if (!r) { root.metaState = "none"; return }
+            // Duration is the guard. Steps 2 and 3 search on title alone, which can
+            // land on a completely different recording of the same name — and a
+            // confidently wrong release date is worse than no date at all.
+            var want = Math.round(root.player ? (root.player.length || 0) : 0);
+            var got = r.length ? r.length / 1000 : 0;
+            if (want > 0 && got > 0 && Math.abs(want - got) > 5) { root.metaState = "none"; return }
+            root.metaReleased = r["first-release-date"] || "";
+            var rel = (r.releases || [])[0];
+            root.metaLabel = rel ? (rel.title || "") : "";
+            root.metaState = root.metaReleased !== "" ? "ok" : "none";
+        } catch (e) { root.metaState = "none" }
+    }
     // current line follows playback (small lead so the line flips as it's sung)
     readonly property int lyrIdx: { var i = -1; for (var k=0;k<root.lyrics.length;k++) if (root.lyrics[k].t <= root.mprisPos + 0.2) i = k; else break; return i }
     function fetchLyrics(force) {
@@ -1502,11 +1723,43 @@ ShellRoot {
                                     width: parent.width; elide: Text.ElideRight; visible: text!==""
                                     text: root.player ? (root.player.trackAlbum||"") : ""; color: theme.faint; font.pixelSize: 10; font.family: root.cfgFont
                                 }
-                                // gold badge: only appears for direct-ALSA (bit-perfect) playback, e.g. SONE
-                                Row { spacing: 5; visible: root.hqInfo !== ""
-                                    Sym { anchors.verticalCenter: parent.verticalCenter; text: "verified"; sz: 13; color: theme.warn }
-                                    Text { anchors.verticalCenter: parent.verticalCenter; text: root.hqInfo
-                                        color: theme.warn; font.pixelSize: 10; font.family: root.cfgFont; font.bold: true } } } }
+                                // gold badge: only appears for direct-ALSA (bit-perfect) playback, e.g. SONE.
+                                // When the card being driven that way is a Moondrop, the badge names it:
+                                // the model comes from the script's own registry, read straight off ALSA,
+                                // so it holds even though pipewire is bypassed. Click opens that DAC's EQ.
+                                //
+                                // The MouseArea WRAPS the Row rather than filling it — anchors.fill on a
+                                // child of a Row makes Qt refuse to lay the Row out at all ("Row will not
+                                // function"), which silently deletes the badge.
+                                MouseArea {
+                                    visible: root.hqInfo !== ""
+                                    implicitWidth: hqRow.implicitWidth; implicitHeight: hqRow.implicitHeight
+                                    hoverEnabled: true
+                                    cursorShape: root.dacExclusive ? Qt.PointingHandCursor : Qt.ArrowCursor
+                                    onClicked: if (root.dacExclusive) dacPanel.toggle()
+                                    Row { id: hqRow; spacing: 5
+                                        Sym { anchors.verticalCenter: parent.verticalCenter; text: "verified"; sz: 13; color: theme.warn }
+                                        Text { anchors.verticalCenter: parent.verticalCenter
+                                            text: root.hqInfo + (root.dacExclusive ? " · " + root.dacModel : "")
+                                            color: theme.warn; font.pixelSize: 10; font.family: root.cfgFont; font.bold: true } } }
+                                // What it is coming OUT of. MPRIS cannot tell you this — a player knows
+                                // nothing about routing — and pipewire alone can't either, since a
+                                // bit-perfect player bypasses the graph entirely. A Moondrop is named
+                                // from the script's registry; anything else falls back to pipewire's
+                                // own name for the sink.
+                                MouseArea {
+                                    visible: root.player !== null
+                                    implicitWidth: outRow.implicitWidth; implicitHeight: outRow.implicitHeight
+                                    hoverEnabled: true
+                                    cursorShape: root.dacActive ? Qt.PointingHandCursor : Qt.ArrowCursor
+                                    onClicked: if (root.dacActive) dacPanel.toggle()
+                                    Row { id: outRow; spacing: 5
+                                        Sym { anchors.verticalCenter: parent.verticalCenter
+                                            text: root.dacActive ? "graphic_eq" : "volume_up"; sz: 13
+                                            color: root.dacActive ? theme.iris : theme.faint }
+                                        Text { anchors.verticalCenter: parent.verticalCenter; text: "out via " + root.outputLabel
+                                            color: root.dacActive ? theme.iris : theme.sub
+                                            font.pixelSize: 10; font.family: root.cfgFont; font.bold: root.dacActive } } } } }
 
                         // cava visualizer
                         Item { width: parent.width; height: 38
@@ -1637,8 +1890,11 @@ ShellRoot {
                     Rectangle {
                         id: infoPanel
                         visible: root.infoOpen && root.openPop === "mpris"
+                        // ask MusicBrainz only when someone actually looks at this panel,
+                        // and only once per track — same deal as the lyrics sidecar
+                        onVisibleChanged: if (visible) root.fetchMeta()
                         // grow to fit the details (art + rows) so nothing clips; never shorter than the card
-                        width: 260; height: Math.max(mprisDrop.card.height, detailsCol.implicitHeight + 28)
+                        width: 288; height: Math.max(mprisDrop.card.height, detailsCol.implicitHeight + 28)
                         clip: true
                         // prefer the LEFT of the card (mirrors lyrics on the right); flip right near the screen edge
                         x: (mprisDrop.card.x - 10 - width < 8)
@@ -1668,16 +1924,39 @@ ShellRoot {
                                 Repeater {
                                     model: {
                                         var p = root.player; if (!p) return [];
-                                        return [
+                                        var rows = [
                                             {k:"Album",   v: p.trackAlbum || "—"},
                                             {k:"Source",  v: p.identity || "—"},
+                                            // where it physically comes out: a Moondrop is named by the
+                                            // script's registry, anything else falls back to pipewire
+                                            {k:"Output",  v: root.outputLabel},
                                             {k:"Quality", v: root.hqInfo !== "" ? root.hqInfo : "standard"},
                                             {k:"Length",  v: root.fmtTime(p.length||0)}
                                         ];
+                                        // only once MusicBrainz has actually answered for THIS track
+                                        if (root.metaState === "ok" && root.metaReleased !== "")
+                                            rows.splice(2, 0, {k:"Released", v: root.metaReleased});
+                                        else if (root.metaState === "loading")
+                                            rows.splice(2, 0, {k:"Released", v: "…"});
+                                        return rows;
                                     }
-                                    delegate: Item { required property var modelData; width: infoRows.width; height: 16
-                                        Text { anchors.left: parent.left; anchors.verticalCenter: parent.verticalCenter; text: modelData.k; color: theme.faint; font.pixelSize: 11; font.family: root.cfgFont }
-                                        Text { anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter; width: parent.width*0.62; horizontalAlignment: Text.AlignRight; elide: Text.ElideRight
+                                    // Label and value used to be anchored to opposite edges with the
+                                    // value pinned at 62% — so they overlapped when the label was long
+                                    // and truncated when the value was ("24-bit · 44.1 kHz · bit-pe…").
+                                    // Now the label takes what it needs, the value gets the rest and
+                                    // wraps to a second line instead of being cut.
+                                    delegate: Item { required property var modelData
+                                        width: infoRows.width
+                                        implicitHeight: Math.max(16, valTxt.implicitHeight + 2)
+                                        Text { id: keyTxt
+                                            anchors.left: parent.left; anchors.top: parent.top
+                                            width: Math.min(implicitWidth, parent.width * 0.34); elide: Text.ElideRight
+                                            text: modelData.k; color: theme.faint; font.pixelSize: 11; font.family: root.cfgFont }
+                                        Text { id: valTxt
+                                            anchors.left: keyTxt.right; anchors.leftMargin: 10
+                                            anchors.right: parent.right; anchors.top: parent.top
+                                            horizontalAlignment: Text.AlignRight
+                                            wrapMode: Text.WordWrap; maximumLineCount: 2; elide: Text.ElideRight
                                             text: modelData.v; color: theme.text; font.pixelSize: 11; font.family: root.cfgFont } }
                                 }
                                 Item { width: infoRows.width; height: 16
@@ -1857,13 +2136,47 @@ ShellRoot {
                         value: pct+"%"; accent: charging?theme.good:pct<=20?theme.bad:theme.frost }
                     
 
+                    // ---- MOONDROP DAC PILL ----
+                    // Transient, like the recorder: it exists only while a DAC the
+                    // panel can actually drive is plugged in.
+                    //
+                    // "Active" is carried by the NAME, not by colour. Colour alone
+                    // can't do it: in light mode theme.iris is Qt.darker(accent,2.4)
+                    // and lands within a few percent of theme.faint, and matugen can
+                    // repoint the accent at any wallpaper colour — so an accent-vs-
+                    // faint swap is unreadable in exactly the theme it has to work in.
+                    // Icon alone = plugged in. Icon + model = audio is going through it.
+                    // Left-click opens the EQ panel, right-click routes audio here.
+                    Pill { owner: bar; id: dacPill; icon: "graphic_eq"
+                        property string wid: "wgDac"; x: rightGroup.xFor(wid); anchors.verticalCenter: parent.verticalCenter
+                        visible: root.cfgDac && root.dacSupported
+                        accent: root.dacActive ? theme.iris : theme.faint
+                        value: root.dacActive ? root.dacModel : ""
+                        maxTextW: 130
+                        onClicked: dacPanel.toggle()
+                        onRightClicked: if (root.dacNode) Pipewire.preferredDefaultAudioSink = root.dacNode
+                    }
+
                     // ---- SCREEN RECORDER PILL ----
-                    Pill { owner: bar; id: recPill; icon: "videocam"
+                    // Transient: it exists only while something is being recorded.
+                    // Left-click stops and keeps. Right-click arms a discard, and a second
+                    // right-click throws the take away — while armed the pill says so.
+                    Pill { owner: bar; id: recPill
                         property string wid: "wgRec"; x: rightGroup.xFor(wid); anchors.verticalCenter: parent.verticalCenter
                         visible: root.recordingActive
-                        accent: theme.bad
-                        value: root.recordingTime
-                        onClicked: Quickshell.execDetached(["sh", "-c", "~/.config/quickshell/sea-shell/sea-record.sh toggle"])
+                        icon: root.recDiscardArmed ? "delete" : "fiber_manual_record"
+                        accent: root.recDiscardArmed ? theme.warn : theme.a(theme.bad, root.recPulse)
+                        value: root.recDiscardArmed ? "discard?" : root.recordingTime
+                        maxTextW: 90
+                        onClicked: {
+                            // an armed pill left-clicked = "no, keep it" — then stop normally
+                            root.recDiscardArmed = false; recDisarm.stop();
+                            recPanel.stop();
+                        }
+                        onRightClicked: {
+                            if (root.recDiscardArmed) { root.recDiscardArmed = false; recDisarm.stop(); recPanel.cancel() }
+                            else { root.recDiscardArmed = true; recDisarm.restart() }
+                        }
                     }
 
                     // ---- CLOCK ----

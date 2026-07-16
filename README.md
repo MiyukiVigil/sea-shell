@@ -68,6 +68,76 @@ click a line to seek. When a player opens the DAC directly over ALSA (e.g. TIDAL
 exclusive mode), a gold **bit-perfect** badge shows the true bit-depth / sample-rate,
 and the visualizer switches to an ambient wave since pipewire can't see the stream.
 
+## Equaliser  ·  `SUPER+SHIFT+E`
+An 8-band parametric EQ with a live frequency-response graph, an all-bands column editor,
+pre-gain, one-tap starting presets, and AutoEQ/REW import.
+
+**It works with or without a Moondrop DAC.** Plug one in (DAWN PRO2, FreeDSP, Rays,
+MOONRIVER 3, …) and the filters run on the DAC's own DSP chip — edits are live, and
+save-to-flash keeps them after you unplug. With no DAC the same panel drives a **software
+EQ** through PipeWire instead, which works on anything: laptop speakers, another brand's
+DAC, bluetooth. It picks automatically, and a `DAC | software` toggle in the header lets
+you force software even with a DAC plugged in — worth doing, since software has no Q2.30
+limit, so the shelf gains the DAC has to refuse work there.
+
+Two differences in software mode, both stated in the panel: **nothing is audible until you
+press apply** (PipeWire 1.6 ignores per-band live control writes, so a change means
+re-rendering the graph), and the first apply asks before creating the virtual output. That
+setup writes one config to `filter-chain.conf.d` and starts `filter-chain.service` — a
+separate PipeWire instance, so **your main daemon is never restarted and nothing playing is
+interrupted**. Remove it any time from the same panel.
+
+**Community presets** — the *community* button opens the public library behind
+[Moondrop Hub](https://hub.moondroplab.tech/): ~59,700 user-made curves, searchable by
+name, author or description, sorted by downloads. **Click one to see its curve** — only
+the *apply* button touches the DAC, so you can audition without writing. The preview
+also says whether that curve would clip at your pre-gain, which the preset itself can't
+tell you. Reading the library needs no account, and the panel only ever reads — it never
+publishes, likes or comments. You get your device family's whole pool (a DAWN PRO2 sees
+~6,900 curves, not just its own 1,270). Two things to know: applying is **live only**
+until you press save, and published presets **carry no pre-gain**.
+
+The graph toggles (top-right) between the **editor** — region-labelled, per-band curves,
+draggable handles — and a **readout** drawn the way the official app draws it: normalised
+with the flat reference at 60 dB, one curve, pre-gain paid for. The editor also shows a
+dashed *output* line with pre-gain applied, so a +6 dB boost doesn't look free.
+
+Two scripts sit behind it, deliberately with no overlap: `moondrop_control.py` is the DAC
+(USB HID, its DSP, the community library) and knows nothing about PipeWire; `sea-eq.py` is
+the software EQ (PipeWire only) and knows nothing about Moondrop. The panel is the one
+place they meet, which is what keeps either usable without the other. The DAC half is
+vendored from [hub_moon](https://hubmoon.miyukivigil.tech/), which documents the protocol
+and the Hub API; the installer adds `python-hidapi` and a udev rule so it works without root.
+
+## Screen recording  ·  `SUPER+R`
+`SUPER+R` opens a chooser: **what to capture** (drag a region · the focused screen ·
+a named output) and **which audio** (none · microphone · system audio · both at once),
+plus framerate, container, and CPU/GPU encoding. It remembers your last choice, so
+`SUPER+R` `⏎` is still two keystrokes. While a recording is running, `SUPER+R` stops it.
+
+A red dot and a timer appear in the bar. **Left-click stops and keeps** (the file lands
+in `~/Videos/Recordings`, its path goes to your clipboard, and the notification tells you
+how big it is). **Right-click discards** — but it arms first and the pill says `discard?`,
+so one stray click can't delete a take.
+
+Some things worth knowing:
+
+- **System audio** is captured from an output's *monitor*, and *Default* re-reads the
+  default sink when recording starts — so it follows your DAC when you plug one in.
+- **Mic + system together** is not something wf-recorder can do (it takes exactly one
+  audio device), so the shell builds the mix itself: a null sink with both looped into
+  it, recorded via its monitor, torn down on stop. If a recording is killed outright,
+  the next `SUPER+R` — or the bar's own status tick — sweeps the leftovers, because a
+  stranded loopback would hold your microphone open.
+- **Bit-perfect playback is invisible to this.** A player holding the DAC directly over
+  ALSA never goes through pipewire, so the monitor is real, readable, and *silent*. The
+  chooser says so up front when it detects an exclusive hold — record the mic instead,
+  or take the player out of exclusive mode. (See *Media, lyrics & bit-perfect audio*.)
+- **mp4 finalises its index on stop**, so a recording that dies with the machine is a
+  write-off. **mkv** keeps every frame written so far. The chooser says which you're on.
+
+Needs `wf-recorder` (plus `slurp` for region drags and `jq`); the installer pulls them in.
+
 ## Status dropdowns
 Every pill opens a frosted card. A few of them:
 
@@ -130,7 +200,7 @@ keybinds.conf, sync to the repo copy, and hot-reload Hyprland.
 `SUPER+F` maximize / `SUPER+SHIFT+F` true fullscreen · `SUPER+P` float · `SUPER+C` center ·
 `hjkl` focus / `SHIFT` move / `CTRL` resize · `1–0` workspaces / `SHIFT 1–0` move-to ·
 `` SUPER+` `` scratchpad · media & brightness keys · `Print`/`SUPER+Print`/`SUPER+SHIFT+S`
-screenshots · `SUPER+SHIFT+R` reload · `SUPER+SHIFT+B` restart bar.
+screenshots · `SUPER+R` screen recording · `SUPER+SHIFT+R` reload · `SUPER+SHIFT+B` restart bar.
 
 ## Wallpapers  ·  `SUPER+SHIFT+W`
 A grid of `~/Pictures/wallpapers`; click to set. **Static** images go through swww
@@ -161,6 +231,11 @@ sea-shell/
 │   ├── keybinds.qml             # live keybind cheat-sheet (SUPER+K)
 │   ├── wallpaper.qml            # wallpaper picker (SUPER+SHIFT+W)
 │   ├── screenshot.qml           # screenshot tool (region / window / full)
+│   ├── RecorderPanel.qml        # screen-recorder chooser + countdown (SUPER+R)
+│   ├── DacPanel.qml             # Moondrop DAC parametric EQ (SUPER+SHIFT+E)
+│   ├── sea-record.sh            # wf-recorder + the pipewire mix for mic+system
+│   ├── moondrop_control.py      # reverse-engineered Moondrop USB-HID controller (vendored)
+│   ├── sea-eq.py                # software EQ — a pipewire filter-chain, no DAC needed
 │   ├── sea-sysmon.sh            # cpu/ram/gpu sampler for the monitor pill
 │   ├── sea-wallpaper-restore.sh # restore last wallpaper at login
 │   ├── sea-wallpaper-autopause.sh # pause video wallpaper under fullscreen

@@ -27,18 +27,26 @@ import Quickshell.Wayland
 import Quickshell.Io
 import QtQuick
 import QtQuick.Layouts
+import Qt.labs.folderlistmodel
 
 Scope {
     id: root
 
     // the shell flattens scripts next to the QML on deploy, so resolve it as a sibling
-    readonly property string pyScript: Qt.resolvedUrl(".").toString().replace("file://", "").replace(/\/$/, "") + "/moondrop_control.py"
+    readonly property string scriptDir: Qt.resolvedUrl(".").toString().replace("file://", "").replace(/\/$/, "")
+    // Two scripts, two jobs, deliberately no overlap. moondrop_control.py is the DAC:
+    // USB HID, its DSP, the community library — and it knows nothing about pipewire.
+    // sea-eq.py is the software EQ: pipewire only, no Moondrop anything. This panel is
+    // the one place they meet, which is what keeps either usable without the other.
+    readonly property string pyScript: root.scriptDir + "/moondrop_control.py"
+    readonly property string swScript: root.scriptDir + "/sea-eq.py"
 
     // ---- lifecycle ----
     property bool shown: false
     property bool helpOpen: false
+    property bool graphReadout: false     // editor view vs the official-style readout
     function open()   { root.shown = true; root.dirty = false; root.pristine = null; root.refresh() }
-    function close()  { root.shown = false; root.helpOpen = false }
+    function close()  { root.shown = false; root.helpOpen = false; root.hubOpen = false }
     function toggle() { if (root.shown) root.close(); else root.open() }
     IpcHandler {
         target: "dac"
@@ -46,6 +54,31 @@ Scope {
         function open(): void   { root.open() }
         function close(): void  { root.close() }
     }
+
+    // ---- which EQ are we driving? ----
+    //
+    // Two backends, same bands, same maths, same panel. A supported Moondrop DAC runs
+    // the filters on its own DSP chip; without one they run in software as a PipeWire
+    // filter-chain, which works on anything — laptop speakers, a rival brand's DAC,
+    // bluetooth. Auto picks the DAC when it's there, because that's the one that keeps
+    // working after you close the shell.
+    //
+    // The override earns its place: software has no Q2.30 limit and isn't pinned to
+    // 96 kHz, so the shelf gains the DAC has to refuse (see §4.1) work there. Wanting
+    // software while a DAC is plugged in is a real thing to want.
+    property string backendPref: "auto"     // auto | hw | sw
+    readonly property bool hwPresent: root.dev.ok === true
+    readonly property bool sw: root.backendPref === "sw" || (root.backendPref === "auto" && !root.hwPresent)
+    // Is there anything to edit? On hardware that means a DAC answered; in software
+    // it's always true — the sink doesn't have to exist yet, applying creates it.
+    readonly property bool ready: root.sw || root.dev.ok
+    property var  swInfo: ({ installed: false, running: false, sink_present: false })
+    // Software edits are apply-based: pipewire 1.6 accepts and then ignores per-control
+    // param writes, so a band change means re-rendering the graph. See the note above
+    // sw_apply() in the script.
+    property bool swDirty: false
+    property bool swBusy: false
+    property bool swConfirm: false          // first-time "create the virtual output?" gate
 
     // ---- device state (all of it read from the script; nothing assumed) ----
     property var  dev: ({ ok: false })
@@ -101,8 +134,91 @@ Scope {
                     if (root.pristine === null) root.snapshot();
                 }
             } catch(e) { root.dev = { ok: false, error: "parse error: " + e }; }
+            // --json also answers "is a DAC here at all", which is what picks the
+            // backend. If the answer is no (or you asked for software anyway), the
+            // bands come from the filter-chain's state instead.
+            if (root.sw) swStatusProc.running = true;
             root._finishRefresh();
         } } }
+
+    // ---- software EQ ----
+    // Deliberately off the device queue below: nothing here opens a hidraw, and the
+    // queue exists purely to stop two processes sharing one.
+    Process {
+        id: swStatusProc
+        command: ["python3", root.swScript, "--status"]
+        stdout: StdioCollector { id: swOut; onStreamFinished: {
+            try {
+                var j = JSON.parse(swOut.text.trim() || "{}");
+                root.swInfo = j;
+                // Only adopt the stored bands when we have nothing pending; otherwise a
+                // status poll would quietly throw away edits you haven't applied.
+                if (!root.swDirty) {
+                    var fs = j.filters || [];
+                    var arr = [];
+                    for (var i = 0; i < root.bandCount; i++) {
+                        var b = null;
+                        for (var k = 0; k < fs.length; k++) if (fs[k].index === i) b = fs[k];
+                        arr.push(b ? { index: i, type: b.type, frequency: b.frequency, gain: b.gain, q: b.q }
+                                   : { index: i, type: "disabled", frequency: 1000, gain: 0, q: 1.0 });
+                    }
+                    root.bands = arr;
+                    root.reorder();
+                    root.pregain = j.pregain || 0;
+                    root.globalGain = 0;          // software has no device volume offset
+                    if (root.pristine === null) root.snapshot();
+                }
+            } catch (e) { /* leave the panel on its defaults */ }
+        } } }
+
+    // Gated entry: the first apply has to create the virtual output, which writes a
+    // pipewire config and starts a service — so ask once rather than doing it behind
+    // your back. swCommit is the ungated one the dialog calls; keeping them separate
+    // matters, since a single function that both raises the prompt and is called BY it
+    // just re-raises the prompt forever.
+    function swApply() {
+        if (root.swBusy) return;
+        if (!root.swInfo.installed) { root.swConfirm = true; return }
+        root.swCommit();
+    }
+    function swCommit() {
+        if (root.swBusy) return;
+        root.swConfirm = false;
+        root.swBusy = true;
+        // argv, not a shell string: band values are ours, but the label isn't always.
+        var payload = JSON.stringify({ pregain: root.pregain, filters: root.bands });
+        swWriteProc.command = ["python3", "-c",
+            "import sys,os,pathlib,subprocess;"
+            + "p=pathlib.Path(os.path.expanduser('~/.cache/sea-shell'));p.mkdir(parents=True,exist_ok=True);"
+            + "f=p/'panel-eq.json';f.write_text(sys.argv[2]);"
+            + "sys.exit(subprocess.run([sys.executable,sys.argv[1],'--apply','--from-json',str(f),"
+            + "'--name',sys.argv[3]]).returncode)",
+            root.swScript, payload, root.swLabel];
+        swWriteProc.running = true;
+    }
+    property string swLabel: "sea-shell panel"
+    Process {
+        id: swWriteProc
+        stdout: StdioCollector { id: swWOut; onStreamFinished: {
+            root.swBusy = false;
+            try {
+                var j = JSON.parse(swWOut.text.trim() || "{}");
+                if (j.ok) { root.swDirty = false; root.dirty = false; root.snapshot(); }
+                else { root.lastError = j.error || "could not apply the software EQ"; errTimer.restart(); }
+            } catch (e) { root.lastError = "could not apply the software EQ"; errTimer.restart(); }
+            swStatusProc.running = true;
+        } }
+        stderr: StdioCollector { id: swWErr; onStreamFinished: {
+            if (swWErr.text.trim() !== "") { root.lastError = swWErr.text.trim().split("\n").pop(); errTimer.restart(); }
+        } } }
+    function swRemove() {
+        root.swBusy = true;
+        swRmProc.running = true;
+    }
+    Process {
+        id: swRmProc
+        command: ["python3", root.swScript, "--remove"]
+        stdout: StdioCollector { onStreamFinished: { root.swBusy = false; root.swDirty = false; swStatusProc.running = true } } }
 
     // ---- device access queue ----
     // EVERY call to the script goes through here, reads included. Two processes must
@@ -148,6 +264,7 @@ Scope {
         if (m) {
             root.lastError = m[1].trim();
             errTimer.restart();
+            root.exported = "";   // an export in flight didn't land; don't claim it did
             // Anything still queued was built on a write that didn't land — drop it
             // and go ask the DAC what it actually holds.
             root._queue = [];
@@ -164,35 +281,262 @@ Scope {
     }
     Timer { id: errTimer; interval: 9000; onTriggered: root.lastError = "" }
 
-    // ---- import from a file, picked in-shell ----
-    // zenity is the one portable picker present here (no kdialog/yad/portal).
-    Process { id: pickProc
-        command: ["zenity", "--file-selection", "--title=Import EQ preset",
-                  "--file-filter=EQ presets (AutoEQ/REW .txt, .json) | *.txt *.json",
-                  "--file-filter=All files | *"]
-        stdout: StdioCollector { id: pickOut; onStreamFinished: {
-            var p = pickOut.text.trim();
-            if (p !== "") root.importFile(p);
+    // ---- community preset browser (Moondrop Hub library) ----
+    //
+    // The official web app carries a public library of user-made curves. Reading it
+    // needs no account, so this browses and applies; it never publishes, likes or
+    // favourites (all of which would need a login this tool doesn't implement).
+    //
+    // Deliberately NOT on the device queue below. Both --presets and --preset are
+    // network-only and provably open zero hidraw handles, so they must not wait
+    // behind a band write — and can't corrupt one by racing it. Only *applying* a
+    // preset touches the DAC, and that goes through applyPreset -> applyBand -> run.
+    property bool   hubOpen: false
+    property var    hubList: []
+    property string hubQuery: ""
+    property string hubState: "idle"      // idle | loading | ok | error
+    property string hubError: ""
+    property int    hubTotal: 0
+    property string hubBusy: ""           // uuid of the preset currently being applied
+
+    // ---- preview ----
+    // Clicking a row draws its curve; only the apply button touches the DAC. 59,700
+    // strangers' curves is a lot to audition one flash-write at a time, and a title
+    // like "三角洲" tells you nothing about what it does to 3 kHz.
+    property string hubSel: ""            // uuid being previewed
+    property string hubSelTitle: ""
+    property var    hubPreview: []        // bands, or [] while loading
+    property var    hubCache: ({})        // uuid -> bands, so re-clicking is instant
+    property bool   hubPreLoading: false
+    property bool   hubPreShowPre: true   // draw the level with pre-gain paid for
+
+    // How far the previewed curve would clip at the pre-gain currently set. Same
+    // maths as root.overshoot, but for a curve we haven't applied — the whole point
+    // of a preview is to find that out before writing it.
+    readonly property real hubPreOvershoot: {
+        var bs = root.hubPreview;
+        if (!bs || bs.length === 0) return 0;
+        var pk = 0;
+        for (var n = 0; n <= 120; n++) {
+            var f = Math.pow(10, root.l0 + (n / 120) * (root.l1 - root.l0));
+            var s = 0;
+            for (var i = 0; i < bs.length; i++) s += root.bandDb(bs[i], f);
+            if (s > pk) pk = s;
+        }
+        return pk + root.pregain;
+    }
+
+    function hubShow(p) {
+        root.hubSel = p.uuid;
+        root.hubSelTitle = p.title;
+        if (root.hubCache[p.uuid]) { root.hubPreview = root.hubCache[p.uuid]; return }
+        root.hubPreview = [];
+        root.hubPreLoading = true;
+        hubPreProc.command = ["python3", root.pyScript, "--preset", p.uuid];
+        hubPreProc.running = true;
+    }
+    Process {
+        id: hubPreProc
+        stdout: StdioCollector { id: hubPreOut; onStreamFinished: {
+            root.hubPreLoading = false;
+            try {
+                var j = JSON.parse(hubPreOut.text.trim() || "{}");
+                if (!j.ok) return;
+                var c = root.hubCache; c[root.hubSel] = j.bands || [];
+                root.hubCache = c;
+                root.hubPreview = j.bands || [];
+            } catch (e) { /* leave the chart empty rather than draw a lie */ }
         } } }
-    function pickImport() { pickProc.running = true }
+
+    // The script wants the pid as hex; --json reports it as an int.
+    readonly property string devPidHex: (root.dev.ok && root.dev.product_id !== undefined)
+        ? ("0000" + root.dev.product_id.toString(16)).slice(-4) : ""
+
+    // Which library to browse. With a DAC it's that DAC's family. Without one there is
+    // no device to key off, so fall back to the DAWN PRO2's group — the biggest pool
+    // (~6,900) — because in software the device a curve was filed under is irrelevant:
+    // a preset is bands, and what it's actually FOR is the headphone in its title.
+    readonly property string hubPid: root.devPidHex !== "" ? root.devPidHex : "011d"
+    readonly property bool hubFallback: root.devPidHex === ""
+
+    function hubBrowse() {
+        root.hubState = "loading";
+        hubProc.command = ["python3", root.pyScript, "--presets", "--pid", root.hubPid, "--limit", "200"]
+            .concat(root.hubQuery.trim() !== "" ? ["--search", root.hubQuery.trim()] : []);
+        hubProc.running = true;
+    }
+    // Search runs in the script, not here, so it covers the whole library (~6900 for a
+    // DAWN PRO2) rather than only the 200 rows we're showing. That costs a process per
+    // query, hence the debounce; the index is cached on disk so a warm query is ~100ms.
+    Timer { id: hubDebounce; interval: 300; onTriggered: root.hubBrowse() }
+    onHubQueryChanged: if (root.hubOpen) hubDebounce.restart()
+
+    Process {
+        id: hubProc
+        stdout: StdioCollector { id: hubOut; onStreamFinished: {
+            try {
+                var j = JSON.parse(hubOut.text.trim() || "{}");
+                if (j.ok) {
+                    root.hubList = j.presets || [];
+                    root.hubTotal = j.total || 0;
+                    root.hubState = "ok";
+                } else {
+                    root.hubError = j.error || "unknown error";
+                    root.hubState = "error";
+                }
+            } catch (e) {
+                root.hubError = "could not read the library";
+                root.hubState = "error";
+            }
+        } }
+        stderr: StdioCollector { id: hubErrOut; onStreamFinished: {
+            if (hubErrOut.text.trim() !== "" && root.hubState === "loading") {
+                root.hubError = hubErrOut.text.trim().split("\n").pop();
+                root.hubState = "error";
+            }
+        } }
+    }
+
+    // Fetch one preset's curve, then hand it to the same applyPreset() the built-in
+    // presets use — so a community curve fills every slot and disables the rest,
+    // exactly like "Bass" or "V-shape" does.
+    function hubApply(p) {
+        root.hubBusy = p.uuid;
+        hubGetProc.command = ["python3", root.pyScript, "--preset", p.uuid];
+        hubGetProc.running = true;
+    }
+    Process {
+        id: hubGetProc
+        stdout: StdioCollector { id: hubGetOut; onStreamFinished: {
+            root.hubBusy = "";
+            try {
+                var j = JSON.parse(hubGetOut.text.trim() || "{}");
+                if (!j.ok) { root.lastError = j.error || "could not fetch that preset"; errTimer.restart(); return; }
+                var bands = j.bands || [];
+                // Community presets carry no pre-gain — the published file is bands and
+                // nothing else. So leave pre-gain where the user put it rather than
+                // inventing a value; the panel's own clipping readout and "match" button
+                // already handle headroom, and they do it from the actual curve.
+                root.applyPreset({ nm: "", pre: root.pregain,
+                                   bands: bands.map(function (b) { return [b.type, b.frequency, b.gain, b.q] }) });
+                if (j.dropped > 0)
+                    root.lastError = "preset had " + (bands.length + j.dropped) + " bands; this device has "
+                                   + root.bandCount + " — the last " + j.dropped + " were dropped";
+                else if (j.coerced > 0)
+                    root.lastError = j.coerced + " band(s) used a filter type this hardware has no register for; "
+                                   + "written as peaking, same as the official app";
+                if (j.dropped > 0 || j.coerced > 0) errTimer.restart();
+                root.hubOpen = false;
+            } catch (e) {
+                root.lastError = "could not read that preset";
+                errTimer.restart();
+            }
+        } }
+    }
+
+    // ---- in-panel file browser (import / export) ----
+    // Deliberately NOT an external dialog. This panel is a layer-shell Overlay with
+    // exclusive keyboard focus, so zenity/portal windows open *underneath* it and
+    // can never take focus — the dialog is there, just unreachable. Browsing has to
+    // happen inside the panel.
+    property bool   fileOpen: false
+    property string fileMode: "import"            // "import" | "export"
+    property string homeDir: ""
+    property string fileDir: ""                   // folder currently listed
+    property string exportName: "moondrop-eq.json"
+    property string exportFmt: "json"             // "json" (backup) | "pipewire" (software EQ)
+
+    Process { running: true; command: ["sh", "-c", "printf %s \"$HOME\""]
+        stdout: StdioCollector { id: homeOut; onStreamFinished: {
+            root.homeDir = homeOut.text.trim();
+            if (root.fileDir === "") root.fileDir = root.homeDir;
+        } } }
+
+    function browse(mode) {
+        root.fileMode = mode;
+        if (root.fileDir === "") root.fileDir = root.homeDir;
+        root.fileOpen = true;
+    }
+    function goUp() {
+        var p = root.fileDir.replace(/\/+$/, "");
+        var i = p.lastIndexOf("/");
+        root.fileDir = i > 0 ? p.substring(0, i) : "/";
+    }
     function importFile(path) {
         // Live, not flashed: audition it first, then hit save to keep it.
         var flag = /\.json$/i.test(path) ? "--import-json" : "--import-rew";
         root.run(["--no-flash", flag, path], true);
         root.dirty = true;
+        root.fileOpen = false;
     }
+    function doExport() {
+        var nm = root.exportName.trim();
+        if (nm === "") return;
+        // Keep the extension honest so the file says what it is.
+        if (root.exportFmt === "pipewire" && !/\.conf$/i.test(nm)) nm += ".conf";
+        if (root.exportFmt === "json" && !/\.json$/i.test(nm)) nm += ".json";
+        var path = root.fileDir.replace(/\/+$/, "") + "/" + nm;
+        if (root.exportFmt === "pipewire") {
+            // Software EQ, so sea-eq.py's job, not the DAC script's — and off the
+            // device queue entirely: rendering a config file has no business waiting
+            // behind a band write, or joining a queue that exists to protect a hidraw.
+            // The bands are already in memory; hand them over rather than round-tripping
+            // through the device.
+            var payload = JSON.stringify({ pregain: root.pregain, filters: root.bands });
+            pwExportProc.command = ["python3", "-c",
+                "import sys,os,pathlib,subprocess;"
+                + "p=pathlib.Path(os.path.expanduser('~/.cache/sea-shell'));p.mkdir(parents=True,exist_ok=True);"
+                + "f=p/'export-eq.json';f.write_text(sys.argv[2]);"
+                + "sys.exit(subprocess.run([sys.executable,sys.argv[1],'--render',sys.argv[3],"
+                + "'--from-json',str(f)]).returncode)",
+                root.swScript, payload, path];
+            pwExportProc.running = true;
+        } else {
+            root.run(["--export-json", path]);
+        }
+        root.exported = path;
+        expTimer.restart();
+        root.fileOpen = false;
+    }
+    Process {
+        id: pwExportProc
+        stdout: StdioCollector { id: pwExpOut; onStreamFinished: {
+            try {
+                var j = JSON.parse(pwExpOut.text.trim() || "{}");
+                if (!j.ok) { root.lastError = j.error || "could not write that config"; errTimer.restart(); root.exported = "" }
+            } catch (e) { root.lastError = "could not write that config"; errTimer.restart(); root.exported = "" }
+        } } }
+    property string exported: ""
+    Timer { id: expTimer; interval: 6000; onTriggered: root.exported = "" }
 
+    // On hardware every edit goes straight to the DSP and you hear it; the flash write
+    // is the deliberate part. In software nothing is audible until apply, because a
+    // band change means re-rendering the whole graph — so an edit only marks itself.
     function applyBand(i) {
         var b = root.bands[i]; if (!b) return;
+        if (root.sw) { root.swDirty = true; root.dirty = true; return }
         root.run(["--no-flash", "--set-peq", "" + b.index, "" + b.type,
                   "" + Math.round(b.frequency), b.gain.toFixed(2), b.q.toFixed(3)]);
         root.dirty = true;
     }
-    function applyPregain()  { root.run(["--no-flash", "--set-pregain", root.pregain.toFixed(2)]); root.dirty = true }
-    function applyGlobal()   { root.run(["--no-flash", "--set-globalgain", root.globalGain.toFixed(2)]); root.dirty = true }
-    function applyProfile()  { root.run(["--no-flash", "--set-eq-index", "" + root.profile], true); root.dirty = true }
-    // What's live is now what's in flash, so this becomes the new revert target.
-    function saveFlash()     { root.run(["--save-flash"]); root.dirty = false; root.snapshot() }
+    function applyPregain()  {
+        if (root.sw) { root.swDirty = true; root.dirty = true; return }
+        root.run(["--no-flash", "--set-pregain", root.pregain.toFixed(2)]); root.dirty = true;
+    }
+    function applyGlobal()   {
+        if (root.sw) return;              // no device volume offset in software
+        root.run(["--no-flash", "--set-globalgain", root.globalGain.toFixed(2)]); root.dirty = true;
+    }
+    function applyProfile()  {
+        if (root.sw) return;              // profile slots are a DAC concept
+        root.run(["--no-flash", "--set-eq-index", "" + root.profile], true); root.dirty = true;
+    }
+    // Hardware: what's live becomes what's in flash. Software: render and reload.
+    // Same button, same meaning — commit what you've been editing.
+    function saveFlash() {
+        if (root.sw) { root.swApply(); return }
+        root.run(["--save-flash"]); root.dirty = false; root.snapshot();
+    }
 
     // Largest Q a shelf can take at this gain. RBJ's shelf formulas read Q as slope,
     // and past this there's no real filter — the python raises ShelfSlopeError and the
@@ -434,7 +778,7 @@ Scope {
     // >0 means the curve overshoots full scale by that much. 0.05 dB of slack keeps
     // float noise from flickering the warning on an otherwise exactly-matched preset.
     readonly property real overshoot: root.curvePeak + root.pregain
-    readonly property bool clipping: root.dev.ok && root.supportsPregain && root.overshoot > 0.05
+    readonly property bool clipping: root.ready && root.supportsPregain && root.overshoot > 0.05
     function matchHeadroom() {
         root.pregain = root.clamp(Math.round(-root.curvePeak * 10) / 10, -24, 6);
         root.applyPregain();
@@ -576,6 +920,94 @@ Scope {
     // Tiny response-curve preview. Uses root.bandDb — the same maths as the big
     // graph — so every shape in the guide is the real curve the DAC would produce,
     // not an illustration that can drift out of sync with the filters.
+    // Response readout drawn the way hub.moondroplab.tech draws it: a flat reference
+    // and the same signal with the EQ applied, normalised so the reference sits at
+    // `normDb` (their default: 60 dB, referenced at 500 Hz). Read-only — no zones, no
+    // handles. That framing carries one thing our editor graph can't: because the
+    // equalised curve includes PRE-GAIN, you see the real output level, so a curve
+    // that boosts 6 dB visibly sits below the reference once you've paid for it.
+    component RespChart: Canvas {
+        id: rc
+        property var  bands: []
+        property real pre: 0
+        property bool withPre: true      // the official's eye toggle
+        property real normDb: 60
+        property color curve: theme.bad
+        property color flat: "#c86fd0"
+        readonly property real topDb: rc.normDb + 6
+        readonly property real botDb: rc.normDb - 14
+        antialiasing: true
+        onBandsChanged: requestPaint()
+        onPreChanged: requestPaint()
+        onWithPreChanged: requestPaint()
+        onWidthChanged: requestPaint()
+        onHeightChanged: requestPaint()
+        Component.onCompleted: requestPaint()
+        function yOf(db) { return (rc.topDb - db) / (rc.topDb - rc.botDb) * height }
+        function sumDb(f) {
+            var s = 0;
+            for (var i = 0; i < rc.bands.length; i++) s += root.bandDb(rc.bands[i], f);
+            return s;
+        }
+        onPaint: {
+            var ctx = getContext("2d"), w = width, h = height;
+            ctx.clearRect(0, 0, w, h);
+
+            // minor gridlines: every 1-2-3…9 step of each decade, like the official
+            ctx.lineWidth = 1; ctx.strokeStyle = theme.line;
+            for (var dec = 1; dec <= 4; dec++) {
+                for (var m = 1; m <= 9; m++) {
+                    var f = m * Math.pow(10, dec);
+                    if (f < root.fMin || f > root.fMax) continue;
+                    var gx = root.xOfFreq(f, w);
+                    ctx.globalAlpha = 0.13;
+                    ctx.beginPath(); ctx.moveTo(gx, 0); ctx.lineTo(gx, h - 13); ctx.stroke();
+                }
+            }
+            // horizontal dashed lines every 5 dB
+            ctx.setLineDash([3, 4]);
+            for (var db = Math.ceil(rc.botDb / 5) * 5; db <= rc.topDb; db += 5) {
+                var y = rc.yOf(db);
+                ctx.globalAlpha = 0.3; ctx.strokeStyle = theme.line;
+                ctx.beginPath(); ctx.moveTo(30, y); ctx.lineTo(w, y); ctx.stroke();
+                ctx.globalAlpha = 0.85; ctx.fillStyle = theme.faint;
+                ctx.font = "9px monospace"; ctx.textAlign = "left";
+                ctx.fillText("+" + db + "dB", 0, root.clamp(y + 3, 9, h - 15));
+            }
+            ctx.setLineDash([]);
+
+            // frequency labels
+            var marks = [20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000];
+            var labels = ["20Hz", "50Hz", "100Hz", "200Hz", "500Hz", "1KHz", "2KHz", "5KHz", "10KHz", "20KHz"];
+            ctx.textAlign = "center";
+            for (var i = 0; i < marks.length; i++) {
+                var x = root.xOfFreq(marks[i], w);
+                ctx.globalAlpha = 0.28; ctx.strokeStyle = theme.line;
+                ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h - 13); ctx.stroke();
+                ctx.globalAlpha = 0.9; ctx.fillStyle = theme.faint;
+                ctx.fillText(labels[i], root.clamp(x, 16, w - 16), h - 2);
+            }
+
+            // the flat reference
+            ctx.globalAlpha = 1; ctx.lineWidth = 1.6; ctx.strokeStyle = rc.flat;
+            var fy = rc.yOf(rc.normDb);
+            ctx.beginPath(); ctx.moveTo(30, fy); ctx.lineTo(w, fy); ctx.stroke();
+
+            // …and the same thing equalised. Pre-gain is part of the answer, not a
+            // footnote: it is what makes a +6 dB curve safe, and hiding it would draw
+            // an output level the DAC never produces.
+            var off = rc.normDb + (rc.withPre ? rc.pre : 0);
+            ctx.lineWidth = 2.2; ctx.strokeStyle = rc.curve; ctx.beginPath();
+            for (var px = 0; px <= w; px += 2) {
+                var ff = root.freqOfX(px, w);
+                var yy = rc.yOf(root.clamp(off + rc.sumDb(ff), rc.botDb - 4, rc.topDb + 4));
+                px === 0 ? ctx.moveTo(px, yy) : ctx.lineTo(px, yy);
+            }
+            ctx.stroke();
+            ctx.textAlign = "left";
+        }
+    }
+
     component MiniCurve: Canvas {
         id: mc
         property var band: null
@@ -659,7 +1091,16 @@ Scope {
         exclusionMode: ExclusionMode.Ignore
 
         Rectangle { anchors.fill: parent; color: Qt.rgba(0, 0, 0, 0.5); MouseArea { anchors.fill: parent; onClicked: root.close() } }
-        Item { anchors.fill: parent; focus: root.shown; Keys.onEscapePressed: root.helpOpen ? (root.helpOpen = false) : root.close() }
+        // Escape backs out one layer at a time rather than nuking the whole panel.
+        Item { anchors.fill: parent; focus: root.shown
+            Keys.onEscapePressed: {
+                if (root.fileOpen) root.fileOpen = false;
+                // the search field eats Escape first to clear itself; this is the
+                // second press, which should back out of the browser
+                else if (root.hubOpen) root.hubOpen = false;
+                else if (root.helpOpen) root.helpOpen = false;
+                else root.close();
+            } }
 
         Rectangle {
             anchors.centerIn: parent
@@ -677,17 +1118,77 @@ Scope {
                     Sym { text: "graphic_eq"; sz: 26; color: theme.iris }
                     ColumnLayout { spacing: 1
                         RowLayout { spacing: 8
-                            Text { text: root.dev.ok ? root.dev.device_name : "Moondrop DAC"; color: theme.text; font.pixelSize: 20; font.family: "monospace"; font.bold: true }
-                            Rectangle { visible: root.dev.ok; radius: 9; implicitHeight: 18; implicitWidth: fwT.width + 14; color: theme.a(theme.iris, 0.16); border.width: 1; border.color: theme.a(theme.iris, 0.3)
+                            Text {
+                                text: root.sw ? "Software EQ" : (root.dev.ok ? root.dev.device_name : "Moondrop DAC")
+                                color: theme.text; font.pixelSize: 20; font.family: "monospace"; font.bold: true }
+                            Rectangle { visible: root.dev.ok && !root.sw; radius: 9; implicitHeight: 18; implicitWidth: fwT.width + 14; color: theme.a(theme.iris, 0.16); border.width: 1; border.color: theme.a(theme.iris, 0.3)
                                 Text { id: fwT; anchors.centerIn: parent; text: "fw " + (root.dev.firmware || "?"); color: theme.frost; font.pixelSize: 10; font.family: "monospace" } }
+                            // Where the filters are actually running. Worth stating plainly:
+                            // the software one dies with the sink, the DAC's outlives the shell.
+                            Rectangle {
+                                visible: root.sw; radius: 9; implicitHeight: 18; implicitWidth: swT.width + 14
+                                color: theme.a(root.swInfo.sink_present ? theme.good : theme.faint, 0.16)
+                                border.width: 1; border.color: theme.a(root.swInfo.sink_present ? theme.good : theme.faint, 0.4)
+                                Text { id: swT; anchors.centerIn: parent
+                                    text: root.swInfo.sink_present ? "live · pipewire" : "not created yet"
+                                    color: root.swInfo.sink_present ? theme.good : theme.faint
+                                    font.pixelSize: 10; font.family: "monospace" } }
                             Rectangle { visible: root.dirty; radius: 9; implicitHeight: 18; implicitWidth: dtT.width + 14; color: theme.a(theme.warn, 0.18); border.width: 1; border.color: theme.a(theme.warn, 0.4)
                                 Text { id: dtT; anchors.centerIn: parent; text: "unsaved"; color: theme.warn; font.pixelSize: 10; font.family: "monospace" } }
                         }
-                        Text { text: root.dev.ok ? (root.bandCount + "-band parametric EQ · DSP @ 96 kHz") : (root.dev.error || "no device connected")
-                            color: root.dev.ok ? theme.faint : theme.bad; font.pixelSize: 11; font.family: "monospace"
+                        Text {
+                            text: root.sw
+                                  ? (root.bandCount + "-band EQ in pipewire · any output · "
+                                     + (root.hwPresent ? "DAC connected but overridden"
+                                        : "no Moondrop DAC — filters run in software"))
+                                  : (root.dev.ok ? (root.bandCount + "-band parametric EQ · DSP @ 96 kHz")
+                                                 : (root.dev.error || "no device connected"))
+                            color: (root.sw || root.dev.ok) ? theme.faint : theme.bad
+                            font.pixelSize: 11; font.family: "monospace"
                             Layout.fillWidth: true; elide: Text.ElideRight }
                     }
                     Item { Layout.fillWidth: true }
+
+                    // Backend override. Only worth showing when there's a real choice:
+                    // with no DAC there is nothing to switch to.
+                    Rectangle {
+                        visible: root.hwPresent
+                        implicitHeight: 24; implicitWidth: bkRow.width + 8; radius: 8
+                        color: theme.a(theme.line, 0.4)
+                        border.width: 1; border.color: theme.a(theme.iris, 0.16)
+                        RowLayout {
+                            id: bkRow; anchors.centerIn: parent; spacing: 2
+                            Repeater {
+                                model: [ { k: "hw", t: "DAC" }, { k: "sw", t: "software" } ]
+                                delegate: Rectangle {
+                                    id: bk
+                                    required property var modelData
+                                    readonly property bool on: (bk.modelData.k === "hw") !== root.sw
+                                    implicitHeight: 20; implicitWidth: bkT.width + 14; radius: 6
+                                    color: bk.on ? theme.iris : (bkMa.containsMouse ? theme.a(theme.iris, 0.2) : "transparent")
+                                    Text { id: bkT; anchors.centerIn: parent; text: bk.modelData.t
+                                        color: bk.on ? theme.bg : theme.sub
+                                        font.pixelSize: 10; font.family: "monospace"; font.bold: bk.on }
+                                    MouseArea {
+                                        id: bkMa; anchors.fill: parent; hoverEnabled: true
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: {
+                                            root.backendPref = bk.modelData.k;
+                                            root.dirty = false; root.swDirty = false;
+                                            root.pristine = null;
+                                            root.refresh();     // the two backends hold different bands
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    TextBtn {
+                        label: "community"; icon: "groups"
+                        enabled: root.devPidHex !== "" || root.sw
+                        onTapped: { root.hubOpen = true; if (root.hubState === "idle" || root.hubState === "error") root.hubBrowse() }
+                    }
                     TextBtn { label: "how to tune"; icon: "help"; onTapped: root.helpOpen = true }
                     IconBtn { icon: "refresh"; onTapped: root.refresh() }
                     IconBtn { icon: "close"; onTapped: root.close() }
@@ -695,8 +1196,12 @@ Scope {
 
                 // ---------------- preset + offsets ----------------
                 RowLayout {
-                    Layout.fillWidth: true; spacing: 12; enabled: root.dev.ok; opacity: root.dev.ok ? 1 : 0.4
-                    Rectangle { Layout.preferredWidth: 236; implicitHeight: 56; radius: 11; color: theme.a(theme.line, 0.24); border.width: 1; border.color: theme.a(theme.iris, 0.12)
+                    Layout.fillWidth: true; spacing: 12; enabled: root.ready; opacity: root.ready ? 1 : 0.4
+                    // A DAC concept: which of the device's internal profiles is selected.
+                    // There is no such thing in a pipewire graph, so don't draw a control
+                    // that would sit there reporting "slot 0" and doing nothing.
+                    Rectangle { visible: !root.sw
+                        Layout.preferredWidth: 236; implicitHeight: 56; radius: 11; color: theme.a(theme.line, 0.24); border.width: 1; border.color: theme.a(theme.iris, 0.12)
                         RowLayout { anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 6; spacing: 4
                             ColumnLayout { spacing: 1; Layout.fillWidth: true
                                 Text { text: "DEVICE SLOT"; color: theme.faint; font.pixelSize: 9; font.family: "monospace"; font.bold: true; font.letterSpacing: 1 }
@@ -719,14 +1224,17 @@ Scope {
                         from: -24; to: 6; value: root.pregain
                         enabled: root.supportsPregain; opacity: root.supportsPregain ? 1 : 0.45
                         onMoved: (v) => root.pregain = v; onCommitted: root.applyPregain() }
-                    OffsetTile { label: "GLOBAL OFFSET"; hint: "volume"; unit: "dB"; from: -10; to: 10; value: root.globalGain
+                    // Also a DAC register (its own volume trim), with no software analogue —
+                    // use your normal volume for that.
+                    OffsetTile { visible: !root.sw
+                        label: "GLOBAL OFFSET"; hint: "volume"; unit: "dB"; from: -10; to: 10; value: root.globalGain
                         onMoved: (v) => root.globalGain = v; onCommitted: root.applyGlobal() }
                 }
 
                 // ---------------- starting-point presets ----------------
                 RowLayout {
                     Layout.fillWidth: true; spacing: 6
-                    enabled: root.dev.ok; opacity: root.dev.ok ? 1 : 0.4
+                    enabled: root.ready; opacity: root.ready ? 1 : 0.4
                     Text { text: "PRESETS"; color: theme.faint; font.pixelSize: 9; font.family: "monospace"; font.bold: true; font.letterSpacing: 1 }
                     Repeater {
                         model: root.presets
@@ -752,14 +1260,49 @@ Scope {
                     Layout.fillWidth: true; Layout.preferredHeight: 244; radius: 12
                     color: theme.a(theme.panel, 0.6); border.width: 1; border.color: theme.a(theme.iris, 0.14); clip: true
 
+                    // Two views of the same maths, because they answer different questions.
+                    // The editor shows what each band does and lets you drag it. The readout
+                    // is hub.moondroplab.tech's framing: one curve, normalised, pre-gain
+                    // paid — what the DAC actually outputs. Neither is a substitute for the
+                    // other, so it's a toggle rather than a replacement.
+                    RespChart {
+                        id: bigChart
+                        visible: root.graphReadout
+                        anchors.fill: parent; anchors.margins: 10
+                        bands: root.bands
+                        pre: root.pregain
+                        withPre: true
+                    }
+                    Rectangle {
+                        z: 6
+                        anchors.right: parent.right; anchors.top: parent.top
+                        anchors.rightMargin: 8; anchors.topMargin: 8
+                        implicitWidth: 26; implicitHeight: 22; radius: 7
+                        color: gmMa.containsMouse ? theme.a(theme.iris, 0.25) : theme.a(theme.bg, 0.6)
+                        border.width: 1; border.color: theme.a(theme.iris, root.graphReadout ? 0.5 : 0.18)
+                        Sym {
+                            anchors.centerIn: parent; sz: 13
+                            text: root.graphReadout ? "tune" : "show_chart"
+                            color: root.graphReadout ? theme.frost : theme.faint
+                        }
+                        MouseArea {
+                            id: gmMa; anchors.fill: parent; hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: root.graphReadout = !root.graphReadout
+                        }
+                    }
+
                     Canvas {
-                        id: graph; anchors.fill: parent; anchors.margins: 10; antialiasing: true
+                        id: graph; visible: !root.graphReadout
+                        anchors.fill: parent; anchors.margins: 10; antialiasing: true
                         property var _bands: root.bands
                         property int _sel: root.sel
                         property color _accent: theme.iris
+                        property real _pre: root.pregain    // the output curve depends on it
                         on_BandsChanged: requestPaint()
                         on_SelChanged: requestPaint()
                         on_AccentChanged: requestPaint()
+                        on_PreChanged: requestPaint()
                         onWidthChanged: requestPaint()
                         onHeightChanged: requestPaint()
                         function css(c) { return Qt.rgba(c.r, c.g, c.b, c.a) }
@@ -778,11 +1321,23 @@ Scope {
                                 if (zx2 - zx1 > 34) { ctx.fillStyle = graph.hexA(rd.c, 0.85);
                                     ctx.font = "9px monospace"; ctx.textAlign = "center"; ctx.fillText(rd.n, (zx1 + zx2) / 2, 12); ctx.textAlign = "left"; }
                             }
+                            // minor gridlines (1-2-3…9 per decade), like the official chart
+                            ctx.strokeStyle = theme.line; ctx.globalAlpha = 0.1;
+                            for (var dc = 1; dc <= 4; dc++) {
+                                for (var mm = 2; mm <= 9; mm++) {
+                                    var mf = mm * Math.pow(10, dc);
+                                    if (mf < root.fMin || mf > root.fMax) continue;
+                                    var mx = root.xOfFreq(mf, w);
+                                    ctx.beginPath(); ctx.moveTo(mx, 16); ctx.lineTo(mx, h - 11); ctx.stroke();
+                                }
+                            }
                             ctx.font = "9px monospace";
                             for (var db = -root.dbMax; db <= root.dbMax; db += 6) {
                                 var y = root.yOfDb(db, h);
                                 ctx.globalAlpha = db === 0 ? 0.85 : 0.4; ctx.strokeStyle = theme.line;
+                                if (db !== 0) ctx.setLineDash([3, 4]);
                                 ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
+                                ctx.setLineDash([]);
                                 // Keep the label inside the canvas and clear of the frequency
                                 // row along the bottom. Unclamped, +dbMax draws at y=-2 (above
                                 // the top edge, invisible) and -dbMax at y=h-2 — exactly where
@@ -809,12 +1364,34 @@ Scope {
                                 }
                                 ctx.stroke();
                             }
+                            // "Flat" — the reference the EQ is shaping, drawn the way the
+                            // official chart draws it so the two read the same way.
+                            ctx.globalAlpha = 1; ctx.strokeStyle = "#c86fd0"; ctx.lineWidth = 1.4;
+                            var flatY = root.yOfDb(0, h);
+                            ctx.beginPath(); ctx.moveTo(0, flatY); ctx.lineTo(w, flatY); ctx.stroke();
+
+                            // The EQ curve: what the bands do, which is what the handles edit.
                             ctx.strokeStyle = theme.iris; ctx.lineWidth = 2.4; ctx.beginPath();
                             for (var qx = 0; qx <= w; qx += 2) {
                                 var ff = root.freqOfX(qx, w); var ty = root.yOfDb(root.clamp(root.totalDb(ff), -root.dbMax, root.dbMax), h);
                                 qx === 0 ? ctx.moveTo(qx, ty) : ctx.lineTo(qx, ty);
                             }
                             ctx.stroke();
+
+                            // …and the level that actually leaves the DAC, once pre-gain is
+                            // paid for. The official chart only ever draws THIS one, which is
+                            // why a +6 dB curve looks like it sits below flat there and above
+                            // it here. Without it the graph shows gain you don't get to keep.
+                            if (Math.abs(root.pregain) > 0.05) {
+                                ctx.strokeStyle = graph.css(theme.a(theme.bad, 0.85));
+                                ctx.lineWidth = 1.6; ctx.setLineDash([5, 3]); ctx.beginPath();
+                                for (var ox = 0; ox <= w; ox += 2) {
+                                    var of = root.freqOfX(ox, w);
+                                    var oy = root.yOfDb(root.clamp(root.totalDb(of) + root.pregain, -root.dbMax, root.dbMax), h);
+                                    ox === 0 ? ctx.moveTo(ox, oy) : ctx.lineTo(ox, oy);
+                                }
+                                ctx.stroke(); ctx.setLineDash([]);
+                            }
                             // handles: dot on the curve, number offset with a leader (anti-overlap)
                             var order = [];
                             for (var k = 0; k < graph._bands.length; k++) { if (graph._bands[k].type === "disabled") continue;
@@ -835,6 +1412,27 @@ Scope {
                                 ctx.fillText("" + graph._bands[oo.k].index, oo.hx, ly + 3);
                             }
                             ctx.textAlign = "left";
+
+                            // legend, bottom-left like the official's
+                            var lg = [{ c: "#c86fd0", t: "Flat", d: false },
+                                      { c: graph.css(theme.iris), t: "Equalized", d: false }];
+                            if (Math.abs(root.pregain) > 0.05)
+                                lg.push({ c: graph.css(theme.a(theme.bad, 0.85)), t: "+ pre-gain (output)", d: true });
+                            ctx.font = "9px monospace";
+                            var lw = 0;
+                            for (var q = 0; q < lg.length; q++) lw = Math.max(lw, ctx.measureText(lg[q].t).width);
+                            var bx = 6, by = h - 14 - lg.length * 12;
+                            ctx.globalAlpha = 0.82; ctx.fillStyle = graph.css(theme.a(theme.bg, 0.9));
+                            ctx.fillRect(bx, by, lw + 26, lg.length * 12 + 6);
+                            ctx.globalAlpha = 1;
+                            for (var q2 = 0; q2 < lg.length; q2++) {
+                                var ly2 = by + 9 + q2 * 12;
+                                ctx.strokeStyle = lg[q2].c; ctx.lineWidth = 2;
+                                if (lg[q2].d) ctx.setLineDash([3, 2]);
+                                ctx.beginPath(); ctx.moveTo(bx + 4, ly2 - 2); ctx.lineTo(bx + 18, ly2 - 2); ctx.stroke();
+                                ctx.setLineDash([]);
+                                ctx.fillStyle = theme.faint; ctx.fillText(lg[q2].t, bx + 22, ly2 + 1);
+                            }
                         }
 
                         MouseArea {
@@ -869,7 +1467,7 @@ Scope {
                 // ---------------- all-bands column editor ----------------
                 Rectangle {
                     Layout.fillWidth: true; Layout.fillHeight: true; radius: 12
-                    visible: root.dev.ok
+                    visible: root.ready
                     color: theme.a(theme.panel, 0.5); border.width: 1; border.color: theme.a(theme.iris, 0.12)
                     RowLayout {
                         anchors.fill: parent; anchors.margins: 9; spacing: 7
@@ -945,44 +1543,559 @@ Scope {
                     }
                 }
 
+                // ---------------- toasts ----------------
+                // Layout items, not overlays: anchored to the panel bottom they sat on
+                // top of the footer and hid the buttons. Layouts skip invisible items,
+                // so these cost nothing until they fire, then push the footer down.
+
+                // Mostly the Q2.30 coefficient-overflow refusal: the firmware can't
+                // represent the filter, so the script declines rather than let the DAC
+                // wrap and play a curve that isn't the one drawn. The graph has already
+                // been resynced to the device by the time this shows.
+                Rectangle {
+                    visible: root.lastError !== ""
+                    Layout.fillWidth: true
+                    implicitHeight: errCol.height + 18; radius: 11
+                    color: theme.a(theme.bad, 0.16); border.width: 1; border.color: theme.a(theme.bad, 0.5)
+                    RowLayout {
+                        id: errCol
+                        anchors.left: parent.left; anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
+                        anchors.leftMargin: 12; anchors.rightMargin: 6; spacing: 10
+                        Sym { text: "block"; sz: 18; color: theme.bad }
+                        ColumnLayout { Layout.fillWidth: true; spacing: 1
+                            Text { text: "device refused the write — graph resynced to the DAC"
+                                color: theme.bad; font.pixelSize: 11; font.family: "monospace"; font.bold: true }
+                            Text { Layout.fillWidth: true; wrapMode: Text.WordWrap; text: root.lastError
+                                color: theme.sub; font.pixelSize: 10; font.family: "monospace"; lineHeight: 1.25 } }
+                        IconBtn { icon: "close"; onTapped: root.lastError = "" }
+                    }
+                }
+
+                Rectangle {
+                    // A failed export clears `exported` in _done(), and this yields to the
+                    // error toast anyway, so the two can never both be showing.
+                    visible: root.exported !== "" && root.lastError === ""
+                    Layout.fillWidth: true
+                    implicitHeight: expRow.height + 18; radius: 11
+                    color: theme.a(theme.good, 0.14); border.width: 1; border.color: theme.a(theme.good, 0.45)
+                    RowLayout {
+                        id: expRow
+                        anchors.left: parent.left; anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
+                        anchors.leftMargin: 12; anchors.rightMargin: 6; spacing: 10
+                        Sym { text: "check_circle"; sz: 18; color: theme.good }
+                        ColumnLayout { Layout.fillWidth: true; spacing: 1
+                            Text { text: /\.conf$/i.test(root.exported) ? "exported — copy it to ~/.config/pipewire/pipewire.conf.d/ and restart pipewire"
+                                                                        : "exported"
+                                color: theme.good; font.pixelSize: 11; font.family: "monospace"; font.bold: true }
+                            Text { Layout.fillWidth: true; elide: Text.ElideMiddle; text: root.exported
+                                color: theme.sub; font.pixelSize: 10; font.family: "monospace" } }
+                        IconBtn { icon: "close"; onTapped: root.exported = "" }
+                    }
+                }
+
                 // ---------------- footer ----------------
                 RowLayout {
                     Layout.fillWidth: true; spacing: 8
-                    Text { text: "drag graph points · scroll = Q · new to this? tap “how to tune” · edits are live, save to keep them after unplug"
+                    Text {
+                        // The one sentence that differs most between the backends: on the DAC
+                        // you hear every drag, in software you hear nothing until you apply.
+                        text: root.sw
+                              ? (root.swInfo.sink_present
+                                 ? "drag graph points · scroll = Q · nothing is audible until you apply · select “Universal EQ” as your output"
+                                 : "drag graph points · scroll = Q · these filters run in pipewire — apply to create the output and hear them")
+                              : "drag graph points · scroll = Q · new to this? tap “how to tune” · edits are live, save to keep them after unplug"
                         color: theme.faint; font.pixelSize: 10; font.family: "monospace"
                         Layout.fillWidth: true; elide: Text.ElideRight }
-                    TextBtn { label: "import"; icon: "folder_open"; enabled: root.dev.ok; onTapped: root.pickImport() }
+                    TextBtn {
+                        visible: root.sw && root.swInfo.installed
+                        label: "remove"; icon: "delete"; enabled: !root.swBusy
+                        onTapped: root.swRemove()
+                    }
+                    TextBtn { label: "import"; icon: "folder_open"; enabled: root.ready; onTapped: root.browse("import") }
+                    TextBtn { label: "export"; icon: "save_as"; enabled: root.ready; onTapped: root.browse("export") }
                     // "reload" re-reads the DAC (truth). "revert" undoes live edits back to
                     // the last saved state — re-reading can't do that, since the DSP reports
                     // what we wrote, not what flash holds.
-                    TextBtn { label: "revert"; icon: "undo"; enabled: root.dev.ok && root.dirty && root.pristine !== null; onTapped: root.revert() }
-                    TextBtn { label: "reload"; icon: "sync"; enabled: root.dev.ok; onTapped: root.refresh() }
-                    TextBtn { label: "save to flash"; icon: "save"; primary: true; enabled: root.dev.ok; onTapped: root.saveFlash() }
+                    TextBtn { label: "revert"; icon: "undo"; enabled: root.ready && root.dirty && root.pristine !== null; onTapped: root.revert() }
+                    TextBtn { label: "reload"; icon: "sync"; enabled: root.ready; onTapped: root.refresh() }
+                    // Same button, different commit. On the DAC it burns the live state
+                    // into flash; in software it renders the graph and reloads the sink,
+                    // which is the first moment any of it becomes audible.
+                    TextBtn {
+                        label: root.sw ? (root.swBusy ? "applying…"
+                                          : root.swInfo.installed ? "apply" : "create + apply")
+                                       : "save to flash"
+                        icon: root.sw ? "play_arrow" : "save"
+                        primary: true
+                        enabled: root.ready && !root.swBusy
+                        onTapped: root.saveFlash()
+                    }
                 }
             }
 
-            // ---------------- refusal toast ----------------
-            // Mostly the Q2.30 coefficient-overflow refusal: the firmware can't
-            // represent the filter, so the script declines rather than let the DAC
-            // wrap and play a curve that isn't the one drawn. The graph has already
-            // been resynced to the device by the time this shows.
+            // ---------------- first-run: create the virtual output ----------------
+            // Writing to your pipewire config and starting a service is not something to
+            // do silently, so the first apply asks. It is genuinely low-impact — the
+            // filter-chain daemon adds the sink without the main pipewire restarting —
+            // and saying so is the difference between an informed yes and a shrug.
             Rectangle {
-                visible: root.lastError !== "" && !root.helpOpen
-                anchors.left: parent.left; anchors.right: parent.right; anchors.bottom: parent.bottom
-                anchors.margins: 14
-                implicitHeight: errCol.height + 20; radius: 11
-                color: theme.a(theme.bad, 0.16); border.width: 1; border.color: theme.a(theme.bad, 0.5)
-                RowLayout {
-                    id: errCol
-                    anchors.left: parent.left; anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
-                    anchors.leftMargin: 12; anchors.rightMargin: 6; spacing: 10
-                    Sym { text: "block"; sz: 18; color: theme.bad }
-                    ColumnLayout { Layout.fillWidth: true; spacing: 1
-                        Text { text: "device refused the write — graph resynced to the DAC"
-                            color: theme.bad; font.pixelSize: 11; font.family: "monospace"; font.bold: true }
-                        Text { Layout.fillWidth: true; wrapMode: Text.WordWrap; text: root.lastError
-                            color: theme.sub; font.pixelSize: 10; font.family: "monospace"; lineHeight: 1.25 } }
-                    IconBtn { icon: "close"; onTapped: root.lastError = "" }
+                visible: root.swConfirm
+                anchors.fill: parent; radius: 18
+                color: theme.a(theme.bg, 0.97); border.width: 1; border.color: theme.a(theme.iris, 0.34)
+                MouseArea { anchors.fill: parent }
+                ColumnLayout {
+                    anchors.centerIn: parent; width: 560; spacing: 14
+                    RowLayout {
+                        Layout.fillWidth: true; spacing: 10
+                        Sym { text: "speaker_group"; sz: 24; color: theme.iris }
+                        Text { text: "Create the software EQ output?"; color: theme.text
+                            font.pixelSize: 18; font.family: "monospace"; font.bold: true }
+                    }
+                    Text {
+                        Layout.fillWidth: true; wrapMode: Text.WordWrap
+                        text: "There's no Moondrop DAC to run these filters on, so they'll run in pipewire "
+                            + "instead — which works on anything: your speakers, another brand's DAC, bluetooth.\n\n"
+                            + "This writes one config file and starts a service:\n"
+                            + "    ~/.config/pipewire/filter-chain.conf.d/99-hub-moon-eq.conf\n"
+                            + "    systemctl --user start filter-chain.service\n\n"
+                            + "A “Universal EQ” output appears, and you pick it as your output device. Your "
+                            + "main pipewire is NOT restarted, so nothing playing right now is interrupted. "
+                            + "Undo it any time with “remove”."
+                        color: theme.sub; font.pixelSize: 11; font.family: "monospace"; lineHeight: 1.4
+                    }
+                    RowLayout {
+                        Layout.fillWidth: true; spacing: 8
+                        Item { Layout.fillWidth: true }
+                        TextBtn { label: "cancel"; icon: "close"; onTapped: root.swConfirm = false }
+                        TextBtn { label: "create it"; icon: "check"; primary: true
+                                  onTapped: root.swCommit() }
+                    }
+                }
+            }
+
+            // ---------------- community preset browser ----------------
+            Rectangle {
+                id: hubBrowser
+                visible: root.hubOpen; anchors.fill: parent; radius: 18
+                color: theme.a(theme.bg, 0.985); border.width: 1; border.color: theme.a(theme.iris, 0.34)
+                MouseArea { anchors.fill: parent }   // swallow clicks
+
+                ColumnLayout {
+                    anchors.fill: parent; anchors.margins: 22; spacing: 11
+
+                    RowLayout {
+                        Layout.fillWidth: true; spacing: 10
+                        Sym { text: "groups"; sz: 22; color: theme.iris }
+                        Text { text: "Community presets"; color: theme.text
+                            font.pixelSize: 19; font.family: "monospace"; font.bold: true }
+                        Text {
+                            text: root.hubState === "ok"
+                                  ? (root.hubTotal > root.hubList.length
+                                     ? ("· " + root.hubList.length + " of " + root.hubTotal + " · most downloaded first")
+                                     : ("· " + root.hubTotal + " for this device family"))
+                                  : "· from hub.moondroplab.tech"
+                            color: theme.faint; font.pixelSize: 11; font.family: "monospace"
+                            Layout.fillWidth: true; elide: Text.ElideRight
+                        }
+                        IconBtn { icon: "refresh"; onTapped: { root.hubState = "loading"
+                            hubProc.command = ["python3", root.pyScript, "--presets", "--pid", root.hubPid,
+                                               "--limit", "200", "--refresh"]
+                                .concat(root.hubQuery.trim() !== "" ? ["--search", root.hubQuery.trim()] : []);
+                            hubProc.running = true } }
+                        IconBtn { icon: "close"; onTapped: root.hubOpen = false }
+                    }
+
+                    // search — typing filters the whole library, not just what's listed
+                    Rectangle {
+                        Layout.fillWidth: true; implicitHeight: 32; radius: 9
+                        color: theme.a(theme.line, 0.4)
+                        border.width: 1; border.color: theme.a(theme.iris, hubSearch.activeFocus ? 0.5 : 0.16)
+                        RowLayout {
+                            anchors.fill: parent; anchors.leftMargin: 10; anchors.rightMargin: 8; spacing: 8
+                            Sym { text: "search"; sz: 15; color: theme.faint }
+                            TextInput {
+                                id: hubSearch
+                                Layout.fillWidth: true
+                                text: root.hubQuery
+                                onTextChanged: root.hubQuery = text
+                                color: theme.text; font.pixelSize: 12; font.family: "monospace"
+                                selectByMouse: true; clip: true
+                                focus: root.hubOpen
+                                Keys.onEscapePressed: { if (text !== "") text = ""; else root.hubOpen = false }
+                                Text {
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    visible: hubSearch.text === ""
+                                    text: "search by name, author or description…"
+                                    color: theme.faint; font.pixelSize: 12; font.family: "monospace"
+                                }
+                            }
+                            Sym { text: "close"; sz: 14; color: theme.faint; visible: hubSearch.text !== ""
+                                MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                                    onClicked: hubSearch.text = "" } }
+                        }
+                    }
+
+                    // states: loading / error / empty / list
+                    Text {
+                        Layout.fillWidth: true; Layout.fillHeight: true
+                        visible: root.hubState !== "ok"
+                        horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter
+                        wrapMode: Text.WordWrap
+                        text: root.hubState === "loading"
+                              ? "fetching the library…\nthe first fetch pulls the whole index (a few MB); it's cached after that"
+                              : root.hubState === "error" ? ("couldn't load the library\n" + root.hubError)
+                              : ""
+                        color: root.hubState === "error" ? theme.bad : theme.faint
+                        font.pixelSize: 12; font.family: "monospace"; lineHeight: 1.4
+                    }
+                    Text {
+                        Layout.fillWidth: true; Layout.fillHeight: true
+                        visible: root.hubState === "ok" && root.hubList.length === 0
+                        horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter
+                        text: "nothing matches “" + root.hubQuery + "”"
+                        color: theme.faint; font.pixelSize: 12; font.family: "monospace"
+                    }
+
+                    // ---- preview: what the selected curve actually does ----
+                    Rectangle {
+                        Layout.fillWidth: true
+                        implicitHeight: root.hubSel !== "" ? 186 : 0
+                        visible: root.hubSel !== "" && root.hubState === "ok"
+                        radius: 10; clip: true
+                        color: theme.a(theme.panel, 0.6)
+                        border.width: 1; border.color: theme.a(theme.iris, 0.14)
+                        Behavior on implicitHeight { NumberAnimation { duration: 130; easing.type: Easing.OutCubic } }
+
+                        ColumnLayout {
+                            anchors.fill: parent; anchors.margins: 9; spacing: 5
+                            RowLayout {
+                                Layout.fillWidth: true; spacing: 8
+                                Text {
+                                    Layout.fillWidth: true; elide: Text.ElideRight; maximumLineCount: 1
+                                    text: root.hubSelTitle
+                                    color: theme.text; font.pixelSize: 11; font.family: "monospace"; font.bold: true
+                                }
+                                // legend, same names the official uses
+                                Rectangle { implicitWidth: 9; implicitHeight: 2; color: "#c86fd0" }
+                                Text { text: "Flat"; color: theme.faint; font.pixelSize: 9; font.family: "monospace" }
+                                Rectangle { implicitWidth: 9; implicitHeight: 2; color: theme.bad; Layout.leftMargin: 4 }
+                                Text { text: "Flat (Equalized)"; color: theme.faint; font.pixelSize: 9; font.family: "monospace" }
+                                // the official's eye: does the drawn level include pre-gain
+                                Rectangle {
+                                    Layout.leftMargin: 6
+                                    implicitWidth: 26; implicitHeight: 18; radius: 6
+                                    color: preEye.containsMouse ? theme.a(theme.iris, 0.2) : theme.a(theme.line, 0.4)
+                                    border.width: 1; border.color: theme.a(theme.iris, 0.16)
+                                    Sym { anchors.centerIn: parent; sz: 12
+                                        text: root.hubPreShowPre ? "visibility" : "visibility_off"
+                                        color: root.hubPreShowPre ? theme.frost : theme.faint }
+                                    MouseArea { id: preEye; anchors.fill: parent; hoverEnabled: true
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: root.hubPreShowPre = !root.hubPreShowPre }
+                                }
+                                Text {
+                                    text: "pre " + root.pregain.toFixed(1) + " dB"
+                                    color: theme.faint; font.pixelSize: 9; font.family: "monospace"
+                                }
+                            }
+                            RespChart {
+                                id: preChart
+                                Layout.fillWidth: true; Layout.fillHeight: true
+                                bands: root.hubPreview
+                                pre: root.pregain
+                                withPre: root.hubPreShowPre
+                                opacity: root.hubPreLoading ? 0.35 : 1
+                                Behavior on opacity { NumberAnimation { duration: 120 } }
+                            }
+                        }
+                        Text {
+                            anchors.centerIn: parent; visible: root.hubPreLoading
+                            text: "…"; color: theme.faint; font.pixelSize: 20; font.family: "monospace"
+                        }
+                        // A community curve is bands only — it says nothing about headroom.
+                        // With YOUR pre-gain applied, this is what it would actually output.
+                        Text {
+                            anchors.right: parent.right; anchors.bottom: parent.bottom
+                            anchors.rightMargin: 10; anchors.bottomMargin: 18
+                            visible: root.hubPreview.length > 0 && root.hubPreOvershoot > 0.05
+                            text: "clips by " + root.hubPreOvershoot.toFixed(1) + " dB at this pre-gain"
+                            color: theme.warn; font.pixelSize: 9; font.family: "monospace"
+                        }
+                    }
+
+                    ListView {
+                        id: hubView
+                        visible: root.hubState === "ok" && root.hubList.length > 0
+                        Layout.fillWidth: true; Layout.fillHeight: true
+                        model: root.hubList
+                        clip: true; spacing: 5
+
+                        // ---- back to top ----
+                        // 200 rows deep, the search box is a long way up.
+                        Rectangle {
+                            parent: hubView
+                            // Left, not right: the right edge is a column of apply buttons,
+                            // and floating a pill over the consequential control is asking
+                            // for a mis-aimed click. Over a row's title costs nothing.
+                            anchors.left: parent.left; anchors.bottom: parent.bottom
+                            anchors.leftMargin: 6; anchors.bottomMargin: 6
+                            z: 5
+                            visible: hubView.contentY > 120
+                            opacity: visible ? 1 : 0
+                            Behavior on opacity { NumberAnimation { duration: 120 } }
+                            implicitWidth: 92; implicitHeight: 26; radius: 13
+                            color: topMa.containsMouse ? theme.iris : theme.a(theme.bg, 0.94)
+                            border.width: 1; border.color: theme.a(theme.iris, 0.45)
+                            RowLayout {
+                                anchors.centerIn: parent; spacing: 5
+                                Sym { text: "arrow_upward"; sz: 13
+                                    color: topMa.containsMouse ? theme.bg : theme.frost }
+                                Text { text: "top"; font.pixelSize: 10; font.family: "monospace"; font.bold: true
+                                    color: topMa.containsMouse ? theme.bg : theme.frost }
+                            }
+                            MouseArea {
+                                id: topMa; anchors.fill: parent; hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: hubView.positionViewAtBeginning()
+                            }
+                        }
+                        delegate: Rectangle {
+                            id: hp
+                            required property var modelData
+                            width: hubView.width; implicitHeight: 46; radius: 9
+                            // These rows hold arbitrary text from strangers. The script
+                            // already flattens whitespace, but clip is the backstop that
+                            // keeps one weird row from painting over its neighbours.
+                            clip: true
+                            readonly property bool picked: root.hubSel === hp.modelData.uuid
+                            color: hp.picked ? theme.a(theme.iris, 0.22)
+                                 : hpMa.containsMouse ? theme.a(theme.iris, 0.16) : theme.a(theme.line, 0.28)
+                            border.width: 1
+                            border.color: theme.a(theme.iris, hp.picked ? 0.6 : hpMa.containsMouse ? 0.4 : 0.1)
+
+                            // FIRST child on purpose. Later siblings receive input first in
+                            // QML, so this has to be declared before the row content or it
+                            // sits on top of the apply button and eats its clicks.
+                            MouseArea {
+                                id: hpMa; anchors.fill: parent; hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: root.hubShow(hp.modelData)
+                            }
+
+                            RowLayout {
+                                anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 12; spacing: 10
+                                ColumnLayout {
+                                    Layout.fillWidth: true; spacing: 1
+                                    Text {
+                                        Layout.fillWidth: true; elide: Text.ElideRight
+                                        maximumLineCount: 1
+                                        text: hp.modelData.title !== "" ? hp.modelData.title : "(untitled)"
+                                        color: theme.text; font.pixelSize: 12; font.family: "monospace"
+                                    }
+                                    Text {
+                                        Layout.fillWidth: true; elide: Text.ElideRight
+                                        maximumLineCount: 1
+                                        text: hp.modelData.author
+                                              + (hp.modelData.desc !== "" ? "  ·  " + hp.modelData.desc : "")
+                                        color: theme.faint; font.pixelSize: 10; font.family: "monospace"
+                                    }
+                                }
+                                RowLayout {
+                                    spacing: 4
+                                    Sym { text: "download"; sz: 12; color: theme.faint }
+                                    Text { text: "" + hp.modelData.downloads; color: theme.frost
+                                        font.pixelSize: 10; font.family: "monospace" }
+                                    Sym { text: "favorite"; sz: 12; color: theme.faint; Layout.leftMargin: 6 }
+                                    Text { text: "" + hp.modelData.likes; color: theme.frost
+                                        font.pixelSize: 10; font.family: "monospace" }
+                                }
+                                // Apply is its own target. Clicking the row only draws the
+                                // curve; writing 8 bands to the DAC should take aim.
+                                Rectangle {
+                                    implicitWidth: 62; implicitHeight: 24; radius: 7
+                                    color: root.hubBusy === hp.modelData.uuid ? theme.a(theme.iris, 0.3)
+                                         : applyMa.containsMouse ? theme.iris : theme.a(theme.line, 0.5)
+                                    border.width: 1
+                                    border.color: theme.a(theme.iris, applyMa.containsMouse ? 0.7 : 0.4)
+                                    Text {
+                                        anchors.centerIn: parent
+                                        text: root.hubBusy === hp.modelData.uuid ? "…" : "apply"
+                                        color: applyMa.containsMouse && root.hubBusy === "" ? theme.bg : theme.sub
+                                        font.pixelSize: 10; font.family: "monospace"; font.bold: true
+                                    }
+                                    MouseArea {
+                                        id: applyMa; anchors.fill: parent; hoverEnabled: true
+                                        cursorShape: Qt.PointingHandCursor
+                                        enabled: root.hubBusy === ""
+                                        onClicked: root.hubApply(hp.modelData)
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // The one thing a user can't see from a title: these are strangers'
+                    // curves for a whole device family, not vendor-checked tunings.
+                    Text {
+                        Layout.fillWidth: true; wrapMode: Text.WordWrap
+                        text: "Click a preset to see its curve — nothing touches the DAC until you press apply. "
+                            + "Applying overwrites all " + root.bandCount + " bands live, and stays out of flash "
+                            + "until you save. Pre-gain is left alone — published presets don't carry one."
+                        color: theme.faint; font.pixelSize: 10; font.family: "monospace"; lineHeight: 1.3
+                    }
+                }
+            }
+
+            // ---------------- in-panel file browser ----------------
+            Rectangle {
+                id: fileBrowser
+                visible: root.fileOpen; anchors.fill: parent; radius: 18
+                color: theme.a(theme.bg, 0.985); border.width: 1; border.color: theme.a(theme.iris, 0.34)
+                MouseArea { anchors.fill: parent }   // swallow clicks
+
+                FolderListModel {
+                    id: folderModel
+                    folder: root.fileDir === "" ? "" : "file://" + root.fileDir
+                    showDirs: true
+                    showFiles: true
+                    showDotAndDotDot: false
+                    showHidden: false
+                    sortField: FolderListModel.Type      // folders first, then name
+                    // Import reads AutoEQ/REW text or an exported backup; export lists
+                    // what we'd write, so you can see what's already there.
+                    nameFilters: root.fileMode === "import" ? ["*.txt", "*.json"] : ["*.json", "*.conf"]
+                }
+
+                ColumnLayout {
+                    anchors.fill: parent; anchors.margins: 22; spacing: 11
+
+                    RowLayout {
+                        Layout.fillWidth: true; spacing: 10
+                        Sym { text: root.fileMode === "import" ? "folder_open" : "save_as"; sz: 22; color: theme.iris }
+                        Text { text: root.fileMode === "import" ? "Import EQ" : "Export EQ"
+                            color: theme.text; font.pixelSize: 19; font.family: "monospace"; font.bold: true }
+                        Text { text: root.fileMode === "import" ? "· AutoEQ/REW .txt or a .json backup" : "· writes to the folder you're in"
+                            color: theme.faint; font.pixelSize: 11; font.family: "monospace" }
+                        Item { Layout.fillWidth: true }
+                        IconBtn { icon: "close"; onTapped: root.fileOpen = false }
+                    }
+
+                    // shortcuts + current path
+                    RowLayout {
+                        Layout.fillWidth: true; spacing: 6
+                        IconBtn { icon: "arrow_upward"; onTapped: root.goUp() }
+                        Repeater {
+                            model: [ { nm: "Home", d: root.homeDir },
+                                     { nm: "Downloads", d: root.homeDir + "/Downloads" },
+                                     { nm: "Documents", d: root.homeDir + "/Documents" } ]
+                            delegate: Rectangle {
+                                id: sc
+                                required property var modelData
+                                implicitHeight: 24; implicitWidth: scT.width + 18; radius: 7
+                                color: scMa.containsMouse ? theme.a(theme.iris, 0.2) : theme.a(theme.line, 0.3)
+                                border.width: 1; border.color: theme.a(theme.iris, 0.14)
+                                Text { id: scT; anchors.centerIn: parent; text: sc.modelData.nm; color: theme.sub; font.pixelSize: 10; font.family: "monospace" }
+                                MouseArea { id: scMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                    onClicked: root.fileDir = sc.modelData.d }
+                            }
+                        }
+                        Text { Layout.fillWidth: true; elide: Text.ElideLeft; text: root.fileDir
+                            color: theme.frost; font.pixelSize: 11; font.family: "monospace" }
+                    }
+
+                    // listing
+                    Rectangle {
+                        Layout.fillWidth: true; Layout.fillHeight: true; radius: 11
+                        color: theme.a(theme.panel, 0.5); border.width: 1; border.color: theme.a(theme.iris, 0.12); clip: true
+                        ListView {
+                            id: fileList
+                            anchors.fill: parent; anchors.margins: 6; spacing: 2
+                            model: folderModel
+                            boundsBehavior: Flickable.StopAtBounds
+                            delegate: Rectangle {
+                                id: row
+                                required property string fileName
+                                required property string filePath
+                                required property bool fileIsDir
+                                width: fileList.width; height: 30; radius: 7
+                                color: rowMa.containsMouse ? theme.a(theme.iris, 0.16) : "transparent"
+                                RowLayout {
+                                    anchors.fill: parent; anchors.leftMargin: 9; anchors.rightMargin: 9; spacing: 9
+                                    Sym { text: row.fileIsDir ? "folder" : (/\.json$/i.test(row.fileName) ? "data_object" : "description")
+                                        sz: 15; color: row.fileIsDir ? theme.iris : theme.faint }
+                                    Text { Layout.fillWidth: true; elide: Text.ElideRight; text: row.fileName
+                                        color: row.fileIsDir ? theme.text : theme.sub; font.pixelSize: 12; font.family: "monospace" }
+                                    Text { visible: !row.fileIsDir && root.fileMode === "import"
+                                        text: /\.json$/i.test(row.fileName) ? "backup" : "AutoEQ/REW"
+                                        color: theme.faint; font.pixelSize: 9; font.family: "monospace" }
+                                }
+                                MouseArea {
+                                    id: rowMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                    onClicked: {
+                                        if (row.fileIsDir) root.fileDir = row.filePath;
+                                        else if (root.fileMode === "import") root.importFile(row.filePath);
+                                        else root.exportName = row.fileName;   // export: click to overwrite
+                                    }
+                                }
+                            }
+                        }
+                        Text {
+                            anchors.centerIn: parent; visible: folderModel.count === 0
+                            text: root.fileMode === "import" ? "no .txt or .json files here" : "no existing exports here"
+                            color: theme.faint; font.pixelSize: 11; font.family: "monospace"
+                        }
+                    }
+
+                    // export controls
+                    RowLayout {
+                        Layout.fillWidth: true; spacing: 8; visible: root.fileMode === "export"
+                        Text { text: "FORMAT"; color: theme.faint; font.pixelSize: 9; font.family: "monospace"; font.bold: true; font.letterSpacing: 1 }
+                        Repeater {
+                            model: [ { k: "json",     nm: "JSON backup",  d: "restore later with import" },
+                                     { k: "pipewire", nm: "PipeWire EQ",  d: "software EQ for any output device" } ]
+                            delegate: Rectangle {
+                                id: fmt
+                                required property var modelData
+                                readonly property bool on: root.exportFmt === fmt.modelData.k
+                                implicitHeight: 30; implicitWidth: fmtT.width + 20; radius: 8
+                                color: fmt.on ? theme.a(theme.iris, 0.22) : theme.a(theme.line, 0.28)
+                                border.width: 1; border.color: theme.a(theme.iris, fmt.on ? 0.5 : 0.14)
+                                Text { id: fmtT; anchors.centerIn: parent; text: fmt.modelData.nm
+                                    color: fmt.on ? theme.frost : theme.sub; font.pixelSize: 10; font.family: "monospace"; font.bold: fmt.on }
+                                MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                                    onClicked: {
+                                        root.exportFmt = fmt.modelData.k;
+                                        root.exportName = fmt.modelData.k === "pipewire" ? "moondrop-eq.conf" : "moondrop-eq.json";
+                                    } }
+                            }
+                        }
+                        Text { text: root.exportFmt === "pipewire" ? "runs the same curves in software — works with any DAC/speakers"
+                                                                   : "a full device snapshot you can re-import"
+                            color: theme.faint; font.pixelSize: 10; font.family: "monospace"
+                            Layout.fillWidth: true; elide: Text.ElideRight }
+                    }
+                    RowLayout {
+                        Layout.fillWidth: true; spacing: 8; visible: root.fileMode === "export"
+                        Text { text: "FILE"; color: theme.faint; font.pixelSize: 9; font.family: "monospace"; font.bold: true; font.letterSpacing: 1 }
+                        Rectangle {
+                            Layout.fillWidth: true; implicitHeight: 32; radius: 8
+                            color: theme.a(theme.line, 0.3); border.width: 1
+                            border.color: nameIn.activeFocus ? theme.a(theme.iris, 0.5) : theme.a(theme.iris, 0.14)
+                            TextInput {
+                                id: nameIn
+                                anchors.fill: parent; anchors.leftMargin: 10; anchors.rightMargin: 10
+                                verticalAlignment: TextInput.AlignVCenter
+                                text: root.exportName
+                                onTextChanged: root.exportName = text
+                                color: theme.text; font.pixelSize: 12; font.family: "monospace"
+                                selectByMouse: true; clip: true
+                                onAccepted: root.doExport()
+                            }
+                        }
+                        TextBtn { label: "export here"; icon: "save"; primary: true
+                            enabled: root.ready && root.exportName.trim() !== ""
+                            onTapped: root.doExport() }
+                    }
                 }
             }
 
@@ -1147,10 +2260,11 @@ Scope {
                             NoteCard {
                                 icon: "speaker_group"
                                 title: "WANT THIS EQ ON A NON-MOONDROP DEVICE?"
-                                body: "The bands above run on the DAC's own chip, so they only exist on supported Moondrop hardware. The same curves can run in software instead, through PipeWire — that works with any output: another brand's DAC, laptop speakers, Bluetooth.\n\n"
-                                      + "python3 …/moondrop_control.py --to-pipewire eq.conf --from-json backup.json\n"
-                                      + "cp eq.conf ~/.config/pipewire/pipewire.conf.d/ && systemctl --user restart pipewire pipewire-pulse\n\n"
-                                      + "Then pick the “Universal EQ” sink as your output. It needs no Moondrop DAC at all — feed it an AutoEQ file with --from-rew instead. Software biquads are floating point, so the shelf gains the DAC has to refuse work fine there."
+                                body: "The bands above run on the DAC's own chip, so they only exist on supported Moondrop hardware. The same curves can run in software instead, through PipeWire — any output: another brand's DAC, laptop speakers, Bluetooth.\n\n"
+                                      + "This panel already does it. With no DAC connected it switches to software by itself; with one connected, use the DAC | software toggle up in the header. Press apply and pick the “Universal EQ” output — your main pipewire is never restarted, so nothing playing is interrupted.\n\n"
+                                      + "Two differences, both in software's favour: floating-point biquads have no Q2.30 limit, so the shelf gains the DAC has to refuse work fine there; and it isn't pinned to 96 kHz. The one cost is that nothing is audible until you press apply.\n\n"
+                                      + "From a terminal, the same thing without this panel:\n"
+                                      + "python3 ~/.config/quickshell/sea-shell/sea-eq.py --apply --from-rew ParametricEQ.txt"
                             }
 
                             NoteCard {
