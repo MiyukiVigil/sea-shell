@@ -17,7 +17,7 @@ import QtQuick.Layouts
 Scope {
     id: root
     property string repo: Qt.resolvedUrl(".").toString().replace("file://", "").replace(/\/$/, "")
-    readonly property string seaVersion: "3.2"     // sea-shell release — mirrored in the repo VERSION file
+    readonly property string seaVersion: "3.2.1"     // sea-shell release — mirrored in the repo VERSION file
     property int tab: 8                             // land on the System / About dashboard
 
     // ---- resident lifecycle: the panel is hidden until shown, so it costs ~nothing closed ----

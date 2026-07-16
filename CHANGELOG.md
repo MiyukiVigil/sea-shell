@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.2.1] - 2026-07-16
+
+### Fixed
+
+- **The EQ and recorder panels ignored matugen.** Every other surface in the shell —
+  the bar, the control center, the launcher, the power and keybind panels — derives its
+  background from the accent *hue* at low saturation, so the whole rice follows your
+  wallpaper. Those two panels were the exception: they hardcoded `#0d1420` / `#e8eef5`
+  and only tinted their accent, so on a warm or purple wallpaper they stayed deep-sea
+  navy while everything around them recoloured — and with a near-white matugen accent
+  (`#cfcfd5`) in light mode, they read as a plain white box. They now use the same
+  hue-derived surfaces as `settings.qml`. Being the two newest panels, they had simply
+  never been ported.
+
 ## [3.2.0] — 2026-07-16
 
 A recorder and an equaliser release. **Screen recording** stops being a blind region

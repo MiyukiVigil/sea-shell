@@ -793,9 +793,13 @@ Scope {
     QtObject {
         id: theme
         readonly property bool light: root.apLight
-        readonly property color bg:    light ? "#e8eef5" : "#0d1420"
-        readonly property color panel: light ? "#dbe3ee" : "#161d2b"
-        readonly property color line:  light ? "#c2ccd9" : "#24304a"
+        // Surfaces follow the accent HUE at low saturation, so the panel tracks matugen with
+        // the rest of the shell instead of sitting at a fixed navy/white while the bar recolours.
+        readonly property color _acc: root.apAccent
+        readonly property real  _ah:  _acc.hslHue >= 0 ? _acc.hslHue : 0.55
+        readonly property color bg:    light ? Qt.hsla(_ah, 0.20, 0.945, 1) : Qt.hsla(_ah, 0.36, 0.070, 1)
+        readonly property color panel: light ? Qt.hsla(_ah, 0.18, 0.895, 1) : Qt.hsla(_ah, 0.30, 0.110, 1)
+        readonly property color line:  light ? Qt.hsla(_ah, 0.16, 0.780, 1) : Qt.hsla(_ah, 0.24, 0.205, 1)
         readonly property color text:  light ? "#0c1520" : "#e2e9f4"
         readonly property color sub:   light ? "#2c4256" : "#a6b6cf"
         readonly property color faint: light ? "#48606f" : "#6f8099"
