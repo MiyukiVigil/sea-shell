@@ -45,7 +45,8 @@ Scope {
     property bool shown: false
     property bool helpOpen: false
     property bool graphReadout: false     // editor view vs the official-style readout
-    function open()   { root.shown = true; root.dirty = false; root.pristine = null; root.refresh() }
+    function open()   { apReadProc.running = true;   // pick up appearance changes made while closed
+                        root.shown = true; root.dirty = false; root.pristine = null; root.refresh() }
     function close()  { root.shown = false; root.helpOpen = false; root.hubOpen = false }
     function toggle() { if (root.shown) root.close(); else root.open() }
     IpcHandler {
@@ -787,7 +788,9 @@ Scope {
     // ---- theme (reads the shared appearance.json so it matches the rice) ----
     property string apAccent: "#63c7dd"
     property bool   apLight: false
-    Process { running: true; command: ["sh","-c","cat ~/.config/sea-shell/appearance.json 2>/dev/null || echo '{}'"]
+    // Re-run on every open() — matugen rewrites `accent` whenever the wallpaper changes, and a
+    // panel that only read this at bar startup would sit on a stale colour while the bar recoloured.
+    Process { id: apReadProc; running: true; command: ["sh","-c","cat ~/.config/sea-shell/appearance.json 2>/dev/null || echo '{}'"]
         stdout: StdioCollector { id: apOut; onStreamFinished: { try { var j = JSON.parse(apOut.text.trim() || "{}");
             if (j.accent) root.apAccent = j.accent; if (j.mode !== undefined) root.apLight = ("" + j.mode === "light"); } catch(e){} } } }
     QtObject {

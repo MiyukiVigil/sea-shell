@@ -1,11 +1,11 @@
 # sea-shell 🐚
 
-**`v1.3`** — A Hyprland rice by MiyukiVigil — a shell, by the sea. (yes.)
+**`v3.2.1`** — A Hyprland rice by MiyukiVigil — a shell, by the sea. (yes.)
 
 <!-- screenshots are hosted on the showcase site, not committed here — clones stay lean -->
-![sea-shell — the desktop: translucent cyan bar, animated whale wallpaper, kitty + fastfetch + the starship prompt](https://seashell.miyukivigil.tech/images/hero.webp)
+![sea-shell — the desktop: translucent bar, animated whale wallpaper, and the player with track details, cava and synced lyrics](https://seashell.miyukivigil.tech/images/hero.webp)
 
-**[seashell.miyukivigil.tech](https://seashell.miyukivigil.tech)**
+**[seashell.miyukivigil.tech](https://seashell.miyukivigil.tech)** · **[changelog](https://seashell.miyukivigil.tech/changelog.html)**
 
 Built for: **CachyOS · Hyprland 0.55 · Quickshell 0.3 · kitty · fish · starship**.
 No external launcher or status-bar helper needed — the bar, app launcher, clipboard
@@ -26,8 +26,18 @@ bg     #0d1420   panel  #161d2b   line      #24304a
 text   #e2e9f4   sub    #a6b6cf   faint     #6f8099
 radius 10px
 ```
-(Catppuccin Mocha base + a custom sea-cyan accent — every panel is live-recolourable,
-and `matugen` can pull the accent straight from your wallpaper.)
+Catppuccin Mocha base + a custom sea-cyan accent — but that's the **default, not the point**.
+Turn on *match colours* in the wallpaper picker and `matugen` pulls a palette out of the image:
+every surface follows the accent's hue, and kitty, starship, hyprlock and the window borders
+come with it. There's a light palette too (`SUPER+SHIFT+D`).
+
+| dark · blue | light · warm | the bar follows too |
+|:---:|:---:|:---:|
+| ![the control center in dark mode with a blue accent from an underwater wallpaper](https://seashell.miyukivigil.tech/images/control-center.webp) | ![the same control center in light mode with a warm taupe accent from a garden wallpaper](https://seashell.miyukivigil.tech/images/control-center-light.webp) | ![the desktop with a pink wallpaper and the bar recoloured to match](https://seashell.miyukivigil.tech/images/theme-pink.webp) |
+
+The same panel, same build — only the wallpaper changed. The terminal palette is generated with a
+WCAG contrast floor rather than matugen's raw base16, so it stays readable on *any* wallpaper
+(that base16 gives you maroon text on a maroon background for a hot-pink image).
 
 ## The bar
 ![the bar — workspaces, centred media, tray, and the status pills](https://seashell.miyukivigil.tech/images/bar.webp)
@@ -69,6 +79,8 @@ exclusive mode), a gold **bit-perfect** badge shows the true bit-depth / sample-
 and the visualizer switches to an ambient wave since pipewire can't see the stream.
 
 ## Equaliser  ·  `SUPER+SHIFT+E`
+![the equaliser — a DAWN PRO2 with eight parametric bands, a live response graph, pre-gain and one-tap presets](https://seashell.miyukivigil.tech/images/eq.webp)
+
 An 8-band parametric EQ with a live frequency-response graph, an all-bands column editor,
 pre-gain, one-tap starting presets, and AutoEQ/REW import.
 
@@ -86,6 +98,10 @@ re-rendering the graph), and the first apply asks before creating the virtual ou
 setup writes one config to `filter-chain.conf.d` and starts `filter-chain.service` — a
 separate PipeWire instance, so **your main daemon is never restarted and nothing playing is
 interrupted**. Remove it any time from the same panel.
+
+| No DAC — the same panel in software | The community library |
+|:---:|:---:|
+| ![the equaliser in software mode — titled Software EQ, marked not created yet, with a create and apply button](https://seashell.miyukivigil.tech/images/eq-software.webp) | ![the community preset browser — a searchable list with download counts and a preview curve](https://seashell.miyukivigil.tech/images/presets.webp) |
 
 **Community presets** — the *community* button opens the public library behind
 [Moondrop Hub](https://hub.moondroplab.tech/): ~59,700 user-made curves, searchable by
@@ -110,6 +126,8 @@ vendored from [hub_moon](https://hubmoon.miyukivigil.tech/), which documents the
 and the Hub API; the installer adds `python-hidapi` and a udev rule so it works without root.
 
 ## Screen recording  ·  `SUPER+R`
+![the screen-recorder chooser — capture and audio options, a bit-perfect warning, quality and countdown settings](https://seashell.miyukivigil.tech/images/recorder.webp)
+
 `SUPER+R` opens a chooser: **what to capture** (drag a region · the focused screen ·
 a named output) and **which audio** (none · microphone · system audio · both at once),
 plus framerate, container, and CPU/GPU encoding. It remembers your last choice, so

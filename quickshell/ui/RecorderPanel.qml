@@ -61,7 +61,8 @@ Scope {
     property int  ticking: 0              // countdown seconds remaining; 0 = not counting
     property string pendingGeom: ""
 
-    function open()   { if (root.recording) return; root.load(); root.probe(); root.shown = true }
+    function open()   { if (root.recording) return; apReadProc.running = true;  // appearance may have changed while closed
+                        root.load(); root.probe(); root.shown = true }
     function close()  { root.shown = false }
     // SUPER+R is one key for the whole feature: it stops a running recording, otherwise
     // it opens the chooser. So the "already recording" case never opens a window you'd
@@ -229,7 +230,9 @@ Scope {
     // ---- theme (reads the shared appearance.json so it matches the rice) ----
     property string apAccent: "#63c7dd"
     property bool   apLight: false
-    Process { running: true; command: ["sh","-c","cat ~/.config/sea-shell/appearance.json 2>/dev/null || echo '{}'"]
+    // Re-run on every open() — matugen rewrites `accent` whenever the wallpaper changes, and a
+    // panel that only read this at bar startup would sit on a stale colour while the bar recoloured.
+    Process { id: apReadProc; running: true; command: ["sh","-c","cat ~/.config/sea-shell/appearance.json 2>/dev/null || echo '{}'"]
         stdout: StdioCollector { id: apOut; onStreamFinished: { try { var j = JSON.parse(apOut.text.trim() || "{}");
             if (j.accent) root.apAccent = j.accent; if (j.mode !== undefined) root.apLight = ("" + j.mode === "light"); } catch(e){} } } }
     QtObject {

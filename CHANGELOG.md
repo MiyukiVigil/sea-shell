@@ -11,15 +11,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **The EQ and recorder panels ignored matugen.** Every other surface in the shell —
-  the bar, the control center, the launcher, the power and keybind panels — derives its
-  background from the accent *hue* at low saturation, so the whole rice follows your
-  wallpaper. Those two panels were the exception: they hardcoded `#0d1420` / `#e8eef5`
-  and only tinted their accent, so on a warm or purple wallpaper they stayed deep-sea
-  navy while everything around them recoloured — and with a near-white matugen accent
-  (`#cfcfd5`) in light mode, they read as a plain white box. They now use the same
-  hue-derived surfaces as `settings.qml`. Being the two newest panels, they had simply
-  never been ported.
+- **The EQ and recorder panels ignored matugen.** Change your wallpaper and the whole shell
+  recoloured — except those two, which kept whatever accent the bar happened to start with.
+  Two separate causes, both from being the newest panels and never having been wired up the
+  way the others are:
+  - They read `appearance.json` **once, at bar startup**, and never again — while matugen
+    rewrites `accent` on every wallpaper change. Every other panel re-reads on open
+    (`settings.qml` has done `apReadProc.running = true` in `showTab()` all along); these
+    two had no `id` on the `Process` at all, so nothing could re-run it. Only restarting
+    the bar picked up a new colour.
+  - Their surfaces were hardcoded to `#0d1420` / `#e8eef5` and only the accent was tinted,
+    so even after a restart they sat at a fixed navy while the rest of the shell followed
+    the accent *hue* at low saturation. With a near-white matugen accent (`#cfcfd5`) in
+    light mode, that read as a plain white box.
+
+  Both now match `settings.qml`: hue-derived surfaces, re-read on `open()`. Verified by
+  changing the accent with the bar left running — the panels open in the new colour instead
+  of the startup one.
 
 ## [3.2.0] — 2026-07-16
 
