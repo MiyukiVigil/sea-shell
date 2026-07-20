@@ -37,6 +37,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Display tab monitor refresh**: Modified the Display settings tab to automatically re-read connected monitors via `hyprctl` on open, making hotplugged screens appear instantly.
 - **NVIDIA HDMI audio auto-routing**: Added automatic detection and activation of the NVIDIA HDMI audio controller profile (`output:hdmi-stereo`) and set it as the default output sink upon monitor connection.
+- All of the above was spotted by me myself funny enough as I was watching the WC Final (Congrats to Spain btw) when I needed to plug in my monitor into my TV
 
 ## [3.2.1] - 2026-07-16
 
