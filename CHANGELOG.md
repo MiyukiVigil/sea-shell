@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.3.0] - 2026-07-20
+
+### Added
+
+- **Native KDE Connect integration.** Your phone lives in the bar — no external app, no
+  KDE session pieces, nothing to run alongside:
+  - a status pill (`wgKdeconnect`) showing the device icon and its **battery percent**,
+    tinted the way the laptop battery is (green charging, red under 20%)
+  - a **dropdown** in the same frosted style as wi-fi and bluetooth: battery bar and
+    charging state, **cell signal strength + network type**, and one tap for
+    **ring · ping · send file · send clipboard · browse files (sftp) · messages** —
+    each greyed out when that device hasn't loaded the matching plugin
+  - **pairing in place**: accept or reject against the verification key, or request a
+    pair, plus a device switcher once more than one device is known
+  - a **KDE Connect tab** in the control center with the same per-device actions, for
+    when you want the whole list at once
+
+  Everything goes through `sea-kdeconnect.py`, which talks to `kdeconnectd` over D-Bus.
+  `--watch` is a resident process that re-reads the daemon only when D-Bus says something
+  changed (battery, reachability, pairing), so the bar is live without polling anything;
+  properties come back as JSON from `busctl --json`, one call per interface rather than
+  one process per property, and the script starts `kdeconnectd` if it isn't on the bus.
+  It also reports which plugins each device has actually loaded, which is what greys out
+  the actions a given device can't do. `kdeconnect` and `zenity` — the file picker behind
+  "send file", optional — were added to `install.sh`.
+
+### Fixed
+
+- **Display tab monitor refresh**: Modified the Display settings tab to automatically re-read connected monitors via `hyprctl` on open, making hotplugged screens appear instantly.
+- **NVIDIA HDMI audio auto-routing**: Added automatic detection and activation of the NVIDIA HDMI audio controller profile (`output:hdmi-stereo`) and set it as the default output sink upon monitor connection.
+
 ## [3.2.1] - 2026-07-16
 
 ### Fixed

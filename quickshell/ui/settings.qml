@@ -17,7 +17,7 @@ import QtQuick.Layouts
 Scope {
     id: root
     property string repo: Qt.resolvedUrl(".").toString().replace("file://", "").replace(/\/$/, "")
-    readonly property string seaVersion: "3.2.1"     // sea-shell release — mirrored in the repo VERSION file
+    readonly property string seaVersion: "3.3.0"     // sea-shell release — mirrored in the repo VERSION file
     property int tab: 8                             // land on the System / About dashboard
 
     // ---- resident lifecycle: the panel is hidden until shown, so it costs ~nothing closed ----
@@ -32,6 +32,8 @@ Scope {
         root.shown = true;
     }
     function refreshTab(t) {
+        if (t === 1) root.reloadMonitors()            // display: refresh monitors list
+        if (t === 14) root.reloadKde()                // kdeconnect: refresh devices
         if (t === 7) kbProc.running = true            // keybinds: refresh binds
         if (t === 8) sysProc.running = true           // system: refresh live stats
         if (t === 10) { idleChk.running = true; lockSettingsGet.running = true }   // idle & lock
@@ -505,6 +507,7 @@ Scope {
                                hz:(""+m.refreshRate).split(".")[0], transform:m.transform||0, scale:m.scale||1,
                                modes:modes, curRes:m.width+"x"+m.height });
                 }
+                if (root.monSel >= out.length) root.monSel = 0;
                 root.monitors = out;
                 if (out.length && root.selRes==="") { var c=out[root.monSel];
                     root.selRes=c.curRes; root.selHz=(c.modes[0]?c.modes[0].hz:""); root.selTransform=c.transform;
@@ -515,6 +518,31 @@ Scope {
         } }
     }
     function reloadMonitors() { monProc.running = true }
+
+    // ---------- KDE Connect ----------
+    property var kdeDevices: []
+    Process {
+        id: kdeProc; running: false
+        command: ["python3", root.repo + "/sea-kdeconnect.py", "--list"]
+        stdout: StdioCollector { id: kdeOut; onStreamFinished: {
+            try {
+                root.kdeDevices = JSON.parse(kdeOut.text.trim() || "[]");
+            } catch(e) { root.kdeDevices = [] }
+        } }
+    }
+    function reloadKde() { kdeProc.running = false; kdeProc.running = true }
+    function kdeAction(args) {
+        Quickshell.execDetached(["python3", root.repo + "/sea-kdeconnect.py"].concat(args));
+        kdeProcTimer.start();
+    }
+    Timer { id: kdeProcTimer; interval: 800; onTriggered: root.reloadKde() }
+    Timer {
+        id: kdeRefreshTimer
+        interval: 4000
+        running: root.shown && root.tab === 14
+        repeat: true
+        onTriggered: root.reloadKde()
+    }
     // native modes first, then common 16:9 resolutions Hyprland can scale to
     function uniqueRes(m) {
         var seen={}, r=[];
@@ -569,7 +597,7 @@ Scope {
     property int  apNightTemp: 4000          // night-light colour temperature (K)
     property bool apNightAuto: false         // night light follows dark mode
     // drag-reorderable order of the bar widgets (mirrors shell.qml cfgWidgetOrder)
-    readonly property var defaultWidgetOrder: ["wgMpris","wgTray","wgQuick","wgWeather","wgClipboard","wgNotif","wgWifi","wgBluetooth","wgCaffeine","wgNight","wgSystem","wgVolume","wgBattery","wgRec","wgClock","wgPower"]
+    readonly property var defaultWidgetOrder: ["wgMpris","wgTray","wgQuick","wgWeather","wgClipboard","wgNotif","wgWifi","wgBluetooth","wgKdeconnect","wgCaffeine","wgNight","wgSystem","wgVolume","wgBattery","wgRec","wgClock","wgPower"]
     property var apWidgetOrder: root.defaultWidgetOrder
     // left cluster order (mirrors shell.qml cfgLeftOrder)
     readonly property var defaultLeftOrder: ["lgLogo","lgWork","lgTitle"]
@@ -597,6 +625,7 @@ Scope {
         wgNotif:     { i: "notifications",         l: "Notification Bell", d: "Unread-count badge + notification centre",              prop: "wgNotif" },
         wgWifi:      { i: "wifi",                   l: "Wi-Fi",             d: "Network status and signal strength",                    prop: "wgWifi" },
         wgBluetooth: { i: "bluetooth",             l: "Bluetooth",         d: "Adapter status + connected-devices list",               prop: "wgBluetooth" },
+        wgKdeconnect:{ i: "phonelink",             l: "KDE Connect",       d: "Phone battery + ring, send file, clipboard, files",     prop: "wgKdeconnect" },
         wgCaffeine:  { i: "coffee",                l: "Caffeine",          d: "Prevents screen dimming and auto-suspend",              prop: "wgCaffeine" },
         wgNight:     { i: "nightlight",            l: "Night light",       d: "One-tap warm-screen toggle on the bar",                 prop: "wgNight" },
         wgSystem:    { i: "speed",                 l: "System Monitor",    d: "Live CPU usage and system load",                        prop: "wgSystem" },
@@ -658,6 +687,7 @@ Scope {
     property bool wgNotif: true
     property bool wgWifi: true
     property bool wgBluetooth: true
+    property bool wgKdeconnect: true
     property bool wgCaffeine: true
     property bool wgSystem: true
     property bool wgVolume: true
@@ -710,6 +740,7 @@ Scope {
             if(j.wgNotif!==undefined) root.wgNotif=!!j.wgNotif;
             if(j.wgWifi!==undefined) root.wgWifi=!!j.wgWifi;
             if(j.wgBluetooth!==undefined) root.wgBluetooth=!!j.wgBluetooth;
+            if(j.wgKdeconnect!==undefined) root.wgKdeconnect=!!j.wgKdeconnect;
             if(j.wgCaffeine!==undefined) root.wgCaffeine=!!j.wgCaffeine;
             if(j.wgSystem!==undefined) root.wgSystem=!!j.wgSystem;
             if(j.wgVolume!==undefined) root.wgVolume=!!j.wgVolume;
@@ -762,6 +793,7 @@ Scope {
             wgNotif: root.wgNotif,
             wgWifi: root.wgWifi,
             wgBluetooth: root.wgBluetooth,
+            wgKdeconnect: root.wgKdeconnect,
             wgCaffeine: root.wgCaffeine,
             wgSystem: root.wgSystem,
             wgVolume: root.wgVolume,
@@ -815,6 +847,7 @@ Scope {
         if (p.wgNotif !== undefined) root.wgNotif = p.wgNotif;
         if (p.wgWifi !== undefined) root.wgWifi = p.wgWifi;
         if (p.wgBluetooth !== undefined) root.wgBluetooth = p.wgBluetooth;
+        if (p.wgKdeconnect !== undefined) root.wgKdeconnect = p.wgKdeconnect;
         if (p.wgCaffeine !== undefined) root.wgCaffeine = p.wgCaffeine;
         if (p.wgSystem !== undefined) root.wgSystem = p.wgSystem;
         if (p.wgVolume !== undefined) root.wgVolume = p.wgVolume;
@@ -844,7 +877,7 @@ Scope {
     }
 
     // ---------- bar layout presets (just the bar: widget order · left order · widget on/off) ----------
-    readonly property var barToggleKeys: ["wgMpris","wgTray","wgWeather","wgClipboard","wgNotif","wgWifi","wgBluetooth","wgCaffeine","wgNight","wgSystem","wgVolume","wgBattery","wgClock","wgPower","wgQuick"]
+    readonly property var barToggleKeys: ["wgMpris","wgTray","wgWeather","wgClipboard","wgNotif","wgWifi","wgBluetooth","wgKdeconnect","wgCaffeine","wgNight","wgSystem","wgVolume","wgBattery","wgClock","wgPower","wgQuick"]
     property var barLayouts: []
     Process { id: barLayoutsReadProc; running: true; command: ["sh","-c","cat \"$HOME/.config/sea-shell/bar-layouts.json\" 2>/dev/null || echo '[]'"]
         stdout: StdioCollector { id: blOut; onStreamFinished: { try { root.barLayouts = JSON.parse(blOut.text) } catch(e){ root.barLayouts = [] } } } }
@@ -872,7 +905,7 @@ Scope {
     }
     function saveAppearance() {
         var cf = '['; for(var i=0;i<root.apCustomFonts.length;i++){ cf += (i?',':'') + '\"'+root.apCustomFonts[i]+'\"'; } cf += ']';
-        var j = '{\"radius\":'+Math.round(root.apRadius)+',\"opacity\":'+root.apOpacity.toFixed(2)+',\"height\":'+Math.round(root.apHeight)+',\"scale\":'+root.apScale.toFixed(2)+',\"accent\":\"'+root.apAccent+'\",\"font\":\"'+root.apFont+'\",\"customFonts\":'+cf+',\"mode\":\"'+(root.apLight?'light':'dark')+'\",\"matugen\":'+(root.apMatugen?'true':'false')+',\"scheme\":\"'+root.apScheme+'\",\"barFill\":\"'+root.apBarFill+'\",\"edge\":\"'+root.apEdge+'\",\"autoDark\":'+(root.apAutoDark?'true':'false')+',\"darkStart\":\"'+root.apDarkStart+'\",\"darkEnd\":\"'+root.apDarkEnd+'\",\"appMode\":\"'+root.apAppMode+'\",\"wgMpris\":'+(root.wgMpris?'true':'false')+',\"wgTray\":'+(root.wgTray?'true':'false')+',\"wgWeather\":'+(root.wgWeather?'true':'false')+',\"wgClipboard\":'+(root.wgClipboard?'true':'false')+',\"wgNotif\":'+(root.wgNotif?'true':'false')+',\"wgWifi\":'+(root.wgWifi?'true':'false')+',\"wgBluetooth\":'+(root.wgBluetooth?'true':'false')+',\"wgCaffeine\":'+(root.wgCaffeine?'true':'false')+',\"wgSystem\":'+(root.wgSystem?'true':'false')+',\"wgVolume\":'+(root.wgVolume?'true':'false')+',\"wgBattery\":'+(root.wgBattery?'true':'false')+',\"wgClock\":'+(root.wgClock?'true':'false')+',\"wgPower\":'+(root.wgPower?'true':'false')+',\"wgQuick\":'+(root.wgQuick?'true':'false')+',\"wgNight\":'+(root.wgNight?'true':'false')+',\"autoHide\":'+(root.apAutoHide?'true':'false')+',\"hideFullscreen\":'+(root.apHideFullscreen?'true':'false')+',\"night\":'+(root.apNight?'true':'false')+',\"nightTemp\":'+Math.round(root.apNightTemp)+',\"nightAuto\":'+(root.apNightAuto?'true':'false')+',\"widgetOrder\":'+JSON.stringify(root.apWidgetOrder)+',\"leftOrder\":'+JSON.stringify(root.apLeftOrder)+',\"monitors\":'+JSON.stringify(root.apMonitors)+'}';
+        var j = '{\"radius\":'+Math.round(root.apRadius)+',\"opacity\":'+root.apOpacity.toFixed(2)+',\"height\":'+Math.round(root.apHeight)+',\"scale\":'+root.apScale.toFixed(2)+',\"accent\":\"'+root.apAccent+'\",\"font\":\"'+root.apFont+'\",\"customFonts\":'+cf+',\"mode\":\"'+(root.apLight?'light':'dark')+'\",\"matugen\":'+(root.apMatugen?'true':'false')+',\"scheme\":\"'+root.apScheme+'\",\"barFill\":\"'+root.apBarFill+'\",\"edge\":\"'+root.apEdge+'\",\"autoDark\":'+(root.apAutoDark?'true':'false')+',\"darkStart\":\"'+root.apDarkStart+'\",\"darkEnd\":\"'+root.apDarkEnd+'\",\"appMode\":\"'+root.apAppMode+'\",\"wgMpris\":'+(root.wgMpris?'true':'false')+',\"wgTray\":'+(root.wgTray?'true':'false')+',\"wgWeather\":'+(root.wgWeather?'true':'false')+',\"wgClipboard\":'+(root.wgClipboard?'true':'false')+',\"wgNotif\":'+(root.wgNotif?'true':'false')+',\"wgWifi\":'+(root.wgWifi?'true':'false')+',\"wgBluetooth\":'+(root.wgBluetooth?'true':'false')+',\"wgKdeconnect\":'+(root.wgKdeconnect?'true':'false')+',\"wgCaffeine\":'+(root.wgCaffeine?'true':'false')+',\"wgSystem\":'+(root.wgSystem?'true':'false')+',\"wgVolume\":'+(root.wgVolume?'true':'false')+',\"wgBattery\":'+(root.wgBattery?'true':'false')+',\"wgClock\":'+(root.wgClock?'true':'false')+',\"wgPower\":'+(root.wgPower?'true':'false')+',\"wgQuick\":'+(root.wgQuick?'true':'false')+',\"wgNight\":'+(root.wgNight?'true':'false')+',\"autoHide\":'+(root.apAutoHide?'true':'false')+',\"hideFullscreen\":'+(root.apHideFullscreen?'true':'false')+',\"night\":'+(root.apNight?'true':'false')+',\"nightTemp\":'+Math.round(root.apNightTemp)+',\"nightAuto\":'+(root.apNightAuto?'true':'false')+',\"widgetOrder\":'+JSON.stringify(root.apWidgetOrder)+',\"leftOrder\":'+JSON.stringify(root.apLeftOrder)+',\"monitors\":'+JSON.stringify(root.apMonitors)+'}';
         run("mkdir -p \"$HOME/.config/sea-shell\" && printf '%s' '"+j+"' > \"$HOME/.config/sea-shell/appearance.json\"");
     }
     // apply the system app dark/light preference independently from the shell theme
@@ -1471,6 +1504,7 @@ Scope {
                 TabBtn { icon: "brightness_6";         label: "Display";     idx: 1 }
                 TabBtn { icon: "wifi";                 label: "Network";     idx: 2 }
                 TabBtn { icon: "bluetooth";            label: "Bluetooth";   idx: 9 }
+                TabBtn { icon: "phonelink";            label: "KDE Connect"; idx: 14 }
                 GroupLabel { text: "DAILY" }
                 TabBtn { icon: "cloud";                label: "Weather";     idx: 3 }
                 TabBtn { icon: "calendar_month";       label: "Calendar";    idx: 11 }
@@ -3094,6 +3128,156 @@ Scope {
                             Text { visible: root.btAdapter !== null && root.btDevices.length === 0
                                 text: (root.btAdapter && root.btAdapter.enabled) ? "no paired devices — hit search to discover" : "bluetooth is off"
                                 color: theme.faint; font.pixelSize: 11; font.family: "monospace" }
+                        }
+
+                        // ================= KDE CONNECT =================
+                        ColumnLayout {
+                            visible: root.tab === 14; Layout.fillWidth: true; spacing: 12
+                            RowLayout {
+                                Layout.fillWidth: true; spacing: 8
+                                Sym { text: "phonelink"; sz: 18; color: theme.iris }
+                                Text { text: "kde connect"; color: theme.iris; font.pixelSize: 12; font.family: "monospace"; font.bold: true }
+                                Rectangle { Layout.fillWidth: true; height: 1; color: theme.a(theme.iris, 0.18) }
+                                Sym { text: "sync"; sz: 16; color: theme.sub
+                                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.reloadKde() } }
+                            }
+                            ColumnLayout {
+                                visible: root.kdeDevices.length === 0; Layout.fillWidth: true; spacing: 2
+                                Text { text: "no devices found"; color: theme.sub; font.pixelSize: 12; font.family: "monospace" }
+                                Text { text: "open KDE Connect on the other device, on the same network, then refresh"
+                                    color: theme.faint; font.pixelSize: 10; font.family: "monospace" }
+                            }
+                            ColumnLayout {
+                                Layout.fillWidth: true; spacing: 8
+                                Repeater {
+                                    model: root.kdeDevices
+                                    delegate: Rectangle {
+                                        id: kdeCard
+                                        required property var modelData
+                                        readonly property bool online: modelData.isPaired && modelData.isReachable
+                                        Layout.fillWidth: true; radius: 10
+                                        implicitHeight: kdeCardCol.implicitHeight + 22
+                                        color: online ? theme.a(theme.iris, 0.14) : theme.a(theme.line, 0.3)
+                                        border.width: 1; border.color: online ? theme.a(theme.iris, 0.55) : theme.a(theme.iris, 0.12)
+                                        ColumnLayout {
+                                            id: kdeCardCol
+                                            anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top
+                                            anchors.margins: 11; spacing: 9
+                                            // name + state
+                                            RowLayout {
+                                                Layout.fillWidth: true; spacing: 10
+                                                Rectangle {
+                                                    implicitWidth: 36; implicitHeight: 36; radius: 11
+                                                    color: kdeCard.online ? theme.a(theme.iris, 0.22) : theme.a(theme.line, 0.5)
+                                                    Sym { anchors.centerIn: parent; sz: 19
+                                                        text: kdeCard.modelData.type === "phone" ? "smartphone"
+                                                            : (kdeCard.modelData.type === "tablet" ? "tablet_android"
+                                                            : (kdeCard.modelData.type === "tv" ? "tv" : "computer"))
+                                                        color: kdeCard.online ? theme.iris : theme.faint }
+                                                }
+                                                ColumnLayout {
+                                                    spacing: 2; Layout.fillWidth: true
+                                                    Text { text: kdeCard.modelData.name; color: theme.text; font.pixelSize: 13; font.family: "monospace"; font.bold: true; elide: Text.ElideRight; Layout.fillWidth: true }
+                                                    RowLayout {
+                                                        spacing: 6
+                                                        Text {
+                                                            text: !kdeCard.modelData.isPaired
+                                                                    ? (kdeCard.modelData.isPairRequestedByPeer ? "wants to pair"
+                                                                       : (kdeCard.modelData.isPairRequested ? "waiting for a reply…" : "not paired"))
+                                                                    : (kdeCard.modelData.isReachable
+                                                                       ? ("online" + (kdeCard.modelData.network ? " · " + kdeCard.modelData.network : ""))
+                                                                       : "away")
+                                                            color: kdeCard.online ? theme.frost : theme.faint; font.pixelSize: 10; font.family: "monospace"
+                                                        }
+                                                        Text { visible: kdeCard.modelData.address !== ""
+                                                            text: "· " + kdeCard.modelData.address; color: theme.faint; font.pixelSize: 10; font.family: "monospace" }
+                                                        // cellular strength, 0–4 bars
+                                                        Row {
+                                                            visible: kdeCard.modelData.signal >= 0
+                                                            spacing: 2; height: 11
+                                                            Repeater { model: 4
+                                                                delegate: Rectangle { required property int index
+                                                                    width: 3; height: 4 + index * 2; radius: 1; anchors.bottom: parent.bottom
+                                                                    color: index < kdeCard.modelData.signal ? theme.frost : theme.a(theme.faint, 0.35) } }
+                                                        }
+                                                    }
+                                                }
+                                                Sym { visible: kdeCard.modelData.isCharging; text: "bolt"; sz: 15; color: theme.good }
+                                            }
+                                            // battery — NOT the Meter component: that one goes red
+                                            // above 88%, which is right for RAM and backwards for a battery
+                                            RowLayout {
+                                                visible: kdeCard.modelData.charge >= 0
+                                                Layout.fillWidth: true; spacing: 11
+                                                Text { text: "battery"; color: theme.faint; font.pixelSize: 11; font.family: "monospace"; Layout.preferredWidth: 58 }
+                                                Rectangle {
+                                                    Layout.fillWidth: true; implicitHeight: 9; radius: 5; color: theme.a(theme.line, 0.8)
+                                                    Rectangle {
+                                                        height: parent.height; radius: 5
+                                                        width: parent.width * Math.max(0, Math.min(1, kdeCard.modelData.charge / 100))
+                                                        color: kdeCard.modelData.isCharging ? theme.good
+                                                             : (kdeCard.modelData.charge <= 20 ? theme.bad : theme.iris)
+                                                        Behavior on width { NumberAnimation { duration: 260; easing.type: Easing.OutCubic } }
+                                                    }
+                                                }
+                                                Text {
+                                                    text: kdeCard.modelData.charge + "%" + (kdeCard.modelData.isCharging ? " charging" : "")
+                                                    color: theme.sub; font.pixelSize: 11; font.family: "monospace"
+                                                    Layout.preferredWidth: 96; horizontalAlignment: Text.AlignRight
+                                                }
+                                            }
+                                            // what you can actually do with it
+                                            Flow {
+                                                visible: kdeCard.online
+                                                Layout.fillWidth: true; spacing: 6
+                                                Chip { label: "ring"; icon: "ring_volume"; enabled: kdeCard.modelData.canRing; opacity: enabled ? 1 : 0.4
+                                                    onPicked: root.kdeAction(["--ring", kdeCard.modelData.id]) }
+                                                Chip { label: "ping"; icon: "wifi_tethering"; enabled: kdeCard.modelData.canPing; opacity: enabled ? 1 : 0.4
+                                                    onPicked: root.kdeAction(["--ping", kdeCard.modelData.id]) }
+                                                Chip { label: "send file"; icon: "upload_file"; enabled: kdeCard.modelData.canShare; opacity: enabled ? 1 : 0.4
+                                                    onPicked: root.kdeAction(["--send-file", kdeCard.modelData.id]) }
+                                                Chip { label: "clipboard"; icon: "content_paste_go"; enabled: kdeCard.modelData.canShare; opacity: enabled ? 1 : 0.4
+                                                    onPicked: root.kdeAction(["--send-clipboard", kdeCard.modelData.id]) }
+                                                Chip { label: "browse files"; icon: "folder_open"; enabled: kdeCard.modelData.canBrowse; opacity: enabled ? 1 : 0.4
+                                                    onPicked: root.kdeAction(["--browse", kdeCard.modelData.id]) }
+                                                Chip { label: "messages"; icon: "sms"; enabled: kdeCard.modelData.canSms; opacity: enabled ? 1 : 0.4
+                                                    onPicked: root.kdeAction(["--sms", kdeCard.modelData.id]) }
+                                            }
+                                            // pairing
+                                            Text {
+                                                visible: kdeCard.modelData.isPairRequestedByPeer || kdeCard.modelData.isPairRequested
+                                                text: "verification key " + kdeCard.modelData.verificationKey + " — it must match the one on the device"
+                                                color: theme.sub; font.pixelSize: 10; font.family: "monospace"; Layout.fillWidth: true; wrapMode: Text.WordWrap
+                                            }
+                                            RowLayout {
+                                                Layout.fillWidth: true; spacing: 6
+                                                Chip { visible: kdeCard.modelData.isPairRequestedByPeer; label: "accept"; icon: "check_circle"
+                                                    onPicked: root.kdeAction(["--accept", kdeCard.modelData.id]) }
+                                                Chip { visible: kdeCard.modelData.isPairRequestedByPeer; label: "reject"; icon: "cancel"
+                                                    onPicked: root.kdeAction(["--reject", kdeCard.modelData.id]) }
+                                                Chip {
+                                                    visible: !kdeCard.modelData.isPaired && kdeCard.modelData.isReachable
+                                                             && !kdeCard.modelData.isPairRequested && !kdeCard.modelData.isPairRequestedByPeer
+                                                    label: "pair"; icon: "link"
+                                                    onPicked: root.kdeAction(["--pair", kdeCard.modelData.id]) }
+                                                Item { Layout.fillWidth: true }
+                                                Text {
+                                                    visible: kdeCard.modelData.isPaired
+                                                    text: "unpair"; color: unpairMa.containsMouse ? theme.bad : theme.a(theme.faint, 0.85)
+                                                    font.pixelSize: 11; font.family: "monospace"
+                                                    MouseArea { id: unpairMa; anchors.fill: parent; anchors.margins: -7; hoverEnabled: true
+                                                        cursorShape: Qt.PointingHandCursor; onClicked: root.kdeAction(["--unpair", kdeCard.modelData.id]) }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            Text {
+                                Layout.fillWidth: true; wrapMode: Text.WordWrap
+                                text: "the bar widget has the same shortcuts — click the phone pill for battery, ring, send file, clipboard and file browsing"
+                                color: theme.faint; font.pixelSize: 10; font.family: "monospace"
+                            }
                         }
 
                         // ================= IDLE & LOCK =================

@@ -1,6 +1,6 @@
 # sea-shell 🐚
 
-**`v3.2.1`** — A Hyprland rice by MiyukiVigil — a shell, by the sea. (yes.)
+**`v3.3.0`** — A Hyprland rice by MiyukiVigil — a shell, by the sea. (yes.)
 
 <!-- screenshots are hosted on the showcase site, not committed here — clones stay lean -->
 ![sea-shell — the desktop: translucent bar, animated whale wallpaper, and the player with track details, cava and synced lyrics](https://seashell.miyukivigil.tech/images/hero.webp)
@@ -61,6 +61,9 @@ frosted by Hyprland layer blur):
 - **wi-fi** → nearby networks + inline password + **Cloudflare WARP** and
   **NetworkManager VPN** toggles
 - **bluetooth** → paired devices, battery %, click to (dis)connect
+- **kde connect** → your phone's battery and cell signal, then one tap for **ring,
+  ping, send file, push clipboard, browse its storage, messages** — pairing (with the
+  verification key) is in the same dropdown, no external app
 - **volume** → slider + output-device picker (scroll = change, right-click = mute)
 - **battery** → power-profile picker (hidden on desktops), plus **low-battery
   notifications** at 15% and a critical one at 5%

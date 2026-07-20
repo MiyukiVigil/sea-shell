@@ -18,6 +18,65 @@ import QtQuick.Layouts
 ShellRoot {
     id: root
 
+    // Auto-detect HDMI monitor plugin to switch audio to HDMI (TV)
+    readonly property int screenCount: Quickshell.screens.length
+    onScreenCountChanged: {
+        if (screenCount > 1) {
+            Quickshell.execDetached(["sh", Qt.resolvedUrl("sea-hdmi-audio.sh").toString().replace("file://", "")]);
+        }
+    }
+    Component.onCompleted: {
+        if (Quickshell.screens.length > 1) {
+            Quickshell.execDetached(["sh", Qt.resolvedUrl("sea-hdmi-audio.sh").toString().replace("file://", "")]);
+        }
+    }
+
+    // ---- KDE Connect Integration ----
+    // `--watch` is a resident process that re-prints the device array whenever the
+    // daemon signals a change (battery, reachability, pairing) — so the pill and its
+    // dropdown are live instead of a spawn-a-python-every-10s poll. The script also
+    // reports which plugins are actually loaded per device, which is what gates the
+    // action tiles in the dropdown.
+    property bool cfgKdeconnect: true
+    property var kdeDevices: []
+    property string kdeSel: ""                 // device pinned in the dropdown ("" = auto)
+    // the device the bar speaks for: the pinned one, else the first — the script sorts
+    // online+paired first, so that is the phone you actually care about
+    readonly property var kdeDev: {
+        if (root.kdeDevices.length === 0) return null;
+        for (var i = 0; i < root.kdeDevices.length; i++)
+            if (root.kdeDevices[i].id === root.kdeSel) return root.kdeDevices[i];
+        return root.kdeDevices[0];
+    }
+    readonly property bool kdeActive: root.kdeDev !== null && root.kdeDev.isPaired && root.kdeDev.isReachable
+    readonly property int kdeBattery: root.kdeActive ? root.kdeDev.charge : -1
+    readonly property string kdeScript: Qt.resolvedUrl("sea-kdeconnect.py").toString().replace("file://", "")
+
+    Process {
+        id: kdeWatch
+        command: ["python3", root.kdeScript, "--watch"]
+        stdout: SplitParser { onRead: data => { try { root.kdeDevices = JSON.parse(data) } catch(e) {} } }
+    }
+    // starts the watcher, stops it when the widget is switched off, and revives it if it
+    // ever dies (kdeconnectd restart / D-Bus hiccup). Re-asserting the same value is a no-op.
+    Timer { interval: 8000; running: true; repeat: true; triggeredOnStart: true
+        onTriggered: kdeWatch.running = root.cfgKdeconnect }
+
+    function kdeRun(args) { Quickshell.execDetached(["python3", root.kdeScript].concat(args)) }
+    function kdeIcon(d) {
+        if (!d) return "phonelink_off";
+        return d.type === "phone" ? "smartphone" : d.type === "tablet" ? "tablet_android"
+             : d.type === "tv" ? "tv" : "computer";
+    }
+    function kdeStatus(d) {
+        if (!d) return "";
+        if (!d.isPaired) return d.isPairRequestedByPeer ? "wants to pair"
+                              : d.isPairRequested ? "waiting for a reply…"
+                              : (d.isReachable ? "not paired" : "not paired · away");
+        if (!d.isReachable) return "away";
+        return d.network !== "" ? "online · " + d.network : "online";
+    }
+
     // resident launcher — no process-spawn delay; open via `qs -c sea-shell ipc call launcher …`
     Launcher { id: launcher }
     IpcHandler {
@@ -151,7 +210,7 @@ ShellRoot {
     // Values are the widget ids; the bar positions each right-group pill by its index here,
     // so reordering this list reorders the pills. Unknown/absent ids fall to the far end.
     // wgMpris is the centre pill and ignores its position; wgRec is the transient recorder.
-    readonly property var defaultWidgetOrder: ["wgMpris","wgTray","wgQuick","wgWeather","wgClipboard","wgNotif","wgWifi","wgBluetooth","wgCaffeine","wgNight","wgSystem","wgDac","wgVolume","wgBattery","wgRec","wgClock","wgPower"]
+    readonly property var defaultWidgetOrder: ["wgMpris","wgTray","wgQuick","wgWeather","wgClipboard","wgNotif","wgWifi","wgBluetooth","wgKdeconnect","wgCaffeine","wgNight","wgSystem","wgDac","wgVolume","wgBattery","wgRec","wgClock","wgPower"]
     property var cfgWidgetOrder: root.defaultWidgetOrder
     // left cluster order (logo · workspaces · window-title) — drag-reorder in Settings → Bar widgets
     readonly property var defaultLeftOrder: ["lgLogo","lgWork","lgTitle"]
@@ -235,6 +294,7 @@ ShellRoot {
             if (j.wgNotif !== undefined) root.cfgNotif = !!j.wgNotif;
             if (j.wgWifi !== undefined) root.cfgWifi = !!j.wgWifi;
             if (j.wgBluetooth !== undefined) root.cfgBluetooth = !!j.wgBluetooth;
+            if (j.wgKdeconnect !== undefined) root.cfgKdeconnect = !!j.wgKdeconnect;
             if (j.wgCaffeine !== undefined) root.cfgCaffeine = !!j.wgCaffeine;
             if (j.wgSystem !== undefined) root.cfgSystem = !!j.wgSystem;
             if (j.wgVolume !== undefined) root.cfgVolume = !!j.wgVolume;
@@ -1283,6 +1343,32 @@ ShellRoot {
         }
     }
 
+    // one shortcut tile in the KDE Connect dropdown. `enabled` is Item's own — a device
+    // that hasn't loaded the plugin greys the tile out AND kills its MouseArea for free.
+    component KdeAct: Rectangle {
+        id: ka
+        property string icon: ""
+        property string label: ""
+        // iris, not frost: frost is near-white in the light palette and the glyph
+        // vanishes into the tile
+        property color tint: theme.iris
+        signal act()
+        implicitHeight: 32; radius: 9
+        color: !ka.enabled ? theme.a(theme.line, 0.22)
+             : (kaMa.containsMouse ? theme.a(theme.iris, 0.22) : theme.a(theme.line, 0.5))
+        border.width: 1
+        border.color: (ka.enabled && kaMa.containsMouse) ? theme.a(theme.iris, 0.5) : theme.a(theme.iris, 0.14)
+        Behavior on color { ColorAnimation { duration: 110 } }
+        Row { anchors.left: parent.left; anchors.leftMargin: 10; anchors.verticalCenter: parent.verticalCenter; spacing: 7
+            Sym { anchors.verticalCenter: parent.verticalCenter; text: ka.icon; sz: 15
+                color: ka.enabled ? ka.tint : theme.a(theme.faint, 0.55) }
+            Text { anchors.verticalCenter: parent.verticalCenter; text: ka.label
+                color: ka.enabled ? theme.text : theme.a(theme.faint, 0.7)
+                font.pixelSize: 11; font.family: root.cfgFont } }
+        MouseArea { id: kaMa; anchors.fill: parent; hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor; onClicked: ka.act() }
+    }
+
     // a clickable bar pill that toggles a dropdown identified by `key`
     component Pill: Rectangle {
         id: pill
@@ -2083,6 +2169,19 @@ ShellRoot {
                         // show the connected device name, plus its battery % when the device reports one
                         value: root.btActive ? (root.btName(root.btActive) + (root.btActive.batteryAvailable ? "  " + Math.round((root.btActive.battery||0)*100) + "%" : "")) : "" }
 
+                    // ---- KDE CONNECT ----
+                    // icon-only when there's nothing to say; the phone's battery is the one
+                    // number worth bar space (the name would eat 150px and is in the dropdown).
+                    // Colour follows the battery the same way the laptop pill does.
+                    Pill { owner: bar; id: kdePill; key: "kde"
+                        property string wid: "wgKdeconnect"; x: rightGroup.xFor(wid); anchors.verticalCenter: parent.verticalCenter
+                        visible: root.cfgKdeconnect
+                        icon: root.kdeActive ? root.kdeIcon(root.kdeDev) : "phonelink_off"
+                        accent: !root.kdeActive ? theme.faint
+                              : (root.kdeDev.isCharging ? theme.good
+                              : (root.kdeBattery >= 0 && root.kdeBattery <= 20 ? theme.bad : theme.iris))
+                        value: root.kdeBattery >= 0 ? root.kdeBattery + "%" : "" }
+
 
                     // ---- CAFFEINE ---- (mug icon; lit yellow when keeping the screen awake)
                     Pill { owner: bar
@@ -2516,6 +2615,131 @@ ShellRoot {
                                     MouseArea { id: dm; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
                                         onClicked: { if(modelData.connected) modelData.disconnect(); else modelData.connect() } } } }
                             Text { visible: root.btDevices.length===0; text: (root.btAdapter&&root.btAdapter.enabled)?"tap search to scan…":"bluetooth is off"; color: theme.faint; font.pixelSize: 11; font.family: root.cfgFont; topPadding: 4 } } }
+                    // KDE Connect: the phone's state, then the things you actually open the
+                    // widget for — ring, send a file, push the clipboard, browse its storage.
+                    // The settings tab is one gear away rather than the only destination.
+                    Drop { screen: bar.screen
+                        id: kdeDrop; host: root.barVertical ? kdePillVert : kdePill; shown: root.openPop ==="kde" && root.openBar === bar
+                        cardW: 300; cardH: kdeCol.implicitHeight + 28
+                        Column { id: kdeCol; anchors.fill: kdeDrop.card; anchors.margins: 14; spacing: 8
+                            readonly property var dev: root.kdeDev
+                            // Header
+                            Item { width: parent.width; height: 26
+                                Text { anchors.verticalCenter: parent.verticalCenter; anchors.left: parent.left
+                                    text: "kde connect"; color: theme.iris; font.pixelSize: 11; font.family: root.cfgFont; font.bold: true; font.letterSpacing: 0.8 }
+                                Row { anchors.verticalCenter: parent.verticalCenter; anchors.right: parent.right; spacing: 2
+                                    Rectangle { width: 26; height: 26; radius: 8
+                                        color: kdeRfMa.containsMouse ? theme.a(theme.iris,0.18) : "transparent"
+                                        Sym { anchors.centerIn: parent; text: "refresh"; sz: 15; color: theme.sub }
+                                        MouseArea { id: kdeRfMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                            onClicked: { kdeWatch.running = false; kdeWatch.running = true } } }
+                                    Rectangle { width: 26; height: 26; radius: 8
+                                        color: kdeSetMa.containsMouse ? theme.a(theme.iris,0.18) : "transparent"
+                                        Sym { anchors.centerIn: parent; text: "settings"; sz: 15; color: theme.sub }
+                                        MouseArea { id: kdeSetMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                            onClicked: { root.openPop = ""; root.openSettings(14) } } } } }
+                            Rectangle { width: parent.width; height: 1; color: theme.a(theme.line, 0.6) }
+                            // Device switcher — only worth the room once there IS a choice
+                            Flow { width: parent.width; spacing: 5; visible: root.kdeDevices.length > 1
+                                Repeater { model: root.kdeDevices
+                                    delegate: Rectangle { required property var modelData
+                                        readonly property bool sel: kdeCol.dev && kdeCol.dev.id === modelData.id
+                                        height: 22; radius: 6; width: chipTxt.width + 26
+                                        color: sel ? theme.a(theme.iris,0.24) : (chipMa.containsMouse ? theme.a(theme.line,0.6) : theme.a(theme.line,0.32))
+                                        border.width: 1; border.color: sel ? theme.a(theme.iris,0.5) : "transparent"
+                                        Row { anchors.centerIn: parent; spacing: 5
+                                            Rectangle { width: 6; height: 6; radius: 3; anchors.verticalCenter: parent.verticalCenter
+                                                color: !modelData.isReachable ? theme.a(theme.faint,0.55) : (modelData.isPaired ? theme.good : theme.warn) }
+                                            // capped so one long hostname can't push the switcher to three rows
+                                            Text { id: chipTxt; anchors.verticalCenter: parent.verticalCenter; text: modelData.name
+                                                width: Math.min(implicitWidth, 104); elide: Text.ElideRight
+                                                color: sel ? theme.text : theme.sub; font.pixelSize: 10; font.family: root.cfgFont } }
+                                        MouseArea { id: chipMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                            onClicked: root.kdeSel = modelData.id } } } }
+                            // The device itself
+                            Rectangle { width: parent.width; radius: 10; visible: kdeCol.dev !== null
+                                implicitHeight: devCol.implicitHeight + 20
+                                color: theme.a(theme.line, 0.32); border.width: 1
+                                border.color: root.kdeActive ? theme.a(theme.iris,0.35) : theme.a(theme.iris,0.12)
+                                Column { id: devCol; anchors.left: parent.left; anchors.right: parent.right
+                                    anchors.top: parent.top; anchors.margins: 10; spacing: 9
+                                    Row { width: parent.width; spacing: 9
+                                        Rectangle { width: 34; height: 34; radius: 10; anchors.verticalCenter: parent.verticalCenter
+                                            color: root.kdeActive ? theme.a(theme.iris,0.2) : theme.a(theme.line,0.5)
+                                            Sym { anchors.centerIn: parent; sz: 19; text: root.kdeIcon(kdeCol.dev)
+                                                color: root.kdeActive ? theme.iris : theme.faint } }
+                                        Column { anchors.verticalCenter: parent.verticalCenter; width: parent.width - 43; spacing: 2
+                                            Text { width: parent.width; elide: Text.ElideRight; text: kdeCol.dev ? kdeCol.dev.name : ""
+                                                color: theme.text; font.pixelSize: 13; font.family: root.cfgFont; font.bold: true }
+                                            Row { spacing: 6
+                                                Text { anchors.verticalCenter: parent.verticalCenter; text: root.kdeStatus(kdeCol.dev)
+                                                    color: root.kdeActive ? theme.frost : theme.faint; font.pixelSize: 10; font.family: root.cfgFont }
+                                                // cellular strength, 0–4 bars
+                                                Row { anchors.verticalCenter: parent.verticalCenter; spacing: 2; height: 11
+                                                    visible: kdeCol.dev && kdeCol.dev.signal >= 0
+                                                    Repeater { model: 4
+                                                        delegate: Rectangle { required property int index
+                                                            width: 3; height: 4 + index*2; radius: 1; anchors.bottom: parent.bottom
+                                                            color: (kdeCol.dev && index < kdeCol.dev.signal) ? theme.frost : theme.a(theme.faint,0.35) } } } } } }
+                                    StatBar { width: parent.width; label: "battery"
+                                        visible: kdeCol.dev && kdeCol.dev.charge >= 0
+                                        value: kdeCol.dev ? kdeCol.dev.charge : 0
+                                        barColor: !kdeCol.dev ? theme.iris : (kdeCol.dev.isCharging ? theme.good : (kdeCol.dev.charge <= 20 ? theme.bad : theme.iris))
+                                        rightText: kdeCol.dev ? (kdeCol.dev.charge + "%" + (kdeCol.dev.isCharging ? "  ·  charging" : "")) : "" } } }
+                            // Shortcuts — greyed out when the phone hasn't loaded that plugin
+                            Grid { id: kdeActs; width: parent.width; columns: 2; columnSpacing: 8; rowSpacing: 8
+                                visible: root.kdeActive
+                                readonly property real cw: (width - columnSpacing) / 2
+                                KdeAct { width: kdeActs.cw; icon: "ring_volume"; label: "ring"; tint: theme.warn
+                                    enabled: kdeCol.dev !== null && kdeCol.dev.canRing
+                                    onAct: root.kdeRun(["--ring", kdeCol.dev.id]) }
+                                KdeAct { width: kdeActs.cw; icon: "wifi_tethering"; label: "ping"
+                                    enabled: kdeCol.dev !== null && kdeCol.dev.canPing
+                                    onAct: root.kdeRun(["--ping", kdeCol.dev.id]) }
+                                KdeAct { width: kdeActs.cw; icon: "upload_file"; label: "send file"
+                                    enabled: kdeCol.dev !== null && kdeCol.dev.canShare
+                                    onAct: { root.openPop = ""; root.kdeRun(["--send-file", kdeCol.dev.id]) } }
+                                KdeAct { width: kdeActs.cw; icon: "content_paste_go"; label: "clipboard"
+                                    enabled: kdeCol.dev !== null && kdeCol.dev.canShare
+                                    onAct: root.kdeRun(["--send-clipboard", kdeCol.dev.id]) }
+                                KdeAct { width: kdeActs.cw; icon: "folder_open"; label: "browse files"
+                                    enabled: kdeCol.dev !== null && kdeCol.dev.canBrowse
+                                    onAct: { root.openPop = ""; root.kdeRun(["--browse", kdeCol.dev.id]) } }
+                                KdeAct { width: kdeActs.cw; icon: "sms"; label: "messages"
+                                    enabled: kdeCol.dev !== null && kdeCol.dev.canSms
+                                    onAct: { root.openPop = ""; root.kdeRun(["--sms", kdeCol.dev.id]) } } }
+                            // Pairing — the only thing that matters until the handshake is done
+                            Column { width: parent.width; spacing: 6
+                                visible: kdeCol.dev !== null && !kdeCol.dev.isPaired
+                                Text { width: parent.width; wrapMode: Text.WordWrap
+                                    visible: kdeCol.dev && (kdeCol.dev.isPairRequestedByPeer || kdeCol.dev.isPairRequested)
+                                    text: "check that your device shows the key " + (kdeCol.dev ? kdeCol.dev.verificationKey : "")
+                                    color: theme.sub; font.pixelSize: 10; font.family: root.cfgFont }
+                                Row { width: parent.width; spacing: 8
+                                    visible: kdeCol.dev && kdeCol.dev.isPairRequestedByPeer
+                                    KdeAct { width: (kdeCol.width - 8)/2; icon: "check_circle"; label: "accept"; tint: theme.good
+                                        onAct: root.kdeRun(["--accept", kdeCol.dev.id]) }
+                                    KdeAct { width: (kdeCol.width - 8)/2; icon: "cancel"; label: "reject"; tint: theme.bad
+                                        onAct: root.kdeRun(["--reject", kdeCol.dev.id]) } }
+                                KdeAct { width: parent.width; icon: "link"; label: "pair with this device"; tint: theme.iris
+                                    visible: kdeCol.dev && kdeCol.dev.isReachable && !kdeCol.dev.isPairRequested && !kdeCol.dev.isPairRequestedByPeer
+                                    onAct: root.kdeRun(["--pair", kdeCol.dev.id]) }
+                                Text { visible: kdeCol.dev && !kdeCol.dev.isReachable
+                                    text: "not on this network — open the app on the device"
+                                    color: theme.faint; font.pixelSize: 10; font.family: root.cfgFont } }
+                            // Unpair sits at the bottom, small and out of the way of the shortcuts
+                            Item { width: parent.width; height: 16; visible: kdeCol.dev !== null && kdeCol.dev.isPaired
+                                Text { anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
+                                    text: "unpair"; color: unpMa.containsMouse ? theme.bad : theme.a(theme.faint, 0.8)
+                                    font.pixelSize: 10; font.family: root.cfgFont
+                                    MouseArea { id: unpMa; anchors.fill: parent; anchors.margins: -6; hoverEnabled: true
+                                        cursorShape: Qt.PointingHandCursor; onClicked: root.kdeRun(["--unpair", kdeCol.dev.id]) } } }
+                            // Nothing at all — usually the daemon just hasn't seen the phone yet
+                            Column { width: parent.width; spacing: 3; visible: root.kdeDevices.length === 0
+                                Text { text: "no devices"; color: theme.sub; font.pixelSize: 12; font.family: root.cfgFont }
+                                Text { width: parent.width; wrapMode: Text.WordWrap
+                                    text: "open KDE Connect on your phone, make sure it's on the same network, then hit refresh"
+                                    color: theme.faint; font.pixelSize: 10; font.family: root.cfgFont } } } }
                     Drop { screen: bar.screen
                         id: sysDrop; host: root.barVertical ? sysPillVert : sysPill; shown: root.openPop ==="sys" && root.openBar === bar
                         cardW: 250; cardH: sysCol.implicitHeight + 28
@@ -2887,6 +3111,20 @@ ShellRoot {
                             }
                         }
                         
+                        // KDE Connect pill (Vertical variant)
+                        Rectangle {
+                            id: kdePillVert
+                            width: 32; height: 32; radius: 16
+                            color: theme.a(theme.line, 0.45); border.width: 1; border.color: theme.a(theme.iris, 0.22)
+                            visible: root.cfgKdeconnect
+                            Sym { anchors.centerIn: parent; text: root.kdeActive ? root.kdeIcon(root.kdeDev) : "phonelink_off"; sz: 16
+                                color: root.kdeActive ? theme.iris : theme.frost }
+                            MouseArea {
+                                anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                                onClicked: { root.openBar = bar; root.openPop = (root.openPop === "kde") ? "" : "kde" }
+                            }
+                        }
+
                         // Volume control (Vertical variant)
                         Rectangle {
                             id: volPillVert
@@ -2972,7 +3210,7 @@ ShellRoot {
 
             // register this bar's windows with the ONE shared focus grab at root —
             // a grab per bar fights the other monitors' grabs and insta-closes dropdowns
-            Item { Component.onCompleted: { root.grabWins = root.grabWins.concat([bar, ccDrop, wxDrop, wifiDrop, btDrop, volDrop, batDrop, calDrop, pwrDrop, notifDrop, mprisDrop, trayDrop, sysDrop]) } }
+            Item { Component.onCompleted: { root.grabWins = root.grabWins.concat([bar, ccDrop, wxDrop, wifiDrop, btDrop, kdeDrop, volDrop, batDrop, calDrop, pwrDrop, notifDrop, mprisDrop, trayDrop, sysDrop]) } }
         }
     }
 
