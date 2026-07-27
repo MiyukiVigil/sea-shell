@@ -125,6 +125,13 @@ ShellRoot {
     // ---------- alt-tab window switcher (resident, driven by ALT+Tab binds) ----------
     property bool switcherOpen: false
     property int switcherSel: 0
+    // Show the switcher ONLY on the focused monitor, not mirrored onto every screen —
+    // a full card on each output reads like a second switcher "behind" the real one.
+    readonly property var switcherScreen: {
+        var fm = Hyprland.focusedMonitor, scrs = Quickshell.screens;
+        if (fm && fm.name) for (var i = 0; i < scrs.length; i++) if (scrs[i].name === fm.name) return scrs[i];
+        return scrs.length ? scrs[0] : null;
+    }
     // every open window, most-recently-used first (focusHistoryID 0 = current)
     readonly property var switcherWins: {
         var m = Hyprland.toplevels ? Hyprland.toplevels.values : [];
@@ -151,6 +158,122 @@ ShellRoot {
         function prev(): void { root.switcherStep(-1) }
         function commit(): void { root.switcherCommit() }
         function cancel(): void { root.switcherOpen = false }
+    }
+    // Visual HUD for the ALT+Tab switcher — icon + title tiles, the current pick highlighted;
+    // hover to preview a pick, click to focus it. Purely visual (the ALT binds drive stepping,
+    // release commits), so it takes no keyboard focus and rides the Overlay layer above windows.
+    Variants {
+        model: (root.switcherOpen && root.switcherScreen) ? [root.switcherScreen] : []
+        PanelWindow {
+            id: swWin
+            required property var modelData
+            screen: modelData
+            readonly property real ui: root.uiFor(swWin.screen)
+            color: "transparent"
+            WlrLayershell.namespace: "sea-shell:switcher"
+            WlrLayershell.layer: WlrLayer.Overlay
+            WlrLayershell.keyboardFocus: WlrKeyboardFocus.None
+            exclusionMode: ExclusionMode.Ignore
+            anchors { top: true; left: true; right: true; bottom: true }
+
+            // dim + click-outside to dismiss without switching
+            Rectangle { anchors.fill: parent; color: "#000000"; opacity: 0.30
+                MouseArea { anchors.fill: parent; onClicked: root.switcherOpen = false } }
+
+            Rectangle {
+                id: swCardRoot
+                anchors.centerIn: parent
+                scale: swWin.ui                 // match the shell's per-monitor UI scale
+                radius: Math.max(14, root.cfgRadius)
+                color: theme.a(theme.panel, 0.98)
+                border.width: 1; border.color: theme.a(theme.iris, 0.28)
+                clip: true
+                // Composite the WHOLE card (all live captures) into one offscreen buffer.
+                // ScreencopyView's texture node escapes per-item clipping and was leaking a
+                // stray thumbnail to a screen corner; an FBO the size of the card physically
+                // confines every capture to the card rectangle.
+                layer.enabled: true
+                // Deterministic column count — depends only on the screen width and the
+                // window count, never on the grid's own size, so there is no binding loop.
+                // As many 132px tiles as fit in 86% of the screen, capped at the window count.
+                readonly property int cols: Math.max(1, Math.min(root.switcherWins.length,
+                                                                 Math.floor(((swWin.width / swWin.ui) * 0.86) / 218)))
+                width: swGrid.implicitWidth + 28
+                height: swInner.implicitHeight + 24
+                Column {
+                    id: swInner
+                    anchors.centerIn: parent
+                    spacing: 10
+                    Grid {
+                    id: swGrid
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    columns: swCardRoot.cols
+                    columnSpacing: 10; rowSpacing: 10
+                    Repeater {
+                        model: root.switcherWins
+                        delegate: Rectangle {
+                            id: swTile
+                            required property int index
+                            required property var modelData
+                            readonly property bool sel: index === root.switcherSel
+                            readonly property string cls: ("" + (modelData.lastIpcObject.class || "")).toLowerCase()
+                            width: 208; height: 150; radius: 12
+                            clip: true
+                            color: sel ? theme.a(theme.iris, 0.22) : theme.a(theme.line, 0.35)
+                            border.width: sel ? 2 : 1
+                            border.color: sel ? theme.iris : theme.a(theme.iris, 0.14)
+                            // live thumbnail of the window (falls back to the app icon until a
+                            // frame arrives, or if the window has no capturable wayland handle)
+                            Rectangle {
+                                anchors { top: parent.top; left: parent.left; right: parent.right; margins: 6 }
+                                height: 96; radius: 8; clip: true; color: theme.a(theme.bg, 0.55)
+                                ScreencopyView {
+                                    id: thumbScv
+                                    anchors.fill: parent
+                                    captureSource: swTile.modelData.wayland
+                                    live: root.switcherOpen
+                                    visible: hasContent
+                                }
+                                Image {
+                                    anchors.centerIn: parent; visible: !thumbScv.hasContent
+                                    width: 40; height: 40; asynchronous: true
+                                    sourceSize.width: 80; sourceSize.height: 80; fillMode: Image.PreserveAspectFit
+                                    source: Quickshell.iconPath(swTile.cls, "application-x-executable")
+                                }
+                            }
+                            // app icon + title along the bottom
+                            Row {
+                                anchors { left: parent.left; right: parent.right; bottom: parent.bottom; leftMargin: 10; rightMargin: 10; bottomMargin: 8 }
+                                height: 32; spacing: 7
+                                Image {
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    width: 18; height: 18; asynchronous: true
+                                    sourceSize.width: 36; sourceSize.height: 36; fillMode: Image.PreserveAspectFit
+                                    source: Quickshell.iconPath(swTile.cls, "application-x-executable")
+                                }
+                                Text {
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    width: parent.width - 25; elide: Text.ElideRight
+                                    text: "" + (swTile.modelData.lastIpcObject.title || swTile.modelData.lastIpcObject.class || "window")
+                                    color: swTile.sel ? theme.text : theme.sub; font.pixelSize: 11; font.family: root.cfgFont; font.bold: swTile.sel
+                                }
+                            }
+                            MouseArea {
+                                anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                onEntered: root.switcherSel = swTile.index
+                                onClicked: { root.switcherSel = swTile.index; root.switcherCommit() }
+                            }
+                        }
+                    }
+                }
+                    Text {
+                        anchors.horizontalCenter: parent.horizontalCenter
+                        text: root.switcherWins.length + " window" + (root.switcherWins.length === 1 ? "" : "s") + "  ·  Tab cycles  ·  release Alt to focus  ·  Esc cancels"
+                        color: theme.faint; font.pixelSize: 10; font.family: root.cfgFont
+                    }
+                }
+            }
+        }
     }
     HyprlandFocusGrab {
         windows: root.grabWins
@@ -428,7 +551,79 @@ ShellRoot {
     // ---------- audio ----------
     property var sinks: (Pipewire.nodes ? Pipewire.nodes.values : []).filter(function (n) { return n && n.isSink && !n.isStream && n.audio })
     PwObjectTracker { objects: { var a = []; if (Pipewire.defaultAudioSink) a.push(Pipewire.defaultAudioSink); for (var i=0;i<root.sinks.length;i++) a.push(root.sinks[i]); return a } }
+    // playing apps (output streams) — tracked so their per-app volume is live
+    property var streams: (Pipewire.nodes ? Pipewire.nodes.values : []).filter(function (n) { return n && n.isStream && n.audio })
+    function streamName(n) { return n ? (n.name || n.description || n.nickname || "app") : "" }
+    PwObjectTracker { objects: root.streams }
     function nodeName(n) { return n ? (n.description || n.nickname || n.name || "device") : "" }
+
+    // ---------- sound: per-sink format + per-app routing (sea-audio.py, 4.0) ----------
+    // Enriches the volume dropdown with what PipeWire's own model doesn't surface: each
+    // output's live sample-rate / bit-depth (or a Bluetooth codec), and the ability to
+    // send one app to a specific sink. A cheap pw-dump snapshot, taken only while the
+    // dropdown is open; routing writes go straight back to pipewire and we re-read.
+    readonly property string _audioScript: Qt.resolvedUrl("sea-audio.py").toString().replace("file://", "")
+    property var audioSinks: ({})       // node.name -> {rate,format,bits,active,bt_codec,rates}
+    property var audioStreams: []       // [{id,app,title,sink_id,sink_label}]
+    Process {
+        id: audioInfoProc
+        command: ["python3", root._audioScript, "--status"]
+        stdout: StdioCollector { id: audioInfoOut; onStreamFinished: {
+            try {
+                var j = JSON.parse(audioInfoOut.text.trim() || "{}");
+                if (!j.ok) return;
+                var m = {};
+                for (var i = 0; i < (j.sinks || []).length; i++) m[j.sinks[i].name] = j.sinks[i];
+                root.audioSinks = m;
+                root.audioStreams = j.streams || [];
+            } catch (e) {}
+        } } }
+    function audioRefresh() { audioInfoProc.running = true }
+    Timer { id: audioRefreshTimer; interval: 350; onTriggered: root.audioRefresh() }
+    // refresh while any volume dropdown is open (rate/streams change as apps come & go)
+    Timer { running: root.openPop === "vol"; interval: 2000; repeat: true; triggeredOnStart: true; onTriggered: root.audioRefresh() }
+    // "48k · 24-bit", or a codec name for bluetooth; idle sinks show the rate they'll run at
+    function audioFmtBadge(nodeName) {
+        var s = root.audioSinks[nodeName]; if (!s) return "";
+        if (s.bt_codec) return ("" + s.bt_codec).toUpperCase();
+        var khz = s.rate ? (s.rate % 1000 === 0 ? (s.rate / 1000) : (s.rate / 1000).toFixed(1)) + "k" : "";
+        if (!s.active) return khz;                       // idle: only the rate is known
+        return khz + (khz && s.bits ? " · " : "") + (s.bits ? s.bits + "-bit" : "");
+    }
+    function audioRoute(streamId, sinkRef) {
+        Quickshell.execDetached(["python3", root._audioScript, "--route", "" + streamId, "" + sinkRef]);
+        audioRefreshTimer.restart();
+    }
+    // click an app's chip to send it to the next output in the list (by node.name, which
+    // the backend resolves robustly regardless of pipewire's id churn)
+    function audioCycleRoute(stream) {
+        var list = root.sinks; if (!list || !list.length) return;
+        var idx = -1;
+        for (var i = 0; i < list.length; i++) if (list[i].id === stream.sink_id) { idx = i; break; }
+        var next = list[(idx + 1) % list.length];
+        if (next) root.audioRoute(stream.id, next.name);
+    }
+    // the current output, if it's a bluetooth device offering a codec choice (else null)
+    readonly property var audioBtSink: {
+        var n = Pipewire.defaultAudioSink ? Pipewire.defaultAudioSink.name : "";
+        var s = root.audioSinks[n];
+        return (s && s.bt_codecs && s.bt_codecs.length > 1) ? s : null;
+    }
+    // switch a bluetooth sink's A2DP codec (by stable node.name — the id churns on switch)
+    function audioSetCodec(sinkName, profile) {
+        Quickshell.execDetached(["python3", root._audioScript, "--bt-codec", "" + sinkName, "" + profile]);
+        audioRefreshTimer.restart();
+    }
+    // bridge the Pipewire stream (which owns the volume) to sea-audio's routing view (keyed by id)
+    function audioSinkLabelOf(pwId) {
+        for (var i = 0; i < root.audioStreams.length; i++) if (root.audioStreams[i].id === pwId) return root.audioStreams[i].sink_label || "default";
+        return "default";
+    }
+    function audioCycleRouteById(pwId) {
+        var e = null;
+        for (var i = 0; i < root.audioStreams.length; i++) if (root.audioStreams[i].id === pwId) { e = root.audioStreams[i]; break; }
+        root.audioCycleRoute(e || { id: pwId, sink_id: -1 });
+    }
 
     // ---------- moondrop dac ----------
     // Identifying the DAC rides entirely on PipeWire, and deliberately never opens
@@ -1149,14 +1344,31 @@ ShellRoot {
  
     // ---------- caffeine mode (idle & lock status) ----------
     property bool idleOn: false
+    // caffeine is now sticky: the DESIRED state persists to ~/.config/sea-shell/caffeine and is
+    // re-applied at startup AND enforced on every poll — so a login or a `hyprctl reload` (which
+    // re-runs the hypridle exec-once) can't quietly bring idle-sleep back while caffeine is on.
+    property bool cafWanted: false
+    Process { running: true; command: ["sh","-c","cat ~/.config/sea-shell/caffeine 2>/dev/null || echo 0"]
+        stdout: StdioCollector { id: cafOut; onStreamFinished: {
+            root.cafWanted = (cafOut.text.trim() === "1");
+            if (root.cafWanted) { Quickshell.execDetached(["sh","-c","pkill -x hypridle"]); root.idleOn = false; }
+        } } }
     Process { id: idleChk; running: false; command: ["sh","-c","pgrep -x hypridle >/dev/null && echo on || echo off"]
-        stdout: StdioCollector { id: idleOut; onStreamFinished: root.idleOn = idleOut.text.trim() === "on" } }
+        stdout: StdioCollector { id: idleOut; onStreamFinished: {
+            var running = idleOut.text.trim() === "on";
+            if (root.cafWanted && running) {           // caffeine wants awake but hypridle crept back → kill it
+                Quickshell.execDetached(["sh","-c","pkill -x hypridle"]); root.idleOn = false;
+            } else root.idleOn = running;
+        } } }
     Timer { id: idleTimer; interval: 5000; running: true; repeat: true; triggeredOnStart: true; onTriggered: idleChk.running = true }
+    function saveCaffeine() { Quickshell.execDetached(["sh","-c","mkdir -p ~/.config/sea-shell && echo " + (root.cafWanted?"1":"0") + " > ~/.config/sea-shell/caffeine"]); }
     function toggleIdle() {
-        if (root.idleOn) {
-            Quickshell.execDetached(["sh", "-c", "pkill -x hypridle; notify-send -i coffee 'sea-shell' 'Caffeine mode active — screen will stay on'"]);
+        if (!root.cafWanted) {
+            root.cafWanted = true; root.saveCaffeine();
+            Quickshell.execDetached(["sh", "-c", "pkill -x hypridle; notify-send -i coffee 'sea-shell' 'Caffeine mode active — screen will stay on (remembered)'"]);
             root.idleOn = false;
         } else {
+            root.cafWanted = false; root.saveCaffeine();
             Quickshell.execDetached(["sh", "-c", "hyprctl dispatch exec hypridle; notify-send 'sea-shell' 'Caffeine mode inactive — normal sleep active'"]);
             root.idleOn = true;
         }
@@ -1201,6 +1413,118 @@ ShellRoot {
     Process { running: true; command: ["sh","-c","cat ~/.config/sea-shell/dnd 2>/dev/null || echo 0"]
         stdout: StdioCollector { id: dndOut; onStreamFinished: root.dnd = (dndOut.text.trim() === "1") } }
     function setDnd(v) { root.dnd = v; Quickshell.execDetached(["sh","-c","echo " + (v?"1":"0") + " > \"$HOME/.config/sea-shell/dnd\""]); }
+
+    // ---------- timers · pomodoro · world clock (all live in the clock dropdown) ----------
+    // A single 1s driver runs both a plain countdown and the pomodoro state machine; when a
+    // pomodoro cycle is engaged, phase transitions flip DND (focus = quiet) and post a heads-up.
+    property bool   tmrRunning: false        // a countdown exists (running or paused)
+    property bool   tmrPaused:  false
+    property int    tmrRemain:  0            // seconds left
+    property int    tmrTotal:   0            // seconds the current phase started at (for the ring)
+    property bool   pomoActive: false        // pomodoro cycle engaged (vs a one-off timer)
+    property string pomoPhase:  "focus"      // focus | break | long
+    property int    pomoDone:   0            // focus sessions completed this cycle
+    // config (persisted to ~/.config/sea-shell/timers.json)
+    property int    pomoFocusMin: 25
+    property int    pomoBreakMin: 5
+    property int    pomoLongMin:  15
+    property int    pomoEvery:    4          // long break after every N focus sessions
+    property bool   pomoDnd:      true       // auto-silence notifications during focus
+    property bool   tmrWasDnd:    false      // DND state before the cycle, restored on stop
+    readonly property string tmrText: {
+        var s = Math.max(0, root.tmrRemain); var m = Math.floor(s/60); var ss = s%60;
+        return (m<10?"0":"")+m+":"+(ss<10?"0":"")+ss;
+    }
+    Timer { id: tmrTick; interval: 1000; repeat: true; running: root.tmrRunning && !root.tmrPaused
+        onTriggered: { if (root.tmrRemain > 0) root.tmrRemain -= 1; if (root.tmrRemain <= 0) root.tmrFinish(); } }
+    function tmrStart(secs, phase) {
+        root.tmrTotal = secs; root.tmrRemain = secs; root.pomoPhase = phase || "focus";
+        root.tmrRunning = true; root.tmrPaused = false;
+    }
+    function tmrToggle() { if (root.tmrRunning) root.tmrPaused = !root.tmrPaused; }
+    function tmrStop() {
+        var wasPomo = root.pomoActive;
+        root.tmrRunning = false; root.tmrPaused = false; root.tmrRemain = 0; root.tmrTotal = 0;
+        root.pomoActive = false;
+        if (wasPomo && root.pomoDnd && root.dnd && !root.tmrWasDnd) root.setDnd(false);
+    }
+    function tmrFinish() {
+        root.tmrRunning = false; root.tmrPaused = false; root.tmrRemain = 0;
+        if (root.pomoActive) { root._pomoAdvance(); return; }
+        Quickshell.execDetached(["sh","-c","notify-send -u critical -a sea-shell -i alarm 'Timer finished' 'time is up' ; canberra-gtk-play -i complete 2>/dev/null || paplay /usr/share/sounds/freedesktop/stereo/complete.oga 2>/dev/null || true"]);
+    }
+    // start a one-off countdown (minutes). Cancels any pomodoro cycle first.
+    function timerStartMin(mins) {
+        if (root.pomoActive) root.tmrStop();
+        root.pomoActive = false; root.tmrStart(Math.max(1, Math.round(mins*60)), "timer");
+    }
+    function pomoStart() {
+        root.pomoActive = true; root.pomoDone = 0; root.tmrWasDnd = root.dnd;
+        if (root.pomoDnd) root.setDnd(true);
+        root.tmrStart(root.pomoFocusMin*60, "focus");
+    }
+    function _pomoAdvance() {
+        if (root.pomoPhase === "focus") {
+            root.pomoDone += 1;
+            var longNow = (root.pomoDone % root.pomoEvery === 0);
+            var mins = longNow ? root.pomoLongMin : root.pomoBreakMin;
+            if (root.pomoDnd && root.dnd && !root.tmrWasDnd) root.setDnd(false);   // breaks: notifications back
+            Quickshell.execDetached(["sh","-c","notify-send -a sea-shell -i coffee 'Focus done' 'take a "+mins+" min break' ; canberra-gtk-play -i complete 2>/dev/null || true"]);
+            root.tmrStart(mins*60, longNow ? "long" : "break");
+        } else {
+            if (root.pomoDnd && !root.tmrWasDnd) root.setDnd(true);
+            Quickshell.execDetached(["sh","-c","notify-send -a sea-shell -i schedule 'Break over' 'back to focus' ; canberra-gtk-play -i complete 2>/dev/null || true"]);
+            root.tmrStart(root.pomoFocusMin*60, "focus");
+        }
+    }
+    function pomoSkip() { if (root.tmrRunning) root.tmrFinish(); }   // jump to the next phase
+    // persistence: read config + world-clock zones at startup, write on change
+    property var wcZones: []                 // ["Asia/Tokyo", …]
+    Process { running: true; command: ["sh","-c","cat ~/.config/sea-shell/timers.json 2>/dev/null || echo '{}'"]
+        stdout: StdioCollector { id: tmrCfgOut; onStreamFinished: {
+            try { var j = JSON.parse(tmrCfgOut.text.trim() || "{}");
+                if (j.pomoFocus) root.pomoFocusMin = j.pomoFocus;
+                if (j.pomoBreak) root.pomoBreakMin = j.pomoBreak;
+                if (j.pomoLong)  root.pomoLongMin  = j.pomoLong;
+                if (j.pomoEvery) root.pomoEvery    = j.pomoEvery;
+                if (j.pomoDnd !== undefined) root.pomoDnd = !!j.pomoDnd;
+                if (Array.isArray(j.zones)) root.wcZones = j.zones;
+            } catch (e) {}
+        } } }
+    function tmrSaveCfg() {
+        var o = { pomoFocus: root.pomoFocusMin, pomoBreak: root.pomoBreakMin, pomoLong: root.pomoLongMin,
+                  pomoEvery: root.pomoEvery, pomoDnd: root.pomoDnd, zones: root.wcZones };
+        var s = JSON.stringify(o).replace(/'/g, "'\\''");
+        Quickshell.execDetached(["sh","-c","mkdir -p ~/.config/sea-shell && printf '%s' '" + s + "' > ~/.config/sea-shell/timers.json"]);
+    }
+    // world clock: one process prints "zone|HH:mm|ddd" per configured zone; refreshed each minute while open
+    property var wcTimes: []                 // [{zone,label,time,day}]
+    Process { id: wcProc
+        stdout: StdioCollector { id: wcOut; onStreamFinished: {
+            var out = [], lines = wcOut.text.trim().split("\n");
+            for (var i=0;i<lines.length;i++) { var p = lines[i].split("|"); if (p.length>=3) {
+                var seg = p[0].split("/"); var city = seg[seg.length-1].replace(/_/g," ");
+                out.push({ zone: p[0], label: city, time: p[1], day: p[2] }); } }
+            root.wcTimes = out;
+        } } }
+    function wcRefresh() {
+        if (!root.wcZones.length) { root.wcTimes = []; return; }
+        var parts = [];
+        for (var i=0;i<root.wcZones.length;i++) { var z = ("" + root.wcZones[i]).replace(/'/g,"");
+            parts.push("printf '%s|%s|%s\\n' '"+z+"' \"$(TZ='"+z+"' date +%H:%M)\" \"$(TZ='"+z+"' date +%a)\""); }
+        wcProc.command = ["sh","-c", parts.join(";")];
+        wcProc.running = true;
+    }
+    function wcAdd(zone)    { var z=(""+zone).trim(); if(!z) return; if(root.wcZones.indexOf(z)>=0) return; var a=root.wcZones.slice(); a.push(z); root.wcZones=a; root.tmrSaveCfg(); root.wcRefresh(); }
+    function wcRemove(zone) { var a=root.wcZones.filter(function(z){return z!==zone;}); root.wcZones=a; root.tmrSaveCfg(); root.wcRefresh(); }
+    readonly property var wcPresets: [
+        {l:"New York", z:"America/New_York"}, {l:"Los Angeles", z:"America/Los_Angeles"},
+        {l:"London", z:"Europe/London"}, {l:"Paris", z:"Europe/Paris"},
+        {l:"Dubai", z:"Asia/Dubai"}, {l:"India", z:"Asia/Kolkata"},
+        {l:"Singapore", z:"Asia/Singapore"}, {l:"Tokyo", z:"Asia/Tokyo"},
+        {l:"Sydney", z:"Australia/Sydney"}, {l:"UTC", z:"UTC"} ]
+    Timer { interval: 60000; running: root.openPop==="cal"; repeat: true; triggeredOnStart: true; onTriggered: root.wcRefresh() }
+
     ListModel { id: popupModel }      // transient on-screen popups
     NotificationServer {
         id: notifServer
@@ -1235,6 +1559,29 @@ ShellRoot {
     Timer { id: osdHide; interval: 1500; onTriggered: root.osdKind = "" }
     Timer { interval: 1400; running: true; onTriggered: root.osdReady = true }  // suppress OSD flash on startup
     function showOsd(kind, val, icon) { if(!root.osdReady) return; root.osdKind = kind; root.osdVal = val; root.osdIcon = icon; osdHide.restart() }
+
+    // ---------- screen magnifier (Hyprland cursor:zoom_factor) ----------
+    // Bound to SUPER +/-/0 in keybinds.conf → `qs -c sea-shell ipc call zoom …`. The OSD
+    // reuses the volume/brightness card so the zoom level flashes on-screen as you step it.
+    property real zoomFactor: 1.0
+    readonly property real zoomMax: 5.0
+    function zoomSet(f) {
+        var z = Math.max(1.0, Math.min(root.zoomMax, Math.round(f * 100) / 100));
+        root.zoomFactor = z;
+        Quickshell.execDetached(["hyprctl", "keyword", "cursor:zoom_factor", "" + z]);
+        root.osdReady = true;   // zoom is always user-initiated — never a startup flash
+        root.showOsd("zoom", (z - 1) / (root.zoomMax - 1), z > 1.01 ? "zoom_in" : "zoom_out");
+    }
+    function zoomIn()    { root.zoomSet(root.zoomFactor + (root.zoomFactor < 2 ? 0.25 : 0.5)); }
+    function zoomOut()   { root.zoomSet(root.zoomFactor - (root.zoomFactor <= 2 ? 0.25 : 0.5)); }
+    function zoomReset() { root.zoomSet(1.0); }
+    IpcHandler {
+        target: "zoom"
+        function inc(): void   { root.zoomIn() }
+        function dec(): void   { root.zoomOut() }
+        function reset(): void { root.zoomReset() }
+        function toggle(): void { root.zoomSet(root.zoomFactor > 1.01 ? 1.0 : 2.0) }
+    }
 
     readonly property var osdSink: Pipewire.defaultAudioSink ? Pipewire.defaultAudioSink.audio : null
     Connections {
@@ -2279,11 +2626,14 @@ ShellRoot {
                     }
 
                     // ---- CLOCK ----
-                    Pill { owner: bar; id: clockPill; key: "cal"; icon: "schedule"
+                    Pill { owner: bar; id: clockPill; key: "cal"
                         property string wid: "wgClock"; x: rightGroup.xFor(wid); anchors.verticalCenter: parent.verticalCenter
                         visible: root.cfgClock
-                        value: Qt.formatDateTime(clock.date,"ddd d MMM · HH:mm")
-                        vertValue: Qt.formatDateTime(clock.date,"HH:mm"); accent: theme.iris }
+                        // when a timer/pomodoro is live the pill becomes a countdown; otherwise it's the clock
+                        icon: root.tmrRunning ? (root.pomoActive ? (root.pomoPhase==="focus" ? "local_fire_department" : "coffee") : "timer") : "schedule"
+                        value: root.tmrRunning ? root.tmrText : Qt.formatDateTime(clock.date,"ddd d MMM · HH:mm")
+                        vertValue: root.tmrRunning ? root.tmrText : Qt.formatDateTime(clock.date,"HH:mm")
+                        accent: root.tmrRunning ? (root.tmrPaused ? theme.warn : (root.pomoActive && root.pomoPhase!=="focus" ? theme.good : theme.iris)) : theme.iris }
                      
 
                     // ---- POWER (very end) ----
@@ -2811,8 +3161,53 @@ ShellRoot {
                                     border.width: cur ? 1 : 0; border.color: theme.a(theme.iris,0.3)
                                     Row { anchors.fill: parent; anchors.leftMargin: 10; anchors.rightMargin: 10; spacing: 8
                                         Sym { anchors.verticalCenter: parent.verticalCenter; text: cur?"radio_button_checked":"radio_button_unchecked"; sz: 15; color: cur?theme.iris:theme.faint }
-                                        Text { anchors.verticalCenter: parent.verticalCenter; width: parent.width-42; elide: Text.ElideRight; text: root.nodeName(modelData); color: theme.text; font.pixelSize: 12; font.family: root.cfgFont; font.bold: cur } }
-                                    MouseArea { id: sm; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: Pipewire.preferredDefaultAudioSink = modelData } } } } }
+                                        Text { anchors.verticalCenter: parent.verticalCenter; width: parent.width-42-sinkBadge.width; elide: Text.ElideRight; text: root.nodeName(modelData); color: theme.text; font.pixelSize: 12; font.family: root.cfgFont; font.bold: cur }
+                                        Text { id: sinkBadge; anchors.verticalCenter: parent.verticalCenter; text: root.audioFmtBadge(modelData.name); visible: text!==""; color: theme.frost; font.pixelSize: 10; font.family: root.cfgFont } }
+                                    MouseArea { id: sm; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: Pipewire.preferredDefaultAudioSink = modelData } } }
+                            // ---- bluetooth codec — only when the current output is a BT device offering a choice ----
+                            Item { height: 6; width: 1; visible: root.audioBtSink !== null }
+                            Text { visible: root.audioBtSink !== null; text: "bluetooth codec"; color: theme.faint; font.pixelSize: 10; font.family: root.cfgFont; font.letterSpacing: 0.5 }
+                            Flow { visible: root.audioBtSink !== null; width: parent.width; spacing: 6
+                                Repeater { model: root.audioBtSink ? root.audioBtSink.bt_codecs : []
+                                    delegate: Rectangle { required property var modelData
+                                        readonly property bool on: modelData.active
+                                        implicitHeight: 24; implicitWidth: ccT.implicitWidth + 18; radius: 7
+                                        color: on ? theme.a(theme.iris, 0.25) : (ccMa.containsMouse ? theme.a(theme.line, 0.55) : theme.a(theme.line, 0.32))
+                                        border.width: 1; border.color: on ? theme.a(theme.iris, 0.55) : theme.a(theme.iris, 0.14)
+                                        Text { id: ccT; anchors.centerIn: parent; text: modelData.codec; color: on ? theme.iris : theme.sub; font.pixelSize: 10; font.family: root.cfgFont; font.bold: on }
+                                        MouseArea { id: ccMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.audioSetCodec(root.audioBtSink.name, modelData.profile) } }
+                                }
+                            }
+                            // ---- per-app mixer (sea-audio.py, 4.0): volume slider + click the chip to change output ----
+                            Item { height: 6; width: 1; visible: root.streams.length > 0 }
+                            Text { visible: root.streams.length > 0; text: "apps"; color: theme.faint; font.pixelSize: 10; font.family: root.cfgFont; font.letterSpacing: 0.5 }
+                            Repeater { model: root.streams
+                                delegate: Column {
+                                    required property var modelData
+                                    width: parent.width; spacing: 3
+                                    // name + output chip
+                                    Row { width: parent.width; height: 20; spacing: 8
+                                        Sym { anchors.verticalCenter: parent.verticalCenter; text: "graphic_eq"; sz: 14; color: theme.faint }
+                                        Text { anchors.verticalCenter: parent.verticalCenter; width: parent.width - 22 - appChip.width - 16; elide: Text.ElideRight
+                                            text: root.streamName(modelData); color: theme.sub; font.pixelSize: 11; font.family: root.cfgFont }
+                                        Rectangle { id: appChip; anchors.verticalCenter: parent.verticalCenter
+                                            implicitWidth: acRow.implicitWidth + 14; height: 20; radius: 6
+                                            color: acMa.containsMouse ? theme.a(theme.iris, 0.28) : theme.a(theme.iris, 0.14); border.width: 1; border.color: theme.a(theme.iris, 0.28)
+                                            Row { id: acRow; anchors.centerIn: parent; spacing: 3
+                                                Sym { anchors.verticalCenter: parent.verticalCenter; text: "arrow_forward"; sz: 11; color: theme.frost }
+                                                Text { anchors.verticalCenter: parent.verticalCenter; text: root.audioSinkLabelOf(modelData.id); color: theme.frost; font.pixelSize: 10; font.family: root.cfgFont } }
+                                            MouseArea { id: acMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.audioCycleRouteById(modelData.id) } } }
+                                    // volume slider + readout
+                                    Row { width: parent.width; height: 20; spacing: 8
+                                        Item { width: 22; height: 1 }
+                                        Slider { anchors.verticalCenter: parent.verticalCenter; width: parent.width - 22 - 44 - 16
+                                            value: modelData.audio ? modelData.audio.volume : 0
+                                            onMoved: (v) => { if (modelData.audio) { modelData.audio.muted = false; modelData.audio.volume = v } } }
+                                        Text { anchors.verticalCenter: parent.verticalCenter; width: 44; horizontalAlignment: Text.AlignRight
+                                            text: modelData.audio ? Math.round(modelData.audio.volume * 100) + "%" : "—"; color: theme.sub; font.pixelSize: 10; font.family: root.cfgFont } }
+                                }
+                            }
+                        } }
                     Drop { screen: bar.screen
                         id: batDrop; host: root.barVertical ? batPillVert : batPill; shown: root.openPop ==="bat" && root.openBar === bar
                         cardW: 230; cardH: batCol.implicitHeight + 28
@@ -2907,7 +3302,119 @@ ShellRoot {
                                             Column { anchors.verticalCenter: parent.verticalCenter; width: parent.width - 44; spacing: 1
                                                 Text { width: parent.width; text: evRow.modelData.title; color: theme.text; font.pixelSize: 11; font.family: root.cfgFont; elide: Text.ElideRight }
                                                 Text { text: evRow.rel + "  ·  " + Qt.formatDate(root.calDate(evRow.modelData.date), "ddd") + (evRow.modelData.time ? "  ·  " + evRow.modelData.time : "")
-                                                    color: evRow.soon ? theme.frost : theme.faint; font.pixelSize: 9; font.family: root.cfgFont } } } } } } } }
+                                                    color: evRow.soon ? theme.frost : theme.faint; font.pixelSize: 9; font.family: root.cfgFont } } } } } }
+
+                            // ================= TIMER · POMODORO =================
+                            Rectangle { width: parent.width; height: 1; color: theme.a(theme.iris, 0.15) }
+                            Column { width: parent.width; spacing: 6
+                                Item { width: parent.width; height: 12
+                                    Text { anchors.left: parent.left; anchors.verticalCenter: parent.verticalCenter
+                                        text: root.pomoActive ? "POMODORO" : "TIMER"; color: theme.frost; font.pixelSize: 9; font.family: root.cfgFont; font.bold: true; font.letterSpacing: 1 }
+                                    Text { anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter; visible: root.pomoActive
+                                        text: "session " + (root.pomoDone + (root.pomoPhase==="focus"?1:0)); color: theme.faint; font.pixelSize: 9; font.family: root.cfgFont } }
+
+                                // ---- active countdown ----
+                                Column { width: parent.width; spacing: 6; visible: root.tmrRunning
+                                    Row { width: parent.width; spacing: 10
+                                        Text { anchors.verticalCenter: parent.verticalCenter; text: root.tmrText; color: root.tmrPaused?theme.warn:theme.frost; font.pixelSize: 30; font.family: root.cfgFont; font.bold: true }
+                                        Column { anchors.verticalCenter: parent.verticalCenter; spacing: 1
+                                            Text { text: root.pomoActive ? (root.pomoPhase==="focus"?"focus":(root.pomoPhase==="long"?"long break":"break")) : "timer"
+                                                color: (root.pomoActive && root.pomoPhase!=="focus") ? theme.good : theme.iris; font.pixelSize: 12; font.family: root.cfgFont; font.bold: true }
+                                            Text { visible: root.tmrPaused; text: "paused"; color: theme.warn; font.pixelSize: 9; font.family: root.cfgFont } } }
+                                    Rectangle { width: parent.width; height: 5; radius: 2.5; color: theme.a(theme.line,0.7)
+                                        Rectangle { height: parent.height; radius: 2.5
+                                            width: parent.width * (root.tmrTotal>0 ? Math.max(0,Math.min(1, 1 - root.tmrRemain/root.tmrTotal)) : 0)
+                                            color: (root.pomoActive && root.pomoPhase!=="focus") ? theme.good : theme.iris; Behavior on width { NumberAnimation { duration: 300 } } } }
+                                    Row { width: parent.width; spacing: 6
+                                        Rectangle { width: (parent.width - (root.pomoActive?12:6))/(root.pomoActive?3:2); height: 30; radius: 8
+                                            color: tpMa.containsMouse ? theme.a(theme.iris,0.25) : theme.a(theme.line,0.4); border.width:1; border.color: theme.a(theme.iris,0.2)
+                                            Row { anchors.centerIn: parent; spacing: 5
+                                                Sym { anchors.verticalCenter: parent.verticalCenter; text: root.tmrPaused?"play_arrow":"pause"; sz: 14; color: theme.frost }
+                                                Text { anchors.verticalCenter: parent.verticalCenter; text: root.tmrPaused?"resume":"pause"; color: theme.text; font.pixelSize: 11; font.family: root.cfgFont } }
+                                            MouseArea { id: tpMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.tmrToggle() } }
+                                        Rectangle { visible: root.pomoActive; width: (parent.width - 12)/3; height: 30; radius: 8
+                                            color: tsMa.containsMouse ? theme.a(theme.iris,0.25) : theme.a(theme.line,0.4); border.width:1; border.color: theme.a(theme.iris,0.2)
+                                            Row { anchors.centerIn: parent; spacing: 5
+                                                Sym { anchors.verticalCenter: parent.verticalCenter; text: "skip_next"; sz: 14; color: theme.frost }
+                                                Text { anchors.verticalCenter: parent.verticalCenter; text: "skip"; color: theme.text; font.pixelSize: 11; font.family: root.cfgFont } }
+                                            MouseArea { id: tsMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.pomoSkip() } }
+                                        Rectangle { width: root.pomoActive ? (parent.width-12)/3 : (parent.width-6)/2; height: 30; radius: 8
+                                            color: txMa.containsMouse ? theme.a(theme.bad,0.22) : theme.a(theme.line,0.4); border.width:1; border.color: theme.a(theme.bad,0.25)
+                                            Row { anchors.centerIn: parent; spacing: 5
+                                                Sym { anchors.verticalCenter: parent.verticalCenter; text: "stop"; sz: 14; color: theme.bad }
+                                                Text { anchors.verticalCenter: parent.verticalCenter; text: "stop"; color: theme.text; font.pixelSize: 11; font.family: root.cfgFont } }
+                                            MouseArea { id: txMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.tmrStop() } } } }
+
+                                // ---- idle: quick timers + pomodoro ----
+                                Column { width: parent.width; spacing: 6; visible: !root.tmrRunning
+                                    Flow { width: parent.width; spacing: 5
+                                        Repeater { model: [1,5,10,15,25]
+                                            delegate: Rectangle { required property var modelData; height: 28; radius: 7; width: (parent.width - 4*5)/5
+                                                color: qcMa.containsMouse ? theme.a(theme.iris,0.2) : theme.a(theme.line,0.4); border.width:1; border.color: theme.a(theme.iris,0.16)
+                                                Text { anchors.centerIn: parent; text: modelData+"m"; color: theme.text; font.pixelSize: 11; font.family: root.cfgFont; font.bold: true }
+                                                MouseArea { id: qcMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.timerStartMin(modelData) } } } }
+                                    Rectangle { width: parent.width; height: 34; radius: 8
+                                        color: psMa.containsMouse ? theme.iris : theme.a(theme.iris,0.22); border.width:1; border.color: theme.iris
+                                        Row { anchors.centerIn: parent; spacing: 7
+                                            Sym { anchors.verticalCenter: parent.verticalCenter; text: "local_fire_department"; sz: 16; color: psMa.containsMouse?theme.bg:theme.frost }
+                                            Text { anchors.verticalCenter: parent.verticalCenter; text: "Start Pomodoro · " + root.pomoFocusMin + "/" + root.pomoBreakMin; color: psMa.containsMouse?theme.bg:theme.frost; font.pixelSize: 12; font.family: root.cfgFont; font.bold: true } }
+                                        MouseArea { id: psMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.pomoStart() } }
+                                    // compact config: focus / break steppers + DND toggle
+                                    Row { width: parent.width; spacing: 8
+                                        Row { spacing: 3
+                                            Text { anchors.verticalCenter: parent.verticalCenter; text: "focus"; color: theme.faint; font.pixelSize: 10; font.family: root.cfgFont }
+                                            Rectangle { width: 20; height: 20; radius: 6; color: fmMa.containsMouse?theme.a(theme.iris,0.2):theme.a(theme.line,0.4)
+                                                Sym { anchors.centerIn: parent; text: "remove"; sz: 12; color: theme.frost }
+                                                MouseArea { id: fmMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: { root.pomoFocusMin = Math.max(5, root.pomoFocusMin-5); root.tmrSaveCfg() } } }
+                                            Text { anchors.verticalCenter: parent.verticalCenter; width: 22; horizontalAlignment: Text.AlignHCenter; text: root.pomoFocusMin; color: theme.text; font.pixelSize: 11; font.family: root.cfgFont; font.bold: true }
+                                            Rectangle { width: 20; height: 20; radius: 6; color: fpMa.containsMouse?theme.a(theme.iris,0.2):theme.a(theme.line,0.4)
+                                                Sym { anchors.centerIn: parent; text: "add"; sz: 12; color: theme.frost }
+                                                MouseArea { id: fpMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: { root.pomoFocusMin = Math.min(120, root.pomoFocusMin+5); root.tmrSaveCfg() } } } }
+                                        Row { spacing: 3
+                                            Text { anchors.verticalCenter: parent.verticalCenter; text: "break"; color: theme.faint; font.pixelSize: 10; font.family: root.cfgFont }
+                                            Rectangle { width: 20; height: 20; radius: 6; color: bmMa.containsMouse?theme.a(theme.iris,0.2):theme.a(theme.line,0.4)
+                                                Sym { anchors.centerIn: parent; text: "remove"; sz: 12; color: theme.frost }
+                                                MouseArea { id: bmMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: { root.pomoBreakMin = Math.max(1, root.pomoBreakMin-1); root.tmrSaveCfg() } } }
+                                            Text { anchors.verticalCenter: parent.verticalCenter; width: 22; horizontalAlignment: Text.AlignHCenter; text: root.pomoBreakMin; color: theme.text; font.pixelSize: 11; font.family: root.cfgFont; font.bold: true }
+                                            Rectangle { width: 20; height: 20; radius: 6; color: bpMa.containsMouse?theme.a(theme.iris,0.2):theme.a(theme.line,0.4)
+                                                Sym { anchors.centerIn: parent; text: "add"; sz: 12; color: theme.frost }
+                                                MouseArea { id: bpMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: { root.pomoBreakMin = Math.min(60, root.pomoBreakMin+1); root.tmrSaveCfg() } } } }
+                                        Item { width: 2; height: 1 }
+                                        Rectangle { anchors.verticalCenter: parent.verticalCenter; width: 26; height: 22; radius: 7
+                                            color: root.pomoDnd ? theme.a(theme.iris,0.25) : theme.a(theme.line,0.4); border.width:1; border.color: root.pomoDnd?theme.a(theme.iris,0.5):theme.a(theme.line,0.9)
+                                            Sym { anchors.centerIn: parent; text: root.pomoDnd?"notifications_off":"notifications"; sz: 13; color: root.pomoDnd?theme.iris:theme.faint }
+                                            MouseArea { anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: { root.pomoDnd = !root.pomoDnd; root.tmrSaveCfg() } } } } } }
+
+                            // ================= WORLD CLOCK =================
+                            Rectangle { width: parent.width; height: 1; color: theme.a(theme.iris, 0.15) }
+                            Column { width: parent.width; spacing: 5
+                                Item { width: parent.width; height: 12
+                                    Text { anchors.left: parent.left; anchors.verticalCenter: parent.verticalCenter
+                                        text: "WORLD CLOCK"; color: theme.frost; font.pixelSize: 9; font.family: root.cfgFont; font.bold: true; font.letterSpacing: 1 } }
+                                Repeater { model: root.wcTimes
+                                    delegate: Rectangle { required property var modelData; width: parent.width; height: 28; radius: 7
+                                        color: wcm.containsMouse ? theme.a(theme.line,0.4) : "transparent"
+                                        Row { anchors.fill: parent; anchors.leftMargin: 8; anchors.rightMargin: 8; spacing: 8
+                                            Sym { anchors.verticalCenter: parent.verticalCenter; text: "public"; sz: 13; color: theme.faint }
+                                            Text { anchors.verticalCenter: parent.verticalCenter; width: parent.width - 120; elide: Text.ElideRight; text: modelData.label; color: theme.text; font.pixelSize: 11; font.family: root.cfgFont }
+                                            Text { anchors.verticalCenter: parent.verticalCenter; text: modelData.day; color: theme.faint; font.pixelSize: 9; font.family: root.cfgFont }
+                                            Text { anchors.verticalCenter: parent.verticalCenter; text: modelData.time; color: theme.frost; font.pixelSize: 12; font.family: root.cfgFont; font.bold: true } }
+                                        MouseArea { id: wcm; anchors.fill: parent; hoverEnabled: true; acceptedButtons: Qt.NoButton }
+                                        Rectangle { anchors.right: parent.right; anchors.rightMargin: 3; anchors.verticalCenter: parent.verticalCenter; visible: wcm.containsMouse
+                                            width: 20; height: 20; radius: 6; color: theme.a(theme.bad,0.22)
+                                            Sym { anchors.centerIn: parent; text: "close"; sz: 12; color: theme.bad }
+                                            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.wcRemove(modelData.zone) } } } }
+                                Text { visible: root.wcTimes.length===0; text: "add a city below"; color: theme.faint; font.pixelSize: 10; font.family: root.cfgFont }
+                                Flow { width: parent.width; spacing: 5; topPadding: 2
+                                    Repeater { model: root.wcPresets
+                                        delegate: Rectangle { required property var modelData
+                                            visible: root.wcZones.indexOf(modelData.z) < 0
+                                            height: 22; radius: 6; width: visible ? (wcAddRow.implicitWidth + 14) : 0
+                                            color: wcaMa.containsMouse ? theme.a(theme.iris,0.2) : theme.a(theme.line,0.35); border.width: 1; border.color: theme.a(theme.iris,0.18)
+                                            Row { id: wcAddRow; anchors.centerIn: parent; spacing: 3
+                                                Sym { anchors.verticalCenter: parent.verticalCenter; text: "add"; sz: 11; color: theme.frost }
+                                                Text { anchors.verticalCenter: parent.verticalCenter; text: modelData.l; color: theme.text; font.pixelSize: 9; font.family: root.cfgFont } }
+                                            MouseArea { id: wcaMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.wcAdd(modelData.z) } } } } } } }
                     Drop { screen: bar.screen
                         id: pwrDrop; host: root.barVertical ? pwrPillVert : pwrPill; shown: root.openPop ==="pwr" && root.openBar === bar
                         cardW: 210; cardH: pwrCol.implicitHeight + 28
@@ -3286,9 +3793,9 @@ ShellRoot {
                 Sym { anchors.verticalCenter: parent.verticalCenter; text: root.osdIcon; sz: 24; color: theme.frost }
                 Column { anchors.verticalCenter: parent.verticalCenter; width: parent.width-52; spacing: 6
                     Row { width: parent.width
-                        Text { text: root.osdKind==="vol" ? "volume" : "brightness"; color: theme.sub; font.pixelSize: 11; font.family: root.cfgFont }
+                        Text { text: root.osdKind==="vol" ? "volume" : (root.osdKind==="zoom" ? "magnifier" : "brightness"); color: theme.sub; font.pixelSize: 11; font.family: root.cfgFont }
                         Item { width: parent.width - 80; height: 1 }
-                        Text { text: Math.round(root.osdVal*100)+"%"; color: theme.frost; font.pixelSize: 11; font.family: root.cfgFont } }
+                        Text { text: root.osdKind==="zoom" ? (root.zoomFactor.toFixed(2).replace(/\.?0+$/,"")+"×") : (Math.round(root.osdVal*100)+"%"); color: theme.frost; font.pixelSize: 11; font.family: root.cfgFont } }
                     Rectangle { width: parent.width; height: 6; radius: 3; color: theme.a(theme.line,0.85)
                         Rectangle { width: parent.width*Math.max(0,Math.min(1,root.osdVal)); height: parent.height; radius: 3; color: theme.iris
                             Behavior on width { NumberAnimation { duration: 90 } } } }
@@ -3297,73 +3804,8 @@ ShellRoot {
         }
     }
 
-    // ===== alt-tab window switcher =====
-    PanelWindow {
-        id: switcherWin
-        readonly property real ui: root.uiFor(switcherWin.screen)
-        visible: root.switcherOpen
-        anchors { top: true; bottom: true; left: true; right: true }
-        color: "transparent"
-        WlrLayershell.layer: WlrLayer.Overlay
-        WlrLayershell.namespace: "sea-shell:switcher"
-        exclusionMode: ExclusionMode.Ignore
-        Rectangle { anchors.fill: parent; color: Qt.rgba(0,0,0,0.35)
-            MouseArea { anchors.fill: parent; onClicked: root.switcherOpen = false } }   // click-away cancels
-        readonly property int cardW: 148
-        Rectangle {
-            anchors.centerIn: parent
-            scale: switcherWin.ui            // authored native; scaled around its centre
-            // clamp in native space so the scaled card still fits the screen
-            width: Math.min(parent.width / switcherWin.ui - 80, swFlick.contentWidth + 28)
-            height: swCol.implicitHeight + 22
-            radius: root.cfgRadius + 4
-            color: theme.a(theme.bg, 0.97)
-            border.width: 1; border.color: theme.a(theme.iris, 0.32)
-            Column {
-                id: swCol; anchors.centerIn: parent; width: parent.width - 24; spacing: 9
-                Flickable {
-                    id: swFlick; width: parent.width; height: 150; contentWidth: swRow.implicitWidth; clip: true
-                    boundsBehavior: Flickable.StopAtBounds
-                    Row {
-                        id: swRow; height: parent.height; spacing: 10
-                        Repeater {
-                            model: root.switcherWins
-                            delegate: Rectangle {
-                                id: swCard
-                                required property var modelData
-                                required property int index
-                                readonly property bool sel: index === root.switcherSel
-                                readonly property var ipc: modelData.lastIpcObject
-                                width: switcherWin.cardW; height: 146; radius: 12
-                                color: sel ? theme.a(theme.iris, 0.22) : theme.a(theme.line, 0.4)
-                                border.width: sel ? 2 : 1; border.color: sel ? theme.iris : theme.a(theme.iris, 0.14)
-                                Column {
-                                    anchors.centerIn: parent; width: parent.width - 18; spacing: 7
-                                    IconImage { anchors.horizontalCenter: parent.horizontalCenter; implicitSize: 52; asynchronous: true
-                                        source: Quickshell.iconPath((""+(swCard.ipc.class||"")).toLowerCase(), "application-x-executable") }
-                                    Text { width: parent.width; horizontalAlignment: Text.AlignHCenter; elide: Text.ElideRight
-                                        text: swCard.ipc.class||"window"; color: theme.text; font.pixelSize: 12; font.family: root.cfgFont; font.bold: swCard.sel }
-                                    Text { width: parent.width; horizontalAlignment: Text.AlignHCenter; elide: Text.ElideRight; maximumLineCount: 2; wrapMode: Text.Wrap
-                                        text: swCard.ipc.title||""; color: theme.sub; font.pixelSize: 9; font.family: root.cfgFont }
-                                }
-                                MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
-                                    onClicked: { root.switcherSel = swCard.index; root.switcherCommit() } }
-                            }
-                        }
-                    }
-                    // keep the selected card visible when cycling past the edge
-                    Connections { target: root; function onSwitcherSelChanged() {
-                        var x = root.switcherSel * (switcherWin.cardW + 10);
-                        if (x < swFlick.contentX) swFlick.contentX = x;
-                        else if (x + switcherWin.cardW > swFlick.contentX + swFlick.width) swFlick.contentX = x + switcherWin.cardW - swFlick.width;
-                    } }
-                }
-                Text { anchors.horizontalCenter: parent.horizontalCenter
-                    text: root.switcherWins.length + " windows · Tab cycles · release Alt to focus · Esc cancels"
-                    color: theme.faint; font.pixelSize: 10; font.family: root.cfgFont }
-            }
-        }
-    }
+    // (the alt-tab switcher HUD lives up top, next to its state + the `switcher` IPC —
+    //  a single thumbnail-based overlay; there is deliberately no second one here.)
 
     // ===== Exposé Mission Control HUD overlay =====
     property bool exposeActive: false
@@ -3421,7 +3863,11 @@ ShellRoot {
                                 width: 280; height: 180; radius: root.cfgRadius
                                 color: theme.a(theme.line, 0.55); border.width: 1
                                 border.color: Hyprland.focusedWorkspace && Hyprland.focusedWorkspace.id === modelData.id ? theme.iris : theme.a(theme.iris, 0.12)
-                                
+                                clip: true
+                                // compose captures into one FBO so a ScreencopyView texture node can't
+                                // leak a stray thumbnail outside the card (the same fix as the switcher)
+                                layer.enabled: true
+
                                 ColumnLayout {
                                     anchors.fill: parent; anchors.margins: 12; spacing: 10
                                     
@@ -3433,52 +3879,66 @@ ShellRoot {
                                         Text { text: modelData.name; color: theme.faint; font.pixelSize: 10; font.family: root.cfgFont }
                                     }
                                     
-                                    // List of windows in this workspace
-                                    ListView {
+                                    // Live thumbnails of the windows in this workspace — click to jump
+                                    Flow {
                                         Layout.fillWidth: true; Layout.fillHeight: true; clip: true; spacing: 6
-                                        model: {
-                                            var m = Hyprland.toplevels ? Hyprland.toplevels.values : [];
-                                            var out = [];
-                                            for (var i = 0; i < m.length; i++) {
-                                                var t = m[i];
-                                                // use the LIVE .workspace ref, not lastIpcObject.workspace —
-                                                // the latter is a stale snapshot, so windows land in the wrong
-                                                // card (or none) after they move or are created post-launch.
-                                                if (t && t.workspace && t.workspace.id === modelData.id) {
-                                                    out.push(t);
+                                        Repeater {
+                                            model: {
+                                                var m = Hyprland.toplevels ? Hyprland.toplevels.values : [];
+                                                var out = [];
+                                                for (var i = 0; i < m.length; i++) {
+                                                    var t = m[i];
+                                                    // use the LIVE .workspace ref, not lastIpcObject.workspace —
+                                                    // the latter is a stale snapshot, so windows land in the wrong card.
+                                                    if (t && t.workspace && t.workspace.id === wsBox.modelData.id) out.push(t);
                                                 }
+                                                return out;
                                             }
-                                            return out;
-                                        }
-                                        delegate: Rectangle {
-                                            id: winCard
-                                            required property var modelData
-                                            width: parent.width; height: 32; radius: 6
-                                            color: theme.a(theme.line, 0.5)
-                                            RowLayout {
-                                                anchors.fill: parent; anchors.leftMargin: 8; anchors.rightMargin: 8; spacing: 8
+                                            delegate: Rectangle {
+                                                id: winTile
+                                                required property var modelData
+                                                readonly property string cls: ("" + (modelData.lastIpcObject.class || "")).toLowerCase()
+                                                width: 122; height: 60; radius: 7; clip: true
+                                                color: theme.a(theme.bg, 0.55)
+                                                border.width: 1; border.color: theme.a(theme.iris, 0.14)
+                                                ScreencopyView {
+                                                    id: winScv
+                                                    anchors.fill: parent
+                                                    captureSource: winTile.modelData.wayland
+                                                    live: root.exposeActive
+                                                    visible: hasContent
+                                                }
                                                 IconImage {
-                                                    implicitSize: 18; asynchronous: true
-                                                    source: Quickshell.iconPath(("" + (modelData.lastIpcObject.class || "")).toLowerCase(), "application-x-executable")
+                                                    anchors.centerIn: parent; implicitSize: 24; asynchronous: true
+                                                    visible: !winScv.hasContent
+                                                    source: Quickshell.iconPath(winTile.cls, "application-x-executable")
                                                 }
-                                                Text {
-                                                    text: modelData.lastIpcObject.class || "window"; color: theme.text; font.pixelSize: 11; font.family: root.cfgFont
-                                                    elide: Text.ElideRight; Layout.fillWidth: true
-                                                }
-                                                // Close window button
-                                                Sym {
-                                                    text: "close"; sz: 13; color: winClMa.containsMouse ? theme.bad : theme.faint
-                                                    MouseArea {
-                                                        id: winClMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
-                                                        onClicked: Hyprland.dispatch("closewindow address:" + modelData.lastIpcObject.address)
+                                                // title strip
+                                                Rectangle {
+                                                    anchors { left: parent.left; right: parent.right; bottom: parent.bottom }
+                                                    height: 15; color: theme.a(theme.panel, 0.9)
+                                                    Text {
+                                                        anchors.fill: parent; anchors.leftMargin: 5; anchors.rightMargin: 5
+                                                        verticalAlignment: Text.AlignVCenter; elide: Text.ElideRight
+                                                        text: winTile.modelData.lastIpcObject.class || "window"
+                                                        color: theme.sub; font.pixelSize: 8; font.family: root.cfgFont
                                                     }
                                                 }
-                                            }
-                                            MouseArea {
-                                                anchors.fill: parent; anchors.rightMargin: 24; cursorShape: Qt.PointingHandCursor
-                                                onClicked: {
-                                                    Hyprland.dispatch("focuswindow address:" + modelData.lastIpcObject.address);
-                                                    root.exposeActive = false;
+                                                // click anywhere → focus that window
+                                                MouseArea {
+                                                    anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                                                    onClicked: { Hyprland.dispatch("focuswindow address:" + winTile.modelData.lastIpcObject.address); root.exposeActive = false }
+                                                }
+                                                // close button — declared last so it wins the click in its corner
+                                                Rectangle {
+                                                    anchors { top: parent.top; right: parent.right; margins: 3 }
+                                                    width: 16; height: 16; radius: 8
+                                                    color: winClMa.containsMouse ? theme.bad : theme.a(theme.bg, 0.7)
+                                                    Sym { anchors.centerIn: parent; text: "close"; sz: 11; color: winClMa.containsMouse ? theme.bg : theme.faint }
+                                                    MouseArea {
+                                                        id: winClMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                                        onClicked: Hyprland.dispatch("closewindow address:" + winTile.modelData.lastIpcObject.address)
+                                                    }
                                                 }
                                             }
                                         }

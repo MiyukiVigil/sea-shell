@@ -17,7 +17,7 @@ import QtQuick.Layouts
 Scope {
     id: root
     property string repo: Qt.resolvedUrl(".").toString().replace("file://", "").replace(/\/$/, "")
-    readonly property string seaVersion: "3.3.0"     // sea-shell release — mirrored in the repo VERSION file
+    readonly property string seaVersion: "4.0.0"     // sea-shell release — mirrored in the repo VERSION file
     property int tab: 8                             // land on the System / About dashboard
 
     // ---- resident lifecycle: the panel is hidden until shown, so it costs ~nothing closed ----
@@ -32,7 +32,8 @@ Scope {
         root.shown = true;
     }
     function refreshTab(t) {
-        if (t === 1) root.reloadMonitors()            // display: refresh monitors list
+        if (t === 0) root.audioRefresh()              // audio: sink formats + streams
+        if (t === 1) { root.reloadMonitors(); root.reloadDisplayProfiles() }   // display: monitors + saved layout profiles
         if (t === 14) root.reloadKde()                // kdeconnect: refresh devices
         if (t === 7) kbProc.running = true            // keybinds: refresh binds
         if (t === 8) sysProc.running = true           // system: refresh live stats
@@ -459,6 +460,57 @@ Scope {
     }
     function nodeName(n) { return n ? (n.description || n.nickname || n.name || "device") : "" }
 
+    // ---------- sound: per-sink format + per-app routing (sea-audio.py, 4.0) ----------
+    // The full-size twin of the volume dropdown's Sound bits: each output's live
+    // sample-rate / bit-depth (or a Bluetooth codec) and its capability, plus per-app
+    // output routing with an explicit sink picker. Read while the Audio tab is open.
+    readonly property string _audioScript: Qt.resolvedUrl("sea-audio.py").toString().replace("file://", "")
+    property var audioSinks: ({})       // node.name -> {rate,format,bits,active,bt_codec,rates}
+    property var audioStreams: []       // [{id,app,title,sink_id,sink_label}]
+    property var audioBtSinks: []       // bluetooth sinks offering a codec choice
+    Process {
+        id: audioInfoProc
+        command: ["python3", root._audioScript, "--status"]
+        stdout: StdioCollector { id: audioInfoOut; onStreamFinished: {
+            try {
+                var j = JSON.parse(audioInfoOut.text.trim() || "{}");
+                if (!j.ok) return;
+                var m = {}, bt = [];
+                for (var i = 0; i < (j.sinks || []).length; i++) {
+                    var sk = j.sinks[i]; m[sk.name] = sk;
+                    if (sk.bt_codecs && sk.bt_codecs.length > 1) bt.push(sk);
+                }
+                root.audioSinks = m; root.audioBtSinks = bt;
+                root.audioStreams = j.streams || [];
+            } catch (e) {}
+        } } }
+    function audioRefresh() { audioInfoProc.running = true }
+    Timer { id: audioRefreshTimer; interval: 350; onTriggered: root.audioRefresh() }
+    Timer { running: root.shown && root.tab === 0; interval: 2000; repeat: true; triggeredOnStart: true; onTriggered: root.audioRefresh() }
+    // "48k · 24-bit", or a codec name for bluetooth; idle sinks show the rate they'll run at
+    function audioFmtBadge(nodeName) {
+        var s = root.audioSinks[nodeName]; if (!s) return "";
+        if (s.bt_codec) return ("" + s.bt_codec).toUpperCase();
+        var khz = s.rate ? (s.rate % 1000 === 0 ? (s.rate / 1000) : (s.rate / 1000).toFixed(1)) + "k" : "";
+        if (!s.active) return khz;
+        return khz + (khz && s.bits ? " · " : "") + (s.bits ? s.bits + "-bit" : "");
+    }
+    function audioMaxRate(nodeName) {
+        var s = root.audioSinks[nodeName]; if (!s || !s.rates || !s.rates.length) return "";
+        var mx = s.rates[s.rates.length - 1];
+        if (s.rate && mx <= s.rate) return "";   // nothing to add when capability == current rate
+        return "up to " + (mx % 1000 === 0 ? (mx / 1000) : (mx / 1000).toFixed(1)) + "k";
+    }
+    function audioRoute(streamId, sinkRef) {
+        Quickshell.execDetached(["python3", root._audioScript, "--route", "" + streamId, "" + sinkRef]);
+        audioRefreshTimer.restart();
+    }
+    // switch a bluetooth sink's A2DP codec (by its stable node.name — the id churns on switch)
+    function audioSetCodec(sinkName, profile) {
+        Quickshell.execDetached(["python3", root._audioScript, "--bt-codec", "" + sinkName, "" + profile]);
+        audioRefreshTimer.restart();
+    }
+
     // ---------- weather location + unit ----------
     property string wxLoc: "Kuching"
     property string wxUnit: "m"   // m = °C metric · u = °F "freedom units"
@@ -543,10 +595,11 @@ Scope {
         repeat: true
         onTriggered: root.reloadKde()
     }
-    // native modes first, then common 16:9 resolutions Hyprland can scale to
+    // native modes first; only fall back to common defaults if no native modes were reported
     function uniqueRes(m) {
         var seen={}, r=[];
         if(m) for(var i=0;i<m.modes.length;i++){ var s=m.modes[i].res; if(!seen[s]){seen[s]=1;r.push(s)} }
+        if(r.length > 0) return r;
         var common=["3840x2160","2560x1440","1920x1080","1600x900","1366x768","1280x720","1024x576"];
         for(var j=0;j<common.length;j++) if(!seen[common[j]]){seen[common[j]]=1;r.push(common[j])}
         return r;
@@ -554,6 +607,7 @@ Scope {
     function hzFor(m, res) {
         var seen={}, r=[];
         if(m) for(var i=0;i<m.modes.length;i++) if(m.modes[i].res===res && !seen[m.modes[i].hz]){seen[m.modes[i].hz]=1;r.push(m.modes[i].hz)}
+        if(r.length > 0) return r;
         var common=["165.00","144.00","120.00","75.00","60.00"];
         for(var j=0;j<common.length;j++) if(!seen[common[j]]){seen[common[j]]=1;r.push(common[j])}
         return r;
@@ -565,6 +619,32 @@ Scope {
         monRefresh.start();
     }
     Timer { id: monRefresh; interval: 900; onTriggered: monProc.running = true }
+
+    // ---------- display profiles (saved monitor arrangements) ----------
+    readonly property string _displayScript: Qt.resolvedUrl("sea-display.py").toString().replace("file://", "")
+    property var displayProfiles: []       // [{name, summary, created, matches}]
+    property string profName: ""           // new-profile name field
+    Process {
+        id: dispProfProc
+        command: ["python3", root._displayScript, "--list"]
+        stdout: StdioCollector { id: dispProfOut; onStreamFinished: {
+            try { var j = JSON.parse(dispProfOut.text.trim() || "{}"); root.displayProfiles = j.profiles || []; } catch (e) {}
+        } } }
+    function reloadDisplayProfiles() { dispProfProc.running = true }
+    Timer { id: dispProfRefresh; interval: 700; onTriggered: root.reloadDisplayProfiles() }
+    function saveDisplayProfile(name) {
+        var n = (name || "").trim(); if (!n) return;
+        Quickshell.execDetached(["python3", root._displayScript, "--save", n]);
+        root.profName = ""; dispProfRefresh.restart();
+    }
+    function applyDisplayProfile(name) {
+        Quickshell.execDetached(["sh", "-c", "python3 '" + root._displayScript + "' --apply '" + ("" + name).replace(/'/g, "") + "' && notify-send 'sea-shell' 'Layout → " + ("" + name).replace(/'/g, "") + "'"]);
+        monRefresh.start();
+    }
+    function deleteDisplayProfile(name) {
+        Quickshell.execDetached(["python3", root._displayScript, "--delete", "" + name]);
+        dispProfRefresh.restart();
+    }
 
     // ---------- appearance (shared with the bar via ~/.config/sea-shell/appearance.json) ----------
     property real apRadius: 14
@@ -1567,8 +1647,25 @@ Scope {
                                         border.width: 1; border.color: cur ? theme.a(theme.iris,0.5) : theme.a(theme.iris, 0.12)
                                         RowLayout { anchors.fill: parent; anchors.leftMargin: 14; anchors.rightMargin: 14; spacing: 10
                                             Sym { text: cur ? "radio_button_checked" : "radio_button_unchecked"; sz: 16; color: cur ? theme.iris : theme.faint }
-                                            Text { text: root.nodeName(modelData); color: theme.text; font.pixelSize: 12; font.family: "monospace"; elide: Text.ElideRight; Layout.fillWidth: true } }
+                                            Text { text: root.nodeName(modelData); color: theme.text; font.pixelSize: 12; font.family: "monospace"; elide: Text.ElideRight; Layout.fillWidth: true }
+                                            Text { text: root.audioFmtBadge(modelData.name); visible: text!==""; color: theme.frost; font.pixelSize: 11; font.family: "monospace"; Layout.alignment: Qt.AlignVCenter }
+                                            Text { text: root.audioMaxRate(modelData.name); visible: text!==""; color: theme.faint; font.pixelSize: 10; font.family: "monospace"; Layout.alignment: Qt.AlignVCenter } }
                                         MouseArea { id: dma; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: Pipewire.preferredDefaultAudioSink = modelData } } } }
+                            // ---- bluetooth codec (per connected BT output offering a choice) ----
+                            Text { visible: root.audioBtSinks.length > 0; text: "bluetooth codec"; color: theme.faint; font.pixelSize: 10; font.family: "monospace"; Layout.leftMargin: 14; Layout.topMargin: 2 }
+                            ColumnLayout { visible: root.audioBtSinks.length > 0; Layout.fillWidth: true; spacing: 8
+                                Repeater { model: root.audioBtSinks
+                                    delegate: ColumnLayout { id: btRow; required property var modelData; Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; spacing: 5
+                                        Text { text: btRow.modelData.label; color: theme.sub; font.pixelSize: 11; font.family: "monospace"; elide: Text.ElideRight; Layout.fillWidth: true }
+                                        Flow { Layout.fillWidth: true; Layout.leftMargin: 4; spacing: 6
+                                            Repeater { model: btRow.modelData.bt_codecs
+                                                delegate: Rectangle { required property var modelData
+                                                    readonly property bool on: modelData.active
+                                                    implicitHeight: 26; implicitWidth: bcT.implicitWidth + 20; radius: 7
+                                                    color: on ? theme.a(theme.iris, 0.25) : (bcMa.containsMouse ? theme.a(theme.line, 0.55) : theme.a(theme.line, 0.32))
+                                                    border.width: 1; border.color: on ? theme.a(theme.iris, 0.55) : theme.a(theme.iris, 0.14)
+                                                    Text { id: bcT; anchors.centerIn: parent; text: modelData.codec; color: on ? theme.iris : theme.sub; font.pixelSize: 10; font.family: "monospace"; font.bold: on }
+                                                    MouseArea { id: bcMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.audioSetCodec(btRow.modelData.name, modelData.profile) } } } } } } }
                             Text { text: "input device"; color: theme.faint; font.pixelSize: 10; font.family: "monospace"; Layout.leftMargin: 14; Layout.topMargin: 2 }
                             ColumnLayout { Layout.fillWidth: true; spacing: 6
                                 Repeater { model: root.sources
@@ -1589,6 +1686,24 @@ Scope {
                                         Text { text: root.streamName(modelData); color: theme.sub; font.pixelSize: 11; font.family: "monospace"; elide: Text.ElideRight; Layout.preferredWidth: 120 }
                                         Slider { fill: theme.iris; value: modelData.audio ? modelData.audio.volume : 0; onMoved: (v) => { if (modelData.audio) modelData.audio.volume = v } }
                                         Text { text: modelData.audio ? Math.round(modelData.audio.volume * 100) + "%" : "—"; color: theme.sub; font.pixelSize: 11; font.family: "monospace"; Layout.minimumWidth: 48; horizontalAlignment: Text.AlignRight } } } }
+
+                            Section { title: "per-app output"; icon: "alt_route" }
+                            Text { visible: root.audioStreams.length === 0; text: "nothing is playing"; color: theme.faint; font.pixelSize: 11; font.family: "monospace"; Layout.leftMargin: 14 }
+                            ColumnLayout { Layout.fillWidth: true; spacing: 12
+                                Repeater { model: root.audioStreams
+                                    delegate: ColumnLayout { id: appRow; required property var modelData; Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; spacing: 5
+                                        RowLayout { Layout.fillWidth: true; spacing: 8
+                                            Sym { text: "graphic_eq"; sz: 15; color: theme.sub; Layout.alignment: Qt.AlignVCenter }
+                                            Text { text: appRow.modelData.app + (appRow.modelData.title ? " — " + appRow.modelData.title : ""); color: theme.sub; font.pixelSize: 11; font.family: "monospace"; elide: Text.ElideRight; Layout.fillWidth: true } }
+                                        Flow { Layout.fillWidth: true; Layout.leftMargin: 23; spacing: 6
+                                            Repeater { model: root.sinks
+                                                delegate: Rectangle { required property var modelData
+                                                    readonly property bool here: appRow.modelData.sink_id === modelData.id
+                                                    implicitHeight: 24; implicitWidth: chipT.implicitWidth + 18; radius: 7
+                                                    color: here ? theme.a(theme.iris, 0.25) : (chipMa.containsMouse ? theme.a(theme.line, 0.55) : theme.a(theme.line, 0.32))
+                                                    border.width: 1; border.color: here ? theme.a(theme.iris, 0.55) : theme.a(theme.iris, 0.14)
+                                                    Text { id: chipT; anchors.centerIn: parent; text: modelData.nickname || root.nodeName(modelData); color: here ? theme.iris : theme.sub; font.pixelSize: 10; font.family: "monospace"; font.bold: here }
+                                                    MouseArea { id: chipMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.audioRoute(appRow.modelData.id, modelData.name) } } } } } } }
                         }
 
                         // ================= DISPLAY =================
@@ -1635,6 +1750,60 @@ Scope {
                             AccentBtn { visible: root.curMon !== null; Layout.leftMargin: 14; Layout.rightMargin: 14; Layout.topMargin: 4
                                 icon: "check"; label: "Apply " + root.selRes + "@" + Math.round(parseFloat(root.selHz || "0")) + "Hz"
                                 onClicked: root.applyDisplay() }
+
+                            // ---- layout profiles (save/restore whole monitor arrangements) ----
+                            Section { title: "layout profiles"; icon: "dashboard" }
+                            Text { text: "save the current monitor arrangement — resolution, position, scale — and restore it in one tap when you dock or unplug."
+                                color: theme.faint; font.pixelSize: 10; font.family: "monospace"; Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; wrapMode: Text.WordWrap }
+
+                            Repeater { model: root.displayProfiles
+                                delegate: Rectangle {
+                                    required property var modelData
+                                    Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14
+                                    implicitHeight: 48; radius: 10
+                                    color: dpMa.containsMouse ? theme.a(theme.line, 0.55) : theme.a(theme.line, 0.4)
+                                    border.width: 1; border.color: modelData.matches ? theme.a(theme.iris, 0.5) : theme.a(theme.iris, 0.14)
+                                    RowLayout {
+                                        anchors.fill: parent; anchors.leftMargin: 14; anchors.rightMargin: 10; spacing: 12
+                                        Sym { text: modelData.matches ? "check_circle" : "dashboard"; sz: 19
+                                            color: modelData.matches ? theme.good : theme.sub; Layout.alignment: Qt.AlignVCenter }
+                                        ColumnLayout { spacing: 1; Layout.fillWidth: true; Layout.alignment: Qt.AlignVCenter
+                                            Text { text: modelData.name; color: theme.text; font.pixelSize: 13; font.family: "monospace"; elide: Text.ElideRight; Layout.fillWidth: true }
+                                            Text { text: modelData.summary + (modelData.created ? "  ·  " + modelData.created : ""); color: theme.faint; font.pixelSize: 10; font.family: "monospace"; elide: Text.ElideRight; Layout.fillWidth: true } }
+                                        // apply
+                                        Rectangle { Layout.alignment: Qt.AlignVCenter; implicitWidth: 66; implicitHeight: 30; radius: 8
+                                            color: dpApplyMa.containsMouse ? theme.iris : theme.a(theme.iris, 0.22); border.width: 1; border.color: theme.iris
+                                            Row { anchors.centerIn: parent; spacing: 5
+                                                Sym { anchors.verticalCenter: parent.verticalCenter; text: "play_arrow"; sz: 14; color: dpApplyMa.containsMouse ? theme.bg : theme.frost }
+                                                Text { anchors.verticalCenter: parent.verticalCenter; text: "apply"; color: dpApplyMa.containsMouse ? theme.bg : theme.frost; font.pixelSize: 11; font.family: "monospace" } }
+                                            MouseArea { id: dpApplyMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.applyDisplayProfile(modelData.name) } }
+                                        // delete
+                                        Rectangle { Layout.alignment: Qt.AlignVCenter; implicitWidth: 30; implicitHeight: 30; radius: 8
+                                            color: dpDelMa.containsMouse ? theme.a(theme.bad, 0.25) : "transparent"; border.width: 1; border.color: theme.a(theme.bad, dpDelMa.containsMouse ? 0.5 : 0.2)
+                                            Sym { anchors.centerIn: parent; text: "delete"; sz: 15; color: dpDelMa.containsMouse ? theme.bad : theme.faint }
+                                            MouseArea { id: dpDelMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.deleteDisplayProfile(modelData.name) } }
+                                    }
+                                    MouseArea { id: dpMa; anchors.fill: parent; hoverEnabled: true; acceptedButtons: Qt.NoButton }
+                                } }
+                            Text { visible: root.displayProfiles.length === 0; text: "no saved layouts yet"; color: theme.faint; font.pixelSize: 11; font.family: "monospace"; Layout.leftMargin: 14 }
+
+                            // save-current row
+                            RowLayout { Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; Layout.topMargin: 2; spacing: 8
+                                Rectangle { Layout.fillWidth: true; implicitHeight: 38; radius: 9
+                                    color: theme.a(theme.line, 0.5); border.width: 1; border.color: profIn.activeFocus ? theme.iris : theme.a(theme.iris, 0.2)
+                                    TextInput { id: profIn; anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 12; verticalAlignment: TextInput.AlignVCenter
+                                        color: theme.text; font.pixelSize: 12; font.family: "monospace"; clip: true; selectByMouse: true
+                                        text: root.profName; onTextChanged: root.profName = text
+                                        onAccepted: { root.saveDisplayProfile(text); text = "" }
+                                        Text { anchors.verticalCenter: parent.verticalCenter; visible: profIn.text === ""; text: "name this layout…"; color: theme.faint; font.pixelSize: 12; font.family: "monospace" } } }
+                                Rectangle { Layout.alignment: Qt.AlignVCenter; implicitWidth: 78; implicitHeight: 38; radius: 9
+                                    opacity: root.profName.trim() !== "" ? 1 : 0.45
+                                    color: profSaveMa.containsMouse && root.profName.trim() !== "" ? theme.iris : theme.a(theme.iris, 0.22); border.width: 1; border.color: theme.iris
+                                    Row { anchors.centerIn: parent; spacing: 5
+                                        Sym { anchors.verticalCenter: parent.verticalCenter; text: "bookmark_add"; sz: 15; color: profSaveMa.containsMouse && root.profName.trim() !== "" ? theme.bg : theme.frost }
+                                        Text { anchors.verticalCenter: parent.verticalCenter; text: "save"; color: profSaveMa.containsMouse && root.profName.trim() !== "" ? theme.bg : theme.frost; font.pixelSize: 11; font.family: "monospace" } }
+                                    MouseArea { id: profSaveMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                        onClicked: { root.saveDisplayProfile(root.profName); profIn.text = "" } } } }
 
                             // ---- per-monitor rules ----
                             Section { visible: root.curMon !== null; title: "this monitor" + (root.monitors.length > 1 && root.curMon ? " · " + root.curMon.name : ""); icon: "tv_options_edit_channels" }

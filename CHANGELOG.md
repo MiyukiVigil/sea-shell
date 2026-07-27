@@ -7,6 +7,69 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.0] - 2026-07-27
+
+A release in two halves: the **audio** and **window-management** surfaces grew real depth,
+and four genuinely new tools landed — **display profiles**, **timers & pomodoro**, a
+**world clock**, and a **screen magnifier**.
+
+### Added
+
+- **Display profiles** (Settings → Display → *layout profiles*). Save the whole monitor
+  arrangement — resolution, position, scale, transform, enabled-state — and restore it in
+  one tap when you dock or unplug:
+  - monitors are matched by their **description** (make/model/serial) first and connector
+    name second, so a profile still applies when an external screen returns on another port
+  - a saved layout whose monitor set matches what's connected right now is flagged with a
+    green check; apply and delete are inline
+  - backed by `sea-display.py` (`--current` · `--save` · `--apply` · `--delete` · `--list`
+    · `--match`), storing to `~/.config/sea-shell/display-profiles.json`
+- **Timers & Pomodoro**, folded into the clock dropdown — no new bar widget to manage:
+  - quick countdowns (1 / 5 / 10 / 15 / 25 min) plus a full **pomodoro** cycle with
+    pause · skip · stop and a live progress bar
+  - **focus auto-silences notifications** (flips DND on during focus, back off on breaks,
+    restoring whatever DND state you started with), and every phase change fires a
+    notification + completion chime
+  - the **clock pill itself becomes the countdown** while a timer runs (🔥 focus / ☕ break
+    / ⏱ timer), so it's visible with the dropdown closed
+  - focus / break lengths and the DND behaviour persist to `~/.config/sea-shell/timers.json`
+- **World clock**, also in the clock dropdown: add cities from a quick-pick list
+  (New York, London, Tokyo, Sydney, UTC, …), each showing local time + day, refreshed every
+  minute; chosen zones persist alongside the timer settings.
+- **Screen magnifier** (Hyprland `cursor:zoom_factor`): `SUPER +` / `SUPER -` step the zoom
+  (hold to repeat), `SUPER 0` resets. The level flashes in the shared volume/brightness
+  **OSD** as a `1.5×` readout. Driven by a new `zoom` IPC target (`inc` · `dec` · `reset`
+  · `toggle`).
+
+### Changed
+
+- **Audio got a proper mixer and routing layer** (bar volume dropdown + Settings → Audio),
+  backed by a new `sea-audio.py`:
+  - **per-app volume sliders** and **per-app output routing** — send any stream to any sink
+    from the dropdown, no `pavucontrol` needed
+  - **device format readout** — each sink shows its negotiated rate + bit depth (e.g.
+    `48k · 24-bit`) and, when idle, the rate it will run at, with an "up to" hint for higher
+    capabilities
+  - **Bluetooth codec switching** — pick SBC / SBC-XQ / AAC / aptX / LDAC on a connected
+    device (via the A2DP card profile), addressed by the sink's stable node name so the
+    choice survives the sink being recreated on switch
+- **Alt-Tab window switcher** now shows **live thumbnails** of every window (most-recently-
+  used order), on the focused monitor only, with an app-icon fallback and click-to-focus —
+  replacing the old icon-only strip.
+- **Exposé / Mission Control** (`SUPER W`) now renders **live thumbnails** of each window in
+  its workspace instead of a text list; click a tile to jump to it.
+
+### Fixed
+
+- Window-thumbnail overlays no longer leak a stray preview into a screen corner — the
+  `ScreencopyView` texture node is contained to its card via an FBO layer.
+- The switcher no longer mirrors onto every monitor (which read as a duplicate switcher
+  "behind" the real one); it renders only on the focused output.
+- **Caffeine mode is now sticky.** The desired state persists to
+  `~/.config/sea-shell/caffeine`, is re-applied at startup, and is enforced on every poll —
+  so a login or `hyprctl reload` can no longer silently drop you back to idle-sleep while
+  caffeine is on. No more re-toggling it every session.
+
 ## [3.3.0] - 2026-07-20
 
 ### Added
