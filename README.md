@@ -1,6 +1,6 @@
 # sea-shell 🐚
 
-**`v4.0.0`** — A Hyprland rice by MiyukiVigil — a shell, by the sea. (yes.)
+**`v5.0.0`** — A Hyprland rice by MiyukiVigil — a shell, by the sea. (yes.)
 
 <!-- screenshots are hosted on the showcase site, not committed here — clones stay lean -->
 ![sea-shell — the desktop: translucent bar, animated whale wallpaper, and the player with track details, cava and synced lyrics](https://seashell.miyukivigil.tech/images/hero.webp)

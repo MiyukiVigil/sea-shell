@@ -185,11 +185,130 @@ def update_hyprlock(new_settings):
     
     save_file_content(HYPRLOCK_PATH, "hypr/hyprlock.conf", content)
 
+KEYBINDS_PATH_1 = os.path.join(HOME, ".config/hypr/sea-shell/keybinds.conf")
+KEYBINDS_PATH_2 = os.path.join(HOME, ".config/hypr/keybinds.conf")
+KEYBINDS_LUA_1  = os.path.join(HOME, ".config/hypr/sea-shell/keybinds.lua")
+
+def get_keybinds_path():
+    # Prefer the Lua keybinds once present (Hyprland 0.55+); fall back to legacy hyprlang .conf.
+    # Returns (path, repo_subpath, is_lua).
+    if os.path.exists(KEYBINDS_LUA_1):
+        return KEYBINDS_LUA_1, "hypr/keybinds.lua", True
+    if os.path.exists(KEYBINDS_PATH_1):
+        return KEYBINDS_PATH_1, "hypr/keybinds.conf", False
+    if os.path.exists(KEYBINDS_PATH_2):
+        return KEYBINDS_PATH_2, "hypr/keybinds.conf", False
+    return KEYBINDS_PATH_1, "hypr/keybinds.conf", False
+
+def parse_keybinds():
+    path, repo_subpath, is_lua = get_keybinds_path()
+    content = get_file_content(path, repo_subpath) or ""
+
+    lid_action = "suspend"
+
+    if is_lua:
+        m = re.search(r'^(\s*--\s*)?hl\.bind\(\s*"switch:on:Lid Switch".*$', content, re.MULTILINE)
+        if not m or m.group(1):
+            return {"lid_action": "ignore"}          # no lid-close bind, or commented out = clamshell
+        low = m.group(0).lower()
+        if "suspend" in low: lid_action = "suspend"
+        elif "hibernate" in low: lid_action = "hibernate"
+        elif "poweroff" in low or "shutdown" in low: lid_action = "shutdown"
+        elif "dpms" in low: lid_action = "dpms"
+        elif "sea-lock" in low or "lock-session" in low or "hyprlock" in low: lid_action = "lock"
+        return {"lid_action": lid_action}
+
+    pattern = r'^\s*(#\s*)?bindl?\s*=\s*,?\s*switch:on:Lid Switch\s*,\s*exec\s*,\s*(.*)$'
+    match = re.search(pattern, content, re.MULTILINE | re.IGNORECASE)
+    if match:
+        is_commented = bool(match.group(1))
+        cmd = match.group(2).strip().lower()
+        if is_commented:
+            lid_action = "ignore"
+        elif "suspend" in cmd:
+            lid_action = "suspend"
+        elif "hibernate" in cmd:
+            lid_action = "hibernate"
+        elif "poweroff" in cmd or "shutdown" in cmd:
+            lid_action = "shutdown"
+        elif "dpms off" in cmd:
+            lid_action = "dpms"
+        elif "sea-lock" in cmd or "lock-session" in cmd or "hyprlock" in cmd:
+            lid_action = "lock"
+        else:
+            lid_action = "suspend"
+            
+    return {"lid_action": lid_action}
+
+def update_keybinds(new_settings):
+    if "lid_action" not in new_settings:
+        return
+        
+    path, repo_subpath, is_lua = get_keybinds_path()
+    content = get_file_content(path, repo_subpath) or ""
+
+    action = new_settings["lid_action"]
+
+    if is_lua:
+        lua_disp = {
+            "suspend":   'hl.dsp.exec_cmd("loginctl lock-session && systemctl suspend")',
+            "lock":      'hl.dsp.exec_cmd("~/.config/quickshell/sea-shell/sea-lock.sh")',
+            "dpms":      'hl.dsp.dpms({ action = "off" })',
+            "hibernate": 'hl.dsp.exec_cmd("loginctl lock-session && systemctl hibernate")',
+            "shutdown":  'hl.dsp.exec_cmd("systemctl poweroff")',
+        }.get(action, 'hl.dsp.exec_cmd("loginctl lock-session && systemctl suspend")')
+        if action == "ignore":
+            new_on = '-- hl.bind("switch:on:Lid Switch", hl.dsp.exec_cmd("loginctl lock-session && systemctl suspend"), { locked = true })'
+        else:
+            new_on = 'hl.bind("switch:on:Lid Switch", %s, { locked = true })' % lua_disp
+        off_line = 'hl.bind("switch:off:Lid Switch", hl.dsp.dpms({ action = "on" }), { locked = true })'
+        on_pat = r'^\s*(?:--\s*)?hl\.bind\(\s*"switch:on:Lid Switch".*$'
+        if re.search(on_pat, content, re.MULTILINE):
+            content = re.sub(on_pat, lambda _m: new_on, content, flags=re.MULTILINE)
+        else:
+            content = content.rstrip() + "\n\n-- laptop lid switch\n" + new_on + "\n"
+        off_pat = r'^\s*(?:--\s*)?hl\.bind\(\s*"switch:off:Lid Switch".*$'
+        if not re.search(off_pat, content, re.MULTILINE):
+            content = content.rstrip() + "\n" + off_line + "\n"
+        save_file_content(path, repo_subpath, content)
+        return
+
+    LID_COMMANDS = {
+        "suspend": "loginctl lock-session && systemctl suspend",
+        "lock": "~/.config/quickshell/sea-shell/sea-lock.sh",
+        "dpms": "hyprctl dispatch dpms off",
+        "hibernate": "loginctl lock-session && systemctl hibernate",
+        "shutdown": "systemctl poweroff",
+        "ignore": "loginctl lock-session && systemctl suspend"
+    }
+    
+    target_cmd = LID_COMMANDS.get(action, LID_COMMANDS["suspend"])
+    if action == "ignore":
+        new_on_line = f"# bindl = , switch:on:Lid Switch, exec, {target_cmd}"
+    else:
+        new_on_line = f"bindl = , switch:on:Lid Switch, exec, {target_cmd}"
+        
+    off_line = "bindl = , switch:off:Lid Switch, exec, hyprctl dispatch dpms on"
+    
+    on_pattern = r'^\s*(?:#\s*)?bindl?\s*=\s*,?\s*switch:on:Lid Switch\s*,\s*exec\s*,.*$'
+    if re.search(on_pattern, content, re.MULTILINE | re.IGNORECASE):
+        content = re.sub(on_pattern, new_on_line, content, flags=re.MULTILINE | re.IGNORECASE)
+    else:
+        lid_block = f"\n\n# ---------------- laptop lid switch ----------------\n{new_on_line}\n{off_line}\n"
+        content = content.rstrip() + lid_block
+        
+    off_pattern = r'^\s*(?:#\s*)?bindl?\s*=\s*,?\s*switch:off:Lid Switch\s*,\s*exec\s*,.*$'
+    if not re.search(off_pattern, content, re.MULTILINE | re.IGNORECASE):
+        content = content.rstrip() + f"\n{off_line}\n"
+        
+    save_file_content(path, repo_subpath, content)
+
 if len(sys.argv) > 1 and sys.argv[1] == "set":
     try:
         new_data = json.load(sys.stdin)
         update_hypridle(new_data)
         update_hyprlock(new_data)
+        update_keybinds(new_data)
         print(json.dumps({"status": "success"}))
     except Exception as e:
         print(json.dumps({"status": "error", "message": str(e)}), file=sys.stderr)
@@ -198,7 +317,8 @@ else:
     try:
         idle = parse_hypridle()
         lock = parse_hyprlock()
-        combined = {**idle, **lock}
+        kb = parse_keybinds()
+        combined = {**idle, **lock, **kb}
         print(json.dumps(combined))
     except Exception as e:
         print(json.dumps({"status": "error", "message": str(e)}), file=sys.stderr)

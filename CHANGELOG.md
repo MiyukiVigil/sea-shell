@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Laptop Lid Close Options**: Select what happens when the laptop lid is closed (Settings → *Power* or *Idle & lock*):
+  - **Suspend** (lock & suspend system)
+  - **Lock screen** (lock display, keep system running)
+  - **Turn off display** (DPMS off, keep system running)
+  - **Hibernate** (hibernate system to disk)
+  - **Shut down** (power off system)
+  - **Ignore** (do nothing on lid close)
+  - Options persist to `hypr/keybinds.conf` via `sea-lock-settings.py` and apply live with `hyprctl reload`.
+
+
+## [5.0.0] - 2026-08-02
+
+**sea-shell's Hyprland config is now Lua.** Since Hyprland 0.55, hyprlang (`.conf`) is
+deprecated and will be removed around **0.57** — so the compositor config is fully migrated
+to the new Lua format, validated against Hyprland's own `--verify-config`.
+
+> **Breaking:** requires **Hyprland 0.55+**, and your top-level config must be
+> `~/.config/hypr/hyprland.lua`. See [hypr/README-lua.md](hypr/README-lua.md) to migrate an
+> existing `hyprland.conf` (flip with a logout/login — **not** `hyprctl reload`).
+
+### Changed
+
+- **`sea.conf` → `sea.lua`, `keybinds.conf` → `keybinds.lua`.** Every binding keeps its
+  description (the SUPER+K cheat-sheet reads `hyprctl binds`, so it's format-agnostic), and
+  the look — general/decoration/blur/shadow, the two bezier curves + six animations, and the
+  layer rules that frost the bar/dropdowns — is reproduced exactly in `hl.config` / `hl.curve`
+  / `hl.animation` / `hl.layer_rule` / `hl.window_rule` form.
+- **matugen now emits `matugen.lua`** alongside its live `hyprctl` apply, so the wallpaper
+  accent persists and re-applies on login via `sea.lua`'s `dofile` (no runtime re-theming
+  needed). A plain colour becomes a string; the gradient becomes `{ colors = {…}, angle = N }`.
+- **Settings tooling writes Lua.** Keybind add/rebind and the lid-action setting edit
+  `keybinds.lua` (falling back to `keybinds.conf` when present), producing valid `hl.bind`
+  lines — verified against Hyprland.
+- **`install.sh` is Lua-only.** It deploys `sea.lua` / `keybinds.lua`, wires a marker-wrapped
+  `dofile` block into `hyprland.lua`, **purges any legacy `sea.conf` / `keybinds.conf` /
+  `matugen.conf`** from a prior install, and strips the old hyprlang block from `hyprland.conf`.
+
+### Kept on hyprlang (unchanged)
+
+- **`hyprlock.conf` and `hypridle.conf`** — separate daemons that keep hyprlang per upstream;
+  they are *not* the Hyprland compositor config and are unaffected by 0.57.
+
 ## [4.0.0] - 2026-07-27
 
 A release in two halves: the **audio** and **window-management** surfaces grew real depth,

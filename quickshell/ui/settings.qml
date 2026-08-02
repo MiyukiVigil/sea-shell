@@ -17,7 +17,7 @@ import QtQuick.Layouts
 Scope {
     id: root
     property string repo: Qt.resolvedUrl(".").toString().replace("file://", "").replace(/\/$/, "")
-    readonly property string seaVersion: "4.0.0"     // sea-shell release — mirrored in the repo VERSION file
+    readonly property string seaVersion: "5.0.0"     // sea-shell release — mirrored in the repo VERSION file
     property int tab: 8                             // land on the System / About dashboard
 
     // ---- resident lifecycle: the panel is hidden until shown, so it costs ~nothing closed ----
@@ -38,7 +38,7 @@ Scope {
         if (t === 7) kbProc.running = true            // keybinds: refresh binds
         if (t === 8) sysProc.running = true           // system: refresh live stats
         if (t === 10) { idleChk.running = true; lockSettingsGet.running = true }   // idle & lock
-        if (t === 6) ppGet.running = true             // power: re-read profile
+        if (t === 6) { ppGet.running = true; lockSettingsGet.running = true }   // power: re-read profile & lid settings
         if (t === 11) { reloadEventsProc.running = true; calCfgLoad.running = true }  // calendar
     }
     function run(cmd) { Quickshell.execDetached(["sh", "-c", cmd]) }
@@ -247,6 +247,7 @@ Scope {
     property int lockDpms: 600
     property int lockSuspend: 1800
     property bool lockSuspendEnabled: true
+    property string lockLidAction: "suspend"
     property int lockGrace: 2
     property bool lockHideCursor: true
     property bool lockIgnoreEmpty: true
@@ -269,6 +270,7 @@ Scope {
                     if (data.idle_dpms !== undefined) root.lockDpms = data.idle_dpms;
                     if (data.idle_suspend !== undefined) root.lockSuspend = data.idle_suspend;
                     if (data.idle_suspend_enabled !== undefined) root.lockSuspendEnabled = data.idle_suspend_enabled;
+                    if (data.lid_action !== undefined) root.lockLidAction = data.lid_action;
                     if (data.lock_grace !== undefined) root.lockGrace = data.lock_grace;
                     if (data.lock_hide_cursor !== undefined) root.lockHideCursor = data.lock_hide_cursor;
                     if (data.lock_ignore_empty !== undefined) root.lockIgnoreEmpty = data.lock_ignore_empty;
@@ -295,6 +297,7 @@ Scope {
             "idle_dpms": root.lockDpms,
             "idle_suspend": root.lockSuspend,
             "idle_suspend_enabled": root.lockSuspendEnabled,
+            "lid_action": root.lockLidAction,
             "lock_grace": root.lockGrace,
             "lock_hide_cursor": root.lockHideCursor,
             "lock_ignore_empty": root.lockIgnoreEmpty,
@@ -3605,6 +3608,47 @@ Scope {
                                             Behavior on x { NumberAnimation { duration: 120 } } }
                                         MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.lockSuspendEnabled = !root.lockSuspendEnabled } }
                                 }
+
+                                // Laptop Lid Close
+                                RowLayout { Layout.fillWidth: true; spacing: 10
+                                    Sym { text: "laptop"; sz: 20; color: theme.frost }
+                                    Text { text: "lid close action"; color: theme.sub; font.pixelSize: 12; font.family: root.apFont; Layout.minimumWidth: 100 }
+                                    Item { Layout.fillWidth: true }
+                                    RowLayout { spacing: 6
+                                        Repeater {
+                                            model: [
+                                                {l:"Suspend",  v:"suspend",   i:"bedtime"},
+                                                {l:"Lock",     v:"lock",      i:"lock"},
+                                                {l:"Screen Off",v:"dpms",     i:"settings_brightness"},
+                                                {l:"Hibernate",v:"hibernate", i:"save_as"},
+                                                {l:"Shut down",v:"shutdown",  i:"power_settings_new"},
+                                                {l:"Ignore",   v:"ignore",    i:"block"}
+                                            ]
+                                            delegate: Rectangle {
+                                                required property var modelData
+                                                readonly property bool sel: root.lockLidAction === modelData.v
+                                                implicitWidth: chipLidRow.implicitWidth + 18; implicitHeight: 26; radius: 6
+                                                color: sel ? theme.iris : (chipLidMa.containsMouse ? theme.a(theme.iris, 0.16) : theme.a(theme.line, 0.4))
+                                                border.width: 1; border.color: sel ? theme.iris : theme.a(theme.iris, 0.14)
+                                                RowLayout {
+                                                    id: chipLidRow
+                                                    anchors.centerIn: parent; spacing: 4
+                                                    Sym { text: modelData.i; sz: 14; color: sel ? theme.bg : (chipLidMa.containsMouse ? theme.frost : theme.sub) }
+                                                    Text { text: modelData.l; color: sel ? theme.bg : theme.sub; font.pixelSize: 11; font.family: root.apFont; font.bold: sel }
+                                                }
+                                                MouseArea {
+                                                    id: chipLidMa
+                                                    anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                                    onClicked: {
+                                                        root.lockLidAction = modelData.v;
+                                                        root.saveLockSettings();
+                                                        root.run("pkill -x hypridle; sleep 0.3; hyprctl dispatch exec hypridle; hyprctl reload");
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                             }
 
                             // SUB-TAB 1: Style & Wallpaper
@@ -3836,6 +3880,37 @@ Scope {
                                             Text { text: modelData.l; color: cur ? theme.frost : theme.text; font.pixelSize: 12; font.family: "monospace"; font.bold: cur } }
                                         MouseArea { id: ppm; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
                                             onClicked: root.setProfile(modelData.k) }
+                                    }
+                                }
+                            }
+                            Section { title: "laptop lid action"; icon: "laptop" }
+                            RowLayout {
+                                Layout.fillWidth: true; spacing: 8
+                                Repeater {
+                                    model: [
+                                        {l:"Suspend",  v:"suspend",   i:"bedtime"},
+                                        {l:"Lock",     v:"lock",      i:"lock"},
+                                        {l:"Screen Off",v:"dpms",     i:"settings_brightness"},
+                                        {l:"Hibernate",v:"hibernate", i:"save_as"},
+                                        {l:"Shut down",v:"shutdown",  i:"power_settings_new"},
+                                        {l:"Ignore",   v:"ignore",    i:"block"}
+                                    ]
+                                    delegate: Rectangle {
+                                        required property var modelData
+                                        readonly property bool cur: root.lockLidAction === modelData.v
+                                        Layout.fillWidth: true; implicitHeight: 34; radius: 8
+                                        color: cur ? theme.a(theme.iris, 0.2) : (ppmLid.containsMouse ? theme.a(theme.line, 0.5) : theme.a(theme.line, 0.3))
+                                        border.width: 1; border.color: cur ? theme.iris : theme.a(theme.iris, 0.12)
+                                        RowLayout { anchors.centerIn: parent; spacing: 6
+                                            Sym { text: modelData.i; sz: 15; color: cur ? theme.iris : theme.frost }
+                                            Text { text: modelData.l; color: cur ? theme.frost : theme.text; font.pixelSize: 11; font.family: "monospace"; font.bold: cur } }
+                                        MouseArea { id: ppmLid; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                            onClicked: {
+                                                root.lockLidAction = modelData.v;
+                                                root.saveLockSettings();
+                                                root.run("pkill -x hypridle; sleep 0.3; hyprctl dispatch exec hypridle; hyprctl reload");
+                                            }
+                                        }
                                     }
                                 }
                             }

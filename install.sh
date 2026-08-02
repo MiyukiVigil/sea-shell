@@ -22,6 +22,8 @@ CFG="${XDG_CONFIG_HOME:-$HOME/.config}"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 MARK_A="# >>> sea-shell >>>"
 MARK_B="# <<< sea-shell <<<"
+MARK_A_LUA="-- >>> sea-shell >>>"          # Lua-comment markers for the hyprland.lua block
+MARK_B_LUA="-- <<< sea-shell <<<"
 
 # install destinations (everything sea-shell owns lives in a sea-shell/ subdir)
 QS_DEST="$CFG/quickshell/sea-shell"
@@ -41,24 +43,24 @@ title() { printf '\n%s🌊 %s%s\n' "$(c '1;38;2;162;226;232')" "$*" "$(c 0)"; }
 # (re)write a marker-wrapped block in a file — replaces any previous sea-shell block,
 # so re-running install always leaves the block current
 add_block() {
-  local file="$1" content="$2"
+  local file="$1" content="$2" ma="${3:-$MARK_A}" mb="${4:-$MARK_B}"
   mkdir -p "$(dirname "$file")"; touch "$file"
-  if grep -qF "$MARK_A" "$file"; then
-    sed -i "/$MARK_A/,/$MARK_B/d" "$file"
+  if grep -qF "$ma" "$file"; then
+    sed -i "/$ma/,/$mb/d" "$file"
     info "refreshing sea-shell block in ${file/#$HOME/\~}"
   else
     cp -a "$file" "$file.bak-$STAMP" 2>/dev/null && info "backed up ${file/#$HOME/\~} → .bak-$STAMP"
   fi
-  { printf '\n%s\n%s\n%s\n' "$MARK_A" "$content" "$MARK_B"; } >> "$file"
+  { printf '\n%s\n%s\n%s\n' "$ma" "$content" "$mb"; } >> "$file"
   ok "wired ${file/#$HOME/\~}"
 }
 remove_block() {
   local file="$1"
   [ -f "$file" ] || return 0
-  if grep -qF "$MARK_A" "$file"; then
-    sed -i "/$MARK_A/,/$MARK_B/d" "$file"
-    ok "unwired ${file/#$HOME/\~}"
-  fi
+  # remove both the legacy hyprlang (#) block and the Lua (--) block, wherever they live
+  grep -qF "$MARK_A"     "$file" && { sed -i "/$MARK_A/,/$MARK_B/d" "$file";         ok "unwired ${file/#$HOME/\~}"; }
+  grep -qF "$MARK_A_LUA" "$file" && { sed -i "/$MARK_A_LUA/,/$MARK_B_LUA/d" "$file"; ok "unwired ${file/#$HOME/\~} (lua)"; }
+  return 0
 }
 # copy a single file into place (backs up a pre-existing foreign file once)
 copy_file() {
@@ -231,16 +233,38 @@ install_moondrop_udev() {
 }
 
 hypr_block() {
-  # $1 = dir the hypr confs are sourced from
-  # idle daemon + polkit agent are guarded at runtime, so installing the package
-  # later makes them work on the next login without re-running this script
-  local block="source = $1/sea.conf
-source = $1/keybinds.conf
-exec-once = qs -c sea-shell
-exec-once = sh -c 'command -v hypridle >/dev/null && exec hypridle'
-exec-once = sh -c '[ -x /usr/lib/hyprpolkitagent/hyprpolkitagent ] && exec /usr/lib/hyprpolkitagent/hyprpolkitagent'
-exec-once = sh -c 'sleep 0.5; exec ~/.config/quickshell/sea-shell/sea-wallpaper-restore.sh'"
+  # $1 = absolute dir the sea-shell .lua files live in. Emits the Lua block dofile'd from
+  # hyprland.lua (Hyprland 0.55+). idle daemon + polkit agent are runtime-guarded, so
+  # installing the package later makes them work on the next login without re-running this.
+  local block="dofile(\"$1/sea.lua\")
+dofile(\"$1/keybinds.lua\")
+hl.on(\"hyprland.start\", function()
+    hl.exec_cmd(\"qs -c sea-shell\")
+    hl.exec_cmd(\"command -v hypridle >/dev/null && exec hypridle\")
+    hl.exec_cmd(\"[ -x /usr/lib/hyprpolkitagent/hyprpolkitagent ] && exec /usr/lib/hyprpolkitagent/hyprpolkitagent\")
+    hl.exec_cmd(\"sleep 0.5; exec ~/.config/quickshell/sea-shell/sea-wallpaper-restore.sh\")
+end)"
   printf '%s' "$block"
+}
+
+# Wire the sea-shell Lua block into ~/.config/hypr/hyprland.lua. sea-shell 5.0+ is Lua-only
+# (hyprlang is dropped in Hyprland 0.57). $1 = absolute dir the .lua files live in.
+wire_hypr_lua() {
+  local lua="$CFG/hypr/hyprland.lua" conf="$CFG/hypr/hyprland.conf"
+  remove_block "$conf"                         # migration: strip any old hyprlang sea-shell block
+  if [ -f "$lua" ]; then
+    add_block "$lua" "$(hypr_block "$1")" "$MARK_A_LUA" "$MARK_B_LUA"
+  elif [ -f "$conf" ]; then
+    warn "you're on a hyprlang hyprland.conf — sea-shell $SEA_VERSION is Lua-only (required at Hyprland 0.57)."
+    warn "convert it to ~/.config/hypr/hyprland.lua, then re-run install. see $SCRIPT_DIR/hypr/README-lua.md"
+  else
+    printf '%s\n' \
+      '-- Hyprland config (Lua). Add your own monitors / input above; sea-shell owns the block below.' \
+      'hl.monitor({ output = "", mode = "preferred", position = "auto", scale = "auto" })' \
+      'hl.config({ input = { kb_layout = "us" } })' > "$lua"
+    add_block "$lua" "$(hypr_block "$1")" "$MARK_A_LUA" "$MARK_B_LUA"
+    warn "created a starter ~/.config/hypr/hyprland.lua — add your monitor/input tweaks to it"
+  fi
 }
 
 do_install() {
@@ -248,8 +272,12 @@ do_install() {
   title "installing sea-shell v$SEA_VERSION from ${SCRIPT_DIR/#$HOME/\~}"
   check_deps
   mkdir -p "$DATA_DIR"
-  # seed the (empty) matugen border override so sea.conf's `source` of it never dangles
-  mkdir -p "$HYPR_DEST"; [ -e "$HYPR_DEST/matugen.conf" ] || : > "$HYPR_DEST/matugen.conf"
+  # seed the (empty) matugen border override so sea.lua's dofile of it never dangles
+  mkdir -p "$HYPR_DEST"; [ -e "$HYPR_DEST/matugen.lua" ] || : > "$HYPR_DEST/matugen.lua"
+  # sea-shell 5.0+ is Lua-only — purge legacy hyprlang compositor configs left by an older install
+  for stale in "$HYPR_DEST/sea.conf" "$HYPR_DEST/keybinds.conf" "$HYPR_DEST/matugen.conf"; do
+    [ -e "$stale" ] && { rm -f "$stale"; info "removed legacy ${stale/#$HOME/\~}"; }
+  done
   [ -e "$HYPR_DEST/hyprlock-colors.conf" ] || printf '# sea-shell default lockscreen colors\n$accent = rgba(63c7ddcc)\n$accentAlpha = 63c7dd\n$frost = rgba(a2e2e8ff)\n$frostAlpha = a2e2e8\n' > "$HYPR_DEST/hyprlock-colors.conf"
   # remember where the repo lives so GUI edits (keybind rebinds) can sync back to it
   printf '%s' "$SCRIPT_DIR" > "$DATA_DIR/.repo"
@@ -257,7 +285,7 @@ do_install() {
   if [ "${DEV:-0}" = "1" ]; then
     # ---- developer mode: live-edit the repo, configs follow instantly ----
     deploy_qs link
-    add_block "$CFG/hypr/hyprland.conf" "$(hypr_block "$SCRIPT_DIR/hypr")"
+    wire_hypr_lua "$SCRIPT_DIR/hypr"
     add_block "$CFG/kitty/kitty.conf" "include $SCRIPT_DIR/kitty/sea-cyan.conf"
     mkdir -p "$CFG"
     [ -e "$CFG/starship.toml" ] && ! [ -L "$CFG/starship.toml" ] && { cp -a "$CFG/starship.toml" "$CFG/starship.toml.bak-$STAMP"; info "backed up ~/.config/starship.toml → .bak-$STAMP"; }
@@ -269,11 +297,11 @@ do_install() {
     # ---- normal mode: self-contained copies in ~/.config ----
     # 0) Quickshell bar + overlays + helper scripts (run with `qs -c sea-shell`)
     deploy_qs copy
-    # 1) Hyprland look + keybinds, sourced from ~/.config/hypr/sea-shell
+    # 1) Hyprland look + keybinds (Lua), dofile'd from hyprland.lua. See hypr/README-lua.md.
     mkdir -p "$HYPR_DEST"
-    copy_file "$SCRIPT_DIR/hypr/sea.conf" "$HYPR_DEST/sea.conf"
-    copy_file "$SCRIPT_DIR/hypr/keybinds.conf" "$HYPR_DEST/keybinds.conf"
-    add_block "$CFG/hypr/hyprland.conf" "$(hypr_block "$HYPR_DEST")"
+    copy_file "$SCRIPT_DIR/hypr/sea.lua" "$HYPR_DEST/sea.lua"
+    copy_file "$SCRIPT_DIR/hypr/keybinds.lua" "$HYPR_DEST/keybinds.lua"
+    wire_hypr_lua "$HYPR_DEST"
     # 2) kitty theme
     copy_file "$SCRIPT_DIR/kitty/sea-cyan.conf" "$KITTY_THEME"
     add_block "$CFG/kitty/kitty.conf" "include $KITTY_THEME"
@@ -319,7 +347,8 @@ set_wallpaper() {
 do_uninstall() {
   title "uninstalling sea-shell"
   pkill -xf "qs -c sea-shell" 2>/dev/null
-  remove_block "$CFG/hypr/hyprland.conf"
+  remove_block "$CFG/hypr/hyprland.lua"     # Lua entry (5.0+)
+  remove_block "$CFG/hypr/hyprland.conf"    # legacy hyprlang entry (pre-5.0)
   remove_block "$CFG/kitty/kitty.conf"
   # installed copies (only removed when tagged as ours) and --dev symlinks
   if [ -L "$QS_DEST" ] || [ -f "$QS_DEST/.sea-shell" ]; then rm -rf "$QS_DEST"; ok "removed ${QS_DEST/#$HOME/\~}"; fi

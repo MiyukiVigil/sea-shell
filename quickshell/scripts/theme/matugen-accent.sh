@@ -67,7 +67,18 @@ apply_hyprland() {
         inactive_val="rgba(${aa}55)"
     fi
     local hd="$HOME/.config/hypr/sea-shell"; mkdir -p "$hd"
-    printf 'general {\n    col.active_border = %s\n    col.inactive_border = %s\n}\n' "$active_val" "$inactive_val" > "$hd/matugen.conf"
+    # sea-shell 5.0+ is Lua-only: emit matugen.lua (dofile'd from hyprland.lua's sea.lua).
+    # A plain colour becomes a string; the frost→accent gradient becomes { colors = {...}, angle = N }.
+    local lua_active lua_inactive="\"$inactive_val\""
+    case "$active_val" in
+        *deg)
+            local _ga="${active_val%% *}" _rest="${active_val#* }" _gang="${active_val##* }"
+            local _gb="${_rest%% *}"; _gang="${_gang%deg}"
+            lua_active="{ colors = { \"$_ga\", \"$_gb\" }, angle = $_gang }" ;;
+        *)  lua_active="\"$active_val\"" ;;
+    esac
+    printf 'hl.config({ general = { col = { active_border = %s, inactive_border = %s } } })\n' \
+        "$lua_active" "$lua_inactive" > "$hd/matugen.lua"
     hyprctl keyword general:col.active_border "$active_val" >/dev/null 2>&1
     hyprctl keyword general:col.inactive_border "$inactive_val" >/dev/null 2>&1
 }
