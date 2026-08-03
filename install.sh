@@ -258,12 +258,16 @@ wire_hypr_lua() {
     warn "you're on a hyprlang hyprland.conf — sea-shell $SEA_VERSION is Lua-only (required at Hyprland 0.57)."
     warn "convert it to ~/.config/hypr/hyprland.lua, then re-run install. see $SCRIPT_DIR/hypr/README-lua.md"
   else
-    printf '%s\n' \
-      '-- Hyprland config (Lua). Add your own monitors / input above; sea-shell owns the block below.' \
-      'hl.monitor({ output = "", mode = "preferred", position = "auto", scale = "auto" })' \
-      'hl.config({ input = { kb_layout = "us" } })' > "$lua"
+    # truly fresh (no hyprland.lua and no hyprland.conf) — drop in the shipped starter config
+    if [ -f "$SCRIPT_DIR/hypr/hyprland.lua" ]; then
+      cp "$SCRIPT_DIR/hypr/hyprland.lua" "$lua"; ok "installed starter ~/.config/hypr/hyprland.lua"
+    else
+      printf '%s\n' '-- Hyprland config (Lua). sea-shell owns the block below; add monitors/input above.' \
+        'hl.monitor({ output = "", mode = "preferred", position = "auto", scale = "auto" })' \
+        'hl.config({ input = { kb_layout = "us" } })' > "$lua"
+    fi
     add_block "$lua" "$(hypr_block "$1")" "$MARK_A_LUA" "$MARK_B_LUA"
-    warn "created a starter ~/.config/hypr/hyprland.lua — add your monitor/input tweaks to it"
+    warn "installed a starter ~/.config/hypr/hyprland.lua — tweak monitors/keyboard to taste"
   fi
 }
 

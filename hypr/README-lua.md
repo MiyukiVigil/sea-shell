@@ -15,8 +15,15 @@ as always.
 
 ## Using the Lua config (Hyprland 0.55+, required at ~0.57)
 
-Your top-level config becomes `~/.config/hypr/hyprland.lua`. Add the sea-shell parts by
-`dofile`-ing them (this replaces the `source =` block):
+Your top-level config becomes `~/.config/hypr/hyprland.lua`.
+
+**Fresh install (nothing to configure):** if you have no `hyprland.lua` yet, `install.sh` drops
+in a complete, ready-to-use one — shipped as [`hypr/hyprland.lua`](hyprland.lua), a sensible
+monitors / input / window-rules / startup starter — and wires the sea-shell block into it.
+Just tweak your monitors or keyboard layout to taste.
+
+**Adding sea-shell to your *own* `hyprland.lua`:** `dofile` its parts (install.sh manages this
+between `-- >>> sea-shell >>>` markers, so re-running install refreshes it in place):
 
 ```lua
 -- somewhere in ~/.config/hypr/hyprland.lua
@@ -34,8 +41,8 @@ end)
 ```
 
 `sea.lua` also `pcall(dofile, …)`s `~/.config/hypr/sea-shell/matugen.lua` — the wallpaper
-accent override, written by `matugen-accent.sh` alongside `matugen.conf`. Absent/empty is
-fine (the default sea-cyan borders stand).
+accent override, written by `matugen-accent.sh`. Absent/empty is fine (the default sea-cyan
+borders stand); it re-applies on every login via the `dofile`, so the accent persists.
 
 ## Converting your existing config
 
