@@ -45,7 +45,7 @@ title() { printf '\n%s🌊 %s%s\n' "$(c '1;38;2;162;226;232')" "$*" "$(c 0)"; }
 add_block() {
   local file="$1" content="$2" ma="${3:-$MARK_A}" mb="${4:-$MARK_B}"
   mkdir -p "$(dirname "$file")"; touch "$file"
-  if grep -qF "$ma" "$file"; then
+  if grep -qF -- "$ma" "$file"; then          # `--`: markers start with `--` (Lua comment), don't let grep parse them as options
     sed -i "/$ma/,/$mb/d" "$file"
     info "refreshing sea-shell block in ${file/#$HOME/\~}"
   else
@@ -58,8 +58,8 @@ remove_block() {
   local file="$1"
   [ -f "$file" ] || return 0
   # remove both the legacy hyprlang (#) block and the Lua (--) block, wherever they live
-  grep -qF "$MARK_A"     "$file" && { sed -i "/$MARK_A/,/$MARK_B/d" "$file";         ok "unwired ${file/#$HOME/\~}"; }
-  grep -qF "$MARK_A_LUA" "$file" && { sed -i "/$MARK_A_LUA/,/$MARK_B_LUA/d" "$file"; ok "unwired ${file/#$HOME/\~} (lua)"; }
+  grep -qF -- "$MARK_A"     "$file" && { sed -i "/$MARK_A/,/$MARK_B/d" "$file";         ok "unwired ${file/#$HOME/\~}"; }
+  grep -qF -- "$MARK_A_LUA" "$file" && { sed -i "/$MARK_A_LUA/,/$MARK_B_LUA/d" "$file"; ok "unwired ${file/#$HOME/\~} (lua)"; }
   return 0
 }
 # copy a single file into place (backs up a pre-existing foreign file once)

@@ -237,7 +237,7 @@ Scope {
     Process { id: idleChk; running: true; command: ["sh","-c","pgrep -x hypridle >/dev/null && echo on || echo off"]
         stdout: StdioCollector { id: idleOut; onStreamFinished: root.idleOn = idleOut.text.trim() === "on" } }
     function toggleIdle() {
-        if (root.idleOn) run("pkill -x hypridle"); else run("hyprctl dispatch exec hypridle");
+        if (root.idleOn) run("pkill -x hypridle"); else run("hyprctl dispatch \"hl.dsp.exec_cmd('hypridle')\"");
         root.idleOn = !root.idleOn;
     }
 
@@ -2902,7 +2902,7 @@ Scope {
                             GridLayout {
                                 columns: 2; columnSpacing: 10; rowSpacing: 8; Layout.fillWidth: true
                                 Row2 { icon: "refresh"; label: "Reload Hyprland"; cmd: "hyprctl reload"; quitAfter: true }
-                                Row2 { icon: "restart_alt"; label: "Restart bar"; cmd: "pkill -xf 'qs -c sea-shell'; sleep 0.3; hyprctl dispatch exec 'qs -c sea-shell'"; quitAfter: true }
+                                Row2 { icon: "restart_alt"; label: "Restart bar"; cmd: "pkill -xf 'qs -c sea-shell'; sleep 0.3; hyprctl dispatch \"hl.dsp.exec_cmd('qs -c sea-shell')\""; quitAfter: true }
                                 Row2 { icon: "terminal"; label: "Terminal"; cmd: "kitty & disown"; quitAfter: true }
                                 Row2 { icon: "wallpaper"; label: "Wallpapers"; cmd: "qs -p " + root.repo + "/wallpaper.qml & disown"; quitAfter: true }
                                 Row2 { icon: "content_paste"; label: "Clipboard history"; cmd: "qs -c sea-shell ipc call launcher clipboard"; quitAfter: true }
@@ -3642,7 +3642,7 @@ Scope {
                                                     onClicked: {
                                                         root.lockLidAction = modelData.v;
                                                         root.saveLockSettings();
-                                                        root.run("pkill -x hypridle; sleep 0.3; hyprctl dispatch exec hypridle; hyprctl reload");
+                                                        root.run("pkill -x hypridle; sleep 0.3; hyprctl dispatch \"hl.dsp.exec_cmd('hypridle')\"; hyprctl reload");
                                                     }
                                                 }
                                             }
@@ -3824,7 +3824,7 @@ Scope {
                                         onClicked: {
                                             root.saveLockSettings();
                                             // Restart daemon
-                                            root.run("pkill -x hypridle; sleep 0.3; hyprctl dispatch exec hypridle");
+                                            root.run("pkill -x hypridle; sleep 0.3; hyprctl dispatch \"hl.dsp.exec_cmd('hypridle')\"");
                                             // Notify user
                                             root.run("notify-send 'sea-shell' 'Lock & Idle settings applied live!'");
                                         }
@@ -3908,7 +3908,7 @@ Scope {
                                             onClicked: {
                                                 root.lockLidAction = modelData.v;
                                                 root.saveLockSettings();
-                                                root.run("pkill -x hypridle; sleep 0.3; hyprctl dispatch exec hypridle; hyprctl reload");
+                                                root.run("pkill -x hypridle; sleep 0.3; hyprctl dispatch \"hl.dsp.exec_cmd('hypridle')\"; hyprctl reload");
                                             }
                                         }
                                     }
@@ -3919,7 +3919,7 @@ Scope {
                                 columns: 2; columnSpacing: 10; rowSpacing: 8; Layout.fillWidth: true
                                 Row2 { icon: "lock"; label: "Lock"; cmd: "~/.config/quickshell/sea-shell/sea-lock.sh"; quitAfter: true }
                                 Row2 { icon: "bedtime"; label: "Suspend"; cmd: "systemctl suspend"; quitAfter: true }
-                                Row2 { icon: "logout"; label: "Logout"; cmd: "systemctl --user is-active -q 'wayland-wm@*.service' && uwsm stop || { hyprctl dispatch exit; sleep 3; loginctl terminate-session self; }"; quitAfter: true }
+                                Row2 { icon: "logout"; label: "Logout"; cmd: "systemctl --user is-active -q 'wayland-wm@*.service' && uwsm stop || { hyprctl dispatch 'hl.dsp.exit()'; sleep 3; loginctl terminate-session self; }"; quitAfter: true }
                                 Row2 { icon: "restart_alt"; label: "Reboot"; cmd: "systemctl reboot"; tint: theme.bad; quitAfter: true }
                                 Row2 { icon: "power_settings_new"; label: "Shutdown"; cmd: "systemctl poweroff"; tint: theme.bad; quitAfter: true }
                             }

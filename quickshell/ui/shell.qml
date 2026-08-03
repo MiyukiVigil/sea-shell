@@ -150,7 +150,7 @@ ShellRoot {
         if (!root.switcherOpen) return; root.switcherOpen = false;
         var w = root.switcherWins[root.switcherSel];
         if (w && w.lastIpcObject && w.lastIpcObject.address)
-            Hyprland.dispatch("focuswindow address:" + w.lastIpcObject.address);
+            Hyprland.dispatch("hl.dsp.focus({ window = 'address:" + w.lastIpcObject.address + "' })");
     }
     IpcHandler {
         target: "switcher"
@@ -1369,7 +1369,7 @@ ShellRoot {
             root.idleOn = false;
         } else {
             root.cafWanted = false; root.saveCaffeine();
-            Quickshell.execDetached(["sh", "-c", "hyprctl dispatch exec hypridle; notify-send 'sea-shell' 'Caffeine mode inactive — normal sleep active'"]);
+            Quickshell.execDetached(["sh", "-c", "hyprctl dispatch \"hl.dsp.exec_cmd('hypridle')\"; notify-send 'sea-shell' 'Caffeine mode inactive — normal sleep active'"]);
             root.idleOn = true;
         }
     }
@@ -2071,7 +2071,7 @@ ShellRoot {
                                 Behavior on width  { NumberAnimation { duration: 180; easing.type: Easing.OutBack } }
                                 Behavior on color { ColorAnimation { duration: 160 } }
                                 Text { anchors.centerIn: parent; text: modelData.id; color: foc ? theme.bg : theme.sub; font.pixelSize: 12; font.family: root.cfgFont; font.bold: foc }
-                                MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: Hyprland.dispatch("workspace "+modelData.id) }
+                                MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: Hyprland.dispatch("hl.dsp.focus({ workspace = "+modelData.id+" })") }
                             }
                         }
                     }
@@ -3434,7 +3434,7 @@ ShellRoot {
                             Item { width: 1; height: 2 }
                             Repeater { model: [{i:"lock",l:"lock",c:"~/.config/quickshell/sea-shell/sea-lock.sh",col:theme.frost},
                                                {i:"bedtime",l:"suspend",c:"systemctl suspend",col:theme.frost},
-                                               {i:"logout",l:"log out",c:"systemctl --user is-active -q 'wayland-wm@*.service' && uwsm stop || { hyprctl dispatch exit; sleep 3; loginctl terminate-session self; }",col:theme.frost},
+                                               {i:"logout",l:"log out",c:"systemctl --user is-active -q 'wayland-wm@*.service' && uwsm stop || { hyprctl dispatch 'hl.dsp.exit()'; sleep 3; loginctl terminate-session self; }",col:theme.frost},
                                                {i:"restart_alt",l:"reboot",c:"systemctl reboot",col:theme.warn,danger:true},
                                                {i:"power_settings_new",l:"shut down",c:"systemctl poweroff",col:theme.bad,danger:true}]
                                 delegate: Rectangle { required property var modelData
@@ -3494,7 +3494,7 @@ ShellRoot {
                                     border.width: 1; border.color: foc ? theme.frost : theme.a(theme.iris, 0.18)
                                     Behavior on height { NumberAnimation { duration: 180; easing.type: Easing.OutBack } }
                                     Text { anchors.centerIn: parent; text: modelData.id; color: foc ? theme.bg : theme.sub; font.pixelSize: 12; font.family: root.cfgFont; font.bold: foc }
-                                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: Hyprland.dispatch("workspace "+modelData.id) }
+                                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: Hyprland.dispatch("hl.dsp.focus({ workspace = "+modelData.id+" })") }
                                 }
                             }
                         }
@@ -3927,7 +3927,7 @@ ShellRoot {
                                                 // click anywhere → focus that window
                                                 MouseArea {
                                                     anchors.fill: parent; cursorShape: Qt.PointingHandCursor
-                                                    onClicked: { Hyprland.dispatch("focuswindow address:" + winTile.modelData.lastIpcObject.address); root.exposeActive = false }
+                                                    onClicked: { Hyprland.dispatch("hl.dsp.focus({ window = 'address:" + winTile.modelData.lastIpcObject.address + "' })"); root.exposeActive = false }
                                                 }
                                                 // close button — declared last so it wins the click in its corner
                                                 Rectangle {
@@ -3937,7 +3937,7 @@ ShellRoot {
                                                     Sym { anchors.centerIn: parent; text: "close"; sz: 11; color: winClMa.containsMouse ? theme.bg : theme.faint }
                                                     MouseArea {
                                                         id: winClMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
-                                                        onClicked: Hyprland.dispatch("closewindow address:" + winTile.modelData.lastIpcObject.address)
+                                                        onClicked: Hyprland.dispatch("hl.dsp.window.close({ window = 'address:" + winTile.modelData.lastIpcObject.address + "' })")
                                                     }
                                                 }
                                             }
