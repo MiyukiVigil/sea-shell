@@ -428,3 +428,10 @@ Built by [MiyukiVigil](https://miyukivigil.tech). The DAC half is vendored from
 [hub_moon](https://hubmoon.miyukivigil.tech/), which documents the Moondrop protocol and the Hub
 API. Palette generation is [matugen](https://github.com/InioX/matugen); the shell itself is
 [Quickshell](https://quickshell.org/).
+
+---
+
+## Licence
+
+[MIT](LICENSE). Use it, fork it, package it, or lift a single widget out of it — the only
+condition is that the copyright notice travels with the copy.

@@ -154,6 +154,12 @@ repaired and updated without remembering how any of it works.
   edited in place by the control center, and `copy_file` suppresses its backup for any file
   containing "sea-shell" — which both of them do — so they were overwritten with nothing kept.
   A file the shell or the user writes is no longer overwritten by an install at all.
+- **The scratchpad put a `-98` chip in the bar.** Hyprland numbers special workspaces from -98
+  down, and the workspace strip drew every workspace it was handed — so `SUPER + grave` added a
+  chip whose label did not fit its own 24px circle, and whose click dispatched
+  `focus({ workspace = -98 })`, which is not how a special workspace is reached. A special
+  workspace is an overlay on the one you are already on, not a place in a list of places to go;
+  its windows being on screen is what tells you it is open.
 - **The launcher calculator rejected exponents.** `=2^10` returned nothing and the panel sat there
   saying "keep typing". The evaluator has always rewritten `^` to `**`, but the character
   whitelist that guards it was missing `^`, so the expression never reached the evaluator at all.

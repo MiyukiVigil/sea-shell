@@ -2560,6 +2560,16 @@ ShellRoot {
                             delegate: Rectangle {
                                 required property var modelData
                                 readonly property bool foc: Hyprland.focusedWorkspace && Hyprland.focusedWorkspace.id === modelData.id
+                                // Special workspaces are not places in the strip. Hyprland numbers
+                                // them from -98 down, so SUPER+` put a chip reading "-98" in the
+                                // bar — a label that doesn't fit its own 24px circle, and one whose
+                                // click dispatched focus({ workspace = -98 }), which is not how a
+                                // special workspace is reached anyway. The scratchpad is an OVERLAY
+                                // on the workspace you are already on; it has no place in a list of
+                                // places to go, and its windows being on screen is what tells you
+                                // it is open. (A Positioner skips invisible children outright, so
+                                // this leaves no gap where the chip used to be.)
+                                visible: modelData.id > 0
                                 // active workspace grows along the bar's long axis
                                 width:  foc ? 36 : 24
                                 height: 24
