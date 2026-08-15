@@ -91,6 +91,11 @@ Item {
         var p = dock.pinned.slice(), i = p.indexOf(key);
         if (i >= 0) p.splice(i, 1); else p.push(key);
         dock.pinned = p; dock.savePins();
+        // Pinning reorders `items` (pinned first), so the index the magnification and the hover
+        // label are keyed on now points at a different app. Re-derive it from the key, which
+        // survives the rebuild.
+        for (var n = 0; n < dock.items.length; n++)
+            if (dock.items[n].key === dock.hoverKey) { dock.hoverIndex = n; break }
     }
 
     // ---------- desktop entry index ----------
@@ -416,7 +421,19 @@ Item {
                         onHoveredChanged: {
                             win.hovered = hovered;
                             if (hovered) { hideTimer.stop(); win.revealed = true }
-                            else { dock.hoverKey = ""; if (win.autoHiding) hideTimer.restart() }
+                            // Clear BOTH halves of the hover state, not just the key. Magnification
+                            // reads hoverIndex and the tooltip reads hoverKey; clearing only the key
+                            // left the icons frozen at their zoomed size with the pointer nowhere
+                            // near them — and no tooltip, which is what made it look broken rather
+                            // than hovered.
+                            //
+                            // A cell's own onExited resets both, but it cannot fire if the cell is
+                            // gone: clicking an icon focuses a window, often on another workspace,
+                            // and the resulting burst of Hyprland events rebuilds `items`, which
+                            // makes the Repeater destroy the delegate the pointer was inside. A
+                            // destroyed MouseArea never emits onExited, so this handler — on the
+                            // card, which survives the rebuild — is the only cleanup left standing.
+                            else { dock.hoverKey = ""; dock.hoverIndex = -1; if (win.autoHiding) hideTimer.restart() }
                         }
                     }
 
@@ -562,10 +579,18 @@ Item {
                     Text {
                         id: tipText
                         anchors.centerIn: parent
+                        // The label also carries the pin state, because nothing else on the dock
+                        // does. Right-click has always toggled the pin and always written
+                        // dock.json, but for an app that was already running NOTHING on screen
+                        // changed — same icon, same slot, same everything — so the binding read
+                        // as dead. Stating it here both confirms the toggle (the label flips
+                        // under the cursor as you click) and teaches the binding to anyone who
+                        // never knew it existed.
                         text: {
                             var it = tip.it; if (!it) return "";
                             var n = dock.labelFor(it);
-                            return it.count > 1 ? (n + "  ·  " + it.count) : n;
+                            if (it.count > 1) n += "  ·  " + it.count;
+                            return n + (it.pinned ? "  ·  pinned" : "  ·  right-click to pin");
                         }
                         color: Tok.ink
                         font.family: Tok.mono

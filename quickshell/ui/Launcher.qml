@@ -131,7 +131,10 @@ Scope {
     // ---------- calculator ----------
     function calc(expr) {
         var fns = /\b(sqrt|cbrt|sinh|cosh|tanh|asin|acos|atan2|atan|sin|cos|tan|log10|log2|log|ln|abs|round|floor|ceil|pow|min|max|exp|hypot|sign|trunc|pi|e)\b/g;
-        if (!/^[0-9+\-*/%().,\s]*$/.test(expr.replace(fns, ""))) return null;
+        // `^` belongs in this whitelist: the evaluator below deliberately rewrites it to `**`,
+        // but the guard ran first and rejected it, so `=2^10` returned null and the panel just
+        // sat there saying "keep typing". Exponent has worked in the evaluator all along.
+        if (!/^[0-9+\-*/%^().,\s]*$/.test(expr.replace(fns, ""))) return null;
         try {
             var v = new Function("with(Math){var ln=log,log=log10,pi=PI,e=E;return(" + expr.replace(/\^/g,"**") + ")}")();
             if (typeof v !== "number" || !isFinite(v)) return null;

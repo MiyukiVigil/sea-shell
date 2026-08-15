@@ -73,6 +73,24 @@ copy_file() {
   install -m 644 "$src" "$dest"
   ok "installed ${dest/#$HOME/\~}"
 }
+# Install a file that something ELSE rewrites after we lay it down — the theme pipeline, or
+# the control center. Copying over one of these on every re-install is how a reinstall quietly
+# reverts work the user already did. copy_file cannot be used: it suppresses its own backup for
+# any file containing "sea-shell", which these all do, so the old content went nowhere at all.
+#
+# The shipped copy still lands on a machine that has none. It just never overwrites a live one.
+keep_file() {
+  local src="$1" dest="$2" why="$3"
+  mkdir -p "$(dirname "$dest")"
+  [ -L "$dest" ] && rm -f "$dest"          # an old --dev symlink is ours to replace
+  if [ ! -e "$dest" ]; then
+    install -m 644 "$src" "$dest"; ok "installed ${dest/#$HOME/\~}"
+  elif cmp -s "$src" "$dest"; then
+    ok "up to date ${dest/#$HOME/\~}"
+  else
+    info "kept your ${dest/#$HOME/\~} — $why"
+  fi
+}
 # copy a whole directory into place; a marker file tags it as ours so uninstall
 # (and re-install) never deletes a directory the user made themselves
 copy_dir() {
@@ -299,9 +317,12 @@ do_install() {
     wire_hypr_lua "$SCRIPT_DIR/hypr"
     add_block "$CFG/kitty/kitty.conf" "include $SCRIPT_DIR/kitty/sea-cyan.conf"
     mkdir -p "$CFG"
-    [ -e "$CFG/starship.toml" ] && ! [ -L "$CFG/starship.toml" ] && { cp -a "$CFG/starship.toml" "$CFG/starship.toml.bak-$STAMP"; info "backed up ~/.config/starship.toml → .bak-$STAMP"; }
-    ln -sfn "$SCRIPT_DIR/starship/sea.toml" "$CFG/starship.toml"
-    ok "linked ~/.config/starship.toml → repo"
+    # Link the TEMPLATE, never ~/.config/starship.toml itself: the theme pipeline generates the
+    # live prompt from the template and would replace the symlink with a real file on the first
+    # accent change — silently seeding the template from the repo copy in the process.
+    ln -sfn "$SCRIPT_DIR/starship/sea.toml" "$DATA_DIR/starship-default.toml"
+    ok "linked ~/.config/sea-shell/starship-default.toml → repo"
+    [ -e "$CFG/starship.toml" ] || { install -m 644 "$SCRIPT_DIR/starship/sea.toml" "$CFG/starship.toml"; ok "seeded ~/.config/starship.toml"; }
     ln -sfn "$SCRIPT_DIR/hypr/hyprlock.conf" "$CFG/hypr/hyprlock.conf"; ok "linked ~/.config/hypr/hyprlock.conf → repo"
     ln -sfn "$SCRIPT_DIR/hypr/hypridle.conf" "$CFG/hypr/hypridle.conf"; ok "linked ~/.config/hypr/hypridle.conf → repo"
   else
@@ -316,11 +337,25 @@ do_install() {
     # 2) kitty theme
     copy_file "$SCRIPT_DIR/kitty/sea-cyan.conf" "$KITTY_THEME"
     add_block "$CFG/kitty/kitty.conf" "include $KITTY_THEME"
-    # 3) starship prompt (fish already runs `starship init fish`)
-    copy_file "$SCRIPT_DIR/starship/sea.toml" "$CFG/starship.toml"
-    # 4) lock screen + idle daemon (canonical paths — hyprlock/hypridle only read these)
-    copy_file "$SCRIPT_DIR/hypr/hyprlock.conf" "$CFG/hypr/hyprlock.conf"
-    copy_file "$SCRIPT_DIR/hypr/hypridle.conf" "$CFG/hypr/hypridle.conf"
+    # 3) starship prompt (fish already runs `starship init fish`).
+    #    ~/.config/starship.toml is GENERATED, not installed: matugen-accent.sh substitutes the
+    #    wallpaper palette into starship-default.toml to produce it. Writing the shipped file
+    #    over the top is exactly what made every re-install revert the prompt to the default
+    #    cyan while the rest of the desktop stayed on the wallpaper's accent. So the shipped
+    #    copy updates the TEMPLATE, and the live prompt is only seeded when there isn't one.
+    install -m 644 "$SCRIPT_DIR/starship/sea.toml" "$DATA_DIR/starship-default.toml"
+    ok "installed ~/.config/sea-shell/starship-default.toml"
+    if [ ! -e "$CFG/starship.toml" ] || [ -L "$CFG/starship.toml" ]; then
+      rm -f "$CFG/starship.toml"
+      install -m 644 "$SCRIPT_DIR/starship/sea.toml" "$CFG/starship.toml"
+      ok "installed ~/.config/starship.toml"
+    else
+      info "kept your themed ~/.config/starship.toml — regenerated from the template on the next accent change"
+    fi
+    # 4) lock screen + idle daemon (canonical paths — hyprlock/hypridle only read these).
+    #    Both are edited in place by the control center's lock settings, so they are kept.
+    keep_file "$SCRIPT_DIR/hypr/hyprlock.conf" "$CFG/hypr/hyprlock.conf" "edited by Control center → Idle & power"
+    keep_file "$SCRIPT_DIR/hypr/hypridle.conf" "$CFG/hypr/hypridle.conf" "edited by Control center → Idle & power"
   fi
 
   # 3) wallpaper: install the repo one if present; --wallpaper regenerates it

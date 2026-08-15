@@ -5,11 +5,6 @@ All notable changes to **sea-shell** are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
-
-_Nothing yet._
-
-
 ## [6.0.0] - 2026-08-15
 
 **A dock, and an interface that reads like an instrument.**
@@ -138,6 +133,30 @@ repaired and updated without remembering how any of it works.
 - **The dock ignored every click.** Its input region pointed at an item inside the UI-scale
   wrapper, whose coordinates are pre-scale and one level down, while the region is interpreted
   in window space — so the dock rendered perfectly and accepted input somewhere else entirely.
+- **The dock left its icons stuck at full magnification.** Clicking an icon focuses a window —
+  often on another workspace — and the burst of Hyprland events that follows rebuilds the dock's
+  item list, which makes the `Repeater` destroy the delegate the pointer was inside. A destroyed
+  `MouseArea` never emits `onExited`, so the hover state was never cleared and the icons sat
+  zoomed with the pointer nowhere near them. The card's own handler was clearing the hover *key*
+  but not the hover *index* — which is why the label correctly vanished while the magnification
+  it should have vanished with did not.
+- **Right-clicking a dock icon looked like it did nothing.** It did toggle the pin, and it did
+  write `dock.json` — but for an app that was already running, nothing on screen changed, so the
+  binding read as dead. The hover label now states the pin, and names the binding when there
+  isn't one.
+- **Re-installing reverted the shell prompt to the default cyan.** `~/.config/starship.toml` is
+  *generated*, not installed: the theme pipeline substitutes the wallpaper palette into
+  `starship-default.toml` to produce it. `install.sh` was writing the shipped source straight over
+  that output, so the prompt dropped back to `#63c7dd` while every other surface stayed on the
+  wallpaper's accent. The shipped copy now updates the template, and the live prompt is seeded
+  only when there isn't one.
+- **Re-installing also discarded lock and idle settings.** `hyprlock.conf` and `hypridle.conf` are
+  edited in place by the control center, and `copy_file` suppresses its backup for any file
+  containing "sea-shell" — which both of them do — so they were overwritten with nothing kept.
+  A file the shell or the user writes is no longer overwritten by an install at all.
+- **The launcher calculator rejected exponents.** `=2^10` returned nothing and the panel sat there
+  saying "keep typing". The evaluator has always rewritten `^` to `**`, but the character
+  whitelist that guards it was missing `^`, so the expression never reached the evaluator at all.
 - **The settings sidebar overflowed** past the last tab once the new tabs were added; it now
   scrolls.
 
