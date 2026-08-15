@@ -1,13 +1,13 @@
 # sea-shell 🐚
 
-**`v5.0.0`** — A Hyprland rice by MiyukiVigil — a shell, by the sea. (yes.)
+**`v6.0.0`** — A Hyprland rice by MiyukiVigil — a shell, by the sea. (yes.)
 
 <!-- screenshots are hosted on the showcase site, not committed here — clones stay lean -->
 ![sea-shell — the desktop: translucent bar, animated whale wallpaper, and the player with track details, cava and synced lyrics](https://seashell.miyukivigil.tech/images/hero.webp)
 
 **[seashell.miyukivigil.tech](https://seashell.miyukivigil.tech)** · **[changelog](https://seashell.miyukivigil.tech/changelog.html)**
 
-Built for: **CachyOS · Hyprland 0.55 · Quickshell 0.3 · kitty · fish · starship**.
+Built for: **CachyOS · Hyprland 0.55+ · Quickshell 0.3 · kitty · fish · starship**.
 No external launcher or status-bar helper needed — the bar, app launcher, clipboard
 picker, notification daemon, power menu and control center are all native Quickshell.
 
@@ -52,6 +52,9 @@ frosted by Hyprland layer blur):
   width auto-clamps to the free space so a long title never overflows the bar
 - **system monitor** — live **CPU / RAM / GPU** with usage bars, **temps, VRAM and
   power draw**; the pill tints amber→red as the CPU heats up (see below)
+- **network throughput** — live up/down rates on the active interface *(opt-in)*
+- **package updates** — repo + AUR counts, the full list with old → new versions,
+  and one click to run the upgrade in a terminal *(opt-in)*
 - **weather** (wttr.in) with a **3-day forecast**; location/units set in the control center
 - **system tray** — left-click activates, right-click opens the app menu in a
   frosted dropdown (single menu, replaces itself when you open another icon's)
@@ -70,6 +73,19 @@ frosted by Hyprland layer blur):
 - **clock** (day · date · time) → month calendar with **event dots** (ICS import)
 - **power** button → session dropdown with user/uptime header; reboot and
   shut down ask for a **second click** so a stray click can't kill your session
+
+## The dock  ·  Settings → *Dock*
+Off by default; turn it on and it appears on every monitor, on whichever **edge** you
+pick (bottom · top · left · right). Pinned and running apps share one strip, with
+**cursor magnification**, a dot under anything running, and hover labels.
+
+- **left-click** launches — or focuses a running window, cycling by focus history when
+  the app has several
+- **middle-click** opens a new instance · **right-click** pins/unpins
+- three visibility modes: **always** · **auto-hide** (a reveal strip at the edge) ·
+  **when free** — visible until a window would overlap it
+
+Pins live in `~/.config/sea-shell/dock.json`, so they survive a reinstall.
 
 ## Media, lyrics & bit-perfect audio
 ![the player dropdown — album art, cava visualizer, synced lyrics sidecar, and the gold bit-perfect badge](https://seashell.miyukivigil.tech/images/player.webp)
@@ -186,11 +202,31 @@ Native, **resident inside the bar process** — opens instantly, no spawn delay
 ## Control center  ·  `SUPER+S`
 ![the control center — audio sliders, output/input device pickers, per-app volume](https://seashell.miyukivigil.tech/images/control-center.webp)
 
-An overlay panel (Esc / click-outside to close): **Audio** (output & mic sliders,
-mute, device selection, per-app volume) · **Display** (brightness) · **Network**
-(wi-fi) · **Bluetooth** · **Appearance** (radius / opacity / height / accent /
-font) · **Weather** · **Keybinds** · **Idle & lock** · **Actions** (reload,
-restart bar, terminal, wallpaper, screenshot) · **Power**.
+An overlay panel (Esc / click-outside to close), twenty tabs in five groups:
+
+- **Overview** — **System** (live monitor, processes, updates, health check, backup,
+  sea-shell updates) · **Appearance** (radius / opacity / height / accent / font) ·
+  **Bar Widgets** (toggle and reorder every pill) · **Dock** · **Window rules** ·
+  **Theme Profiles**
+- **Devices** — **Audio** (output & mic sliders, mute, device selection, per-app volume) ·
+  **Display** (brightness, scale, VRR) · **Network** · **Bluetooth** · **KDE Connect** ·
+  **Disks**
+- **Daily** — **Weather** · **Calendar** · **Keybinds** · **Input** (mouse, touchpad,
+  gestures)
+- **Session** — **Screen time** · **Idle & lock** · **Actions** (reload, restart bar,
+  terminal, wallpaper, screenshot) · **Power**
+
+**Window rules** and **gestures** are set here and written straight into Hyprland Lua
+(`rules.lua` / `gestures.lua`), loaded *after* the shipped rules so yours always win. Both
+generators were verified against the running compositor before the UI was built — the
+gesture picker can only offer combinations Hyprland actually accepts.
+
+**Disks** groups partitions under their physical drive with model, bus and size, shows real
+used/free from `lsblk`, and mounts / unmounts / ejects through udisks. An unmounted partition
+shows **no usage bar** rather than an empty one — its usage isn't knowable without mounting it.
+
+**Screen time** tracks per-app focus time (paused while the session is idle), with optional
+daily limits and a summary notification.
 
 **Big screens / TVs / projectors** — under *Display → display scale*, the shell
 sizes itself to each monitor automatically (a 4K TV scales up, a 1080p/1440p
@@ -209,11 +245,11 @@ Reboot/shut down arm to a red "sure?" and need a second press; Esc backs out.
 ## Keybinds  ·  `SUPER+K`
 ![the keybind cheat-sheet — searchable, click any bind to rebind it](https://seashell.miyukivigil.tech/images/keybinds.webp)
 
-Every bind in `hypr/keybinds.conf` is a `bindd` with a human name, so the cheat-sheet
-shows "Wallpaper picker" instead of a shell command. **Type to search**, and
+Every bind in `hypr/keybinds.lua` carries a `description`, so the cheat-sheet shows
+"Wallpaper picker" instead of a shell command. **Type to search**, and
 **click any bind to rebind it** — toggle SUPER/CTRL/ALT/SHIFT chips, press the new
 base key; conflicts are refused with a "used by …" note. Rebinds rewrite
-keybinds.conf, sync to the repo copy, and hot-reload Hyprland.
+`keybinds.lua`, sync to the repo copy, and hot-reload Hyprland.
 
 `SUPER+Space`/`CTRL+Space` launcher · `SUPER+V` clipboard history ·
 `SUPER+Return` terminal · `SUPER+Q` close · `SUPER+E` files · `SUPER+B` browser ·
@@ -221,7 +257,9 @@ keybinds.conf, sync to the repo copy, and hot-reload Hyprland.
 `SUPER+F` maximize / `SUPER+SHIFT+F` true fullscreen · `SUPER+P` float · `SUPER+C` center ·
 `hjkl` focus / `SHIFT` move / `CTRL` resize · `1–0` workspaces / `SHIFT 1–0` move-to ·
 `` SUPER+` `` scratchpad · media & brightness keys · `Print`/`SUPER+Print`/`SUPER+SHIFT+S`
-screenshots · `SUPER+R` screen recording · `SUPER+SHIFT+R` reload · `SUPER+SHIFT+B` restart bar.
+screenshots · `SUPER+SHIFT+O` OCR region to clipboard · `SUPER+R` screen recording ·
+`SUPER+SHIFT+G` game mode · `SUPER+N`/`SUPER+SHIFT+N` cycle wallpaper ·
+`SUPER+SHIFT+R` reload · `SUPER+SHIFT+B` restart bar.
 
 ## Wallpapers  ·  `SUPER+SHIFT+W`
 A grid of `~/Pictures/wallpapers`; click to set. **Static** images go through swww
@@ -229,9 +267,19 @@ A grid of `~/Pictures/wallpapers`; click to set. **Static** images go through sw
 (mp4/webm/gif) play via **mpvpaper**, and a small listener **pauses the video
 whenever a fullscreen window covers it** (and resumes when it's visible again) —
 so a fullscreen game or video costs no wallpaper CPU/GPU. "Match colours" runs
-`matugen` to recolour the whole shell from the wallpaper. The pick is persisted and
+`matugen` to recolour the whole shell from the wallpaper — including the **window glow**,
+so the shadow under your windows follows the accent too. The pick is persisted and
 restored on every login. `./install.sh --wallpaper` generates a matching
 sea-gradient (`~/.config/sea-shell/sea-wall.png`) as the default.
+
+**Transitions** — pick from swww's fourteen (grow, wipe, wave, outer, random, …) with your
+own fps and duration. `SUPER+N` / `SUPER+SHIFT+N` cycle the folder; because **mpvpaper can't
+transition at all**, the shell draws a dip-to-black fade over the swap itself so animated
+wallpapers change as cleanly as static ones.
+
+**Auto-rotate** — off by default. Turn it on for a wallpaper change every *n* minutes, going
+next, previous or random. The setting is re-read every tick, so toggling it takes effect
+without a restart and leaves no daemon running when it's off.
 
 ## Lock & idle  (hyprlock + hypridle)
 `loginctl lock-session` (power menus, lock binds, lid events) locks via a
@@ -240,31 +288,71 @@ sea-themed **hyprlock**: blurred wallpaper, big clock, iris input field.
 at 30 (comment that listener out on a desktop), and always locks before sleep. Both
 configs install to their canonical `~/.config/hypr/` paths and start on login.
 
+## Keeping it running
+Four things that exist for the machine you *aren't* actively ricing — six months from now,
+when you no longer remember how any of this works.
+
+- **sea-shell updates**  ·  Settings → *System*. Checks GitHub for a newer release and updates
+  in place. It **only ever fast-forwards**: if your repo has uncommitted changes, unpushed
+  commits or a diverged history it refuses and tells you which. An updater that can quietly
+  eat your own unpushed work isn't one you should ever press.
+- **Health check** — forty-odd read-only checks: dependencies, fonts, whether each config file
+  is valid JSON, what's deployed, which Hyprland parser you're on, and **the bar's crash log**.
+  Invalid JSON is the quiet killer — every parse is wrapped in a try/catch, so a corrupt file
+  doesn't crash anything, it just silently reverts that whole area to defaults.
+- **Backup & restore** — one archive of every setting, pin, rule, gesture and keybind.
+  Restoring writes a `.pre-restore` archive first, so restoring the wrong file is undoable too.
+- **The bar supervisor** — Quickshell exits with `rc=255` when its Wayland connection dies,
+  which a fullscreen client tearing down reliably causes: closing a game used to take the bar
+  with it and leave you barless until `SUPER+SHIFT+B`. It now runs supervised — respawned,
+  every exit logged, and it gives up after five failures in a row rather than spinning.
+
+**Game mode**  ·  `SUPER+SHIFT+G` strips blur, shadows, animations and the video wallpaper,
+switches to the performance profile and silences notifications — then restores **every one to
+the value it had before**, not to some hardcoded default. Steam and gamescope windows are also
+forced opaque with no blur or shadow: an unfocused game at `inactive_opacity 0.96` drags a
+4-pass blur that samples the animated wallpaper behind it *every frame*, and on a hybrid laptop
+that runs on the same iGPU that's copying the game's frames across.
+
 ## Structure
 ```
 sea-shell/
 ├── install.sh                    # installer (--dev / --wallpaper / --uninstall)
-├── quickshell/
+├── quickshell/ui/
 │   ├── shell.qml                # the bar + dropdowns + notification daemon
+│   ├── Dock.qml                 # the dock (pinned + running, per-monitor)
 │   ├── Launcher.qml             # resident app launcher
 │   ├── settings.qml             # control center (SUPER+S)
+│   ├── Dashboard.qml            # dashboard (SUPER+D)
 │   ├── power.qml                # power / session menu (SUPER+ESC)
 │   ├── keybinds.qml             # live keybind cheat-sheet (SUPER+K)
 │   ├── wallpaper.qml            # wallpaper picker (SUPER+SHIFT+W)
 │   ├── screenshot.qml           # screenshot tool (region / window / full)
 │   ├── RecorderPanel.qml        # screen-recorder chooser + countdown (SUPER+R)
 │   ├── DacPanel.qml             # Moondrop DAC parametric EQ (SUPER+SHIFT+E)
-│   ├── sea-record.sh            # wf-recorder + the pipewire mix for mic+system
-│   ├── moondrop_control.py      # reverse-engineered Moondrop USB-HID controller (vendored)
-│   ├── sea-eq.py                # software EQ — a pipewire filter-chain, no DAC needed
-│   ├── sea-sysmon.sh            # cpu/ram/gpu sampler for the monitor pill
-│   ├── sea-wallpaper-restore.sh # restore last wallpaper at login
-│   ├── sea-wallpaper-autopause.sh # pause video wallpaper under fullscreen
-│   ├── sea-import-ics.py        # import .ics events into the calendar
-│   ├── matugen-accent.sh        # recolour the shell from the wallpaper
-│   └── … (lock, clipboard, rebind & toggle helpers)
-├── hypr/sea.conf                # borders, blur, shadow, animations, layer rules
-├── hypr/keybinds.conf           # full Hyprland keybinds (SUPER-based)
+│   ├── Tok.qml                  # design tokens — one singleton, read by every surface
+│   └── Ind*.qml                 # the shared component set (table, panel, kpi, chip, …)
+├── quickshell/scripts/
+│   ├── system/sea-bar-supervisor.sh  # respawn the bar when wayland drops it
+│   ├── system/sea-update.sh          # over-the-air updates (fast-forward only)
+│   ├── system/sea-doctor.sh          # read-only health check
+│   ├── system/sea-backup.sh          # back up / restore everything the shell owns
+│   ├── system/sea-gamemode.sh        # game mode, with real restore
+│   ├── system/sea-updates.sh         # pending repo + AUR updates
+│   ├── system/sea-window-rules.sh    # window-rules.json → rules.lua
+│   ├── system/sea-gestures.sh        # gestures.json → gestures.lua
+│   ├── system/sea-sysmon.sh          # cpu/ram/gpu sampler for the monitor pill
+│   ├── system/sea-record.sh          # wf-recorder + the pipewire mix for mic+system
+│   ├── system/sea-ocr.sh             # OCR a region to the clipboard
+│   ├── wallpaper/sea-wallpaper-apply.sh    # the one place a wallpaper is applied
+│   ├── wallpaper/sea-wallpaper-rotate.sh   # auto-rotate on a timer
+│   ├── wallpaper/sea-wallpaper-autopause.sh # pause video wallpaper under fullscreen
+│   ├── system/moondrop_control.py    # reverse-engineered Moondrop USB-HID controller (vendored)
+│   ├── system/sea-eq.py              # software EQ — a pipewire filter-chain, no DAC needed
+│   ├── theme/matugen-accent.sh       # recolour the shell from the wallpaper
+│   └── … (lock, media, calendar, keybind & clipboard helpers)
+├── hypr/sea.lua                 # borders, blur, shadow, animations, layer + window rules
+├── hypr/keybinds.lua            # full Hyprland keybinds (SUPER-based)
 ├── hypr/hyprlock.conf           # sea-themed lock screen
 ├── hypr/hypridle.conf           # idle: dim → lock → screen off → suspend
 ├── kitty/sea-cyan.conf          # terminal colours
@@ -321,17 +409,21 @@ use `nvidia-smi` when present. Disable any other bar's autostart so you don't ge
 
 ## Try it without installing
 ```bash
-qs -p quickshell/shell.qml       # bar (launcher + tray menus included)
-qs -p quickshell/settings.qml    # control center
-qs -p quickshell/power.qml       # power menu
-qs -p quickshell/wallpaper.qml   # wallpaper picker
+qs -p quickshell/ui/shell.qml       # bar + dock (launcher + tray menus included)
+qs -p quickshell/ui/settings.qml   # control center
+qs -p quickshell/ui/power.qml      # power menu
+qs -p quickshell/ui/wallpaper.qml  # wallpaper picker
 ```
 
 ## Notes / gotchas
-- **Hyprland 0.55 rule syntax changed** — rules are `field value, match:prop regex`
-  (e.g. `layerrule = blur on, ignore_alpha 0.2, match:namespace sea-shell:drop`).
-  The old `layerrule = blur ns` form is accepted **silently as a no-op**, so a
-  wrong rule shows no error and no effect. `sea.conf` uses the new syntax.
+- **The Hyprland config is Lua** (0.55+, see [hypr/README-lua.md](hypr/README-lua.md)).
+  Two consequences worth knowing: `hyprctl keyword` is **inert** under the Lua parser —
+  anything setting values at runtime has to go through `hyprctl eval` — and
+  `hyprctl dispatch exec …` is a *Lua syntax error*, not a dispatch. The correct form is
+  `hyprctl dispatch "hl.dsp.exec_cmd('…')"`. Both fail quietly, which is the trap.
+- **`hl.workspace_rule({ layout = … })` returns `ok` and does nothing** in 0.56 — per-workspace
+  layouts were tested on both fresh and existing workspaces and don't work, which is why the
+  settings panel doesn't offer them.
 - Duplicate binds both fire in Hyprland — if a toggle (fullscreen, float…)
   "does nothing", check you're not sourcing two keybind files.
 - `pkill -f <pattern>` matches a process's **whole command line**, including the

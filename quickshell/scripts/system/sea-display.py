@@ -13,7 +13,7 @@ Subcommands (all print JSON to stdout unless noted):
   --current            snapshot the live arrangement (not saved)
   --list               saved profiles + a one-line summary of each
   --save NAME          store the current arrangement under NAME
-  --apply NAME         restore NAME via `hyprctl keyword monitor …`
+  --apply NAME         restore NAME (hyprctl keyword, or eval on a Lua config)
   --delete NAME        remove a saved profile
   --match              name of the saved profile whose monitor set matches the
                        currently-connected monitors (for auto-apply), or ""
@@ -32,6 +32,27 @@ def _hypr(*args):
                               text=True, timeout=6).stdout
     except Exception:
         return ""
+
+
+def _apply_monitor(spec):
+    """Apply one `name,WxH@hz,XxY,scale[,transform,N]` spec to the running Hyprland.
+
+    `hyprctl keyword` only speaks to the LEGACY .conf parser; against a Lua config it answers
+    "keyword can't work with non-legacy parsers. Use eval." and changes nothing, so a restored
+    profile looked applied but wasn't. Try keyword first, fall back to the Lua equivalent.
+    """
+    if _hypr("keyword", "monitor", spec).strip().startswith("ok"):
+        return
+    parts = spec.split(",")
+    name = parts[0]
+    if len(parts) > 1 and parts[1] == "disable":
+        _hypr("eval", 'hl.monitor({ output = "%s", disabled = true })' % name)
+        return
+    lua = 'hl.monitor({ output = "%s", mode = "%s", position = "%s", scale = %s' % (
+        name, parts[1], parts[2], parts[3])
+    if len(parts) > 5 and parts[4] == "transform":
+        lua += ", transform = %s" % parts[5]
+    _hypr("eval", lua + " })")
 
 
 def _live_monitors():
@@ -158,7 +179,7 @@ def cmd_apply(name):
         cmds.append(spec)
     applied = []
     for spec in cmds:
-        _hypr("keyword", "monitor", spec)
+        _apply_monitor(spec)
         applied.append(spec)
     print(json.dumps({"ok": True, "applied": applied}))
 

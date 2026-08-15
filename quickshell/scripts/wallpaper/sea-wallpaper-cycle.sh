@@ -26,10 +26,11 @@ wp=$(printf '%s\n' "$list" | sed -n "${new}p")
 [ -z "$wp" ] && exit 0
 printf '%s' "$wp" > "$cfgwp"
 
-# apply (reuse the restore logic), sync the lock-screen bg, and recolour if matugen is on
-sh "$here/sea-wallpaper-restore.sh" >/dev/null 2>&1 &
+# apply through the shared path, sync the lock-screen bg, and recolour if matugen is on
+sh "$here/sea-wallpaper-apply.sh" "$wp" >/dev/null 2>&1 &
 [ -f "$here/sea-lockwall.sh" ] && sh "$here/sea-lockwall.sh" "$wp" >/dev/null 2>&1 &
 if python3 -c "import json,sys;sys.exit(0 if json.load(open('$HOME/.config/sea-shell/appearance.json')).get('matugen') else 1)" 2>/dev/null; then
     sh "$here/matugen-accent.sh" "$wp" >/dev/null 2>&1 &
 fi
-notify-send 'sea-shell' "Wallpaper → $(basename "$wp")" 2>/dev/null
+# the auto-rotate daemon sets SEA_ROTATE_QUIET: a toast every 30 minutes, unprompted, is spam
+[ -n "$SEA_ROTATE_QUIET" ] || notify-send 'sea-shell' "Wallpaper → $(basename "$wp")" 2>/dev/null

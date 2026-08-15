@@ -77,6 +77,23 @@ ShellRoot {
         return d.network !== "" ? "online · " + d.network : "online";
     }
 
+    // app dock — its own layer-shell surface per monitor, off unless enabled in settings.
+    // It shares cfgMonitors with the bar so a monitor turned off there can turn the dock off
+    // independently (`{"<name>": {"bar": false, "dock": false}}`).
+    Dock {
+        id: appDock
+        dockEnabled: root.cfgDock
+        edge: root.cfgDockEdge
+        iconSize: root.cfgDockIcon
+        mode: root.cfgDockMode
+        zoomEnabled: root.cfgDockZoom
+        showRunning: root.cfgDockRunning
+        showLabels: root.cfgDockLabels
+        surfaceOpacity: root.dropOpacity
+        cfgMonitors: root.cfgMonitors
+        cfgScale: root.cfgScale
+    }
+
     // resident launcher — no process-spawn delay; open via `qs -c sea-shell ipc call launcher …`
     Launcher { id: launcher }
     IpcHandler {
@@ -124,7 +141,6 @@ ShellRoot {
 
     // ---------- alt-tab window switcher (resident, driven by ALT+Tab binds) ----------
     property bool switcherOpen: false
-    property int switcherSel: 0
     // Show the switcher ONLY on the focused monitor, not mirrored onto every screen —
     // a full card on each output reads like a second switcher "behind" the real one.
     readonly property var switcherScreen: {
@@ -133,24 +149,49 @@ ShellRoot {
         return scrs.length ? scrs[0] : null;
     }
     // every open window, most-recently-used first (focusHistoryID 0 = current)
+    // Membership is decided by the WAYLAND handle, never by lastIpcObject: `Hyprland.toplevels`
+    // keeps ghost entries whose wayland handle is null, and — the reason ALT+Tab used to do
+    // nothing at all — lastIpcObject goes empty on a long-lived shell until something calls
+    // refreshToplevels(). Gating on it meant every window was filtered out and switcherStep()
+    // bailed on n === 0. hyprctl data is now used only to ENRICH (MRU order), never to include.
     readonly property var switcherWins: {
-        var m = Hyprland.toplevels ? Hyprland.toplevels.values : [];
-        var out = [];
-        for (var i=0;i<m.length;i++) { var t=m[i];
-            if (t && t.lastIpcObject && (""+(t.lastIpcObject.class||"")) !== "") out.push(t); }
-        out.sort(function(a,b){ return (a.lastIpcObject.focusHistoryID||0) - (b.lastIpcObject.focusHistoryID||0); });
-        return out;
+        try {
+            var m = (Hyprland && Hyprland.toplevels) ? Hyprland.toplevels.values : [];
+            var out = [];
+            for (var i=0; i<m.length; i++) {
+                var t = m[i];
+                if (t && t.wayland && t.wayland.appId && (""+t.wayland.appId).trim() !== "") out.push(t);
+            }
+            out.sort(function(a, b) {
+                try {
+                    var ai = (a && a.lastIpcObject && a.lastIpcObject.focusHistoryID !== undefined) ? a.lastIpcObject.focusHistoryID : 9999;
+                    var bi = (b && b.lastIpcObject && b.lastIpcObject.focusHistoryID !== undefined) ? b.lastIpcObject.focusHistoryID : 9999;
+                    return ai - bi;
+                } catch(e) { return 0; }
+            });
+            return out;
+        } catch(e) { return []; }
+    }
+    // The selection tracks the WINDOW, not its index — refreshToplevels() lands a moment after
+    // the switcher opens and can reorder the list under the highlight.
+    property var switcherSelWin: null
+    readonly property int switcherSel: {
+        var i = root.switcherWins.indexOf(root.switcherSelWin);
+        return i < 0 ? 0 : i;
     }
     function switcherStep(dir) {
-        var n = root.switcherWins.length; if (n === 0) return;
-        if (!root.switcherOpen) { root.switcherOpen = true; root.switcherSel = (n > 1 ? (dir > 0 ? 1 : n - 1) : 0); }
-        else root.switcherSel = ((root.switcherSel + dir) % n + n) % n;
+        Hyprland.refreshToplevels();          // titles + MRU order; async, list already stands on its own
+        var wins = root.switcherWins, n = wins.length; if (n === 0) return;
+        if (!root.switcherOpen) { root.switcherOpen = true; root.switcherSelWin = wins[n > 1 ? (dir > 0 ? 1 : n - 1) : 0]; }
+        else root.switcherSelWin = wins[((root.switcherSel + dir) % n + n) % n];
     }
     function switcherCommit() {
         if (!root.switcherOpen) return; root.switcherOpen = false;
-        var w = root.switcherWins[root.switcherSel];
-        if (w && w.lastIpcObject && w.lastIpcObject.address)
+        var w = root.switcherSelWin; if (!w) return;
+        if (w.lastIpcObject && w.lastIpcObject.address)
             Hyprland.dispatch("hl.dsp.focus({ window = 'address:" + w.lastIpcObject.address + "' })");
+        else if (w.wayland)
+            w.wayland.activate();             // no hyprctl data yet — the wayland handle still focuses
     }
     IpcHandler {
         target: "switcher"
@@ -158,6 +199,85 @@ ShellRoot {
         function prev(): void { root.switcherStep(-1) }
         function commit(): void { root.switcherCommit() }
         function cancel(): void { root.switcherOpen = false }
+    }
+
+    // ---------- wallpaper switch transition ----------
+    // swww/awww animate a static→static change themselves, but ANIMATED wallpapers go to
+    // mpvpaper, which has no transition at all: switching one means `pkill mpvpaper`, a gap,
+    // then a fresh process — a hard cut with a black flash. Most of this user's library is
+    // video, so the backend transition almost never ran.
+    //
+    // The compositor can't fix that, but the shell can: dip a full-screen layer to black over
+    // the swap and lift it once the new wallpaper is up. It works for EVERY backend — mpvpaper,
+    // awww, hyprpaper — because it never touches them; it just covers the seam.
+    property real wallFade: 0                  // 0 = clear, 1 = fully black
+    property bool wallFading: false
+    // Kept short on purpose. The black hold below is fixed by how long mpvpaper takes to show a
+    // first frame, so the fades are the only part worth trimming — at 0.45× the whole switch sat
+    // near 1.6s of darkness, which reads as a stall rather than a transition.
+    readonly property int wallFadeMs: Math.max(120, Math.round(root.cfgWpTransitionDur * 1000 * 0.28))
+    property real cfgWpTransitionDur: 1        // mirrors appearance.json wpTransitionDur
+
+    IpcHandler {
+        target: "wallpaper"
+        function cycle(dir: string): void { root.wallCycle(dir) }
+        function next(): void { root.wallCycle("next") }
+        function prev(): void { root.wallCycle("prev") }
+        function random(): void { root.wallCycle("random") }
+    }
+
+    property string wallCycleDir: "next"
+    function wallCycle(dir) {
+        if (root.wallFading) return;           // ignore a second press mid-transition
+        root.wallCycleDir = (dir === "prev" || dir === "random") ? dir : "next";
+        root.wallFading = true;
+        root.wallFade = 1;                     // Behavior animates it; swapTimer fires at the bottom
+        wallSwapTimer.interval = root.wallFadeMs;
+        wallSwapTimer.restart();
+    }
+    // at full black: perform the actual switch
+    Timer {
+        id: wallSwapTimer; repeat: false
+        onTriggered: {
+            Quickshell.execDetached(["sh",
+                Qt.resolvedUrl("sea-wallpaper-cycle.sh").toString().replace("file://",""),
+                root.wallCycleDir]);
+            // mpvpaper needs its pkill + 0.2s settle + process start before the first frame is
+            // up; lifting the curtain earlier just shows the flash we came here to hide. Static
+            // wallpapers are ready far sooner, but awww is doing its own transition underneath
+            // by then, so a slightly long hold costs nothing there.
+            wallLiftTimer.interval = 620;
+            wallLiftTimer.restart();
+        }
+    }
+    Timer {
+        id: wallLiftTimer; repeat: false
+        onTriggered: { root.wallFade = 0; wallDoneTimer.interval = root.wallFadeMs; wallDoneTimer.restart() }
+    }
+    Timer { id: wallDoneTimer; repeat: false; onTriggered: root.wallFading = false }
+
+    // One curtain per monitor. Bottom layer: above the background (where mpvpaper and awww
+    // draw) but below every real window, so it only ever darkens visible wallpaper — never
+    // the user's apps. It takes no input: no keyboard focus and an empty mask.
+    Variants {
+        model: root.wallFading ? Quickshell.screens : []
+        PanelWindow {
+            required property var modelData
+            screen: modelData
+            anchors { top: true; bottom: true; left: true; right: true }
+            color: "transparent"
+            WlrLayershell.namespace: "sea-shell:wallfade"
+            WlrLayershell.layer: WlrLayer.Bottom
+            WlrLayershell.keyboardFocus: WlrKeyboardFocus.None
+            exclusionMode: ExclusionMode.Ignore
+            mask: Region {}                    // fully click-through
+            Rectangle {
+                anchors.fill: parent
+                color: "#000000"
+                opacity: root.wallFade
+                Behavior on opacity { NumberAnimation { duration: root.wallFadeMs; easing.type: Easing.InOutQuad } }
+            }
+        }
     }
     // Visual HUD for the ALT+Tab switcher — icon + title tiles, the current pick highlighted;
     // hover to preview a pick, click to focus it. Purely visual (the ALT binds drive stepping,
@@ -184,7 +304,7 @@ ShellRoot {
                 id: swCardRoot
                 anchors.centerIn: parent
                 scale: swWin.ui                 // match the shell's per-monitor UI scale
-                radius: Math.max(14, root.cfgRadius)
+                radius: Tok.rCard
                 color: theme.a(theme.panel, 0.98)
                 border.width: 1; border.color: theme.a(theme.iris, 0.28)
                 clip: true
@@ -216,8 +336,10 @@ ShellRoot {
                             required property int index
                             required property var modelData
                             readonly property bool sel: index === root.switcherSel
-                            readonly property string cls: ("" + (modelData.lastIpcObject.class || "")).toLowerCase()
-                            width: 208; height: 150; radius: 12
+                            // hyprctl class when we have it, wayland app id until then
+                            readonly property string cls: ("" + ((modelData.lastIpcObject && modelData.lastIpcObject.class)
+                                                                || (modelData.wayland && modelData.wayland.appId) || "")).toLowerCase()
+                            width: 208; height: 150; radius: Tok.r
                             clip: true
                             color: sel ? theme.a(theme.iris, 0.22) : theme.a(theme.line, 0.35)
                             border.width: sel ? 2 : 1
@@ -226,11 +348,11 @@ ShellRoot {
                             // frame arrives, or if the window has no capturable wayland handle)
                             Rectangle {
                                 anchors { top: parent.top; left: parent.left; right: parent.right; margins: 6 }
-                                height: 96; radius: 8; clip: true; color: theme.a(theme.bg, 0.55)
+                                height: 96; radius: Tok.r; clip: true; color: theme.a(theme.bg, 0.55)
                                 ScreencopyView {
                                     id: thumbScv
                                     anchors.fill: parent
-                                    captureSource: swTile.modelData.wayland
+                                    captureSource: (swTile.modelData && swTile.modelData.wayland) ? swTile.modelData.wayland : null
                                     live: root.switcherOpen
                                     visible: hasContent
                                 }
@@ -254,14 +376,15 @@ ShellRoot {
                                 Text {
                                     anchors.verticalCenter: parent.verticalCenter
                                     width: parent.width - 25; elide: Text.ElideRight
-                                    text: "" + (swTile.modelData.lastIpcObject.title || swTile.modelData.lastIpcObject.class || "window")
+                                    text: "" + ((swTile.modelData.lastIpcObject && (swTile.modelData.lastIpcObject.title || swTile.modelData.lastIpcObject.class))
+                                                || (swTile.modelData.wayland && (swTile.modelData.wayland.title || swTile.modelData.wayland.appId)) || "window")
                                     color: swTile.sel ? theme.text : theme.sub; font.pixelSize: 11; font.family: root.cfgFont; font.bold: swTile.sel
                                 }
                             }
                             MouseArea {
                                 anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
-                                onEntered: root.switcherSel = swTile.index
-                                onClicked: { root.switcherSel = swTile.index; root.switcherCommit() }
+                                onEntered: root.switcherSelWin = swTile.modelData
+                                onClicked: { root.switcherSelWin = swTile.modelData; root.switcherCommit() }
                             }
                         }
                     }
@@ -276,7 +399,17 @@ ShellRoot {
         }
     }
     HyprlandFocusGrab {
-        windows: root.grabWins
+        windows: {
+            try {
+                var out = [];
+                var list = root.grabWins || [];
+                for (var i = 0; i < list.length; i++) {
+                    var w = list[i];
+                    if (w && w.visible !== undefined) out.push(w);
+                }
+                return out;
+            } catch(e) { return []; }
+        }
         active: root.openPop !== "" && !root.grabHold
         onCleared: root.openPop = ""
     }
@@ -311,6 +444,17 @@ ShellRoot {
     property bool   cfgLight: false          // dark (default) ↔ light palette
     property string cfgBarFill: "matugen"    // top-bar fill: matugen (accent-tinted) · black · white
     property string cfgEdge: "top"           // which screen edge the bar docks to: top or bottom
+    // ---- dock ----
+    // Off by default: the dock is a second always-on surface and nobody should get one they did
+    // not ask for. It defaults to the edge OPPOSITE the bar so enabling it never lands the two
+    // on top of each other.
+    property bool   cfgDock: false
+    property string cfgDockEdge: "bottom"
+    property int    cfgDockIcon: 40
+    property string cfgDockMode: "always"    // always (reserves space) · autohide · intelligent
+    property bool   cfgDockZoom: true
+    property bool   cfgDockRunning: true     // show running apps that are not pinned
+    property bool   cfgDockLabels: true
     property bool cfgMpris: true
     property bool cfgDac: true
     property bool cfgTray: true
@@ -326,6 +470,8 @@ ShellRoot {
     property bool cfgClock: true
     property bool cfgPower: true
     property bool cfgQuick: true          // Control Center pill (quick toggles + power profile)
+    property bool cfgUpdates: true        // pending pacman/AUR update count
+    property bool cfgNet: true            // live network throughput
     property bool cfgNightWidget: false   // Night-light toggle pill on the bar
     property bool cfgAutoHide: false      // auto-hide the bar; reveal by pushing the cursor to the edge
     property bool cfgHideFullscreen: false // hide the bar while a window is fullscreen (reveal on hover)
@@ -333,7 +479,7 @@ ShellRoot {
     // Values are the widget ids; the bar positions each right-group pill by its index here,
     // so reordering this list reorders the pills. Unknown/absent ids fall to the far end.
     // wgMpris is the centre pill and ignores its position; wgRec is the transient recorder.
-    readonly property var defaultWidgetOrder: ["wgMpris","wgTray","wgQuick","wgWeather","wgClipboard","wgNotif","wgWifi","wgBluetooth","wgKdeconnect","wgCaffeine","wgNight","wgSystem","wgDac","wgVolume","wgBattery","wgRec","wgClock","wgPower"]
+    readonly property var defaultWidgetOrder: ["wgMpris","wgTray","wgQuick","wgUpdates","wgNet","wgWeather","wgClipboard","wgNotif","wgWifi","wgBluetooth","wgKdeconnect","wgCaffeine","wgNight","wgSystem","wgDac","wgVolume","wgBattery","wgRec","wgClock","wgPower"]
     property var cfgWidgetOrder: root.defaultWidgetOrder
     // left cluster order (logo · workspaces · window-title) — drag-reorder in Settings → Bar widgets
     readonly property var defaultLeftOrder: ["lgLogo","lgWork","lgTitle"]
@@ -401,10 +547,18 @@ ShellRoot {
             var t = text(); if(!t || !t.trim()) return; var j = JSON.parse(t);
             if (j.radius  !== undefined) root.cfgRadius  = j.radius;
             if (j.opacity !== undefined) root.cfgOpacity = j.opacity;
+            if (j.wpTransitionDur !== undefined) root.cfgWpTransitionDur = j.wpTransitionDur;
             if (j.barFill !== undefined && (""+j.barFill).length>0) root.cfgBarFill = j.barFill;
             // top / bottom only — this shell is a horizontal bar; left/right were dropped.
             if (j.edge === "top" || j.edge === "bottom" || j.edge === "left" || j.edge === "right") root.cfgEdge = j.edge;
             if (j.height  !== undefined) root.cfgHeight  = j.height;
+            if (j.dock !== undefined) root.cfgDock = !!j.dock;
+            if (j.dockEdge === "top" || j.dockEdge === "bottom" || j.dockEdge === "left" || j.dockEdge === "right") root.cfgDockEdge = j.dockEdge;
+            if (j.dockIcon !== undefined) root.cfgDockIcon = j.dockIcon;
+            if (j.dockMode === "always" || j.dockMode === "autohide" || j.dockMode === "intelligent") root.cfgDockMode = j.dockMode;
+            if (j.dockZoom !== undefined) root.cfgDockZoom = !!j.dockZoom;
+            if (j.dockRunning !== undefined) root.cfgDockRunning = !!j.dockRunning;
+            if (j.dockLabels !== undefined) root.cfgDockLabels = !!j.dockLabels;
             if (j.scale   !== undefined) root.cfgScale   = j.scale;
             if (j.accent  !== undefined && (""+j.accent).length>0) root.cfgAccent = j.accent;
             if (j.font    !== undefined && (""+j.font).length>0)   root.cfgFont   = j.font;
@@ -425,6 +579,8 @@ ShellRoot {
             if (j.wgClock !== undefined) root.cfgClock = !!j.wgClock;
             if (j.wgPower !== undefined) root.cfgPower = !!j.wgPower;
             if (j.wgQuick !== undefined) root.cfgQuick = !!j.wgQuick;
+            if (j.wgUpdates !== undefined) root.cfgUpdates = !!j.wgUpdates;
+            if (j.wgNet !== undefined) root.cfgNet = !!j.wgNet;
             if (j.wgNight !== undefined) root.cfgNightWidget = !!j.wgNight;
             if (j.autoHide !== undefined) root.cfgAutoHide = !!j.autoHide;
             if (j.hideFullscreen !== undefined) root.cfgHideFullscreen = !!j.hideFullscreen;
@@ -521,32 +677,40 @@ ShellRoot {
     }
     Timer { interval: 60000; running: true; repeat: true; triggeredOnStart: true; onTriggered: root.checkReminders() }
 
+    // ---------- industrial token shim ----------
+    // The ramp formulas now live once, in Tok.qml. This object survives only because ~190 call
+    // sites in this file already speak its vocabulary; each name is remapped onto its industrial
+    // role rather than re-deriving colours here (the old copy had already drifted from the one
+    // in settings.qml and Dashboard.qml).
+    //
+    //   panel → surface        one step up from the ground, not a translucent card
+    //   line  → ruleHard       used BOTH as a hairline and, via a(), as a fill — ruleHard keeps
+    //                          the old fill relationship intact while moving to the new palette
+    //   frost → ink2           icons go neutral, so the accent can go back to meaning "active"
+    //                          instead of tinting every glyph on the bar
     QtObject {
         id: theme
-        readonly property bool light: root.cfgLight
-        // Surfaces follow the accent HUE at low saturation, so the whole shell tracks matugen
-        // instead of a fixed navy — a subtle tint only (text keeps its high-contrast values).
-        // The default/off accent is sea cyan, whose hue lands right back on the old deep-ocean
-        // navy, so nothing jarring changes when matugen is off.
+        readonly property bool  light: root.cfgLight
         readonly property color _acc: root.cfgAccent
         readonly property real  _ah:  _acc.hslHue >= 0 ? _acc.hslHue : 0.55
-        readonly property color bg:    light ? Qt.hsla(_ah, 0.20, 0.945, 1) : Qt.hsla(_ah, 0.36, 0.070, 1)
-        readonly property color panel: light ? Qt.hsla(_ah, 0.18, 0.895, 1) : Qt.hsla(_ah, 0.30, 0.110, 1)
-        readonly property color line:  light ? Qt.hsla(_ah, 0.16, 0.780, 1) : Qt.hsla(_ah, 0.24, 0.205, 1)
-        // The dropdowns are very translucent now, so the text does the readability work:
-        // near-white in dark mode, near-black in light mode, with punchy secondaries.
-        readonly property color text:  light ? "#08111c" : "#f2f6fc"
-        readonly property color sub:   light ? "#213747" : "#cbd6e6"
-        readonly property color faint: light ? "#3a4e5e" : "#9dabc1"
-        // the raw accent is too pale for text/borders on a light card, so darken it hard
-        // there — a pale accent (e.g. #96cdf8) only reads as text once it's well darkened.
-        readonly property color iris:  light ? Qt.darker(root.cfgAccent, 2.4)  : root.cfgAccent
-        readonly property color frost: light ? Qt.darker(root.cfgAccent, 1.7)  : Qt.lighter(root.cfgAccent, 1.22)
-        readonly property color good:  light ? "#2f9e63" : "#a6e3a1"
-        readonly property color warn:  light ? "#b9820f" : "#f4c542"
-        readonly property color bad:   light ? "#d1495b" : "#f38ba8"
+        readonly property color bg:    Tok.bg
+        readonly property color panel: Tok.surface
+        readonly property color line:  Tok.ruleHard
+        readonly property color text:  Tok.ink
+        readonly property color sub:   Tok.ink2
+        readonly property color faint: Tok.ink3
+        readonly property color iris:  Tok.accent
+        readonly property color frost: Tok.ink2
+        readonly property color good:  Tok.ok
+        readonly property color warn:  Tok.warn
+        readonly property color bad:   Tok.crit
         function a(c, al) { return Qt.rgba(c.r, c.g, c.b, al) }
     }
+    // The bar owns the LIVE accent — matugen, theme profiles and the night toggle all land in
+    // root.cfgAccent first — so push it into the shared tokens instead of letting Tok's own
+    // file read race them. settings.qml takes over while its panel is open, for live preview.
+    Binding { target: Tok; property: "accentRaw"; value: root.cfgAccent }
+    Binding { target: Tok; property: "light";     value: root.cfgLight }
 
     // ---------- audio ----------
     property var sinks: (Pipewire.nodes ? Pipewire.nodes.values : []).filter(function (n) { return n && n.isSink && !n.isStream && n.audio })
@@ -694,7 +858,7 @@ ShellRoot {
         } } }
     // Cannot be gated on dacPresent: presence now partly DEPENDS on this scan, and
     // a timer waiting on its own result never fires. It is a few /proc reads.
-    Timer { interval: 2000; running: true; repeat: true; triggeredOnStart: true
+    Timer { interval: 8000; running: true; repeat: true; triggeredOnStart: true
             onTriggered: dacExclProc.running = true }
 
     // The exclusively-held card, named through the script's registry — "" when
@@ -748,24 +912,69 @@ ShellRoot {
             root.ssid = root.wifiOn ? conn : "";
         } }
     }
-    Timer { interval: 3000; running: true; repeat: true; triggeredOnStart: true; onTriggered: wifiStatus.running = true }
+    Timer { interval: 10000; running: true; repeat: true; triggeredOnStart: true; onTriggered: wifiStatus.running = true }
     // the network list for the dropdown (styling only — active row cross-checks the
     // connected SSID from dev status so a stale ACTIVE column can't mis-highlight)
+    //
+    // `nmcli dev wifi` PRINTS NM'S CACHE — it is not a scan. NetworkManager only re-probes the
+    // air on its own schedule (minutes apart), so polling that cache faster just re-renders the
+    // same rows; that's why the dropdown looked frozen until something else forced a scan.
+    // `list --rescan yes` re-probes and waits for the result, but it costs a real radio sweep —
+    // so it's spent only while the user is looking (see the while-open timer below) and the idle
+    // background poll stays on the cheap cached read.
+    function wifiScanCmd(force) {
+        return ["sh","-c","nmcli -t -f ACTIVE,SIGNAL,SECURITY,SSID dev wifi list --rescan "
+            + (force ? "yes" : "no") + " 2>/dev/null | awk -F: 'length($4)>0'"];
+    }
+    // force=true re-probes the air. A scan already in flight is left to finish: setting
+    // running=true on a live Process is a no-op, so re-entering here would silently drop it.
+    function wifiRescan(force) {
+        wifiStatus.running = true;
+        wifiSavedScan.running = true;
+        if (wifiScan.running) return;
+        wifiScan.command = root.wifiScanCmd(force);
+        wifiScan.running = true;
+    }
     Process {
         id: wifiScan; running: true
-        command: ["sh", "-c", "nmcli -t -f ACTIVE,SIGNAL,SECURITY,SSID dev wifi 2>/dev/null | awk -F: 'length($4)>0' | sort -t: -k2 -rn | head -8"]
+        command: root.wifiScanCmd(false)
         stdout: StdioCollector { id: wifiOut; onStreamFinished: {
-            var out = []; var lines = wifiOut.text.trim().split("\n");
+            // nmcli returns one row per BSSID, so a mesh/repeater SSID repeats and eats list
+            // slots — collapse each name to its strongest sighting, then take the top 8 DISTINCT.
+            var best = {}; var order = []; var lines = wifiOut.text.trim().split("\n");
             for (var i=0;i<lines.length;i++){ if(!lines[i])continue; var p=lines[i].split(":");
-                var sid=p.slice(3).join(":");
+                var sid=p.slice(3).join(":").replace(/\\:/g,":");   // terse mode escapes ':' in SSIDs
+                if(!sid) continue;
                 var e={active:(p[0]==="yes")||(root.ssid!=="" && sid===root.ssid),signal:parseInt(p[1])||0,secure:(p[2]||"").length>0,ssid:sid};
-                out.push(e); }
-            root.wifiList = out;
+                if (!(sid in best)) { best[sid]=e; order.push(sid) }
+                else if (e.signal > best[sid].signal) { e.active = e.active || best[sid].active; best[sid]=e }
+                else if (e.active) best[sid].active = true; }
+            var out = order.map(function(s){ return best[s] });
+            out.sort(function(a,b){ return b.signal - a.signal });
+            root.wifiList = out.slice(0,8);
         } }
     }
-    Timer { interval: 8000; running: true; repeat: true; triggeredOnStart: true; onTriggered: wifiScan.running = true }
+    Timer { interval: 30000; running: true; repeat: true; triggeredOnStart: true; onTriggered: root.wifiRescan(false) }
+    // dropdown open → the list has to be live: re-probe on open (triggeredOnStart) and keep
+    // re-probing, so signal bars move and vanished APs drop off without a manual poke.
+    Timer { interval: 8000; running: root.openPop === "wifi"; repeat: true; triggeredOnStart: true
+        onTriggered: root.wifiRescan(true) }
     property string wifiPwFor: ""     // ssid awaiting an inline password
     property string wifiRetry: ""     // ssid whose saved profile we're trying first
+    // Saved (known) networks — the settings panel has always tracked these; the bar did not, and
+    // that was the whole bug below. Also drives the "saved" tag and the forget action.
+    property var wifiSaved: []
+    Process { id: wifiSavedScan; running: true
+        command: ["sh","-c","nmcli -t -f NAME,TYPE con show 2>/dev/null | awk -F: '$2==\"802-11-wireless\"{print $1}'"]
+        stdout: StdioCollector { id: wsOut; onStreamFinished: {
+            var t = wsOut.text.trim();
+            root.wifiSaved = t ? t.split("\n") : [];
+        } } }
+    function wifiForget(s) {
+        var e = s.replace(/'/g,"");
+        Quickshell.execDetached(["sh","-c","nmcli con delete id '"+e+"' 2>/dev/null; notify-send 'sea-shell' 'Forgot "+e+"'"]);
+        wifiRefresh.start();
+    }
     // known networks reconnect with their STORED password (`nmcli con up`); the
     // inline field only appears for new networks or when the saved secret fails.
     Process { id: wifiUp
@@ -778,9 +987,16 @@ ShellRoot {
     function wifiConnect(s, secure) {
         var e = s.replace(/'/g,"");
         if (secure) {
-            root.wifiRetry = s;
-            wifiUp.command = ["sh","-c","nmcli con up id '"+e+"' 2>&1"];
-            wifiUp.running = true; return;
+            // Only try the stored profile if one actually EXISTS. This used to fire `con up` at
+            // every secured network including ones never seen before, which always failed — so
+            // joining a new network cost a guaranteed round-trip through nmcli before the
+            // password field appeared. settings.qml had the savedCons check; the bar didn't.
+            if (root.wifiSaved.indexOf(s) >= 0) {
+                root.wifiRetry = s;
+                wifiUp.command = ["sh","-c","nmcli con up id '"+e+"' 2>&1"];
+                wifiUp.running = true; return;
+            }
+            root.wifiPwFor = s; return;       // never seen → ask straight away
         }
         Quickshell.execDetached(["sh","-c","nmcli dev wifi connect '"+e+"' || notify-send 'sea-shell' 'Could not join "+e+"'"]);
         root.wifiPwFor = ""; wifiRefresh.start();
@@ -795,7 +1011,7 @@ ShellRoot {
         root.wifiPwFor = ""; wifiRefresh.start();
     }
     function wifiToggle() { Quickshell.execDetached(["sh","-c","nmcli radio wifi | grep -q enabled && nmcli radio wifi off || nmcli radio wifi on"]); wifiRefresh.start() }
-    Timer { id: wifiRefresh; interval: 2500; onTriggered: { wifiScan.running = true; wifiStatus.running = true } }
+    Timer { id: wifiRefresh; interval: 2500; onTriggered: root.wifiRescan(true) }
 
     // ---------- cloudflare warp ----------
     property string warpStatus: "Disconnected"   // raw status line from warp-cli
@@ -813,7 +1029,7 @@ ShellRoot {
         stdout: StdioCollector { id: warpModeOut; onStreamFinished: {
             var m = warpModeOut.text.trim(); if (m) root.warpMode = m; } }
     }
-    Timer { interval: 4000; running: true; repeat: true; triggeredOnStart: true
+    Timer { interval: 15000; running: true; repeat: true; triggeredOnStart: true
         onTriggered: { warpPoll.running = true; warpModePoll.running = true } }
     function warpToggle() {
         if (root.warpConnected) {
@@ -867,7 +1083,7 @@ ShellRoot {
             root.vpnList = out;
         } }
     }
-    Timer { interval: 5000; running: true; repeat: true; triggeredOnStart: true; onTriggered: vpnScan.running = true }
+    Timer { interval: 15000; running: true; repeat: true; triggeredOnStart: true; onTriggered: vpnScan.running = true }
     function vpnToggle(name) {
         if (root.vpnActionName !== "") return;
         root.vpnActionName = name;
@@ -973,6 +1189,7 @@ ShellRoot {
         if (k === "wifi") return root.wifiOn;
         if (k === "bt")   return !!(root.btAdapter && root.btAdapter.enabled);
         if (k === "night") return root.nightActive;
+        if (k === "game") return root.gameOn;
         return false;
     }
     function ccToggle(k) {
@@ -982,6 +1199,7 @@ ShellRoot {
         if (k === "wifi") { root.wifiToggle(); return; }
         if (k === "bt")   { if (root.btAdapter) root.btAdapter.enabled = !root.btAdapter.enabled; return; }
         if (k === "night"){ Quickshell.execDetached(["sh", Qt.resolvedUrl("sea-toggle-night.sh").toString().replace("file://","")]); return; }
+        if (k === "game") { root.toggleGame(); return; }
     }
 
     // ---------- night light (hyprsunset — warms the screen in the evening) ----------
@@ -1414,6 +1632,248 @@ ShellRoot {
         stdout: StdioCollector { id: dndOut; onStreamFinished: root.dnd = (dndOut.text.trim() === "1") } }
     function setDnd(v) { root.dnd = v; Quickshell.execDetached(["sh","-c","echo " + (v?"1":"0") + " > \"$HOME/.config/sea-shell/dnd\""]); }
 
+    // ---------- network throughput ----------
+    // /proc/net/dev holds cumulative counters, so a RATE needs two samples and the real elapsed
+    // time between them — not the timer interval, which drifts whenever the shell is busy and
+    // would quietly inflate every reading.
+    property real netRx: 0                       // bytes/sec, all real interfaces
+    property real netTx: 0
+    property var  netIf: []                      // [{name, rx, tx}] per interface, bytes/sec
+    property var  _netPrev: ({})
+    property real _netPrevT: 0
+    Process {
+        id: netProc
+        command: ["sh","-c","cat /proc/net/dev"]
+        stdout: StdioCollector { id: netOut; onStreamFinished: {
+            var now = Date.now(), dt = (now - root._netPrevT) / 1000;
+            var lines = netOut.text.split("\n"), cur = {}, rows = [], trx = 0, ttx = 0;
+            for (var i = 2; i < lines.length; i++) {
+                var ln = lines[i].trim(); if (ln === "") continue;
+                var ci = ln.indexOf(":"); if (ci < 0) continue;
+                var name = ln.substring(0, ci).trim();
+                // loopback is not network traffic, and a down interface is noise
+                if (name === "lo" || name.indexOf("virbr") === 0) continue;
+                var f = ln.substring(ci + 1).trim().split(/\s+/);
+                if (f.length < 10) continue;
+                var rx = parseFloat(f[0]), tx = parseFloat(f[8]);
+                cur[name] = { rx: rx, tx: tx };
+                var p = root._netPrev[name];
+                if (p && dt > 0.2 && dt < 30) {
+                    // counters reset on interface restart; a negative delta is not -5 GB/s
+                    var drx = Math.max(0, rx - p.rx) / dt, dtx = Math.max(0, tx - p.tx) / dt;
+                    if (rx > 0 || tx > 0) rows.push({ name: name, rx: drx, tx: dtx });
+                    trx += drx; ttx += dtx;
+                }
+            }
+            root._netPrev = cur; root._netPrevT = now;
+            if (rows.length > 0 || dt > 0.2) { root.netRx = trx; root.netTx = ttx; root.netIf = rows; }
+        } } }
+    Timer { interval: 2000; repeat: true; running: root.cfgNet; triggeredOnStart: true
+        onTriggered: netProc.running = true }
+    function netFmt(b) {
+        if (b < 1024) return Math.round(b) + " B";
+        if (b < 1024 * 1024) return (b / 1024).toFixed(b < 10240 ? 1 : 0) + " K";
+        return (b / 1048576).toFixed(1) + " M";
+    }
+
+    // ---------- app usage ----------
+    // Measures how long each app actually HELD FOCUS, not how long it was open, and stops
+    // counting once the session goes idle — otherwise walking away with Firefox focused would
+    // quietly bill it for lunch. IdleMonitor is a real wayland idle-notify subscription, so this
+    // costs nothing while you work.
+    property var    usageAll: ({})            // {"YYYY-MM-DD": {class: seconds}}
+    property string usageDate: Qt.formatDate(new Date(), "yyyy-MM-dd")
+    property string usageCur: ""
+    property real   usageSince: 0
+    IdleMonitor { id: usageIdle; timeout: 120 }
+
+    Process { running: true; command: ["sh","-c","cat \"$HOME/.config/sea-shell/usage.json\" 2>/dev/null"]
+        stdout: StdioCollector { id: usageOut; onStreamFinished: {
+            try { var t = usageOut.text.trim(); if (t) root.usageAll = JSON.parse(t) || ({}); } catch (e) {}
+        } } }
+    function usageSave() {
+        // Keep a fortnight. Unbounded history would grow forever for a panel that only ever
+        // shows today and the last 7 days.
+        var keys = Object.keys(root.usageAll).sort(), out = {};
+        var keep = keys.slice(Math.max(0, keys.length - 14));
+        for (var i = 0; i < keep.length; i++) out[keep[i]] = root.usageAll[keep[i]];
+        root.usageAll = out;
+        root.writeCfg("usage.json", JSON.stringify(out));
+    }
+    // Bank whatever the current app has earned since the last checkpoint.
+    function usageFlush() {
+        if (root.usageCur === "" || root.usageSince <= 0) return;
+        var now = Date.now();
+        var dt = (now - root.usageSince) / 1000;
+        root.usageSince = now;
+        // A suspend/resume or a clock change can hand us an absurd delta; drop it rather than
+        // recording an eight-hour "session" that never happened.
+        if (dt <= 0 || dt > 3600) return;
+        var today = Qt.formatDate(new Date(), "yyyy-MM-dd");
+        if (today !== root.usageDate) { root.usageDate = today; }
+        var all = {}; for (var d in root.usageAll) all[d] = root.usageAll[d];
+        var day = {}; if (all[today]) for (var k in all[today]) day[k] = all[today][k];
+        day[root.usageCur] = (day[root.usageCur] || 0) + dt;
+        all[today] = day;
+        root.usageAll = all;
+    }
+    function usageSwitch(cls) { root.usageFlush(); root.usageCur = cls; root.usageSince = Date.now(); }
+    Connections { target: Hyprland; ignoreUnknownSignals: true
+        function onActiveToplevelChanged() {
+            var t = Hyprland.activeToplevel;
+            root.usageSwitch((t && t.wayland && t.wayland.appId) ? ("" + t.wayland.appId) : "");
+        } }
+    Connections { target: usageIdle; ignoreUnknownSignals: true
+        function onIsIdleChanged() {
+            // Bank what is owed, then park the clock (0 makes usageFlush a no-op) until input
+            // comes back.
+            if (usageIdle.isIdle) { root.usageFlush(); root.usageSince = 0; }
+            else root.usageSince = Date.now();
+        } }
+    // ---- daily limits + summary ----
+    property var    usageLimits: ({})          // appClass -> minutes/day
+    property bool   usageSummary: false
+    property string usageSummaryTime: "21:00"
+    // Not persisted: "already warned about X today" is worthless after a restart, and re-warning
+    // once after a reboot is far better than staying silent because a stale flag said we had.
+    property var    _usageNotified: ({})
+    property string _usageSummaryDone: ""
+    Process { running: true; command: ["sh","-c","cat \"$HOME/.config/sea-shell/usage-limits.json\" 2>/dev/null"]
+        stdout: StdioCollector { id: ulimOut; onStreamFinished: {
+            try {
+                var t = ulimOut.text.trim(); if (!t) return;
+                var j = JSON.parse(t);
+                if (j.limits && typeof j.limits === "object") root.usageLimits = j.limits;
+                if (j.summary !== undefined) root.usageSummary = !!j.summary;
+                if (j.summaryTime) root.usageSummaryTime = j.summaryTime;
+            } catch (e) {}
+        } } }
+    function usageCheck() {
+        var day = root.usageAll[root.usageDate] || ({});
+        for (var app in root.usageLimits) {
+            var lim = root.usageLimits[app];
+            if (!(lim > 0)) continue;
+            var used = (day[app] || 0) / 60;
+            var key = root.usageDate + "/" + app;
+            if (used >= lim && !root._usageNotified[key]) {
+                root._usageNotified[key] = true;
+                Quickshell.execDetached(["notify-send","-u","normal","-a","sea-shell","sea-shell",
+                    app + " is over its " + lim + " min limit — " + Math.round(used) + " min today"]);
+            }
+        }
+        if (!root.usageSummary) return;
+        // Fires on the first minute-tick at or after the chosen time, once per day. String
+        // compare is safe because both sides are zero-padded HH:mm.
+        var nowS = Qt.formatDateTime(new Date(), "HH:mm");
+        if (nowS >= root.usageSummaryTime && root._usageSummaryDone !== root.usageDate) {
+            root._usageSummaryDone = root.usageDate;
+            var rows = root.usageRows;
+            if (rows.length === 0) return;
+            var body = "";
+            for (var i = 0; i < Math.min(3, rows.length); i++)
+                body += (i ? "\n" : "") + rows[i].app + " — " + root.usageFmt(rows[i].secs);
+            Quickshell.execDetached(["notify-send","-a","sea-shell","sea-shell",
+                "Today: " + root.usageFmt(root.usageTotal) + " active\n" + body]);
+        }
+    }
+    Timer { interval: 60000; repeat: true; running: true
+        onTriggered: { root.usageFlush(); root.usageSave(); root.usageCheck(); } }
+
+    function usageFmt(s) {
+        s = Math.round(s);
+        if (s < 60) return s + "s";
+        var m = Math.floor(s / 60);
+        if (m < 60) return m + "m";
+        return Math.floor(m / 60) + "h " + (m % 60) + "m";
+    }
+    readonly property var usageRows: {
+        var day = root.usageAll[root.usageDate] || ({}), arr = [];
+        for (var k in day) arr.push({ app: k, secs: day[k] });
+        arr.sort(function (a, b) { return b.secs - a.secs });
+        return arr;
+    }
+    readonly property real usageTotal: {
+        var t = 0; for (var i = 0; i < root.usageRows.length; i++) t += root.usageRows[i].secs;
+        return t;
+    }
+
+    // ---------- pending package updates ----------
+    // The count comes from sea-updates.sh (checkupdates + paru -Qua). See that script for why
+    // `pacman -Qu` is not used: it reports against a possibly week-old sync db.
+    property int  updRepo: 0
+    property int  updAur: 0
+    readonly property int updTotal: root.updRepo + root.updAur
+    property var  updList: []                    // [{src:"R"|"A", name, old, nw}]
+    property bool updChecking: false
+    Process {
+        id: updProc
+        command: ["sh","-c","~/.config/quickshell/sea-shell/sea-updates.sh"]
+        onRunningChanged: root.updChecking = updProc.running
+        stdout: StdioCollector { id: updOut; onStreamFinished: {
+            var lines = updOut.text.split("\n"), out = [];
+            if (lines.length > 0) {
+                var h = lines[0].split("|");
+                root.updRepo = parseInt(h[0]) || 0;
+                root.updAur  = parseInt(h[1]) || 0;
+            }
+            for (var i = 1; i < lines.length; i++) {
+                var p = lines[i].split("|");
+                // `new` is reserved in JS, hence nw
+                if (p.length >= 4) out.push({ src: p[0], name: p[1], old: p[2], nw: p[3] });
+            }
+            root.updList = out;
+        } } }
+    // 30 minutes. checkupdates syncs a private db over the NETWORK — this is a real request to a
+    // mirror, not a local read — so a tight interval is rude for no gain. triggeredOnStart gives
+    // a count at login rather than a blank pill for the first half hour.
+    Timer { interval: 30 * 60 * 1000; repeat: true; running: root.cfgUpdates; triggeredOnStart: true
+        onTriggered: updProc.running = true }
+    function updRefresh() { updProc.running = true }
+    // Upgrades run in a terminal on purpose: pacman asks questions (replace this? keep that?) and
+    // a silent background upgrade that hits a prompt would hang forever with nothing to answer it.
+    function updRun() {
+        root.openPop = "";
+        Quickshell.execDetached(["sh","-c","kitty --hold sh -c 'paru -Syu; echo; echo done'"]);
+    }
+
+    // ---------- game mode ----------
+    // sea-gamemode.sh owns the SYSTEM side (effects, power profile, mpvpaper) and writes its
+    // state file; the bar owns DND and the indicator. One owner per setting — the script never
+    // touches root.dnd and the bar never touches blur, so neither can fight the other.
+    // Watching the file rather than only reacting to our own IPC means running the script from
+    // a terminal, a keybind or the panel all behave identically.
+    property bool gameOn: false
+    property bool gameWasDnd: false
+    Process { running: true
+        // create it if absent: a FileView cannot watch a path that has never existed
+        command: ["sh","-c","f=\"${XDG_RUNTIME_DIR:-/tmp}/sea-gamemode.json\"; [ -f \"$f\" ] || printf '{\"on\":false}' > \"$f\"; echo \"$f\""]
+        stdout: StdioCollector { id: gmPathOut; onStreamFinished: gmFile.path = gmPathOut.text.trim() } }
+    FileView {
+        id: gmFile; path: ""; watchChanges: true
+        function apply() { try {
+            reload();
+            var t = text(); if (!t || !t.trim()) return;
+            root.applyGame(!!JSON.parse(t).on);
+        } catch (e) {} }
+        onLoaded: apply()
+        onFileChanged: apply()
+    }
+    // Mirrors how the pomodoro handles DND: remember whether DND was ALREADY on, so leaving game
+    // mode does not un-silence notifications the user had deliberately silenced.
+    function applyGame(v) {
+        if (v === root.gameOn) return;
+        if (v) { root.gameWasDnd = root.dnd; root.setDnd(true); }
+        else if (!root.gameWasDnd) root.setDnd(false);
+        root.gameOn = v;
+    }
+    function toggleGame() { Quickshell.execDetached(["sh","-c","~/.config/quickshell/sea-shell/sea-gamemode.sh toggle"]) }
+    IpcHandler {
+        target: "game"
+        function toggle(): void { root.toggleGame() }
+        function on(): void { Quickshell.execDetached(["sh","-c","~/.config/quickshell/sea-shell/sea-gamemode.sh on"]) }
+        function off(): void { Quickshell.execDetached(["sh","-c","~/.config/quickshell/sea-shell/sea-gamemode.sh off"]) }
+    }
+
     // ---------- timers · pomodoro · world clock (all live in the clock dropdown) ----------
     // A single 1s driver runs both a plain countdown and the pomodoro state machine; when a
     // pomodoro cycle is engaged, phase transitions flip DND (focus = quiet) and post a heads-up.
@@ -1529,7 +1989,9 @@ ShellRoot {
     NotificationServer {
         id: notifServer
         keepOnReload: false
-        actionsSupported: false
+        // Apps only attach action buttons if the server advertises support, so this being false
+        // is why notifications here have always been text-only.
+        actionsSupported: true
         bodyImagesSupported: false
         bodyMarkupSupported: true
         imageSupported: true
@@ -1539,17 +2001,50 @@ ShellRoot {
             var entry = { key: k, summary: (n.summary||""), body: (n.body||""),
                           appName: app, urgency: n.urgency,
                           time: Qt.formatDateTime(new Date(), "HH:mm") };
+            // Actions live on the Notification object, and an UNTRACKED notification is released
+            // by the server the moment this handler returns — so the buttons would be dead by the
+            // time you could click one. Track ONLY notifications that actually have actions, and
+            // release them again on dismiss, so nothing is held longer than it is useful.
+            var acts = [];
+            try {
+                if (n.actions) for (var ai = 0; ai < n.actions.length; ai++)
+                    acts.push({ i: ai, t: ("" + (n.actions[ai].text || "")) });
+            } catch (e) {}
+            if (acts.length > 0) {
+                try { n.tracked = true; root.noteObjs[k] = n; } catch (e) { acts = []; }
+            }
+            entry.actions = acts;
             root.notes = [entry].concat(root.notes).slice(0, 40);
             root.saveNotes();
             // DND or a per-app mute swallows the popup but keeps the history entry;
             // critical (urgency 2) breaks through either way so alerts aren't lost.
             if ((!root.dnd && !root.isMuted(app)) || n.urgency === 2)
-                popupModel.insert(0, { key: k, summary: entry.summary, body: entry.body, appName: entry.appName, urg: n.urgency });
+                popupModel.insert(0, { key: k, summary: entry.summary, body: entry.body,
+                                       appName: entry.appName, urg: n.urgency,
+                                       // ListModel roles stay primitive; the array rides as JSON
+                                       acts: JSON.stringify(acts) });
             // not tracked → server releases it after this handler; we've copied the fields
         }
     }
-    function popDismiss(k) { for (var i=0;i<popupModel.count;i++) if (popupModel.get(i).key===k) { popupModel.remove(i); return } }
-    function noteClear() { root.notes = []; popupModel.clear(); root.saveNotes() }
+    // Live notification objects for entries that carry actions, keyed by our own sequence number.
+    // Deliberately NOT inside `notes` — that array is JSON.stringify'd to disk on every change,
+    // and a QObject in there would corrupt the history file.
+    property var noteObjs: ({})
+    function noteRelease(k) {
+        var n = root.noteObjs[k]; if (!n) return;
+        try { n.tracked = false; } catch (e) {}
+        delete root.noteObjs[k];
+    }
+    function noteInvoke(k, idx) {
+        var n = root.noteObjs[k];
+        try { if (n && n.actions && n.actions[idx]) n.actions[idx].invoke(); } catch (e) {}
+        root.popDismiss(k);
+    }
+    function popDismiss(k) { root.noteRelease(k); for (var i=0;i<popupModel.count;i++) if (popupModel.get(i).key===k) { popupModel.remove(i); return } }
+    function noteClear() {
+        for (var k in root.noteObjs) root.noteRelease(k);
+        root.notes = []; popupModel.clear(); root.saveNotes();
+    }
 
     // ---------- OSD (volume + brightness) ----------
     property string osdKind: ""      // "vol" | "bright" | ""
@@ -1618,9 +2113,9 @@ ShellRoot {
         signal moved(real v)
         implicitHeight: 20; implicitWidth: 150
         function clamp(v){ return Math.max(0,Math.min(1,v)) }
-        Rectangle { id: trk; anchors.verticalCenter: parent.verticalCenter; width: parent.width; height: 6; radius: 3; color: theme.a(theme.line,0.85)
-            Rectangle { width: trk.width*sl.clamp(sl.value); height: parent.height; radius: 3; color: sl.fill } }
-        Rectangle { width: 14; height: 14; radius: 7; border.width: 2; border.color: sl.fill; color: theme.frost
+        Rectangle { id: trk; anchors.verticalCenter: parent.verticalCenter; width: parent.width; height: 6; radius: Tok.r; color: theme.a(theme.line,0.85)
+            Rectangle { width: trk.width*sl.clamp(sl.value); height: parent.height; radius: Tok.r; color: sl.fill } }
+        Rectangle { width: 14; height: 14; radius: Tok.r; border.width: 2; border.color: sl.fill; color: theme.frost
             anchors.verticalCenter: parent.verticalCenter; x: (sl.width-width)*sl.clamp(sl.value) }
         MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
             onPressed: (e)=>{ var v=sl.clamp(e.x/sl.width); sl.value=v; sl.moved(v) }
@@ -1639,8 +2134,8 @@ ShellRoot {
                 text: label; color: theme.sub; font.pixelSize: 11; font.family: root.cfgFont }
             Text { anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
                 text: rightText; color: theme.text; font.pixelSize: 11; font.family: root.cfgFont; font.bold: true } }
-        Rectangle { width: parent.width; height: 6; radius: 3; color: theme.a(theme.line,0.85)
-            Rectangle { height: parent.height; radius: 3; color: barColor
+        Rectangle { width: parent.width; height: 6; radius: Tok.r; color: theme.a(theme.line,0.85)
+            Rectangle { height: parent.height; radius: Tok.r; color: barColor
                 width: parent.width * Math.max(0, Math.min(1, value/100))
                 Behavior on width { NumberAnimation { duration: 300; easing.type: Easing.OutCubic } } } }
     }
@@ -1700,7 +2195,7 @@ ShellRoot {
         // vanishes into the tile
         property color tint: theme.iris
         signal act()
-        implicitHeight: 32; radius: 9
+        implicitHeight: 32; radius: Tok.r
         color: !ka.enabled ? theme.a(theme.line, 0.22)
              : (kaMa.containsMouse ? theme.a(theme.iris, 0.22) : theme.a(theme.line, 0.5))
         border.width: 1
@@ -1838,8 +2333,15 @@ ShellRoot {
         readonly property int scrY: dw.screen ? dw.screen.y : 0
         // host size in NATIVE units. The host pill lives in the (scaled) bar, so its own
         // width/height are already native — no division needed.
-        readonly property real hostNW: dw.host ? (dw.host.width  || dw.host.implicitWidth)  : 0
-        readonly property real hostNH: dw.host ? (dw.host.height || dw.host.implicitHeight) : 0
+        //
+        // Read `width` ONLY. This used to be `width || implicitWidth`, and depending on both in
+        // one binding is what produced "Binding loop detected for hostNW/hostNH" twelve times
+        // over on every launch: an Item's width is itself bound to implicitWidth, so the
+        // expression sat on both ends of that link and re-entered whenever the pill resized.
+        // The fallback was never load-bearing — no Pill usage sets width, so it is always
+        // exactly implicitWidth; the `||` only ever covered the pre-layout frame.
+        readonly property real hostNW: dw.host ? dw.host.width  : 0
+        readonly property real hostNH: dw.host ? dw.host.height : 0
         // host top-left in this window's NATIVE coordinates. mapToGlobal returns physical px, so
         // divide by ui. On a layer surface mapToGlobal omits the surface's inset on its docked
         // axis — a right/bottom bar reads as flush to the monitor's left/top — so add it back
@@ -1895,23 +2397,14 @@ ShellRoot {
                 if (root.barVertical)          return Math.max(8, Math.min(dw.shN - dw.cardH - 8, dw.hostGY + dw.hostNH/2 - dw.cardH/2));
                 return dw.hostGY + dw.hostNH + 8 - slide;   // top bar
             }
-            radius: root.cfgRadius
-            gradient: Gradient {
-                GradientStop { position: 0.0; color: theme.a(theme.bg, Math.min(1, root.dropOpacity * 1.10)) }
-                GradientStop { position: 1.0; color: theme.a(theme.bg, root.dropOpacity * 0.92) }
-            }
-            border.width: 1; border.color: theme.a(theme.frost, 0.26)
-            // matte-glass rim — a whisper of light at the top edge fading out, matching the
-            // launcher card. Children draw above the fill but below the content columns.
-            Rectangle {
-                anchors.fill: parent; radius: parent.radius
-                gradient: Gradient {
-                    GradientStop { position: 0.0;  color: Qt.rgba(1, 1, 1, theme.light ? 0.10 : 0.05) }
-                    GradientStop { position: 0.32; color: "transparent" }
-                }
-            }
-            Rectangle { anchors { top: parent.top; left: parent.left; right: parent.right; topMargin: 1; leftMargin: parent.radius; rightMargin: parent.radius }
-                height: 1; color: Qt.rgba(1, 1, 1, theme.light ? 0.45 : 0.12) }
+            radius: Tok.rCard
+            // Flat, and translucent in step with the bar: dropOpacity tracks cfgOpacity so the
+            // cards and the bar read as one material. What was removed is the DECORATION that
+            // used to ride on top — a two-stop gradient, a "matte-glass" rim and a white
+            // highlight hairline, three stacked layers imitating frosted glass. The see-through
+            // is the feature; the fake glass was not.
+            color: Tok.alpha(Tok.surface, root.dropOpacity)
+            border.width: 1; border.color: Tok.ruleHard
         }
     }
 
@@ -1935,8 +2428,10 @@ ShellRoot {
             property bool revealed: false
             property bool barHover: false
             readonly property bool fsActive: {
-                var t = Hyprland.activeToplevel;
-                return !!(t && t.lastIpcObject && t.lastIpcObject.fullscreen);
+                try {
+                    var t = Hyprland.activeToplevel;
+                    return !!(t && t.lastIpcObject && t.lastIpcObject.fullscreen);
+                } catch(e) { return false; }
             }
             // the bar auto-hides when the user turned it on, or when configured to hide on fullscreen
             readonly property bool autoHiding: root.cfgAutoHide || (root.cfgHideFullscreen && bar.fsActive)
@@ -2001,11 +2496,14 @@ ShellRoot {
                 height: barInset.height / bar.ui
                 transformOrigin: Item.TopLeft
                 scale: bar.ui
-                radius: root.cfgRadius
+                radius: Tok.rCard
+                // The opacity slider stays live — a see-through bar is a deliberate feature here
+                // (at 0% the fill and outline both vanish and only the chips remain), so it is
+                // left alone. The rim is the part that changes: a hairline rule rather than an
+                // accent tint, so the accent goes back to marking active state only.
                 color: theme.a(root.barFillColor, root.cfgOpacity)
-                // at 0% opacity the fill vanishes and so does the outline — only the chips remain
                 border.width: root.cfgOpacity < 0.06 ? 0 : 1
-                border.color: theme.a(theme.iris, 0.30 * Math.min(1, root.cfgOpacity / 0.5))
+                border.color: Tok.ruleHard
 
                 Item {
                     id: horizontalBarLayout
@@ -2065,7 +2563,7 @@ ShellRoot {
                                 // active workspace grows along the bar's long axis
                                 width:  foc ? 36 : 24
                                 height: 24
-                                radius: 12   // circle → pill when active
+                                radius: Tok.r   // circle → pill when active
                                 color: foc ? theme.iris : theme.a(theme.line,0.55)
                                 border.width: 1; border.color: foc ? theme.frost : theme.a(theme.iris,0.18)
                                 Behavior on width  { NumberAnimation { duration: 180; easing.type: Easing.OutBack } }
@@ -2081,7 +2579,15 @@ ShellRoot {
                         property string lid: "lgTitle"; x: leftGroup.xFor(lid); anchors.verticalCenter: parent.verticalCenter
                         width: Math.min(implicitWidth, 130); elide: Text.ElideRight
                         color: theme.faint; font.pixelSize: 12; font.family: root.cfgFont
-                        text: (Hyprland.activeToplevel && Hyprland.activeToplevel.lastIpcObject) ? (Hyprland.activeToplevel.lastIpcObject.class || "") : ""
+                        text: {
+                            try {
+                                var t = Hyprland.activeToplevel;
+                                if (!t) return "";
+                                if (t.lastIpcObject && t.lastIpcObject.class) return "" + t.lastIpcObject.class;
+                                if (t.wayland && t.wayland.appId) return "" + t.wayland.appId;
+                                return "";
+                            } catch(e) { return ""; }
+                        }
                     }
                 }
 
@@ -2128,7 +2634,7 @@ ShellRoot {
                             Repeater { model: root.players.length
                                 delegate: Rectangle { required property int index
                                     property bool cur: index === Math.min(root.playerSel, root.players.length-1)
-                                    width: pcTxt.width + 18; height: 20; radius: 10
+                                    width: pcTxt.width + 18; height: 20; radius: Tok.r
                                     color: cur ? theme.a(theme.iris,0.28) : (pcMa.containsMouse ? theme.a(theme.iris,0.14) : theme.a(theme.line,0.5))
                                     border.width: 1; border.color: cur ? theme.iris : theme.a(theme.line,0.9)
                                     Text { id: pcTxt; anchors.centerIn: parent; text: (root.players[index].identity||"player").toLowerCase()
@@ -2138,7 +2644,7 @@ ShellRoot {
 
                         // art + track info
                         Row { width: parent.width; spacing: 13
-                            Rectangle { width: 84; height: 84; radius: 12; color: theme.a(theme.line,0.6); clip: true
+                            Rectangle { width: 84; height: 84; radius: Tok.r; color: theme.a(theme.line,0.6); clip: true
                                 border.width: 1; border.color: theme.a(theme.iris,0.35)
                                 Image { anchors.fill: parent; asynchronous: true; fillMode: Image.PreserveAspectCrop
                                     source: (root.player && root.player.trackArtUrl) ? root.player.trackArtUrl : ""; visible: status===Image.Ready }
@@ -2207,9 +2713,9 @@ ShellRoot {
                         // seekable progress
                         Column { width: parent.width; spacing: 4; visible: root.player && root.player.length>0
                             Item { width: parent.width; height: 14
-                                Rectangle { id: seekTrack; anchors.verticalCenter: parent.verticalCenter; width: parent.width; height: seekMa.containsMouse||seekMa.pressed ? 7 : 5; radius: 4; color: theme.a(theme.line,0.85)
+                                Rectangle { id: seekTrack; anchors.verticalCenter: parent.verticalCenter; width: parent.width; height: seekMa.containsMouse||seekMa.pressed ? 7 : 5; radius: Tok.r; color: theme.a(theme.line,0.85)
                                     Behavior on height { NumberAnimation { duration: 90 } }
-                                    Rectangle { height: parent.height; radius: 4; color: theme.iris
+                                    Rectangle { height: parent.height; radius: Tok.r; color: theme.iris
                                         width: parent.width * (root.player && root.player.length>0 ? Math.max(0,Math.min(1, root.mprisPos/root.player.length)) : 0) } }
                                 MouseArea { id: seekMa; anchors.fill: parent; hoverEnabled: true
                                     cursorShape: (root.player && root.player.canSeek) ? Qt.PointingHandCursor : Qt.ArrowCursor
@@ -2224,20 +2730,20 @@ ShellRoot {
 
                         // controls: shuffle · prev · play · next · loop
                         Row { anchors.horizontalCenter: parent.horizontalCenter; spacing: 10
-                            Rectangle { width: 34; height: 34; radius: 17; visible: root.player ? root.player.shuffleSupported : false
+                            Rectangle { width: 34; height: 34; radius: Tok.r; visible: root.player ? root.player.shuffleSupported : false
                                 color: sh.containsMouse ? theme.a(theme.iris,0.2) : "transparent"
                                 Sym { anchors.centerIn: parent; text: "shuffle"; sz: 18; color: (root.player&&root.player.shuffle) ? theme.iris : theme.faint }
                                 MouseArea { id: sh; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: if(root.player) root.player.shuffle = !root.player.shuffle } }
-                            Rectangle { width: 38; height: 38; radius: 19; color: pv.containsMouse?theme.a(theme.iris,0.2):"transparent"
+                            Rectangle { width: 38; height: 38; radius: Tok.r; color: pv.containsMouse?theme.a(theme.iris,0.2):"transparent"
                                 Sym { anchors.centerIn: parent; text: "skip_previous"; sz: 22; color: (root.player&&root.player.canGoPrevious)?theme.frost:theme.faint }
                                 MouseArea { id: pv; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: if(root.player) root.player.previous() } }
-                            Rectangle { width: 46; height: 46; radius: 23; color: pp.containsMouse?theme.iris:theme.a(theme.iris,0.22); border.width: 1; border.color: theme.iris
+                            Rectangle { width: 46; height: 46; radius: Tok.r; color: pp.containsMouse?theme.iris:theme.a(theme.iris,0.22); border.width: 1; border.color: theme.iris
                                 Sym { anchors.centerIn: parent; text: (root.player&&root.player.isPlaying)?"pause":"play_arrow"; sz: 26; color: pp.containsMouse?theme.bg:theme.frost }
                                 MouseArea { id: pp; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: if(root.player) root.player.togglePlaying() } }
-                            Rectangle { width: 38; height: 38; radius: 19; color: nx.containsMouse?theme.a(theme.iris,0.2):"transparent"
+                            Rectangle { width: 38; height: 38; radius: Tok.r; color: nx.containsMouse?theme.a(theme.iris,0.2):"transparent"
                                 Sym { anchors.centerIn: parent; text: "skip_next"; sz: 22; color: (root.player&&root.player.canGoNext)?theme.frost:theme.faint }
                                 MouseArea { id: nx; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: if(root.player) root.player.next() } }
-                            Rectangle { width: 34; height: 34; radius: 17; visible: root.player ? root.player.loopSupported : false
+                            Rectangle { width: 34; height: 34; radius: Tok.r; visible: root.player ? root.player.loopSupported : false
                                 color: lp.containsMouse ? theme.a(theme.iris,0.2) : "transparent"
                                 Sym { anchors.centerIn: parent; sz: 18
                                     text: (root.player&&root.player.loopState===MprisLoopState.Track) ? "repeat_one" : "repeat"
@@ -2259,7 +2765,7 @@ ShellRoot {
 
                         // details (left) + lyrics (right) toggles — each panel opens BESIDE the card as a sidecar
                         Row { width: parent.width; spacing: 8; height: 26
-                            Rectangle { width: (parent.width-8)/2; height: 26; radius: 8
+                            Rectangle { width: (parent.width-8)/2; height: 26; radius: Tok.r
                                 color: dtMa.containsMouse ? theme.a(theme.iris,0.14) : theme.a(theme.line,0.4)
                                 border.width: 1; border.color: root.infoOpen ? theme.a(theme.iris,0.5) : theme.a(theme.line,0.9)
                                 Row { anchors.centerIn: parent; spacing: 6
@@ -2268,7 +2774,7 @@ ShellRoot {
                                         color: root.infoOpen ? theme.text : theme.sub; font.pixelSize: 10; font.family: root.cfgFont } }
                                 MouseArea { id: dtMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
                                     onClicked: root.infoOpen = !root.infoOpen } }
-                            Rectangle { width: (parent.width-8)/2; height: 26; radius: 8
+                            Rectangle { width: (parent.width-8)/2; height: 26; radius: Tok.r
                                 color: lyMa.containsMouse ? theme.a(theme.iris,0.14) : theme.a(theme.line,0.4)
                                 border.width: 1; border.color: root.lyricsOpen ? theme.a(theme.iris,0.5) : theme.a(theme.line,0.9)
                                 Row { anchors.centerIn: parent; spacing: 6
@@ -2288,8 +2794,8 @@ ShellRoot {
                         x: (mprisDrop.card.x + mprisDrop.card.width + 10 + width > mprisDrop.swN - 8)
                            ? mprisDrop.card.x - width - 10 : mprisDrop.card.x + mprisDrop.card.width + 10
                         y: mprisDrop.card.y
-                        radius: root.cfgRadius; color: theme.a(theme.bg, root.dropOpacity)
-                        border.width: 1; border.color: theme.a(theme.iris,0.34)
+                        radius: Tok.rCard; color: Tok.alpha(Tok.surface, root.dropOpacity)
+                        border.width: 1; border.color: Tok.ruleHard
                         Column { anchors.fill: parent; anchors.margins: 13; spacing: 8
                             Row { width: parent.width; spacing: 6
                                 Sym { anchors.verticalCenter: parent.verticalCenter; text: "lyrics"; sz: 15; color: theme.iris }
@@ -2333,8 +2839,8 @@ ShellRoot {
                         x: (mprisDrop.card.x - 10 - width < 8)
                            ? mprisDrop.card.x + mprisDrop.card.width + 10 : mprisDrop.card.x - width - 10
                         y: mprisDrop.card.y
-                        radius: root.cfgRadius; color: theme.a(theme.bg, root.dropOpacity)
-                        border.width: 1; border.color: theme.a(theme.iris,0.34)
+                        radius: Tok.rCard; color: Tok.alpha(Tok.surface, root.dropOpacity)
+                        border.width: 1; border.color: Tok.ruleHard
                         Column { id: detailsCol; anchors.fill: parent; anchors.margins: 14; spacing: 10
                             Row { width: parent.width; spacing: 6
                                 Sym { anchors.verticalCenter: parent.verticalCenter; text: "info"; sz: 15; color: theme.iris }
@@ -2342,7 +2848,7 @@ ShellRoot {
                             Rectangle { width: parent.width; height: 1; color: theme.a(theme.iris,0.2) }
                             // large album art
                             Rectangle { anchors.horizontalCenter: parent.horizontalCenter
-                                width: Math.min(parent.width, 150); height: width; radius: 12; clip: true
+                                width: Math.min(parent.width, 150); height: width; radius: Tok.r; clip: true
                                 color: theme.a(theme.line,0.6); border.width: 1; border.color: theme.a(theme.iris,0.3)
                                 Image { anchors.fill: parent; asynchronous: true; fillMode: Image.PreserveAspectCrop
                                     source: (root.player && root.player.trackArtUrl) ? root.player.trackArtUrl : ""; visible: status===Image.Ready }
@@ -2450,7 +2956,7 @@ ShellRoot {
                         horizontalItemAlignment: Grid.AlignHCenter; verticalItemAlignment: Grid.AlignVCenter
                         visible: root.cfgTray && SystemTray.items.values.length > 0
                         // collapse / expand toggle
-                        Rectangle { width: 16; height: 16; radius: 4
+                        Rectangle { width: 16; height: 16; radius: Tok.r
                             visible: SystemTray.items.values.length > 0
                             color: tcm.containsMouse ? theme.a(theme.iris,0.18) : "transparent"
                             Sym { anchors.centerIn: parent; text: root.trayCollapsed ? "chevron_left" : "chevron_right"; sz: 12; color: theme.sub }
@@ -2459,13 +2965,18 @@ ShellRoot {
                             horizontalItemAlignment: Grid.AlignHCenter; verticalItemAlignment: Grid.AlignVCenter
                             Repeater { model: SystemTray.items
                                 delegate: Item { id: trayItem; required property SystemTrayItem modelData; width: 18; height: 18
-                                    Image { width: 36; height: 36; anchors.centerIn: parent; scale: 0.5; asynchronous: true; source: trayItem.modelData.icon; sourceSize.width: 96; sourceSize.height: 96; smooth: true; mipmap: true; fillMode: Image.PreserveAspectFit }
+                                    Image { width: 36; height: 36; anchors.centerIn: parent; scale: 0.5; asynchronous: true
+                                        source: { try { return (trayItem.modelData && trayItem.modelData.icon) ? trayItem.modelData.icon : "" } catch(e) { return "" } }
+                                        sourceSize.width: 96; sourceSize.height: 96; smooth: true; mipmap: true; fillMode: Image.PreserveAspectFit }
                                     MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; acceptedButtons: Qt.LeftButton|Qt.RightButton
                                         onClicked: (e)=>{
-                                            if (e.button===Qt.LeftButton) { trayItem.modelData.activate(); return }
-                                            // one shared menu window → opening a 2nd icon replaces it, same icon toggles
-                                            if (root.openPop==="tray" && bar.trayHost===trayItem) { root.openPop=""; return }
-                                            bar.trayHost = trayItem; bar.trayMenuSel = trayItem.modelData; root.openBar = bar; root.openPop = "tray" } }
+                                            try {
+                                                if (!trayItem.modelData) return;
+                                                if (e.button===Qt.LeftButton) { trayItem.modelData.activate(); return }
+                                                if (root.openPop==="tray" && bar.trayHost===trayItem) { root.openPop=""; return }
+                                                bar.trayHost = trayItem; bar.trayMenuSel = trayItem.modelData; root.openBar = bar; root.openPop = "tray"
+                                            } catch(err) { root.openPop=""; }
+                                        } }
                                 } } } }
 
                     // ---- shared tray menu: ONE blurable layer-surface Drop (sea-shell:drop),
@@ -2488,6 +2999,27 @@ ShellRoot {
                         property string wid: "wgClipboard"; x: rightGroup.xFor(wid); anchors.verticalCenter: parent.verticalCenter
                         visible: root.cfgClipboard
                         onClicked: { root.openPop = ""; launcher.open(";") } }
+
+                    // ---- PENDING UPDATES ----
+                    Pill { owner: bar; id: updPill; key: "upd"
+                        property string wid: "wgUpdates"; x: rightGroup.xFor(wid); anchors.verticalCenter: parent.verticalCenter
+                        visible: root.cfgUpdates
+                        icon: root.updTotal > 0 ? "system_update_alt" : "task_alt"
+                        accent: root.updTotal > 0 ? theme.warn : theme.frost
+                        value: root.updTotal > 0 ? String(root.updTotal) : "" }
+
+                    // ---- NETWORK THROUGHPUT ----
+                    // No dropdown: the pill IS the readout, and the per-interface detail lives in
+                    // the Dashboard where there is room for it. Clicking opens Network settings.
+                    Pill { owner: bar; id: netPill; key: ""
+                        property string wid: "wgNet"; x: rightGroup.xFor(wid); anchors.verticalCenter: parent.verticalCenter
+                        visible: root.cfgNet
+                        icon: "swap_vert"
+                        accent: (root.netRx + root.netTx) > 262144 ? theme.iris : theme.frost
+                        value: root.netFmt(root.netRx) + "  " + root.netFmt(root.netTx)
+                        vertValue: root.netFmt(root.netRx + root.netTx)
+                        maxTextW: 140
+                        onClicked: root.openSettings(2) }
 
                     // ---- NOTIFICATION CENTER (bell + badge) ----
                     Pill { owner: bar; id: bellPill; key: "notif"
@@ -2648,6 +3180,75 @@ ShellRoot {
                 // (columns:1) bar would insert screen-tall gaps. They anchor to their host by id, so
                 // their parent doesn't matter — parking them here keeps the Grid pill-only.
                 Item { id: rightGroupDrops
+                    // ---- UPDATES dropdown: what is pending, and one button to install it ----
+                    Drop { screen: bar.screen
+                        id: updDrop; host: updPill; shown: root.openPop === "upd" && root.openBar === bar
+                        cardW: 340; cardH: updCol.implicitHeight + 30
+                        Column { id: updCol; anchors.fill: updDrop.card; anchors.margins: 15; spacing: 10
+                            Row { width: parent.width
+                                Text { text: "updates"; color: theme.iris; font.pixelSize: 11; font.family: root.cfgFont; font.bold: true; font.letterSpacing: 0.8 }
+                                Item { width: parent.width - 120; height: 1 }
+                                Text { text: root.updChecking ? "checking…" : (root.updRepo + " repo · " + root.updAur + " aur")
+                                    color: theme.faint; font.pixelSize: 10; font.family: Tok.mono } }
+                            Rectangle { width: parent.width; height: 1; color: theme.a(theme.iris, 0.16) }
+
+                            Text { visible: root.updTotal === 0 && !root.updChecking
+                                text: "everything is up to date"; color: theme.sub; font.pixelSize: 12; font.family: root.cfgFont }
+
+                            // Capped, but the footer says by how much — a list that silently stops
+                            // at 12 reads as "12 updates" when it might be 90.
+                            Column { width: parent.width; spacing: 5
+                                Repeater {
+                                    model: Math.min(12, root.updList.length)
+                                    delegate: Row {
+                                        required property int index
+                                        readonly property var u: root.updList[index]
+                                        width: updCol.width; spacing: 7
+                                        Rectangle {
+                                            anchors.verticalCenter: parent.verticalCenter
+                                            width: 15; height: 13; radius: Tok.rSmall
+                                            color: u.src === "A" ? theme.a(theme.warn, 0.22) : theme.a(theme.iris, 0.18)
+                                            border.width: 1; border.color: u.src === "A" ? theme.a(theme.warn, 0.5) : theme.a(theme.iris, 0.35)
+                                            Text { anchors.centerIn: parent; text: u.src; font.pixelSize: 8; font.family: Tok.mono
+                                                color: u.src === "A" ? theme.warn : theme.iris } }
+                                        Text { anchors.verticalCenter: parent.verticalCenter
+                                            width: 150; elide: Text.ElideRight
+                                            text: u.name; color: theme.text; font.pixelSize: 11; font.family: Tok.mono }
+                                        Text { anchors.verticalCenter: parent.verticalCenter
+                                            width: 130; elide: Text.ElideLeft; horizontalAlignment: Text.AlignRight
+                                            text: u.nw; color: theme.sub; font.pixelSize: 10; font.family: Tok.mono }
+                                    }
+                                }
+                            }
+                            Text { visible: root.updList.length > 12
+                                text: "+" + (root.updList.length - 12) + " more not shown"
+                                color: theme.faint; font.pixelSize: 10; font.family: Tok.mono }
+
+                            Row { width: parent.width; spacing: 8
+                                Rectangle { width: (parent.width - 8) * 0.62; height: 34; radius: Tok.r
+                                    color: updGoMa.containsMouse ? theme.iris : theme.a(theme.iris, 0.22)
+                                    border.width: 1; border.color: theme.iris
+                                    opacity: root.updTotal > 0 ? 1 : 0.45
+                                    Row { anchors.centerIn: parent; spacing: 7
+                                        Sym { anchors.verticalCenter: parent.verticalCenter; text: "download"; sz: 15
+                                            color: updGoMa.containsMouse ? Tok.accentInk : theme.frost }
+                                        Text { anchors.verticalCenter: parent.verticalCenter; text: "update now"
+                                            color: updGoMa.containsMouse ? Tok.accentInk : theme.text; font.pixelSize: 12; font.family: root.cfgFont } }
+                                    MouseArea { id: updGoMa; anchors.fill: parent; hoverEnabled: true
+                                        enabled: root.updTotal > 0
+                                        cursorShape: Qt.PointingHandCursor; onClicked: root.updRun() } }
+                                Rectangle { width: (parent.width - 8) * 0.38; height: 34; radius: Tok.r
+                                    color: updReMa.containsMouse ? theme.a(theme.iris, 0.18) : theme.a(theme.line, 0.4)
+                                    border.width: 1; border.color: theme.a(theme.iris, 0.16)
+                                    Row { anchors.centerIn: parent; spacing: 6
+                                        Sym { anchors.verticalCenter: parent.verticalCenter; text: "refresh"; sz: 15; color: theme.frost }
+                                        Text { anchors.verticalCenter: parent.verticalCenter; text: "check"; color: theme.sub; font.pixelSize: 11; font.family: root.cfgFont } }
+                                    MouseArea { id: updReMa; anchors.fill: parent; hoverEnabled: true
+                                        cursorShape: Qt.PointingHandCursor; onClicked: root.updRefresh() } }
+                            }
+                        }
+                    }
+
                     // ---- CONTROL CENTER dropdown: quick toggles + power profile ----
                     Drop { screen: bar.screen
                         id: ccDrop; host: root.barVertical ? ccPillVert : ccPill; shown: root.openPop === "cc" && root.openBar === bar
@@ -2663,12 +3264,13 @@ ShellRoot {
                                         { k: "dnd",  onI: "do_not_disturb_on", offI: "do_not_disturb_off", l: "Do not disturb" },
                                         { k: "wifi", onI: "wifi",             offI: "wifi_off",          l: "Wi-Fi" },
                                         { k: "bt",   onI: "bluetooth",        offI: "bluetooth_disabled", l: "Bluetooth" },
-                                        { k: "night", onI: "nightlight",      offI: "nightlight",        l: "Night light" }
+                                        { k: "night", onI: "nightlight",      offI: "nightlight",        l: "Night light" },
+                                        { k: "game", onI: "sports_esports",   offI: "sports_esports",    l: "Game mode" }
                                     ]
                                     delegate: Rectangle {
                                         required property var modelData
                                         readonly property bool on: root.ccActive(modelData.k)
-                                        width: (parent.width - 8) / 2; height: 50; radius: 10
+                                        width: (parent.width - 8) / 2; height: 50; radius: Tok.r
                                         color: on ? theme.a(theme.iris, 0.22) : theme.a(theme.line, 0.4)
                                         border.width: 1; border.color: on ? theme.iris : theme.a(theme.iris, 0.14)
                                         Behavior on color { ColorAnimation { duration: 120 } }
@@ -2687,7 +3289,7 @@ ShellRoot {
                                     delegate: Rectangle {
                                         required property var modelData
                                         readonly property bool sel: root.powerProfile === modelData.k
-                                        width: (parent.width - 12) / 3; height: 44; radius: 9
+                                        width: (parent.width - 12) / 3; height: 44; radius: Tok.r
                                         color: sel ? theme.iris : theme.a(theme.line, 0.4); border.width: 1; border.color: sel ? theme.iris : theme.a(theme.iris, 0.14)
                                         Behavior on color { ColorAnimation { duration: 120 } }
                                         Column { anchors.centerIn: parent; spacing: 2
@@ -2698,7 +3300,7 @@ ShellRoot {
                                 }
                             }
                             // shortcut to full settings
-                            Rectangle { width: parent.width; height: 38; radius: 9
+                            Rectangle { width: parent.width; height: 38; radius: Tok.r
                                 color: ccSetMa.containsMouse ? theme.a(theme.iris, 0.18) : theme.a(theme.line, 0.4)
                                 border.width: 1; border.color: theme.a(theme.iris, 0.16)
                                 Row { anchors.centerIn: parent; spacing: 8
@@ -2746,21 +3348,30 @@ ShellRoot {
                                 MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { root.openPop=""; root.openSettings(3) } } } } }
                     Drop { screen: bar.screen
                         id: trayDrop; host: bar.trayHost
-                        shown: root.openPop ==="tray" && root.openBar === bar && bar.trayHost !== null
+                        shown: root.openPop ==="tray" && root.openBar === bar && bar.trayHost !== null && bar.trayMenuSel !== null
                         cardW: 230; cardH: Math.max(30, tmCol.implicitHeight + 12)
-                        QsMenuOpener { id: trayMenu; menu: bar.trayMenuSel ? bar.trayMenuSel.menu : null }
+                        QsMenuOpener { id: trayMenu; menu: { try { return (bar.trayMenuSel && bar.trayMenuSel.menu) ? bar.trayMenuSel.menu : null } catch(e) { return null } } }
                         Column { id: tmCol; anchors.fill: trayDrop.card; anchors.margins: 6; spacing: 1
-                            Text { visible: trayMenu.children.values.length===0; text: "no menu"; color: theme.faint; font.pixelSize: 11; font.family: root.cfgFont; leftPadding: 6; topPadding: 4 }
-                            Repeater { model: trayMenu.children
+                            Text {
+                                // A block-bodied binding cannot be followed by `;` on the same line —
+                                // QML parses that as a stray statement ("Unexpected token ;") and the
+                                // WHOLE config fails to load. Keep the block on its own lines.
+                                visible: {
+                                    try { return !trayMenu.children || !trayMenu.children.values || trayMenu.children.values.length === 0 }
+                                    catch (e) { return true }
+                                }
+                                text: "no menu"; color: theme.faint; font.pixelSize: 11; font.family: root.cfgFont; leftPadding: 6; topPadding: 4
+                            }
+                            Repeater { model: { try { return trayMenu.children ? trayMenu.children : [] } catch(e) { return [] } }
                                 delegate: Rectangle { required property var modelData
-                                    width: parent.width; height: modelData.isSeparator ? 7 : 28; radius: 6
-                                    color: (!modelData.isSeparator && em.containsMouse) ? theme.a(theme.iris,0.16) : "transparent"
-                                    Rectangle { visible: modelData.isSeparator; anchors.verticalCenter: parent.verticalCenter; x: 5; width: parent.width-10; height: 1; color: theme.a(theme.line,0.8) }
-                                    Row { visible: !modelData.isSeparator; anchors.fill: parent; anchors.leftMargin: 9; anchors.rightMargin: 9; spacing: 8
-                                        Text { anchors.verticalCenter: parent.verticalCenter; text: modelData.text||""; color: modelData.enabled?theme.text:theme.faint; font.pixelSize: 12; font.family: root.cfgFont; elide: Text.ElideRight; width: parent.width-22 }
-                                        Sym { anchors.verticalCenter: parent.verticalCenter; visible: modelData.hasChildren; text: "chevron_right"; sz: 14; color: theme.sub } }
-                                    MouseArea { id: em; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; enabled: !modelData.isSeparator
-                                        onClicked: { if(!modelData.hasChildren){ modelData.triggered(); root.openPop="" } } } } } } }
+                                    width: parent.width; height: (modelData && modelData.isSeparator) ? 7 : 28; radius: Tok.r
+                                    color: (modelData && !modelData.isSeparator && em.containsMouse) ? theme.a(theme.iris,0.16) : "transparent"
+                                    Rectangle { visible: !!(modelData && modelData.isSeparator); anchors.verticalCenter: parent.verticalCenter; x: 5; width: parent.width-10; height: 1; color: theme.a(theme.line,0.8) }
+                                    Row { visible: !!(modelData && !modelData.isSeparator); anchors.fill: parent; anchors.leftMargin: 9; anchors.rightMargin: 9; spacing: 8
+                                        Text { anchors.verticalCenter: parent.verticalCenter; text: (modelData && modelData.text) ? modelData.text : ""; color: (modelData && modelData.enabled)?theme.text:theme.faint; font.pixelSize: 12; font.family: root.cfgFont; elide: Text.ElideRight; width: parent.width-22 }
+                                        Sym { anchors.verticalCenter: parent.verticalCenter; visible: !!(modelData && modelData.hasChildren); text: "chevron_right"; sz: 14; color: theme.sub } }
+                                    MouseArea { id: em; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; enabled: !!(modelData && !modelData.isSeparator)
+                                        onClicked: { try { if(modelData && !modelData.hasChildren){ modelData.triggered(); root.openPop="" } } catch(e) { root.openPop=""; } } } } } } }
                     Drop { screen: bar.screen
                         id: notifDrop; host: root.barVertical ? bellPillVert : bellPill; shown: root.openPop ==="notif" && root.openBar === bar
                         cardW: 350; cardH: Math.min(460, notifCol.implicitHeight + 28)
@@ -2772,7 +3383,7 @@ ShellRoot {
                                 Row { anchors.verticalCenter: parent.verticalCenter; anchors.right: parent.right; spacing: 6
                                     // Do Not Disturb toggle
                                     Rectangle { anchors.verticalCenter: parent.verticalCenter
-                                        width: dndRow.width + 16; height: 22; radius: 6
+                                        width: dndRow.width + 16; height: 22; radius: Tok.r
                                         color: root.dnd ? theme.a(theme.warn, 0.2) : (dndMa.containsMouse ? theme.a(theme.line, 0.75) : theme.a(theme.line, 0.5))
                                         border.width: 1; border.color: root.dnd ? theme.a(theme.warn, 0.5) : "transparent"
                                         Row { id: dndRow; anchors.centerIn: parent; spacing: 4
@@ -2782,7 +3393,7 @@ ShellRoot {
                                     // clear all
                                     Rectangle { anchors.verticalCenter: parent.verticalCenter
                                         visible: root.notes.length > 0
-                                        width: clrTxt.implicitWidth + 16; height: 22; radius: 6
+                                        width: clrTxt.implicitWidth + 16; height: 22; radius: Tok.r
                                         color: clrMa.containsMouse ? theme.a(theme.bad, 0.18) : theme.a(theme.line, 0.5)
                                         Text { id: clrTxt; anchors.centerIn: parent; text: "clear all"; color: clrMa.containsMouse ? theme.bad : theme.sub; font.pixelSize: 10; font.family: root.cfgFont }
                                         MouseArea { id: clrMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.noteClear() } } } }
@@ -2794,7 +3405,7 @@ ShellRoot {
                                 Flow { width: parent.width; spacing: 5
                                     Repeater { model: root.mutedApps
                                         delegate: Rectangle { required property var modelData
-                                            height: 20; radius: 6; width: mchip.implicitWidth + 16
+                                            height: 20; radius: Tok.r; width: mchip.implicitWidth + 16
                                             color: mchMa.containsMouse ? theme.a(theme.warn,0.22) : theme.a(theme.warn,0.13)
                                             border.width: 1; border.color: theme.a(theme.warn,0.35)
                                             Row { id: mchip; anchors.centerIn: parent; spacing: 4
@@ -2807,7 +3418,7 @@ ShellRoot {
                             Flickable { width: parent.width; height: Math.min(390, listCol.implicitHeight); contentHeight: listCol.implicitHeight; clip: true; boundsBehavior: Flickable.StopAtBounds; visible: root.notes.length>0
                                 Column { id: listCol; width: parent.width; spacing: 6
                                     Repeater { model: root.notes
-                                        delegate: Rectangle { required property var modelData; width: listCol.width; radius: 10
+                                        delegate: Rectangle { required property var modelData; width: listCol.width; radius: Tok.r
                                             implicitHeight: ec.implicitHeight + 16; color: theme.a(theme.line,0.38)
                                             border.width: 1; border.color: modelData.urgency===2 ? theme.a(theme.bad,0.45) : theme.a(theme.iris,0.12)
                                             Column { id: ec; anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top; anchors.margins: 10; spacing: 3
@@ -2816,7 +3427,7 @@ ShellRoot {
                                                         text: modelData.appName; color: theme.frost; font.pixelSize: 10; font.family: root.cfgFont; elide: Text.ElideRight; width: parent.width - 46 - 26; font.bold: true }
                                                     // mute-this-app toggle
                                                     Rectangle { id: noteMute; anchors.right: noteTime.left; anchors.rightMargin: 6; anchors.verticalCenter: parent.verticalCenter
-                                                        width: 18; height: 16; radius: 5
+                                                        width: 18; height: 16; radius: Tok.r
                                                         readonly property bool m: root.isMuted(modelData.appName)
                                                         color: nmMa.containsMouse ? theme.a(theme.warn,0.2) : "transparent"
                                                         Sym { anchors.centerIn: parent; text: noteMute.m ? "notifications_off" : "notifications_active"; sz: 12; color: noteMute.m ? theme.warn : theme.faint }
@@ -2835,32 +3446,45 @@ ShellRoot {
                                 Text { anchors.verticalCenter: parent.verticalCenter; anchors.left: parent.left
                                     text: "wi-fi"; color: theme.iris; font.pixelSize: 11; font.family: root.cfgFont; font.bold: true; font.letterSpacing: 0.8 }
                                 Rectangle { anchors.verticalCenter: parent.verticalCenter; anchors.right: parent.right
-                                    width: 26; height: 26; radius: 8
+                                    width: 26; height: 26; radius: Tok.r
                                     color: rfm.containsMouse ? theme.a(theme.iris,0.18) : "transparent"
                                     Sym { anchors.centerIn: parent; text: "refresh"; sz: 15; color: theme.sub }
-                                    MouseArea { id: rfm; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: { wifiScan.running = true; wifiStatus.running = true } } } }
+                                    MouseArea { id: rfm; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.wifiRescan(true) } } }
                             Rectangle { width: parent.width; height: 1; color: theme.a(theme.line, 0.6) }
                             Item { height: 2; width: 1 }
                             Repeater { model: root.wifiList
                                 delegate: Column { id: netRow; required property var modelData; width: parent.width; spacing: 3
                                     readonly property bool asking: root.wifiPwFor === netRow.modelData.ssid
-                                    Rectangle { width: parent.width; height: 34; radius: 8
+                                    readonly property bool saved: root.wifiSaved.indexOf(netRow.modelData.ssid) >= 0
+                                    Rectangle { width: parent.width; height: 34; radius: Tok.r
                                         color: netRow.modelData.active ? theme.a(theme.iris,0.18) : (netRow.asking ? theme.a(theme.iris,0.10) : (wm.containsMouse ? theme.a(theme.line,0.45) : "transparent"))
                                         border.width: netRow.modelData.active ? 1 : 0; border.color: theme.a(theme.iris,0.3)
+                                        // base click zone sits UNDER the forget hitbox
+                                        MouseArea { id: wm; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                            onClicked: { if(netRow.modelData.active) return; if(netRow.asking) root.wifiPwFor=""; else root.wifiConnect(netRow.modelData.ssid, netRow.modelData.secure) } }
                                         Row { anchors.fill: parent; anchors.leftMargin: 10; anchors.rightMargin: 10; spacing: 8
                                             Sym { anchors.verticalCenter: parent.verticalCenter; text: netRow.modelData.signal>66?"signal_wifi_4_bar":netRow.modelData.signal>33?"network_wifi_3_bar":"network_wifi_1_bar"; sz: 16; color: netRow.modelData.active?theme.iris:theme.frost }
-                                            Text { anchors.verticalCenter: parent.verticalCenter; width: parent.width-64; elide: Text.ElideRight; text: netRow.modelData.ssid; color: netRow.modelData.active ? theme.text : theme.sub; font.pixelSize: 12; font.family: root.cfgFont; font.bold: netRow.modelData.active }
+                                            Text { anchors.verticalCenter: parent.verticalCenter; width: parent.width - 64 - (netRow.saved ? 46 : 0); elide: Text.ElideRight; text: netRow.modelData.ssid; color: netRow.modelData.active ? theme.text : theme.sub; font.pixelSize: 12; font.family: root.cfgFont; font.bold: netRow.modelData.active }
+                                            // knowing a network is remembered explains why it joins without asking
+                                            IndChip { anchors.verticalCenter: parent.verticalCenter; visible: netRow.saved && !netRow.modelData.active; text: "saved" }
                                             Sym { anchors.verticalCenter: parent.verticalCenter; text: netRow.modelData.active?"check_circle":"lock"; sz: 13; color: netRow.modelData.active?theme.good:theme.a(theme.faint,0.6); visible: netRow.modelData.secure||netRow.modelData.active } }
-                                        MouseArea { id: wm; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
-                                            onClicked: { if(netRow.modelData.active) return; if(netRow.asking) root.wifiPwFor=""; else root.wifiConnect(netRow.modelData.ssid, netRow.modelData.secure) } } }
+                                        // forget — only for remembered networks, and only on hover so it can't be hit by accident
+                                        Rectangle {
+                                            anchors.verticalCenter: parent.verticalCenter; anchors.right: parent.right; anchors.rightMargin: 6
+                                            width: 24; height: 24; radius: Tok.rSmall
+                                            visible: netRow.saved && wm.containsMouse || fgm.containsMouse
+                                            color: fgm.containsMouse ? theme.a(theme.bad, 0.22) : "transparent"
+                                            Sym { anchors.centerIn: parent; text: "delete"; sz: 14; color: fgm.containsMouse ? theme.bad : theme.faint }
+                                            MouseArea { id: fgm; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                                onClicked: root.wifiForget(netRow.modelData.ssid) } } }
                                     // inline password field
                                     Row { width: parent.width; height: 34; visible: netRow.asking; spacing: 6
-                                        Rectangle { width: parent.width-42; height: 32; radius: 8; color: theme.a(theme.line,0.5); border.width: 1; border.color: pwIn.activeFocus?theme.iris:theme.a(theme.iris,0.2)
+                                        Rectangle { width: parent.width-42; height: 32; radius: Tok.r; color: theme.a(theme.line,0.5); border.width: 1; border.color: pwIn.activeFocus?theme.iris:theme.a(theme.iris,0.2)
                                             TextInput { id: pwIn; anchors.fill: parent; anchors.leftMargin: 10; anchors.rightMargin: 10; verticalAlignment: TextInput.AlignVCenter
                                                 echoMode: TextInput.Password; color: theme.text; font.pixelSize: 12; font.family: root.cfgFont; clip: true; focus: netRow.asking
                                                 onAccepted: root.wifiJoin(netRow.modelData.ssid, text)
                                                 Text { anchors.verticalCenter: parent.verticalCenter; visible: pwIn.text===""; text: "password ↵"; color: theme.faint; font.pixelSize: 12; font.family: root.cfgFont } } }
-                                        Rectangle { width: 36; height: 32; radius: 8; color: jm.containsMouse?theme.iris:theme.a(theme.iris,0.2); border.width: 1; border.color: theme.iris
+                                        Rectangle { width: 36; height: 32; radius: Tok.r; color: jm.containsMouse?theme.iris:theme.a(theme.iris,0.2); border.width: 1; border.color: theme.iris
                                             Sym { anchors.centerIn: parent; text: "arrow_forward"; sz: 14; color: jm.containsMouse?theme.bg:theme.frost }
                                             MouseArea { id: jm; anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.wifiJoin(netRow.modelData.ssid, pwIn.text) } } } } }
                             Text { visible: root.wifiList.length===0; text: "scanning…"; color: theme.faint; font.pixelSize: 11; font.family: root.cfgFont; topPadding: 4 }
@@ -2882,11 +3506,11 @@ ShellRoot {
                                         text: "· " + root.warpMode; color: theme.faint; font.pixelSize: 10; font.family: root.cfgFont } }
                                 // WARP toggle switch
                                 Rectangle { anchors.verticalCenter: parent.verticalCenter; anchors.right: parent.right
-                                    width: 36; height: 20; radius: 10
+                                    width: 36; height: 20; radius: Tok.r
                                     color: root.warpConnected ? theme.good : theme.a(theme.line, 0.85)
                                     border.width: 1; border.color: root.warpConnected ? theme.a(theme.good,0.5) : theme.a(theme.iris,0.3)
                                     Behavior on color { ColorAnimation { duration: 120 } }
-                                    Rectangle { width: 15; height: 15; radius: 8; color: theme.frost; anchors.verticalCenter: parent.verticalCenter
+                                    Rectangle { width: 15; height: 15; radius: Tok.r; color: theme.frost; anchors.verticalCenter: parent.verticalCenter
                                         x: root.warpConnected ? 19 : 2; Behavior on x { NumberAnimation { duration: 130 } } }
                                     MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.warpToggle() } } }
 
@@ -2895,7 +3519,7 @@ ShellRoot {
                                 Repeater { model: ["warp","doh","warp+doh","tunnel_only"]
                                     delegate: Rectangle { required property var modelData
                                         readonly property bool cur: root.warpMode === modelData
-                                        height: 20; radius: 5; width: modeTxt.implicitWidth + 14
+                                        height: 20; radius: Tok.r; width: modeTxt.implicitWidth + 14
                                         color: cur ? theme.a(theme.good,0.2) : (modeMa.containsMouse ? theme.a(theme.line,0.5) : theme.a(theme.line,0.3))
                                         border.width: cur ? 1 : 0; border.color: theme.a(theme.good,0.4)
                                         Text { id: modeTxt; anchors.centerIn: parent
@@ -2923,11 +3547,11 @@ ShellRoot {
                                             color: connecting ? theme.frost : (failed ? theme.bad : theme.good)
                                             font.pixelSize: 9; font.family: root.cfgFont; leftPadding: 21 } }
                                     Rectangle { anchors.verticalCenter: parent.verticalCenter; anchors.right: parent.right
-                                        width: 36; height: 20; radius: 10
+                                        width: 36; height: 20; radius: Tok.r
                                         color: modelData.active ? theme.iris : (connecting ? theme.a(theme.frost, 0.4) : theme.a(theme.line, 0.85))
                                         border.width: 1; border.color: modelData.active ? theme.a(theme.iris,0.5) : (connecting ? theme.a(theme.frost,0.3) : theme.a(theme.iris,0.3))
                                         Behavior on color { ColorAnimation { duration: 120 } }
-                                        Rectangle { width: 15; height: 15; radius: 8; color: theme.frost; anchors.verticalCenter: parent.verticalCenter
+                                        Rectangle { width: 15; height: 15; radius: Tok.r; color: theme.frost; anchors.verticalCenter: parent.verticalCenter
                                             x: modelData.active ? 19 : 2; Behavior on x { NumberAnimation { duration: 130 } } }
                                         MouseArea { anchors.fill: parent; cursorShape: connecting ? Qt.ArrowCursor : Qt.PointingHandCursor
                                             onClicked: if (!connecting) root.vpnToggle(modelData.name) } } } } } }
@@ -2940,20 +3564,20 @@ ShellRoot {
                                 Text { anchors.verticalCenter: parent.verticalCenter; anchors.left: parent.left
                                     text: "bluetooth"; color: theme.iris; font.pixelSize: 11; font.family: root.cfgFont; font.bold: true; font.letterSpacing: 0.8 }
                                 Row { anchors.verticalCenter: parent.verticalCenter; anchors.right: parent.right; spacing: 6
-                                    Rectangle { width: 26; height: 26; radius: 8
+                                    Rectangle { width: 26; height: 26; radius: Tok.r
                                         color: btScanMa.containsMouse ? theme.a(theme.iris,0.18) : "transparent"
                                         Sym { anchors.centerIn: parent; text: (root.btAdapter&&root.btAdapter.discovering)?"sync":"search"; sz: 15; color: theme.sub }
                                         MouseArea { id: btScanMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: if(root.btAdapter) root.btAdapter.discovering = !root.btAdapter.discovering } }
                                     // power toggle
-                                    Rectangle { width: 36; height: 20; radius: 10; anchors.verticalCenter: undefined
+                                    Rectangle { width: 36; height: 20; radius: Tok.r; anchors.verticalCenter: undefined
                                         color: (root.btAdapter&&root.btAdapter.enabled)?theme.iris:theme.a(theme.line,0.85); border.width: 1; border.color: theme.a(theme.iris,0.3)
-                                        Rectangle { width: 15; height: 15; radius: 8; color: theme.frost; anchors.verticalCenter: parent.verticalCenter
+                                        Rectangle { width: 15; height: 15; radius: Tok.r; color: theme.frost; anchors.verticalCenter: parent.verticalCenter
                                             x: (root.btAdapter&&root.btAdapter.enabled)?19:2; Behavior on x { NumberAnimation { duration: 130 } } }
                                         MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: if(root.btAdapter) root.btAdapter.enabled = !root.btAdapter.enabled } } } }
                             Rectangle { width: parent.width; height: 1; color: theme.a(theme.line, 0.6) }
                             Item { height: 2; width: 1 }
                             Repeater { model: root.btDevices
-                                delegate: Rectangle { required property var modelData; width: parent.width; height: 36; radius: 8
+                                delegate: Rectangle { required property var modelData; width: parent.width; height: 36; radius: Tok.r
                                     color: modelData.connected ? theme.a(theme.iris,0.18) : (dm.containsMouse ? theme.a(theme.line,0.45) : "transparent")
                                     border.width: modelData.connected ? 1 : 0; border.color: theme.a(theme.iris,0.3)
                                     Row { anchors.fill: parent; anchors.leftMargin: 10; anchors.rightMargin: 10; spacing: 8
@@ -2978,12 +3602,12 @@ ShellRoot {
                                 Text { anchors.verticalCenter: parent.verticalCenter; anchors.left: parent.left
                                     text: "kde connect"; color: theme.iris; font.pixelSize: 11; font.family: root.cfgFont; font.bold: true; font.letterSpacing: 0.8 }
                                 Row { anchors.verticalCenter: parent.verticalCenter; anchors.right: parent.right; spacing: 2
-                                    Rectangle { width: 26; height: 26; radius: 8
+                                    Rectangle { width: 26; height: 26; radius: Tok.r
                                         color: kdeRfMa.containsMouse ? theme.a(theme.iris,0.18) : "transparent"
                                         Sym { anchors.centerIn: parent; text: "refresh"; sz: 15; color: theme.sub }
                                         MouseArea { id: kdeRfMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
                                             onClicked: { kdeWatch.running = false; kdeWatch.running = true } } }
-                                    Rectangle { width: 26; height: 26; radius: 8
+                                    Rectangle { width: 26; height: 26; radius: Tok.r
                                         color: kdeSetMa.containsMouse ? theme.a(theme.iris,0.18) : "transparent"
                                         Sym { anchors.centerIn: parent; text: "settings"; sz: 15; color: theme.sub }
                                         MouseArea { id: kdeSetMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
@@ -2994,11 +3618,11 @@ ShellRoot {
                                 Repeater { model: root.kdeDevices
                                     delegate: Rectangle { required property var modelData
                                         readonly property bool sel: kdeCol.dev && kdeCol.dev.id === modelData.id
-                                        height: 22; radius: 6; width: chipTxt.width + 26
+                                        height: 22; radius: Tok.r; width: chipTxt.width + 26
                                         color: sel ? theme.a(theme.iris,0.24) : (chipMa.containsMouse ? theme.a(theme.line,0.6) : theme.a(theme.line,0.32))
                                         border.width: 1; border.color: sel ? theme.a(theme.iris,0.5) : "transparent"
                                         Row { anchors.centerIn: parent; spacing: 5
-                                            Rectangle { width: 6; height: 6; radius: 3; anchors.verticalCenter: parent.verticalCenter
+                                            Rectangle { width: 6; height: 6; radius: Tok.r; anchors.verticalCenter: parent.verticalCenter
                                                 color: !modelData.isReachable ? theme.a(theme.faint,0.55) : (modelData.isPaired ? theme.good : theme.warn) }
                                             // capped so one long hostname can't push the switcher to three rows
                                             Text { id: chipTxt; anchors.verticalCenter: parent.verticalCenter; text: modelData.name
@@ -3007,14 +3631,14 @@ ShellRoot {
                                         MouseArea { id: chipMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
                                             onClicked: root.kdeSel = modelData.id } } } }
                             // The device itself
-                            Rectangle { width: parent.width; radius: 10; visible: kdeCol.dev !== null
+                            Rectangle { width: parent.width; radius: Tok.r; visible: kdeCol.dev !== null
                                 implicitHeight: devCol.implicitHeight + 20
                                 color: theme.a(theme.line, 0.32); border.width: 1
                                 border.color: root.kdeActive ? theme.a(theme.iris,0.35) : theme.a(theme.iris,0.12)
                                 Column { id: devCol; anchors.left: parent.left; anchors.right: parent.right
                                     anchors.top: parent.top; anchors.margins: 10; spacing: 9
                                     Row { width: parent.width; spacing: 9
-                                        Rectangle { width: 34; height: 34; radius: 10; anchors.verticalCenter: parent.verticalCenter
+                                        Rectangle { width: 34; height: 34; radius: Tok.r; anchors.verticalCenter: parent.verticalCenter
                                             color: root.kdeActive ? theme.a(theme.iris,0.2) : theme.a(theme.line,0.5)
                                             Sym { anchors.centerIn: parent; sz: 19; text: root.kdeIcon(kdeCol.dev)
                                                 color: root.kdeActive ? theme.iris : theme.faint } }
@@ -3144,7 +3768,7 @@ ShellRoot {
                             Item { height: 4; width: 1 }
                             // Volume slider row
                             Row { width: parent.width; spacing: 10; height: 32
-                                Rectangle { width: 28; height: 28; radius: 8; anchors.verticalCenter: parent.verticalCenter
+                                Rectangle { width: 28; height: 28; radius: Tok.r; anchors.verticalCenter: parent.verticalCenter
                                     color: volMuteMa.containsMouse ? theme.a(theme.iris,0.15) : "transparent"
                                     Sym { anchors.centerIn: parent; text: (volPill.au&&volPill.au.muted)?"volume_off":"volume_up"; sz: 17; color: (volPill.au&&volPill.au.muted)?theme.bad:theme.frost }
                                     MouseArea { id: volMuteMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: if(volPill.au) volPill.au.muted=!volPill.au.muted } }
@@ -3156,7 +3780,7 @@ ShellRoot {
                             Item { height: 1; width: 1 }
                             Repeater { model: root.sinks
                                 delegate: Rectangle { required property var modelData; readonly property bool cur: Pipewire.defaultAudioSink && Pipewire.defaultAudioSink.id===modelData.id
-                                    width: parent.width; height: 32; radius: 8
+                                    width: parent.width; height: 32; radius: Tok.r
                                     color: cur ? theme.a(theme.iris,0.18) : (sm.containsMouse?theme.a(theme.line,0.45):"transparent")
                                     border.width: cur ? 1 : 0; border.color: theme.a(theme.iris,0.3)
                                     Row { anchors.fill: parent; anchors.leftMargin: 10; anchors.rightMargin: 10; spacing: 8
@@ -3171,7 +3795,7 @@ ShellRoot {
                                 Repeater { model: root.audioBtSink ? root.audioBtSink.bt_codecs : []
                                     delegate: Rectangle { required property var modelData
                                         readonly property bool on: modelData.active
-                                        implicitHeight: 24; implicitWidth: ccT.implicitWidth + 18; radius: 7
+                                        implicitHeight: 24; implicitWidth: ccT.implicitWidth + 18; radius: Tok.r
                                         color: on ? theme.a(theme.iris, 0.25) : (ccMa.containsMouse ? theme.a(theme.line, 0.55) : theme.a(theme.line, 0.32))
                                         border.width: 1; border.color: on ? theme.a(theme.iris, 0.55) : theme.a(theme.iris, 0.14)
                                         Text { id: ccT; anchors.centerIn: parent; text: modelData.codec; color: on ? theme.iris : theme.sub; font.pixelSize: 10; font.family: root.cfgFont; font.bold: on }
@@ -3191,7 +3815,7 @@ ShellRoot {
                                         Text { anchors.verticalCenter: parent.verticalCenter; width: parent.width - 22 - appChip.width - 16; elide: Text.ElideRight
                                             text: root.streamName(modelData); color: theme.sub; font.pixelSize: 11; font.family: root.cfgFont }
                                         Rectangle { id: appChip; anchors.verticalCenter: parent.verticalCenter
-                                            implicitWidth: acRow.implicitWidth + 14; height: 20; radius: 6
+                                            implicitWidth: acRow.implicitWidth + 14; height: 20; radius: Tok.r
                                             color: acMa.containsMouse ? theme.a(theme.iris, 0.28) : theme.a(theme.iris, 0.14); border.width: 1; border.color: theme.a(theme.iris, 0.28)
                                             Row { id: acRow; anchors.centerIn: parent; spacing: 3
                                                 Sym { anchors.verticalCenter: parent.verticalCenter; text: "arrow_forward"; sz: 11; color: theme.frost }
@@ -3222,7 +3846,7 @@ ShellRoot {
                             Item { height: 2; width: 1 }
                             Repeater { model: [{k:"performance",i:"speed",l:"Performance"},{k:"balanced",i:"balance",l:"Balanced"},{k:"power-saver",i:"eco",l:"Power Saver"}]
                                 delegate: Rectangle { required property var modelData; readonly property bool cur: root.powerProfile===modelData.k
-                                    width: parent.width; height: 34; radius: 8
+                                    width: parent.width; height: 34; radius: Tok.r
                                     color: cur ? theme.a(theme.iris,0.18) : (bm.containsMouse?theme.a(theme.line,0.45):"transparent")
                                     border.width: cur ? 1 : 0; border.color: theme.a(theme.iris,0.3)
                                     Row { anchors.fill: parent; anchors.leftMargin: 10; anchors.rightMargin: 10; spacing: 10
@@ -3265,7 +3889,7 @@ ShellRoot {
                                             var dateStr = calCol.yr + "-" + String(calCol.mo + 1).padStart(2, "0") + "-" + String(modelData).padStart(2, "0");
                                             return root.calEvents.some(function(e) { return e.date === dateStr; });
                                         }
-                                        width: 34; height: 26; radius: 7
+                                        width: 34; height: 26; radius: Tok.r
                                         color: isToday ? theme.iris : (hasEvent ? theme.a(theme.iris, 0.13) : "transparent")
                                         border.width: (hasEvent && !isToday) ? 1 : 0; border.color: theme.a(theme.frost, 0.4)
                                         Text { anchors.centerIn: parent; text: parent.modelData; color: parent.isToday ? theme.bg : theme.text; font.pixelSize: 12; font.family: root.cfgFont; font.bold: parent.isToday }
@@ -3290,7 +3914,7 @@ ShellRoot {
                                         required property var modelData
                                         readonly property string rel: root.calRel(modelData.date)
                                         readonly property bool soon: evRow.rel === "today" || evRow.rel === "tomorrow"
-                                        width: parent.width; height: 34; radius: 7
+                                        width: parent.width; height: 34; radius: Tok.r
                                         color: evRow.soon ? theme.a(theme.iris, 0.12) : "transparent"
                                         Row {
                                             anchors.fill: parent; anchors.leftMargin: 7; anchors.rightMargin: 8; spacing: 9
@@ -3326,19 +3950,19 @@ ShellRoot {
                                             width: parent.width * (root.tmrTotal>0 ? Math.max(0,Math.min(1, 1 - root.tmrRemain/root.tmrTotal)) : 0)
                                             color: (root.pomoActive && root.pomoPhase!=="focus") ? theme.good : theme.iris; Behavior on width { NumberAnimation { duration: 300 } } } }
                                     Row { width: parent.width; spacing: 6
-                                        Rectangle { width: (parent.width - (root.pomoActive?12:6))/(root.pomoActive?3:2); height: 30; radius: 8
+                                        Rectangle { width: (parent.width - (root.pomoActive?12:6))/(root.pomoActive?3:2); height: 30; radius: Tok.r
                                             color: tpMa.containsMouse ? theme.a(theme.iris,0.25) : theme.a(theme.line,0.4); border.width:1; border.color: theme.a(theme.iris,0.2)
                                             Row { anchors.centerIn: parent; spacing: 5
                                                 Sym { anchors.verticalCenter: parent.verticalCenter; text: root.tmrPaused?"play_arrow":"pause"; sz: 14; color: theme.frost }
                                                 Text { anchors.verticalCenter: parent.verticalCenter; text: root.tmrPaused?"resume":"pause"; color: theme.text; font.pixelSize: 11; font.family: root.cfgFont } }
                                             MouseArea { id: tpMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.tmrToggle() } }
-                                        Rectangle { visible: root.pomoActive; width: (parent.width - 12)/3; height: 30; radius: 8
+                                        Rectangle { visible: root.pomoActive; width: (parent.width - 12)/3; height: 30; radius: Tok.r
                                             color: tsMa.containsMouse ? theme.a(theme.iris,0.25) : theme.a(theme.line,0.4); border.width:1; border.color: theme.a(theme.iris,0.2)
                                             Row { anchors.centerIn: parent; spacing: 5
                                                 Sym { anchors.verticalCenter: parent.verticalCenter; text: "skip_next"; sz: 14; color: theme.frost }
                                                 Text { anchors.verticalCenter: parent.verticalCenter; text: "skip"; color: theme.text; font.pixelSize: 11; font.family: root.cfgFont } }
                                             MouseArea { id: tsMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.pomoSkip() } }
-                                        Rectangle { width: root.pomoActive ? (parent.width-12)/3 : (parent.width-6)/2; height: 30; radius: 8
+                                        Rectangle { width: root.pomoActive ? (parent.width-12)/3 : (parent.width-6)/2; height: 30; radius: Tok.r
                                             color: txMa.containsMouse ? theme.a(theme.bad,0.22) : theme.a(theme.line,0.4); border.width:1; border.color: theme.a(theme.bad,0.25)
                                             Row { anchors.centerIn: parent; spacing: 5
                                                 Sym { anchors.verticalCenter: parent.verticalCenter; text: "stop"; sz: 14; color: theme.bad }
@@ -3349,11 +3973,11 @@ ShellRoot {
                                 Column { width: parent.width; spacing: 6; visible: !root.tmrRunning
                                     Flow { width: parent.width; spacing: 5
                                         Repeater { model: [1,5,10,15,25]
-                                            delegate: Rectangle { required property var modelData; height: 28; radius: 7; width: (parent.width - 4*5)/5
+                                            delegate: Rectangle { required property var modelData; height: 28; radius: Tok.r; width: (parent.width - 4*5)/5
                                                 color: qcMa.containsMouse ? theme.a(theme.iris,0.2) : theme.a(theme.line,0.4); border.width:1; border.color: theme.a(theme.iris,0.16)
                                                 Text { anchors.centerIn: parent; text: modelData+"m"; color: theme.text; font.pixelSize: 11; font.family: root.cfgFont; font.bold: true }
                                                 MouseArea { id: qcMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.timerStartMin(modelData) } } } }
-                                    Rectangle { width: parent.width; height: 34; radius: 8
+                                    Rectangle { width: parent.width; height: 34; radius: Tok.r
                                         color: psMa.containsMouse ? theme.iris : theme.a(theme.iris,0.22); border.width:1; border.color: theme.iris
                                         Row { anchors.centerIn: parent; spacing: 7
                                             Sym { anchors.verticalCenter: parent.verticalCenter; text: "local_fire_department"; sz: 16; color: psMa.containsMouse?theme.bg:theme.frost }
@@ -3363,24 +3987,24 @@ ShellRoot {
                                     Row { width: parent.width; spacing: 8
                                         Row { spacing: 3
                                             Text { anchors.verticalCenter: parent.verticalCenter; text: "focus"; color: theme.faint; font.pixelSize: 10; font.family: root.cfgFont }
-                                            Rectangle { width: 20; height: 20; radius: 6; color: fmMa.containsMouse?theme.a(theme.iris,0.2):theme.a(theme.line,0.4)
+                                            Rectangle { width: 20; height: 20; radius: Tok.r; color: fmMa.containsMouse?theme.a(theme.iris,0.2):theme.a(theme.line,0.4)
                                                 Sym { anchors.centerIn: parent; text: "remove"; sz: 12; color: theme.frost }
                                                 MouseArea { id: fmMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: { root.pomoFocusMin = Math.max(5, root.pomoFocusMin-5); root.tmrSaveCfg() } } }
                                             Text { anchors.verticalCenter: parent.verticalCenter; width: 22; horizontalAlignment: Text.AlignHCenter; text: root.pomoFocusMin; color: theme.text; font.pixelSize: 11; font.family: root.cfgFont; font.bold: true }
-                                            Rectangle { width: 20; height: 20; radius: 6; color: fpMa.containsMouse?theme.a(theme.iris,0.2):theme.a(theme.line,0.4)
+                                            Rectangle { width: 20; height: 20; radius: Tok.r; color: fpMa.containsMouse?theme.a(theme.iris,0.2):theme.a(theme.line,0.4)
                                                 Sym { anchors.centerIn: parent; text: "add"; sz: 12; color: theme.frost }
                                                 MouseArea { id: fpMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: { root.pomoFocusMin = Math.min(120, root.pomoFocusMin+5); root.tmrSaveCfg() } } } }
                                         Row { spacing: 3
                                             Text { anchors.verticalCenter: parent.verticalCenter; text: "break"; color: theme.faint; font.pixelSize: 10; font.family: root.cfgFont }
-                                            Rectangle { width: 20; height: 20; radius: 6; color: bmMa.containsMouse?theme.a(theme.iris,0.2):theme.a(theme.line,0.4)
+                                            Rectangle { width: 20; height: 20; radius: Tok.r; color: bmMa.containsMouse?theme.a(theme.iris,0.2):theme.a(theme.line,0.4)
                                                 Sym { anchors.centerIn: parent; text: "remove"; sz: 12; color: theme.frost }
                                                 MouseArea { id: bmMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: { root.pomoBreakMin = Math.max(1, root.pomoBreakMin-1); root.tmrSaveCfg() } } }
                                             Text { anchors.verticalCenter: parent.verticalCenter; width: 22; horizontalAlignment: Text.AlignHCenter; text: root.pomoBreakMin; color: theme.text; font.pixelSize: 11; font.family: root.cfgFont; font.bold: true }
-                                            Rectangle { width: 20; height: 20; radius: 6; color: bpMa.containsMouse?theme.a(theme.iris,0.2):theme.a(theme.line,0.4)
+                                            Rectangle { width: 20; height: 20; radius: Tok.r; color: bpMa.containsMouse?theme.a(theme.iris,0.2):theme.a(theme.line,0.4)
                                                 Sym { anchors.centerIn: parent; text: "add"; sz: 12; color: theme.frost }
                                                 MouseArea { id: bpMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: { root.pomoBreakMin = Math.min(60, root.pomoBreakMin+1); root.tmrSaveCfg() } } } }
                                         Item { width: 2; height: 1 }
-                                        Rectangle { anchors.verticalCenter: parent.verticalCenter; width: 26; height: 22; radius: 7
+                                        Rectangle { anchors.verticalCenter: parent.verticalCenter; width: 26; height: 22; radius: Tok.r
                                             color: root.pomoDnd ? theme.a(theme.iris,0.25) : theme.a(theme.line,0.4); border.width:1; border.color: root.pomoDnd?theme.a(theme.iris,0.5):theme.a(theme.line,0.9)
                                             Sym { anchors.centerIn: parent; text: root.pomoDnd?"notifications_off":"notifications"; sz: 13; color: root.pomoDnd?theme.iris:theme.faint }
                                             MouseArea { anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: { root.pomoDnd = !root.pomoDnd; root.tmrSaveCfg() } } } } } }
@@ -3392,7 +4016,7 @@ ShellRoot {
                                     Text { anchors.left: parent.left; anchors.verticalCenter: parent.verticalCenter
                                         text: "WORLD CLOCK"; color: theme.frost; font.pixelSize: 9; font.family: root.cfgFont; font.bold: true; font.letterSpacing: 1 } }
                                 Repeater { model: root.wcTimes
-                                    delegate: Rectangle { required property var modelData; width: parent.width; height: 28; radius: 7
+                                    delegate: Rectangle { required property var modelData; width: parent.width; height: 28; radius: Tok.r
                                         color: wcm.containsMouse ? theme.a(theme.line,0.4) : "transparent"
                                         Row { anchors.fill: parent; anchors.leftMargin: 8; anchors.rightMargin: 8; spacing: 8
                                             Sym { anchors.verticalCenter: parent.verticalCenter; text: "public"; sz: 13; color: theme.faint }
@@ -3401,7 +4025,7 @@ ShellRoot {
                                             Text { anchors.verticalCenter: parent.verticalCenter; text: modelData.time; color: theme.frost; font.pixelSize: 12; font.family: root.cfgFont; font.bold: true } }
                                         MouseArea { id: wcm; anchors.fill: parent; hoverEnabled: true; acceptedButtons: Qt.NoButton }
                                         Rectangle { anchors.right: parent.right; anchors.rightMargin: 3; anchors.verticalCenter: parent.verticalCenter; visible: wcm.containsMouse
-                                            width: 20; height: 20; radius: 6; color: theme.a(theme.bad,0.22)
+                                            width: 20; height: 20; radius: Tok.r; color: theme.a(theme.bad,0.22)
                                             Sym { anchors.centerIn: parent; text: "close"; sz: 12; color: theme.bad }
                                             MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.wcRemove(modelData.zone) } } } }
                                 Text { visible: root.wcTimes.length===0; text: "add a city below"; color: theme.faint; font.pixelSize: 10; font.family: root.cfgFont }
@@ -3409,7 +4033,7 @@ ShellRoot {
                                     Repeater { model: root.wcPresets
                                         delegate: Rectangle { required property var modelData
                                             visible: root.wcZones.indexOf(modelData.z) < 0
-                                            height: 22; radius: 6; width: visible ? (wcAddRow.implicitWidth + 14) : 0
+                                            height: 22; radius: Tok.r; width: visible ? (wcAddRow.implicitWidth + 14) : 0
                                             color: wcaMa.containsMouse ? theme.a(theme.iris,0.2) : theme.a(theme.line,0.35); border.width: 1; border.color: theme.a(theme.iris,0.18)
                                             Row { id: wcAddRow; anchors.centerIn: parent; spacing: 3
                                                 Sym { anchors.verticalCenter: parent.verticalCenter; text: "add"; sz: 11; color: theme.frost }
@@ -3439,7 +4063,7 @@ ShellRoot {
                                                {i:"power_settings_new",l:"shut down",c:"systemctl poweroff",col:theme.bad,danger:true}]
                                 delegate: Rectangle { required property var modelData
                                     readonly property bool arming: pwrDrop.confirmL === modelData.l
-                                    width: parent.width; height: 34; radius: 8
+                                    width: parent.width; height: 34; radius: Tok.r
                                     color: arming ? theme.a(theme.bad,0.18) : (pw.containsMouse ? theme.a(theme.iris,0.16) : "transparent")
                                     border.width: arming ? 1 : 0; border.color: theme.a(theme.bad,0.6)
                                     Row { anchors.fill: parent; anchors.leftMargin: 10; spacing: 10
@@ -3481,7 +4105,7 @@ ShellRoot {
                         // Workspace list (vertical switcher)
                         Column {
                             spacing: 6
-                            anchors.horizontalCenter: parent.horizontalCenter
+                            Layout.alignment: Qt.AlignHCenter
                             Repeater {
                                 model: Hyprland.workspaces
                                 delegate: Rectangle {
@@ -3489,7 +4113,7 @@ ShellRoot {
                                     readonly property bool foc: Hyprland.focusedWorkspace && Hyprland.focusedWorkspace.id === modelData.id
                                     width: 24
                                     height: foc ? 36 : 24
-                                    radius: 12
+                                    radius: Tok.r
                                     color: foc ? theme.iris : theme.a(theme.line, 0.55)
                                     border.width: 1; border.color: foc ? theme.frost : theme.a(theme.iris, 0.18)
                                     Behavior on height { NumberAnimation { duration: 180; easing.type: Easing.OutBack } }
@@ -3509,7 +4133,7 @@ ShellRoot {
                         // Media pill (Vertical variant)
                         Rectangle {
                             id: mprisPillVert
-                            width: 32; height: 32; radius: 16
+                            width: 32; height: 32; radius: Tok.r
                             color: theme.a(theme.line, 0.45); border.width: 1; border.color: theme.a(theme.iris, 0.22)
                             visible: root.cfgMpris && root.player !== null
                             Sym { anchors.centerIn: parent; text: "music_note"; sz: 16; color: theme.frost }
@@ -3523,7 +4147,7 @@ ShellRoot {
                         // System monitor pill (Vertical variant)
                         Rectangle {
                             id: sysPillVert
-                            width: 32; height: 32; radius: 16
+                            width: 32; height: 32; radius: Tok.r
                             color: theme.a(theme.line, 0.45); border.width: 1; border.color: theme.a(theme.iris, 0.22)
                             visible: root.cfgSystem
                             Sym { anchors.centerIn: parent; text: "speed"; sz: 16; color: theme.frost }
@@ -3546,7 +4170,7 @@ ShellRoot {
                             spacing: 4
                             Layout.alignment: Qt.AlignHCenter
                             Rectangle {
-                                width: 22; height: 22; radius: 11
+                                width: 22; height: 22; radius: Tok.r
                                 color: theme.a(theme.line, 0.4)
                                 Sym { anchors.centerIn: parent; text: root.trayCollapsed ? "expand_less" : "expand_more"; sz: 12; color: theme.sub }
                                 MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.trayCollapsed = !root.trayCollapsed }
@@ -3562,16 +4186,19 @@ ShellRoot {
                                         width: 18; height: 18
                                         Image {
                                             width: 36; height: 36; anchors.centerIn: parent; scale: 0.5
-                                            asynchronous: true; source: trayItemVert.modelData.icon
+                                            asynchronous: true; source: { try { return (trayItemVert.modelData && trayItemVert.modelData.icon) ? trayItemVert.modelData.icon : "" } catch(e) { return "" } }
                                             sourceSize.width: 96; sourceSize.height: 96; smooth: true; mipmap: true
                                             fillMode: Image.PreserveAspectFit
                                         }
                                         MouseArea {
                                             anchors.fill: parent; cursorShape: Qt.PointingHandCursor; acceptedButtons: Qt.LeftButton|Qt.RightButton
                                             onClicked: (e)=>{
-                                                if (e.button===Qt.LeftButton) { trayItemVert.modelData.activate(); return }
-                                                if (root.openPop==="tray" && bar.trayHost===trayItemVert) { root.openPop=""; return }
-                                                bar.trayHost = trayItemVert; bar.trayMenuSel = trayItemVert.modelData; root.openBar = bar; root.openPop = "tray"
+                                                try {
+                                                    if (!trayItemVert.modelData) return;
+                                                    if (e.button===Qt.LeftButton) { trayItemVert.modelData.activate(); return }
+                                                    if (root.openPop==="tray" && bar.trayHost===trayItemVert) { root.openPop=""; return }
+                                                    bar.trayHost = trayItemVert; bar.trayMenuSel = trayItemVert.modelData; root.openBar = bar; root.openPop = "tray"
+                                                } catch(err) { root.openPop=""; }
                                             }
                                         }
                                     }
@@ -3582,7 +4209,7 @@ ShellRoot {
                         // Quick Settings shortcut (Vertical variant)
                         Rectangle {
                             id: ccPillVert
-                            width: 32; height: 32; radius: 16
+                            width: 32; height: 32; radius: Tok.r
                             color: theme.a(theme.line, 0.45); border.width: 1; border.color: theme.a(theme.iris, 0.22)
                             visible: root.cfgQuick
                             Sym { anchors.centerIn: parent; text: "tune"; sz: 16; color: theme.frost }
@@ -3595,7 +4222,7 @@ ShellRoot {
                         // Network status pill (Vertical variant)
                         Rectangle {
                             id: wifiPillVert
-                            width: 32; height: 32; radius: 16
+                            width: 32; height: 32; radius: Tok.r
                             color: theme.a(theme.line, 0.45); border.width: 1; border.color: theme.a(theme.iris, 0.22)
                             visible: root.cfgWifi
                             Sym { anchors.centerIn: parent; text: root.wifiOn ? "wifi" : "wifi_off"; sz: 16; color: root.wifiOn ? theme.frost : theme.bad }
@@ -3608,7 +4235,7 @@ ShellRoot {
                         // Bluetooth status pill (Vertical variant)
                         Rectangle {
                             id: btPillVert
-                            width: 32; height: 32; radius: 16
+                            width: 32; height: 32; radius: Tok.r
                             color: theme.a(theme.line, 0.45); border.width: 1; border.color: theme.a(theme.iris, 0.22)
                             visible: root.cfgBluetooth && root.btAdapter !== null
                             Sym { anchors.centerIn: parent; text: "bluetooth"; sz: 16; color: root.btActive ? theme.iris : theme.frost }
@@ -3621,7 +4248,7 @@ ShellRoot {
                         // KDE Connect pill (Vertical variant)
                         Rectangle {
                             id: kdePillVert
-                            width: 32; height: 32; radius: 16
+                            width: 32; height: 32; radius: Tok.r
                             color: theme.a(theme.line, 0.45); border.width: 1; border.color: theme.a(theme.iris, 0.22)
                             visible: root.cfgKdeconnect
                             Sym { anchors.centerIn: parent; text: root.kdeActive ? root.kdeIcon(root.kdeDev) : "phonelink_off"; sz: 16
@@ -3635,7 +4262,7 @@ ShellRoot {
                         // Volume control (Vertical variant)
                         Rectangle {
                             id: volPillVert
-                            width: 32; height: 32; radius: 16
+                            width: 32; height: 32; radius: Tok.r
                             color: theme.a(theme.line, 0.45); border.width: 1; border.color: theme.a(theme.iris, 0.22)
                             visible: root.cfgVolume
                             readonly property var au: Pipewire.defaultAudioSink ? Pipewire.defaultAudioSink.audio : null
@@ -3650,7 +4277,7 @@ ShellRoot {
                         // Battery status pill (Vertical variant)
                         Rectangle {
                             id: batPillVert
-                            width: 32; height: 32; radius: 16
+                            width: 32; height: 32; radius: Tok.r
                             color: theme.a(theme.line, 0.45); border.width: 1; border.color: theme.a(theme.iris, 0.22)
                             readonly property var dev: UPower.displayDevice
                             readonly property bool charging: !UPower.onBattery
@@ -3666,7 +4293,7 @@ ShellRoot {
                         // Notification pill (Vertical variant)
                         Rectangle {
                             id: bellPillVert
-                            width: 32; height: 32; radius: 16
+                            width: 32; height: 32; radius: Tok.r
                             color: theme.a(theme.line, 0.45); border.width: 1; border.color: theme.a(theme.iris, 0.22)
                             visible: root.cfgNotif
                             Sym { anchors.centerIn: parent; text: root.dnd ? "notifications_off" : (root.notes.length>0 ? "notifications" : "notifications_none"); sz: 16; color: theme.frost }
@@ -3677,20 +4304,26 @@ ShellRoot {
                         }
                         
                         // Vertical Stacked Clock
-                        ColumnLayout {
+                        Item {
                             id: clockPillVert
-                            spacing: 1
                             Layout.alignment: Qt.AlignHCenter
                             visible: root.cfgClock
-                            Text {
-                                text: Qt.formatDateTime(clock.date, "HH")
-                                color: theme.text; font.pixelSize: 13; font.bold: true; font.family: root.cfgFont
-                                Layout.alignment: Qt.AlignHCenter
-                            }
-                            Text {
-                                text: Qt.formatDateTime(clock.date, "mm")
-                                color: theme.iris; font.pixelSize: 13; font.bold: true; font.family: root.cfgFont
-                                Layout.alignment: Qt.AlignHCenter
+                            implicitWidth: clockColVert.implicitWidth
+                            implicitHeight: clockColVert.implicitHeight
+                            ColumnLayout {
+                                id: clockColVert
+                                anchors.centerIn: parent
+                                spacing: 1
+                                Text {
+                                    text: Qt.formatDateTime(clock.date, "HH")
+                                    color: theme.text; font.pixelSize: 13; font.bold: true; font.family: root.cfgFont
+                                    Layout.alignment: Qt.AlignHCenter
+                                }
+                                Text {
+                                    text: Qt.formatDateTime(clock.date, "mm")
+                                    color: theme.iris; font.pixelSize: 13; font.bold: true; font.family: root.cfgFont
+                                    Layout.alignment: Qt.AlignHCenter
+                                }
                             }
                             MouseArea {
                                 anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { root.openBar = bar; root.openPop = (root.openPop === "cal") ? "" : "cal" }
@@ -3700,7 +4333,7 @@ ShellRoot {
                         // Power Control (Vertical variant)
                         Rectangle {
                             id: pwrPillVert
-                            width: 32; height: 32; radius: 16
+                            width: 32; height: 32; radius: Tok.r
                             color: theme.a(theme.bad, 0.22); border.width: 1; border.color: theme.bad
                             visible: root.cfgPower
                             Sym { anchors.centerIn: parent; text: "power_settings_new"; sz: 16; color: theme.bad }
@@ -3717,7 +4350,39 @@ ShellRoot {
 
             // register this bar's windows with the ONE shared focus grab at root —
             // a grab per bar fights the other monitors' grabs and insta-closes dropdowns
-            Item { Component.onCompleted: { root.grabWins = root.grabWins.concat([bar, ccDrop, wxDrop, wifiDrop, btDrop, kdeDrop, volDrop, batDrop, calDrop, pwrDrop, notifDrop, mprisDrop, trayDrop, sysDrop]) } }
+            Item {
+                // EVERY dropdown must be in this list. One left out is not "unregistered", it is
+                // treated as outside the grab — so it opens and is dismissed in the same frame,
+                // which looks exactly like a dead pill. (updDrop was missing and did precisely that.)
+                readonly property var myWins: [bar, ccDrop, wxDrop, wifiDrop, btDrop, kdeDrop, volDrop, batDrop, calDrop, pwrDrop, notifDrop, mprisDrop, trayDrop, sysDrop, updDrop]
+                Component.onCompleted: {
+                    try { root.grabWins = root.grabWins.concat(myWins); } catch(e) {}
+                }
+                Component.onDestruction: {
+                    try {
+                        var mw = myWins;
+                        root.grabWins = root.grabWins.filter(function(w) { return w && mw.indexOf(w) < 0; });
+                    } catch(e) {}
+                }
+            }
+            
+            // clear tray hosts/menus safely if a SystemTrayItem is removed
+            Connections {
+                target: SystemTray.items
+                ignoreUnknownSignals: true
+                function onValuesChanged() {
+                    if (root.openPop === "tray") {
+                        try {
+                            var vals = SystemTray.items ? SystemTray.items.values : [];
+                            var found = false;
+                            for (var i = 0; i < vals.length; i++) {
+                                if (vals[i] === bar.trayMenuSel) { found = true; break; }
+                            }
+                            if (!found) { root.openPop = ""; bar.trayHost = null; bar.trayMenuSel = null; }
+                        } catch(e) { root.openPop = ""; bar.trayHost = null; bar.trayMenuSel = null; }
+                    }
+                }
+            }
         }
     }
 
@@ -3749,18 +4414,41 @@ ShellRoot {
                 delegate: Rectangle {
                     id: pcard
                     required property var model
-                    width: popCol.width; radius: root.cfgRadius
+                    readonly property var actList: {
+                        try { return JSON.parse(pcard.model.acts || "[]"); } catch (e) { return []; }
+                    }
+                    width: popCol.width; radius: Tok.rCard
                     implicitHeight: pcc.implicitHeight + 22
-                    color: theme.a(theme.bg, root.dropOpacity)
-                    border.width: 1; border.color: pcard.model.urg===2 ? theme.a(theme.bad,0.6) : theme.a(theme.iris,0.34)
+                    color: Tok.alpha(Tok.surface, root.dropOpacity)
+                    border.width: 1; border.color: pcard.model.urg===2 ? theme.a(theme.bad,0.6) : Tok.ruleHard
                     Column { id: pcc; anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top; anchors.margins: 12; anchors.rightMargin: 36; spacing: 3
                         Row { width: parent.width
                             Sym { anchors.verticalCenter: parent.verticalCenter; text: pcard.model.urg===2 ? "priority_high" : "notifications"; sz: 13; color: pcard.model.urg===2 ? theme.bad : theme.frost }
                             Text { leftPadding: 6; anchors.verticalCenter: parent.verticalCenter; text: pcard.model.appName; color: theme.frost; font.pixelSize: 10; font.family: root.cfgFont; elide: Text.ElideRight; width: parent.width-24 } }
                         Text { width: parent.width; visible: pcard.model.summary!==""; text: pcard.model.summary; color: theme.text; font.pixelSize: 13; font.family: root.cfgFont; font.bold: true; wrapMode: Text.WordWrap }
                         Text { width: parent.width; visible: pcard.model.body!==""; text: pcard.model.body; color: theme.sub; font.pixelSize: 11; font.family: root.cfgFont; wrapMode: Text.WordWrap; maximumLineCount: 4; elide: Text.ElideRight; textFormat: Text.PlainText }
+                        // action buttons the app supplied (Reply, Mark as read, …)
+                        Row {
+                            spacing: 6; topPadding: 6
+                            visible: pcard.actList.length > 0
+                            Repeater {
+                                model: pcard.actList
+                                delegate: Rectangle {
+                                    required property var modelData
+                                    height: 24; radius: Tok.r
+                                    width: alab.implicitWidth + 18
+                                    color: am.containsMouse ? theme.a(theme.iris, 0.25) : theme.a(theme.line, 0.5)
+                                    border.width: 1; border.color: theme.a(theme.iris, 0.3)
+                                    Text { id: alab; anchors.centerIn: parent; text: modelData.t
+                                        color: theme.text; font.pixelSize: 11; font.family: root.cfgFont }
+                                    MouseArea { id: am; anchors.fill: parent; hoverEnabled: true
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: root.noteInvoke(pcard.model.key, modelData.i) }
+                                }
+                            }
+                        }
                     }
-                    Rectangle { anchors.top: parent.top; anchors.right: parent.right; anchors.margins: 6; width: 22; height: 22; radius: 11
+                    Rectangle { anchors.top: parent.top; anchors.right: parent.right; anchors.margins: 6; width: 22; height: 22; radius: Tok.r
                         color: xm.containsMouse ? theme.a(theme.iris,0.2) : "transparent"
                         Sym { anchors.centerIn: parent; text: "close"; sz: 14; color: theme.sub }
                         MouseArea { id: xm; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.popDismiss(pcard.model.key) } }
@@ -3787,8 +4475,8 @@ ShellRoot {
             id: osdCard
             anchors.centerIn: parent
             scale: osdWin.ui                 // authored native; scaled around its centre
-            width: 250; height: 54; radius: root.cfgRadius
-            color: theme.a(theme.bg, root.dropOpacity); border.width: 1; border.color: theme.a(theme.iris,0.34)
+            width: 250; height: 54; radius: Tok.rCard
+            color: Tok.alpha(Tok.surface, root.dropOpacity); border.width: 1; border.color: Tok.ruleHard
             Row { anchors.fill: parent; anchors.margins: 16; spacing: 13
                 Sym { anchors.verticalCenter: parent.verticalCenter; text: root.osdIcon; sz: 24; color: theme.frost }
                 Column { anchors.verticalCenter: parent.verticalCenter; width: parent.width-52; spacing: 6
@@ -3796,8 +4484,8 @@ ShellRoot {
                         Text { text: root.osdKind==="vol" ? "volume" : (root.osdKind==="zoom" ? "magnifier" : "brightness"); color: theme.sub; font.pixelSize: 11; font.family: root.cfgFont }
                         Item { width: parent.width - 80; height: 1 }
                         Text { text: root.osdKind==="zoom" ? (root.zoomFactor.toFixed(2).replace(/\.?0+$/,"")+"×") : (Math.round(root.osdVal*100)+"%"); color: theme.frost; font.pixelSize: 11; font.family: root.cfgFont } }
-                    Rectangle { width: parent.width; height: 6; radius: 3; color: theme.a(theme.line,0.85)
-                        Rectangle { width: parent.width*Math.max(0,Math.min(1,root.osdVal)); height: parent.height; radius: 3; color: theme.iris
+                    Rectangle { width: parent.width; height: 6; radius: Tok.r; color: theme.a(theme.line,0.85)
+                        Rectangle { width: parent.width*Math.max(0,Math.min(1,root.osdVal)); height: parent.height; radius: Tok.r; color: theme.iris
                             Behavior on width { NumberAnimation { duration: 90 } } } }
                 }
             }
@@ -3809,7 +4497,9 @@ ShellRoot {
 
     // ===== Exposé Mission Control HUD overlay =====
     property bool exposeActive: false
-    function toggleExpose() { root.exposeActive = !root.exposeActive }
+    // refresh on the way in: the tiles read titles/classes and focus by address out of
+    // lastIpcObject, which goes empty on a long-lived shell until something asks for it.
+    function toggleExpose() { if (!root.exposeActive) Hyprland.refreshToplevels(); root.exposeActive = !root.exposeActive }
     
     PanelWindow {
         id: exposeWin
@@ -3844,7 +4534,7 @@ ShellRoot {
                         Text { text: "MISSION CONTROL / EXPOSÉ"; color: theme.text; font.pixelSize: 22; font.bold: true; font.family: root.cfgFont }
                         Item { Layout.fillWidth: true }
                         Rectangle {
-                            implicitWidth: 32; implicitHeight: 32; radius: 16
+                            implicitWidth: 32; implicitHeight: 32; radius: Tok.r
                             color: expClMa.containsMouse ? theme.a(theme.iris, 0.25) : theme.a(theme.line, 0.4)
                             border.width: 1; border.color: theme.a(theme.iris, 0.16)
                             Sym { anchors.centerIn: parent; text: "close"; sz: 16; color: theme.frost }
@@ -3860,7 +4550,7 @@ ShellRoot {
                             delegate: Rectangle {
                                 id: wsBox
                                 required property var modelData
-                                width: 280; height: 180; radius: root.cfgRadius
+                                width: 280; height: 180; radius: Tok.r
                                 color: theme.a(theme.line, 0.55); border.width: 1
                                 border.color: Hyprland.focusedWorkspace && Hyprland.focusedWorkspace.id === modelData.id ? theme.iris : theme.a(theme.iris, 0.12)
                                 clip: true
@@ -3883,7 +4573,17 @@ ShellRoot {
                                     Flow {
                                         Layout.fillWidth: true; Layout.fillHeight: true; clip: true; spacing: 6
                                         Repeater {
+                                            // EMPTY while exposé is closed. The PanelWindow above is only
+                                            // `visible: false`, not destroyed — and in QML that keeps every
+                                            // child alive, so this Repeater used to hold one ScreencopyView
+                                            // per window on the system, permanently, each pinned to that
+                                            // window's wayland handle. When a window dies (closing a game or
+                                            // emulator) the capture outlives its source, which is a prime
+                                            // suspect for the fatal "Wayland connection ... Invalid argument"
+                                            // that kills the whole bar. Nothing needs capturing when the
+                                            // overlay isn't on screen; emptying the model destroys them.
                                             model: {
+                                                if (!root.exposeActive) return [];
                                                 var m = Hyprland.toplevels ? Hyprland.toplevels.values : [];
                                                 var out = [];
                                                 for (var i = 0; i < m.length; i++) {
@@ -3897,14 +4597,21 @@ ShellRoot {
                                             delegate: Rectangle {
                                                 id: winTile
                                                 required property var modelData
-                                                readonly property string cls: ("" + (modelData.lastIpcObject.class || "")).toLowerCase()
-                                                width: 122; height: 60; radius: 7; clip: true
+                                                readonly property string cls: {
+                                                    try {
+                                                        if (!modelData) return "";
+                                                        var c = (modelData.lastIpcObject && modelData.lastIpcObject.class)
+                                                            || (modelData.wayland && modelData.wayland.appId) || "";
+                                                        return ("" + c).toLowerCase();
+                                                    } catch(e) { return ""; }
+                                                }
+                                                width: 122; height: 60; radius: Tok.r; clip: true
                                                 color: theme.a(theme.bg, 0.55)
                                                 border.width: 1; border.color: theme.a(theme.iris, 0.14)
                                                 ScreencopyView {
                                                     id: winScv
                                                     anchors.fill: parent
-                                                    captureSource: winTile.modelData.wayland
+                                                    captureSource: (winTile.modelData && winTile.modelData.wayland) ? winTile.modelData.wayland : null
                                                     live: root.exposeActive
                                                     visible: hasContent
                                                 }
@@ -3920,24 +4627,33 @@ ShellRoot {
                                                     Text {
                                                         anchors.fill: parent; anchors.leftMargin: 5; anchors.rightMargin: 5
                                                         verticalAlignment: Text.AlignVCenter; elide: Text.ElideRight
-                                                        text: winTile.modelData.lastIpcObject.class || "window"
+                                                        text: winTile.cls || "window"
                                                         color: theme.sub; font.pixelSize: 8; font.family: root.cfgFont
                                                     }
                                                 }
                                                 // click anywhere → focus that window
                                                 MouseArea {
                                                     anchors.fill: parent; cursorShape: Qt.PointingHandCursor
-                                                    onClicked: { Hyprland.dispatch("hl.dsp.focus({ window = 'address:" + winTile.modelData.lastIpcObject.address + "' })"); root.exposeActive = false }
+                                                    onClicked: {
+                                                        var o = winTile.modelData.lastIpcObject;
+                                                        if (o && o.address) Hyprland.dispatch("hl.dsp.focus({ window = 'address:" + o.address + "' })");
+                                                        else if (winTile.modelData.wayland) winTile.modelData.wayland.activate();
+                                                        root.exposeActive = false;
+                                                    }
                                                 }
                                                 // close button — declared last so it wins the click in its corner
                                                 Rectangle {
                                                     anchors { top: parent.top; right: parent.right; margins: 3 }
-                                                    width: 16; height: 16; radius: 8
+                                                    width: 16; height: 16; radius: Tok.r
                                                     color: winClMa.containsMouse ? theme.bad : theme.a(theme.bg, 0.7)
                                                     Sym { anchors.centerIn: parent; text: "close"; sz: 11; color: winClMa.containsMouse ? theme.bg : theme.faint }
                                                     MouseArea {
                                                         id: winClMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
-                                                        onClicked: Hyprland.dispatch("hl.dsp.window.close({ window = 'address:" + winTile.modelData.lastIpcObject.address + "' })")
+                                                        onClicked: {
+                                                            var o = winTile.modelData.lastIpcObject;
+                                                            if (o && o.address) Hyprland.dispatch("hl.dsp.window.close({ window = 'address:" + o.address + "' })");
+                                                            else if (winTile.modelData.wayland) winTile.modelData.wayland.close();
+                                                        }
                                                     }
                                                 }
                                             }

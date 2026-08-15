@@ -115,6 +115,13 @@ deploy_qs() {
     else install -m 644 "$f" "$dest/$name"; fi
   done < <(find "$src" -type f ! -name '.sea-shell' | sort)
   touch "$dest/.sea-shell"
+  # Stamp the release alongside the code. Without this a backup archive made months later has
+  # no idea which version produced it, which is exactly when you need to know.
+  printf '%s\n' "$SEA_VERSION" > "$dest/VERSION"
+  # Record where this repo lives so the OTA updater can find it later. install.sh explicitly
+  # allows the repo to be moved or deleted afterwards, so the deployed copy has no other way
+  # of knowing where its source is.
+  printf '%s\n' "$SCRIPT_DIR" > "$dest/REPO_PATH"
   chmod +x "$dest"/*.sh "$dest"/*.py 2>/dev/null
   ok "installed ${dest/#$HOME/\~}/ (${mode}, flattened)"
 }
@@ -239,7 +246,7 @@ hypr_block() {
   local block="dofile(\"$1/sea.lua\")
 dofile(\"$1/keybinds.lua\")
 hl.on(\"hyprland.start\", function()
-    hl.exec_cmd(\"qs -c sea-shell\")
+    hl.exec_cmd(\"sh ~/.config/quickshell/sea-shell/sea-bar-supervisor.sh\")
     hl.exec_cmd(\"command -v hypridle >/dev/null && exec hypridle\")
     hl.exec_cmd(\"[ -x /usr/lib/hyprpolkitagent/hyprpolkitagent ] && exec /usr/lib/hyprpolkitagent/hyprpolkitagent\")
     hl.exec_cmd(\"sleep 0.5; exec ~/.config/quickshell/sea-shell/sea-wallpaper-restore.sh\")
@@ -323,9 +330,39 @@ do_install() {
   # 4) apply live: reload hyprland + (re)start the bar from the installed config
   if command -v hyprctl >/dev/null 2>&1 && [ -n "${HYPRLAND_INSTANCE_SIGNATURE:-}" ]; then
     hyprctl reload >/dev/null 2>&1
-    pkill -xf "qs -c sea-shell" 2>/dev/null
-    hyprctl dispatch exec "qs -c sea-shell" >/dev/null 2>&1
-    ok "hyprland reloaded, bar restarted"
+    # The restart has to go through Hyprland: anything this script backgrounds itself dies when
+    # install.sh exits. Under a Lua config (Hyprland 0.55+) the old `hyprctl dispatch exec ...`
+    # form is a Lua SYNTAX ERROR — "[string \"return hl.dispatch(exec sh ...)\"]:1: ')' expected".
+    # That error went to /dev/null and success was printed unconditionally, so for months this
+    # said "bar restarted" while leaving the old process running the previous code. Hence both
+    # the correct dispatch form AND an actual check that a new pid appeared.
+    _sup="sh \$HOME/.config/quickshell/sea-shell/sea-bar-supervisor.sh --restart"
+    _oldbar=$(pgrep -xf "qs -c sea-shell" 2>/dev/null | head -1)
+    if ! hyprctl dispatch "hl.dsp.exec_cmd('$_sup')" 2>&1 | grep -q '^ok'; then
+      # pre-0.55 .conf parser, where the Lua form is the one that does not exist
+      hyprctl dispatch exec "$_sup" >/dev/null 2>&1
+    fi
+    _i=0; _newbar=""
+    while [ "$_i" -lt 30 ]; do
+      _newbar=$(pgrep -xf "qs -c sea-shell" 2>/dev/null | head -1)
+      [ -n "$_newbar" ] && [ "$_newbar" != "$_oldbar" ] && break
+      _i=$((_i + 1)); sleep 0.2
+    done
+    # A new pid is NOT proof of a working bar. A QML error makes qs exit ~instantly and the
+    # supervisor respawns it, so "a different pid appeared" is exactly what a crash loop looks
+    # like from out here. Confirm the same pid is still alive a moment later.
+    if [ -n "$_newbar" ] && [ "$_newbar" != "$_oldbar" ]; then
+      sleep 2
+      if kill -0 "$_newbar" 2>/dev/null; then
+        ok "hyprland reloaded, bar restarted (pid $_newbar)"
+      else
+        warn "the bar started and immediately exited — that is a QML error, not a restart problem."
+        warn "see the error with:  qs -c sea-shell"
+      fi
+    else
+      warn "hyprland reloaded, but the bar did not come back — start it with:"
+      warn "  sh ~/.config/quickshell/sea-shell/sea-bar-supervisor.sh --restart"
+    fi
   else
     info "not inside a Hyprland session — everything starts on next login"
   fi
@@ -350,6 +387,9 @@ set_wallpaper() {
 
 do_uninstall() {
   title "uninstalling sea-shell"
+  # stop the supervisor first, or it just respawns the bar we are removing
+  [ -f "${XDG_RUNTIME_DIR:-/tmp}/sea-shell-supervisor.pid" ] && \
+    kill "$(cat "${XDG_RUNTIME_DIR:-/tmp}/sea-shell-supervisor.pid")" 2>/dev/null
   pkill -xf "qs -c sea-shell" 2>/dev/null
   remove_block "$CFG/hypr/hyprland.lua"     # Lua entry (5.0+)
   remove_block "$CFG/hypr/hyprland.conf"    # legacy hyprlang entry (pre-5.0)

@@ -7,16 +7,139 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+_Nothing yet._
+
+
+## [6.0.0] - 2026-08-15
+
+**A dock, and an interface that reads like an instrument.**
+
+Two headline changes sit next to each other. sea-shell grows a real **dock** — pinned and
+running apps, magnification, per-monitor, on any edge. And every data-bearing surface is
+rebuilt on one **industrial design language**: labelled regions divided by hairlines instead
+of translucent cards nested three deep, tabular mono on every number, and a single accent that
+marks the active thing and nothing else.
+
+Underneath is the *"I am about to disappear for six months"* half of the release.
+**Over-the-air updates**, a **health check**, **backup & restore** and a **bar supervisor**
+exist for one reason: so a machine you are no longer actively ricing can be diagnosed,
+repaired and updated without remembering how any of it works.
+
+> **Nothing breaks and nothing moves.** Every existing key in `appearance.json` is read as
+> before, and each new one defaults to the old behaviour — the dock is **off** until you turn
+> it on, and the two new bar widgets are opt-in from *Bar Widgets*.
+
 ### Added
 
-- **Laptop Lid Close Options**: Select what happens when the laptop lid is closed (Settings → *Power* or *Idle & lock*):
-  - **Suspend** (lock & suspend system)
-  - **Lock screen** (lock display, keep system running)
-  - **Turn off display** (DPMS off, keep system running)
-  - **Hibernate** (hibernate system to disk)
-  - **Shut down** (power off system)
-  - **Ignore** (do nothing on lid close)
-  - Options persist to `hypr/keybinds.conf` via `sea-lock-settings.py` and apply live with `hyprctl reload`.
+#### Dock  ·  Settings → *Dock*
+- **Pinned + running apps** in one strip, per-monitor, on **any edge** (bottom/top/left/right),
+  with macOS-style **cursor magnification**, running-app dots and hover labels.
+- Three visibility modes: **always**, **auto-hide** (reveal strip at the edge), and
+  **when free** — visible until a window would overlap it.
+- Left-click launches, or focuses a running window — cycling by focus history when the app has
+  several. Middle-click opens a new instance; right-click pins or unpins. Pins persist to
+  `~/.config/sea-shell/dock.json`.
+
+#### Staying alive, and staying current
+- **Over-the-air updates**  ·  Settings → *System*. Checks GitHub for a newer sea-shell and
+  updates in place. It **only ever fast-forwards**: if the repo has uncommitted changes,
+  unpushed commits or a diverged history, it refuses and says which — an updater that can eat
+  your own unpushed work is not one you should ever press.
+- **Health check**  ·  Settings → *System*. Forty-odd read-only checks — dependencies, fonts,
+  config JSON validity, deployment, compositor, and **the supervisor's crash log**. That log is the
+  usual difference between fixing the bar and reinstalling it; nothing surfaced it before.
+- **Backup & restore**  ·  Settings → *System*. One archive of every setting, pin, rule,
+  gesture and keybind (`sea-backup.sh`). Restoring writes a `.pre-restore` archive first, so
+  restoring the wrong file is itself undoable.
+- **Bar supervisor** — Quickshell dies with `rc=255` when its Wayland connection drops, which
+  a fullscreen client tearing down reliably causes: closing a game took the bar with it and
+  left you barless until `SUPER+SHIFT+B`. The bar now runs under a supervisor that respawns it,
+  logs every exit, and gives up after 5 failures in a row rather than spinning.
+
+#### System
+- **Package updates pill** — repo + AUR counts (via `checkupdates`, so it never touches the
+  live pacman db), the full list with old → new versions in a dropdown, and one click to run
+  the upgrade in a terminal. Opt-in from *Bar Widgets*.
+- **Network throughput pill** — live up/down rates on the active interface. Opt-in.
+- **Game mode**  ·  `SUPER+SHIFT+G`. Strips blur, shadows, animations and the video wallpaper,
+  switches to the performance profile and silences notifications — then **restores every one to
+  the value it had before**, not to a hardcoded default.
+- **Disks**  ·  Settings → *Disks*. Drives grouped with model, bus and size; partitions with
+  real used/free bars from `lsblk`; mount, unmount and eject through udisks. Unmounted
+  partitions show **no bar** rather than an empty one, because their usage genuinely isn't
+  knowable without mounting.
+- **Screen time**  ·  Settings → *Screen time*. Per-app focus time, paused while the session is
+  idle, with optional daily limits and a daily summary notification. History in `usage.json`.
+- **Notification actions** — notifications with buttons now render them and invoke them.
+
+#### Compositor
+- **Window rules**  ·  Settings → *Window rules*. Float, size, position, centre, opacity,
+  workspace, pin and no-blur per app class or title, written to `rules.lua` and applied live.
+  Loaded *after* the shipped rules so yours always wins.
+- **Touchpad gestures**  ·  Settings → *Input*. Swipe actions by finger count and direction.
+  The valid action/direction sets were **probed against Hyprland**, not taken from docs, so the
+  UI cannot offer you a combination the compositor will reject.
+- **Input tab** — mouse sensitivity and acceleration profile, natural scroll, touchpad tap,
+  scroll speed and disable-while-typing.
+- **VRR** — off / always / fullscreen / fullscreen-video, per the compositor's own modes.
+- **Games opt out of the glass** — `steam_app_*` and `gamescope` windows are forced opaque with
+  no blur, shadow, rounding or animation. An unfocused game at `inactive_opacity 0.96` forces a
+  4-pass blur that samples the *animated wallpaper* behind it every frame; on a hybrid laptop
+  that blur runs on the same iGPU that is copying the game's frames across.
+- **Laptop lid actions** — suspend · lock · display off · hibernate · shut down · ignore
+  (Settings → *Power* / *Idle & lock*), written to `keybinds.lua` and applied live.
+
+#### Wallpaper
+- **Transitions** — 14 swww transitions with configurable fps and duration, and a **dip-to-black
+  fade** drawn by the shell for the `SUPER+N` cycle (mpvpaper can't transition at all, so the
+  shell covers the swap itself).
+- **Auto-rotate** on a timer — next, previous or random, off by default and re-read from disk
+  each tick, so toggling it needs no restart and leaves no daemon running when off.
+- **One apply path** — the picker, the cycle binds, login restore and the rotator now all route
+  through `sea-wallpaper-apply.sh`. The swww invocation used to be copy-pasted into two files
+  with the transition hardcoded in both.
+
+#### Misc
+- **OCR a region to the clipboard**  ·  `SUPER+SHIFT+O` (needs `tesseract`).
+
+### Changed
+
+- **Every surface is rebuilt on the industrial design language.** The bar, control center,
+  dashboard, launcher, keybinds, power menu, screenshot tools, recorder and DAC panel now share
+  eleven components (`IndTable`, `IndPanel`, `IndKpi`, `IndChip`, …) and one token singleton.
+  Data lives in **real tables** with declared columns rather than in per-surface hand-rolled
+  rows — displays, keybinds, audio devices, VPNs and processes each had grown their own copy of
+  the same header-plus-hairline layout.
+- **Design tokens are a singleton.** `shell.qml`, `settings.qml` and `Dashboard.qml` each used
+  to declare their own theme object and separately re-parse `appearance.json`; the three had
+  already drifted. `Tok.qml` reads it once. The accent stays user-configurable and
+  matugen-driven, and the neutral ramp is **derived from its hue** so the greys read as chosen.
+- **The window glow follows matugen.** `matugen.lua` was `dofile`'d *before* the decoration
+  block, so the shadow colour it wrote was immediately overwritten by the hardcoded sea-cyan
+  below it — the glow never followed the wallpaper. It now loads after everything it may
+  override.
+- **`SUPER+SHIFT+B` restarts through the supervisor** instead of `pkill`-ing the bar, so a
+  manual restart is no longer indistinguishable from a crash.
+
+### Fixed
+
+- **Settings could silently reset every appearance setting.** A read that caught
+  `appearance.json` mid-write (a reinstall, or matugen rewriting it) failed to parse, left the
+  in-memory settings at their declared defaults, and still marked the config *loaded* — so the
+  next save wrote those defaults over your real file. The dock switching itself off was the
+  visible symptom; the actual blast radius was the whole file. An empty read (no config yet) is
+  now distinguished from an unparseable one (retry), and saving is blocked until a clean parse.
+- **`install.sh` reported "bar restarted" when it hadn't.** `hyprctl dispatch exec` is a *Lua
+  syntax error* under the 0.55+ parser, and the error went to `/dev/null`. It now dispatches
+  correctly and confirms the process actually survived rather than trusting the exit code.
+- **The updates pill was dead on click.** Every dropdown must be listed in the bar's grab set —
+  one left out isn't merely unregistered, it counts as *outside* the grab, so it opened and was
+  dismissed in the same frame.
+- **The dock ignored every click.** Its input region pointed at an item inside the UI-scale
+  wrapper, whose coordinates are pre-scale and one level down, while the region is interpreted
+  in window space — so the dock rendered perfectly and accepted input somewhere else entirely.
+- **The settings sidebar overflowed** past the last tab once the new tabs were added; it now
+  scrolls.
 
 
 ## [5.0.0] - 2026-08-02

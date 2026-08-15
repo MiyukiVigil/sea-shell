@@ -26,20 +26,25 @@ ShellRoot {
     Process { running: true; command: ["sh","-c","cat \"$HOME/.config/sea-shell/appearance.json\" 2>/dev/null"]
         stdout: StdioCollector { id: apOut; onStreamFinished: { try { var j=JSON.parse(apOut.text); if(j.accent) root.accent=j.accent; if(j.scale!==undefined) root.cfgScale=j.scale; if(j.mode!==undefined) root.cfgLight=(""+j.mode==="light") } catch(e){} } } }
 
+    // ---------- industrial token shim ----------
+    // Colours come from the shared Tok singleton (see shell.qml). This surface used to carry its
+    // own copy of the ramp AND its own appearance.json parse, so it drifted from the bar every
+    // time the palette changed. The `theme.*` vocabulary is kept because the call sites below
+    // speak it; only the source of the values moved.
     QtObject {
         id: theme
-        readonly property bool light: root.cfgLight
-        readonly property color _acc: root.accent
-        readonly property real  _ah:  _acc.hslHue >= 0 ? _acc.hslHue : 0.55
-        readonly property color bg:    light ? Qt.hsla(_ah, 0.20, 0.945, 1) : Qt.hsla(_ah, 0.36, 0.070, 1)
-        readonly property color line:  light ? Qt.hsla(_ah, 0.16, 0.780, 1) : Qt.hsla(_ah, 0.24, 0.205, 1)
-        readonly property color text:  light ? "#0c1520" : "#e2e9f4"
-        readonly property color sub:   light ? "#2c4256" : "#a6b6cf"
-        readonly property color faint: light ? "#48606f" : "#6f8099"
-        readonly property color iris:  light ? Qt.darker(root.accent, 2.4)  : root.accent
-        readonly property color frost: light ? Qt.darker(root.accent, 1.7) : Qt.lighter(root.accent, 1.22)
-        readonly property color warn:  light ? "#b9820f" : "#f4c542"
-        readonly property color bad:   light ? "#d1495b" : "#f38ba8"
+        readonly property bool  light: Tok.light
+        readonly property color bg:    Tok.bg
+        readonly property color panel: Tok.surface
+        readonly property color line:  Tok.ruleHard
+        readonly property color text:  Tok.ink
+        readonly property color sub:   Tok.ink2
+        readonly property color faint: Tok.ink3
+        readonly property color iris:  Tok.accent
+        readonly property color frost: Tok.ink2
+        readonly property color good:  Tok.ok
+        readonly property color warn:  Tok.warn
+        readonly property color bad:   Tok.crit
         function a(c, al) { return Qt.rgba(c.r, c.g, c.b, al) }
     }
 
@@ -93,9 +98,9 @@ ShellRoot {
             anchors.bottom: cardsRow.top; anchors.bottomMargin: 34
             spacing: 4
             Text { anchors.horizontalCenter: parent.horizontalCenter; text: root.who
-                color: theme.text; font.pixelSize: 17; font.bold: true; font.family: "monospace" }
+                color: theme.text; font.pixelSize: 17; font.bold: true; font.family: Tok.mono }
             Text { anchors.horizontalCenter: parent.horizontalCenter; text: root.up
-                color: theme.faint; font.pixelSize: 12; font.family: "monospace" }
+                color: theme.faint; font.pixelSize: 12; font.family: Tok.mono }
         }
 
         Row {
@@ -108,7 +113,7 @@ ShellRoot {
                     required property int index
                     readonly property bool cur: index === root.sel
                     readonly property bool arm: index === root.arming
-                    width: 130; height: 150; radius: 18
+                    width: 130; height: 150; radius: Tok.rCard
                     scale: cur ? 1.05 : 1.0
                     color: arm ? theme.a(theme.bad,0.16) : cur ? theme.a(theme.iris,0.16) : theme.a(theme.bg,0.96)
                     border.width: cur || arm ? 2 : 1
@@ -120,10 +125,10 @@ ShellRoot {
                         Text { anchors.horizontalCenter: parent.horizontalCenter; text: modelData.i
                             font.family: "Material Symbols Outlined"; font.pixelSize: 46; color: arm ? theme.bad : modelData.col }
                         Text { anchors.horizontalCenter: parent.horizontalCenter; text: arm ? "sure?" : modelData.l
-                            color: arm ? theme.bad : theme.text; font.pixelSize: 14; font.family: "monospace" }
+                            color: arm ? theme.bad : theme.text; font.pixelSize: 14; font.family: Tok.mono }
                         Text { anchors.horizontalCenter: parent.horizontalCenter
                             text: String.fromCharCode(modelData.k).toLowerCase()
-                            color: cur ? theme.frost : theme.faint; font.pixelSize: 10; font.family: "monospace" }
+                            color: cur ? theme.frost : theme.faint; font.pixelSize: 10; font.family: Tok.mono }
                     }
                     MouseArea { anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
                         onEntered: { root.sel = index; if (root.arming !== index) root.arming = -1 }
@@ -137,7 +142,7 @@ ShellRoot {
             text: root.arming >= 0 ? "press again to " + root.actions[root.arming].l.toLowerCase() + " · esc to cancel"
                                    : "←→ select · ⏎ go · l s o r p · esc to cancel"
             color: root.arming >= 0 ? theme.bad : theme.faint
-            font.pixelSize: 12; font.family: "monospace"
+            font.pixelSize: 12; font.family: Tok.mono
         }
     }
 }

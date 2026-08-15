@@ -793,24 +793,25 @@ Scope {
     Process { id: apReadProc; running: true; command: ["sh","-c","cat ~/.config/sea-shell/appearance.json 2>/dev/null || echo '{}'"]
         stdout: StdioCollector { id: apOut; onStreamFinished: { try { var j = JSON.parse(apOut.text.trim() || "{}");
             if (j.accent) root.apAccent = j.accent; if (j.mode !== undefined) root.apLight = ("" + j.mode === "light"); } catch(e){} } } }
+    // ---------- industrial token shim ----------
+    // Colours come from the shared Tok singleton (see shell.qml). This surface used to carry its
+    // own copy of the ramp AND its own appearance.json parse, so it drifted from the bar every
+    // time the palette changed. The `theme.*` vocabulary is kept because the call sites below
+    // speak it; only the source of the values moved.
     QtObject {
         id: theme
-        readonly property bool light: root.apLight
-        // Surfaces follow the accent HUE at low saturation, so the panel tracks matugen with
-        // the rest of the shell instead of sitting at a fixed navy/white while the bar recolours.
-        readonly property color _acc: root.apAccent
-        readonly property real  _ah:  _acc.hslHue >= 0 ? _acc.hslHue : 0.55
-        readonly property color bg:    light ? Qt.hsla(_ah, 0.20, 0.945, 1) : Qt.hsla(_ah, 0.36, 0.070, 1)
-        readonly property color panel: light ? Qt.hsla(_ah, 0.18, 0.895, 1) : Qt.hsla(_ah, 0.30, 0.110, 1)
-        readonly property color line:  light ? Qt.hsla(_ah, 0.16, 0.780, 1) : Qt.hsla(_ah, 0.24, 0.205, 1)
-        readonly property color text:  light ? "#0c1520" : "#e2e9f4"
-        readonly property color sub:   light ? "#2c4256" : "#a6b6cf"
-        readonly property color faint: light ? "#48606f" : "#6f8099"
-        readonly property color iris:  light ? Qt.darker(root.apAccent, 2.4) : root.apAccent
-        readonly property color frost: light ? Qt.darker(root.apAccent, 1.7) : Qt.lighter(root.apAccent, 1.22)
-        readonly property color good:  light ? "#2f9e63" : "#a6e3a1"
-        readonly property color warn:  light ? "#b9820f" : "#f4c542"
-        readonly property color bad:   light ? "#d1495b" : "#f38ba8"
+        readonly property bool  light: Tok.light
+        readonly property color bg:    Tok.bg
+        readonly property color panel: Tok.surface
+        readonly property color line:  Tok.ruleHard
+        readonly property color text:  Tok.ink
+        readonly property color sub:   Tok.ink2
+        readonly property color faint: Tok.ink3
+        readonly property color iris:  Tok.accent
+        readonly property color frost: Tok.ink2
+        readonly property color good:  Tok.ok
+        readonly property color warn:  Tok.warn
+        readonly property color bad:   Tok.crit
         function a(c, al) { return Qt.rgba(c.r, c.g, c.b, al) }
     }
 
@@ -825,9 +826,9 @@ Scope {
         signal moved(real v); signal committed(real v)
         implicitHeight: 18; Layout.fillWidth: true
         readonly property real t: sl.to === sl.from ? 0 : (sl.value - sl.from) / (sl.to - sl.from)
-        Rectangle { id: trk; anchors.verticalCenter: parent.verticalCenter; width: parent.width; height: 5; radius: 3; color: theme.a(theme.line, 0.85)
-            Rectangle { width: trk.width * Math.max(0, Math.min(1, sl.t)); height: parent.height; radius: 3; color: sl.fill } }
-        Rectangle { width: 14; height: 14; radius: 7; border.width: 2; border.color: sl.fill; color: theme.frost
+        Rectangle { id: trk; anchors.verticalCenter: parent.verticalCenter; width: parent.width; height: 5; radius: Tok.r; color: theme.a(theme.line, 0.85)
+            Rectangle { width: trk.width * Math.max(0, Math.min(1, sl.t)); height: parent.height; radius: Tok.r; color: sl.fill } }
+        Rectangle { width: 14; height: 14; radius: Tok.r; border.width: 2; border.color: sl.fill; color: theme.frost
             anchors.verticalCenter: parent.verticalCenter; x: (sl.width - width) * Math.max(0, Math.min(1, sl.t)) }
         MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
             function put(px) { var tt = Math.max(0, Math.min(1, px / sl.width)); sl.value = sl.from + tt * (sl.to - sl.from); sl.moved(sl.value) }
@@ -844,13 +845,13 @@ Scope {
         signal moved(real v); signal committed(real v)
         implicitWidth: 24
         function tOf(v) { return vs.to === vs.from ? 0 : (v - vs.from) / (vs.to - vs.from) }
-        Rectangle { id: vtrk; width: 6; radius: 3; color: theme.a(theme.line, 0.85)
+        Rectangle { id: vtrk; width: 6; radius: Tok.r; color: theme.a(theme.line, 0.85)
             anchors.horizontalCenter: parent.horizontalCenter; anchors.top: parent.top; anchors.bottom: parent.bottom
             Rectangle { width: parent.width + 5; x: -2.5; height: 1; color: theme.a(theme.faint, 0.7); y: vtrk.height * (1 - vs.tOf(0)) }
-            Rectangle { width: parent.width; radius: 3; color: vs.fill
+            Rectangle { width: parent.width; radius: Tok.r; color: vs.fill
                 property real cy: vtrk.height * (1 - vs.tOf(0)); property real ky: vtrk.height * (1 - vs.tOf(vs.value))
                 y: Math.min(cy, ky); height: Math.abs(cy - ky) } }
-        Rectangle { width: 20; height: 12; radius: 4; color: theme.frost; border.width: 2; border.color: vs.fill
+        Rectangle { width: 20; height: 12; radius: Tok.r; color: theme.frost; border.width: 2; border.color: vs.fill
             anchors.horizontalCenter: parent.horizontalCenter; y: vtrk.height * (1 - vs.tOf(vs.value)) - height/2 }
         MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
             function put(py) { var t = 1 - Math.max(0, Math.min(1, py / vs.height)); vs.value = vs.from + t * (vs.to - vs.from); vs.moved(vs.value) }
@@ -862,7 +863,7 @@ Scope {
     component IconBtn: Rectangle {
         id: ib
         property string icon: ""; property int sz: 30; signal tapped()
-        implicitWidth: sz + 4; implicitHeight: sz + 4; radius: 8
+        implicitWidth: sz + 4; implicitHeight: sz + 4; radius: Tok.r
         color: ibm.containsMouse ? theme.a(theme.iris, 0.18) : "transparent"
         Sym { anchors.centerIn: parent; text: ib.icon; sz: Math.round(ib.sz * 0.6); color: theme.sub }
         MouseArea { id: ibm; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: ib.tapped() }
@@ -870,13 +871,13 @@ Scope {
     component TextBtn: Rectangle {
         id: tb
         property string label: ""; property string icon: ""; property bool primary: false; signal tapped()
-        implicitHeight: 32; implicitWidth: tbr.width + 22; radius: 9
+        implicitHeight: 32; implicitWidth: tbr.width + 22; radius: Tok.r
         opacity: tb.enabled ? 1 : 0.4
         color: tb.primary ? (tbm.containsMouse ? theme.frost : theme.iris) : (tbm.containsMouse ? theme.a(theme.iris, 0.18) : theme.a(theme.line, 0.4))
         border.width: 1; border.color: theme.a(theme.iris, tb.primary ? 0.5 : 0.2)
         RowLayout { id: tbr; anchors.centerIn: parent; spacing: 7
             Sym { text: tb.icon; sz: 15; color: tb.primary ? theme.bg : theme.frost }
-            Text { text: tb.label; color: tb.primary ? theme.bg : theme.sub; font.pixelSize: 11; font.family: "monospace"; font.bold: tb.primary } }
+            Text { text: tb.label; color: tb.primary ? theme.bg : theme.sub; font.pixelSize: 11; font.family: Tok.mono; font.bold: tb.primary } }
         MouseArea { id: tbm; anchors.fill: parent; enabled: tb.enabled; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: tb.tapped() }
     }
     component OffsetTile: Rectangle {
@@ -886,26 +887,26 @@ Scope {
         property bool alert: false
         property string action: ""
         signal moved(real v); signal committed(); signal actionTapped()
-        Layout.fillWidth: true; implicitHeight: 56; radius: 11
+        Layout.fillWidth: true; implicitHeight: 56; radius: Tok.r
         color: ot.alert ? theme.a(theme.warn, 0.13) : theme.a(theme.line, 0.24)
         border.width: 1; border.color: ot.alert ? theme.a(theme.warn, 0.45) : theme.a(theme.iris, 0.12)
         ColumnLayout { anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 12; anchors.topMargin: 8; anchors.bottomMargin: 8; spacing: 3
             RowLayout { Layout.fillWidth: true; spacing: 6
-                Text { text: ot.label; color: theme.faint; font.pixelSize: 9; font.family: "monospace"; font.bold: true; font.letterSpacing: 1 }
-                Text { text: ot.hint; color: ot.alert ? theme.warn : theme.faint; font.pixelSize: 9; font.family: "monospace"; visible: ot.hint !== ""
+                Text { text: ot.label; color: theme.faint; font.pixelSize: 9; font.family: Tok.mono; font.bold: true; font.letterSpacing: 1 }
+                Text { text: ot.hint; color: ot.alert ? theme.warn : theme.faint; font.pixelSize: 9; font.family: Tok.mono; visible: ot.hint !== ""
                     font.bold: ot.alert }
                 Item { Layout.fillWidth: true }
                 Rectangle {
                     visible: ot.action !== ""
-                    implicitHeight: 15; implicitWidth: actT.width + 12; radius: 7
+                    implicitHeight: 15; implicitWidth: actT.width + 12; radius: Tok.r
                     color: actMa.containsMouse ? theme.warn : theme.a(theme.warn, 0.2)
                     border.width: 1; border.color: theme.a(theme.warn, 0.55)
                     Text { id: actT; anchors.centerIn: parent; text: ot.action
-                        color: actMa.containsMouse ? theme.bg : theme.warn; font.pixelSize: 8; font.family: "monospace"; font.bold: true }
+                        color: actMa.containsMouse ? theme.bg : theme.warn; font.pixelSize: 8; font.family: Tok.mono; font.bold: true }
                     MouseArea { id: actMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: ot.actionTapped() }
                 }
                 Text { text: (ot.value >= 0 ? "+" : "") + ot.value.toFixed(1) + " " + ot.unit
-                    color: ot.alert ? theme.warn : theme.frost; font.pixelSize: 12; font.family: "monospace"; font.bold: true } }
+                    color: ot.alert ? theme.warn : theme.frost; font.pixelSize: 12; font.family: Tok.mono; font.bold: true } }
             DSlider { from: ot.from; to: ot.to; value: ot.value; fill: ot.alert ? theme.warn : theme.iris
                 onMoved: (v) => ot.moved(v); onCommitted: ot.committed() }
         }
@@ -919,8 +920,8 @@ Scope {
         property string title: ""
         property string note: ""
         Layout.fillWidth: true; spacing: 9; Layout.topMargin: 2
-        Text { text: hh.title; color: theme.iris; font.pixelSize: 10; font.family: "monospace"; font.bold: true; font.letterSpacing: 2 }
-        Text { text: hh.note; color: theme.faint; font.pixelSize: 10; font.family: "monospace"; visible: hh.note !== "" }
+        Text { text: hh.title; color: theme.iris; font.pixelSize: 10; font.family: Tok.mono; font.bold: true; font.letterSpacing: 2 }
+        Text { text: hh.note; color: theme.faint; font.pixelSize: 10; font.family: Tok.mono; visible: hh.note !== "" }
         Rectangle { Layout.fillWidth: true; implicitHeight: 1; color: theme.a(theme.iris, 0.2) }
     }
 
@@ -1046,7 +1047,7 @@ Scope {
         property int n: 1
         property string title: ""
         property string body: ""
-        Layout.fillWidth: true; Layout.preferredWidth: 1; radius: 10
+        Layout.fillWidth: true; Layout.preferredWidth: 1; radius: Tok.r
         color: theme.a(theme.line, 0.2); border.width: 1; border.color: theme.a(theme.iris, 0.13)
         implicitHeight: rcr.height + 20
         RowLayout {
@@ -1054,14 +1055,14 @@ Scope {
             anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top
             anchors.leftMargin: 11; anchors.rightMargin: 11; anchors.topMargin: 10; spacing: 9
             Rectangle {
-                implicitWidth: 19; implicitHeight: 19; radius: 10; Layout.alignment: Qt.AlignTop
+                implicitWidth: 19; implicitHeight: 19; radius: Tok.r; Layout.alignment: Qt.AlignTop
                 color: theme.a(theme.iris, 0.16); border.width: 1; border.color: theme.a(theme.iris, 0.35)
-                Text { anchors.centerIn: parent; text: "" + rc.n; color: theme.frost; font.pixelSize: 10; font.family: "monospace"; font.bold: true }
+                Text { anchors.centerIn: parent; text: "" + rc.n; color: theme.frost; font.pixelSize: 10; font.family: Tok.mono; font.bold: true }
             }
             ColumnLayout {
                 Layout.fillWidth: true; spacing: 2
-                Text { text: rc.title; color: theme.text; font.pixelSize: 12; font.family: "monospace"; font.bold: true }
-                Text { Layout.fillWidth: true; wrapMode: Text.WordWrap; text: rc.body; color: theme.sub; font.pixelSize: 11; font.family: "monospace"; lineHeight: 1.3 }
+                Text { text: rc.title; color: theme.text; font.pixelSize: 12; font.family: Tok.mono; font.bold: true }
+                Text { Layout.fillWidth: true; wrapMode: Text.WordWrap; text: rc.body; color: theme.sub; font.pixelSize: 11; font.family: Tok.mono; lineHeight: 1.3 }
             }
         }
     }
@@ -1072,7 +1073,7 @@ Scope {
         property string title: ""
         property string body: ""
         property color tint: theme.iris
-        Layout.fillWidth: true; radius: 11
+        Layout.fillWidth: true; radius: Tok.r
         color: theme.a(nc.tint, 0.08); border.width: 1; border.color: theme.a(nc.tint, 0.26)
         implicitHeight: ncr.height + 22
         RowLayout {
@@ -1082,8 +1083,8 @@ Scope {
             Sym { text: nc.icon; sz: 16; color: nc.tint; Layout.alignment: Qt.AlignTop }
             ColumnLayout {
                 Layout.fillWidth: true; spacing: 3
-                Text { text: nc.title; color: nc.tint; font.pixelSize: 11; font.family: "monospace"; font.bold: true; font.letterSpacing: 1 }
-                Text { Layout.fillWidth: true; wrapMode: Text.WordWrap; text: nc.body; color: theme.sub; font.pixelSize: 11; font.family: "monospace"; lineHeight: 1.35 }
+                Text { text: nc.title; color: nc.tint; font.pixelSize: 11; font.family: Tok.mono; font.bold: true; font.letterSpacing: 1 }
+                Text { Layout.fillWidth: true; wrapMode: Text.WordWrap; text: nc.body; color: theme.sub; font.pixelSize: 11; font.family: Tok.mono; lineHeight: 1.35 }
             }
         }
     }
@@ -1111,7 +1112,7 @@ Scope {
 
         Rectangle {
             anchors.centerIn: parent
-            width: 980; height: 726; radius: 18
+            width: 980; height: 726; radius: Tok.rCard
             color: theme.a(theme.bg, 0.98)
             border.width: 1; border.color: theme.a(theme.iris, 0.34)
             MouseArea { anchors.fill: parent }
@@ -1127,21 +1128,21 @@ Scope {
                         RowLayout { spacing: 8
                             Text {
                                 text: root.sw ? "Software EQ" : (root.dev.ok ? root.dev.device_name : "Moondrop DAC")
-                                color: theme.text; font.pixelSize: 20; font.family: "monospace"; font.bold: true }
-                            Rectangle { visible: root.dev.ok && !root.sw; radius: 9; implicitHeight: 18; implicitWidth: fwT.width + 14; color: theme.a(theme.iris, 0.16); border.width: 1; border.color: theme.a(theme.iris, 0.3)
-                                Text { id: fwT; anchors.centerIn: parent; text: "fw " + (root.dev.firmware || "?"); color: theme.frost; font.pixelSize: 10; font.family: "monospace" } }
+                                color: theme.text; font.pixelSize: 20; font.family: Tok.mono; font.bold: true }
+                            Rectangle { visible: root.dev.ok && !root.sw; radius: Tok.r; implicitHeight: 18; implicitWidth: fwT.width + 14; color: theme.a(theme.iris, 0.16); border.width: 1; border.color: theme.a(theme.iris, 0.3)
+                                Text { id: fwT; anchors.centerIn: parent; text: "fw " + (root.dev.firmware || "?"); color: theme.frost; font.pixelSize: 10; font.family: Tok.mono } }
                             // Where the filters are actually running. Worth stating plainly:
                             // the software one dies with the sink, the DAC's outlives the shell.
                             Rectangle {
-                                visible: root.sw; radius: 9; implicitHeight: 18; implicitWidth: swT.width + 14
+                                visible: root.sw; radius: Tok.r; implicitHeight: 18; implicitWidth: swT.width + 14
                                 color: theme.a(root.swInfo.sink_present ? theme.good : theme.faint, 0.16)
                                 border.width: 1; border.color: theme.a(root.swInfo.sink_present ? theme.good : theme.faint, 0.4)
                                 Text { id: swT; anchors.centerIn: parent
                                     text: root.swInfo.sink_present ? "live · pipewire" : "not created yet"
                                     color: root.swInfo.sink_present ? theme.good : theme.faint
-                                    font.pixelSize: 10; font.family: "monospace" } }
-                            Rectangle { visible: root.dirty; radius: 9; implicitHeight: 18; implicitWidth: dtT.width + 14; color: theme.a(theme.warn, 0.18); border.width: 1; border.color: theme.a(theme.warn, 0.4)
-                                Text { id: dtT; anchors.centerIn: parent; text: "unsaved"; color: theme.warn; font.pixelSize: 10; font.family: "monospace" } }
+                                    font.pixelSize: 10; font.family: Tok.mono } }
+                            Rectangle { visible: root.dirty; radius: Tok.r; implicitHeight: 18; implicitWidth: dtT.width + 14; color: theme.a(theme.warn, 0.18); border.width: 1; border.color: theme.a(theme.warn, 0.4)
+                                Text { id: dtT; anchors.centerIn: parent; text: "unsaved"; color: theme.warn; font.pixelSize: 10; font.family: Tok.mono } }
                         }
                         Text {
                             text: root.sw
@@ -1151,7 +1152,7 @@ Scope {
                                   : (root.dev.ok ? (root.bandCount + "-band parametric EQ · DSP @ 96 kHz")
                                                  : (root.dev.error || "no device connected"))
                             color: (root.sw || root.dev.ok) ? theme.faint : theme.bad
-                            font.pixelSize: 11; font.family: "monospace"
+                            font.pixelSize: 11; font.family: Tok.mono
                             Layout.fillWidth: true; elide: Text.ElideRight }
                     }
                     Item { Layout.fillWidth: true }
@@ -1160,7 +1161,7 @@ Scope {
                     // with no DAC there is nothing to switch to.
                     Rectangle {
                         visible: root.hwPresent
-                        implicitHeight: 24; implicitWidth: bkRow.width + 8; radius: 8
+                        implicitHeight: 24; implicitWidth: bkRow.width + 8; radius: Tok.r
                         color: theme.a(theme.line, 0.4)
                         border.width: 1; border.color: theme.a(theme.iris, 0.16)
                         RowLayout {
@@ -1171,11 +1172,11 @@ Scope {
                                     id: bk
                                     required property var modelData
                                     readonly property bool on: (bk.modelData.k === "hw") !== root.sw
-                                    implicitHeight: 20; implicitWidth: bkT.width + 14; radius: 6
+                                    implicitHeight: 20; implicitWidth: bkT.width + 14; radius: Tok.r
                                     color: bk.on ? theme.iris : (bkMa.containsMouse ? theme.a(theme.iris, 0.2) : "transparent")
                                     Text { id: bkT; anchors.centerIn: parent; text: bk.modelData.t
                                         color: bk.on ? theme.bg : theme.sub
-                                        font.pixelSize: 10; font.family: "monospace"; font.bold: bk.on }
+                                        font.pixelSize: 10; font.family: Tok.mono; font.bold: bk.on }
                                     MouseArea {
                                         id: bkMa; anchors.fill: parent; hoverEnabled: true
                                         cursorShape: Qt.PointingHandCursor
@@ -1208,15 +1209,15 @@ Scope {
                     // There is no such thing in a pipewire graph, so don't draw a control
                     // that would sit there reporting "slot 0" and doing nothing.
                     Rectangle { visible: !root.sw
-                        Layout.preferredWidth: 236; implicitHeight: 56; radius: 11; color: theme.a(theme.line, 0.24); border.width: 1; border.color: theme.a(theme.iris, 0.12)
+                        Layout.preferredWidth: 236; implicitHeight: 56; radius: Tok.r; color: theme.a(theme.line, 0.24); border.width: 1; border.color: theme.a(theme.iris, 0.12)
                         RowLayout { anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 6; spacing: 4
                             ColumnLayout { spacing: 1; Layout.fillWidth: true
-                                Text { text: "DEVICE SLOT"; color: theme.faint; font.pixelSize: 9; font.family: "monospace"; font.bold: true; font.letterSpacing: 1 }
+                                Text { text: "DEVICE SLOT"; color: theme.faint; font.pixelSize: 9; font.family: Tok.mono; font.bold: true; font.letterSpacing: 1 }
                                 RowLayout { spacing: 6
-                                    Text { text: "slot " + root.profile; color: theme.text; font.pixelSize: 15; font.family: "monospace" }
+                                    Text { text: "slot " + root.profile; color: theme.text; font.pixelSize: 15; font.family: Tok.mono }
                                     // Just what the DAC reports. It is NOT a readout of whether
                                     // the EQ is on -- see the header note; don't colour it as one.
-                                    Text { text: "· as reported"; color: theme.faint; font.pixelSize: 9; font.family: "monospace" } } }
+                                    Text { text: "· as reported"; color: theme.faint; font.pixelSize: 9; font.family: Tok.mono } } }
                             IconBtn { icon: "remove"; sz: 26; onTapped: { root.profile = root.clamp(root.profile - 1, 0, 15); root.applyProfile() } }
                             IconBtn { icon: "add";    sz: 26; onTapped: { root.profile = root.clamp(root.profile + 1, 0, 15); root.applyProfile() } }
                         } }
@@ -1242,19 +1243,19 @@ Scope {
                 RowLayout {
                     Layout.fillWidth: true; spacing: 6
                     enabled: root.ready; opacity: root.ready ? 1 : 0.4
-                    Text { text: "PRESETS"; color: theme.faint; font.pixelSize: 9; font.family: "monospace"; font.bold: true; font.letterSpacing: 1 }
+                    Text { text: "PRESETS"; color: theme.faint; font.pixelSize: 9; font.family: Tok.mono; font.bold: true; font.letterSpacing: 1 }
                     Repeater {
                         model: root.presets
                         delegate: Rectangle {
                             id: chip
                             required property var modelData
-                            Layout.fillWidth: true; implicitHeight: 28; radius: 8
+                            Layout.fillWidth: true; implicitHeight: 28; radius: Tok.r
                             color: chipMa.containsMouse ? theme.a(theme.iris, 0.2) : theme.a(theme.line, 0.3)
                             border.width: 1; border.color: theme.a(theme.iris, chipMa.containsMouse ? 0.45 : 0.16)
                             RowLayout {
                                 anchors.centerIn: parent; spacing: 5
                                 Sym { text: chip.modelData.ic; sz: 13; color: theme.frost }
-                                Text { text: chip.modelData.nm; color: theme.sub; font.pixelSize: 10; font.family: "monospace"; font.bold: true }
+                                Text { text: chip.modelData.nm; color: theme.sub; font.pixelSize: 10; font.family: Tok.mono; font.bold: true }
                             }
                             MouseArea { id: chipMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
                                 onClicked: root.applyPreset(chip.modelData) }
@@ -1264,7 +1265,7 @@ Scope {
 
                 // ---------------- response graph (region-labelled) ----------------
                 Rectangle {
-                    Layout.fillWidth: true; Layout.preferredHeight: 244; radius: 12
+                    Layout.fillWidth: true; Layout.preferredHeight: 244; radius: Tok.r
                     color: theme.a(theme.panel, 0.6); border.width: 1; border.color: theme.a(theme.iris, 0.14); clip: true
 
                     // Two views of the same maths, because they answer different questions.
@@ -1284,7 +1285,7 @@ Scope {
                         z: 6
                         anchors.right: parent.right; anchors.top: parent.top
                         anchors.rightMargin: 8; anchors.topMargin: 8
-                        implicitWidth: 26; implicitHeight: 22; radius: 7
+                        implicitWidth: 26; implicitHeight: 22; radius: Tok.r
                         color: gmMa.containsMouse ? theme.a(theme.iris, 0.25) : theme.a(theme.bg, 0.6)
                         border.width: 1; border.color: theme.a(theme.iris, root.graphReadout ? 0.5 : 0.18)
                         Sym {
@@ -1473,7 +1474,7 @@ Scope {
 
                 // ---------------- all-bands column editor ----------------
                 Rectangle {
-                    Layout.fillWidth: true; Layout.fillHeight: true; radius: 12
+                    Layout.fillWidth: true; Layout.fillHeight: true; radius: Tok.r
                     visible: root.ready
                     color: theme.a(theme.panel, 0.5); border.width: 1; border.color: theme.a(theme.iris, 0.12)
                     RowLayout {
@@ -1487,7 +1488,7 @@ Scope {
                                 readonly property var bd: root.bands[slot]
                                 readonly property bool selCol: slot === root.sel
                                 readonly property bool off: col.bd.type === "disabled"
-                                Layout.fillWidth: true; Layout.preferredWidth: 1; Layout.fillHeight: true; radius: 10
+                                Layout.fillWidth: true; Layout.preferredWidth: 1; Layout.fillHeight: true; radius: Tok.r
                                 color: selCol ? theme.a(theme.iris, 0.13) : theme.a(theme.line, 0.16)
                                 border.width: 1; border.color: selCol ? theme.a(theme.iris, 0.5) : theme.a(theme.line, 0.5)
                                 MouseArea { anchors.fill: parent; onClicked: root.sel = col.slot }   // click empty space to select
@@ -1502,19 +1503,19 @@ Scope {
                                         Layout.fillWidth: true; implicitHeight: 10
                                         Text { anchors.centerIn: parent; text: root.regionOf(col.bd.frequency).n
                                             color: col.off ? theme.a(theme.faint, 0.45) : root.regionOf(col.bd.frequency).c
-                                            font.pixelSize: 8; font.family: "monospace"; font.bold: true; font.letterSpacing: .5 }
+                                            font.pixelSize: 8; font.family: Tok.mono; font.bold: true; font.letterSpacing: .5 }
                                         // bd.index is the slot the write actually targets, and the same
                                         // number the graph prints on its handles — use it, not the
                                         // on-screen position, so the two can never disagree.
                                         Text { anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
                                             text: col.bd.index; color: theme.a(theme.faint, col.selCol ? 0.9 : 0.5)
-                                            font.pixelSize: 7; font.family: "monospace" }
+                                            font.pixelSize: 7; font.family: Tok.mono }
                                     }
                                     // filter type — click cycles fwd, right-click back
-                                    Rectangle { Layout.fillWidth: true; implicitHeight: 24; radius: 6
+                                    Rectangle { Layout.fillWidth: true; implicitHeight: 24; radius: Tok.r
                                         color: col.off ? theme.a(theme.line, 0.4) : theme.a(theme.iris, 0.12)
                                         border.width: 1; border.color: theme.a(theme.iris, 0.28)
-                                        Text { anchors.centerIn: parent; text: root.typeAbbr(col.bd.type); color: col.off ? theme.faint : theme.text; font.pixelSize: 11; font.family: "monospace"; font.bold: true }
+                                        Text { anchors.centerIn: parent; text: root.typeAbbr(col.bd.type); color: col.off ? theme.faint : theme.text; font.pixelSize: 11; font.family: Tok.mono; font.bold: true }
                                         MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; acceptedButtons: Qt.LeftButton | Qt.RightButton
                                             onPressed: (e) => { root.sel = col.slot; root.cycleType(col.slot, e.button === Qt.RightButton ? -1 : 1) } }
                                     }
@@ -1529,20 +1530,20 @@ Scope {
                                     RowLayout { Layout.alignment: Qt.AlignHCenter; spacing: 4
                                         Text { text: (col.bd.gain >= 0 ? "+" : "") + col.bd.gain.toFixed(1)
                                             color: col.off ? theme.a(theme.faint, 0.55) : (root.atCeiling(col.bd) ? theme.warn : theme.frost)
-                                            font.pixelSize: 12; font.family: "monospace"; font.bold: true }
-                                        Text { visible: root.atCeiling(col.bd); text: "limit"; color: theme.warn; font.pixelSize: 7; font.family: "monospace" } }
+                                            font.pixelSize: 12; font.family: Tok.mono; font.bold: true }
+                                        Text { visible: root.atCeiling(col.bd); text: "limit"; color: theme.warn; font.pixelSize: 7; font.family: Tok.mono } }
                                     // frequency stepper (log step)
                                     RowLayout { Layout.fillWidth: true; spacing: 0
                                         IconBtn { icon: "remove"; sz: 18; onTapped: { root.sel = col.slot; root.stepFreq(col.slot, -1) } }
                                         Text { Layout.fillWidth: true; horizontalAlignment: Text.AlignHCenter; text: root.fmtHz(col.bd.frequency)
-                                            color: col.off ? theme.a(theme.faint, 0.6) : theme.sub; font.pixelSize: 10; font.family: "monospace" }
+                                            color: col.off ? theme.a(theme.faint, 0.6) : theme.sub; font.pixelSize: 10; font.family: Tok.mono }
                                         IconBtn { icon: "add"; sz: 18; onTapped: { root.sel = col.slot; root.stepFreq(col.slot, 1) } } }
-                                    Text { Layout.alignment: Qt.AlignHCenter; text: "FREQ"; color: theme.faint; font.pixelSize: 7; font.family: "monospace"; font.letterSpacing: 1 }
+                                    Text { Layout.alignment: Qt.AlignHCenter; text: "FREQ"; color: theme.faint; font.pixelSize: 7; font.family: Tok.mono; font.letterSpacing: 1 }
                                     // Q stepper
                                     RowLayout { Layout.fillWidth: true; spacing: 0
                                         IconBtn { icon: "remove"; sz: 18; onTapped: { root.sel = col.slot; root.setBand(col.slot, { q: Math.round(root.clamp(col.bd.q - 0.1, 0.1, root.qMax) * 100) / 100 }, true) } }
                                         Text { Layout.fillWidth: true; horizontalAlignment: Text.AlignHCenter; text: "Q" + col.bd.q.toFixed(2)
-                                            color: col.off ? theme.a(theme.faint, 0.6) : theme.sub; font.pixelSize: 10; font.family: "monospace" }
+                                            color: col.off ? theme.a(theme.faint, 0.6) : theme.sub; font.pixelSize: 10; font.family: Tok.mono }
                                         IconBtn { icon: "add"; sz: 18; onTapped: { root.sel = col.slot; root.setBand(col.slot, { q: Math.round(root.clamp(col.bd.q + 0.1, 0.1, root.qMax) * 100) / 100 }, true) } } }
                                 }
                             }
@@ -1562,7 +1563,7 @@ Scope {
                 Rectangle {
                     visible: root.lastError !== ""
                     Layout.fillWidth: true
-                    implicitHeight: errCol.height + 18; radius: 11
+                    implicitHeight: errCol.height + 18; radius: Tok.r
                     color: theme.a(theme.bad, 0.16); border.width: 1; border.color: theme.a(theme.bad, 0.5)
                     RowLayout {
                         id: errCol
@@ -1571,9 +1572,9 @@ Scope {
                         Sym { text: "block"; sz: 18; color: theme.bad }
                         ColumnLayout { Layout.fillWidth: true; spacing: 1
                             Text { text: "device refused the write — graph resynced to the DAC"
-                                color: theme.bad; font.pixelSize: 11; font.family: "monospace"; font.bold: true }
+                                color: theme.bad; font.pixelSize: 11; font.family: Tok.mono; font.bold: true }
                             Text { Layout.fillWidth: true; wrapMode: Text.WordWrap; text: root.lastError
-                                color: theme.sub; font.pixelSize: 10; font.family: "monospace"; lineHeight: 1.25 } }
+                                color: theme.sub; font.pixelSize: 10; font.family: Tok.mono; lineHeight: 1.25 } }
                         IconBtn { icon: "close"; onTapped: root.lastError = "" }
                     }
                 }
@@ -1583,7 +1584,7 @@ Scope {
                     // error toast anyway, so the two can never both be showing.
                     visible: root.exported !== "" && root.lastError === ""
                     Layout.fillWidth: true
-                    implicitHeight: expRow.height + 18; radius: 11
+                    implicitHeight: expRow.height + 18; radius: Tok.r
                     color: theme.a(theme.good, 0.14); border.width: 1; border.color: theme.a(theme.good, 0.45)
                     RowLayout {
                         id: expRow
@@ -1593,9 +1594,9 @@ Scope {
                         ColumnLayout { Layout.fillWidth: true; spacing: 1
                             Text { text: /\.conf$/i.test(root.exported) ? "exported — copy it to ~/.config/pipewire/pipewire.conf.d/ and restart pipewire"
                                                                         : "exported"
-                                color: theme.good; font.pixelSize: 11; font.family: "monospace"; font.bold: true }
+                                color: theme.good; font.pixelSize: 11; font.family: Tok.mono; font.bold: true }
                             Text { Layout.fillWidth: true; elide: Text.ElideMiddle; text: root.exported
-                                color: theme.sub; font.pixelSize: 10; font.family: "monospace" } }
+                                color: theme.sub; font.pixelSize: 10; font.family: Tok.mono } }
                         IconBtn { icon: "close"; onTapped: root.exported = "" }
                     }
                 }
@@ -1611,7 +1612,7 @@ Scope {
                                  ? "drag graph points · scroll = Q · nothing is audible until you apply · select “Universal EQ” as your output"
                                  : "drag graph points · scroll = Q · these filters run in pipewire — apply to create the output and hear them")
                               : "drag graph points · scroll = Q · new to this? tap “how to tune” · edits are live, save to keep them after unplug"
-                        color: theme.faint; font.pixelSize: 10; font.family: "monospace"
+                        color: theme.faint; font.pixelSize: 10; font.family: Tok.mono
                         Layout.fillWidth: true; elide: Text.ElideRight }
                     TextBtn {
                         visible: root.sw && root.swInfo.installed
@@ -1647,7 +1648,7 @@ Scope {
             // and saying so is the difference between an informed yes and a shrug.
             Rectangle {
                 visible: root.swConfirm
-                anchors.fill: parent; radius: 18
+                anchors.fill: parent; radius: Tok.rCard
                 color: theme.a(theme.bg, 0.97); border.width: 1; border.color: theme.a(theme.iris, 0.34)
                 MouseArea { anchors.fill: parent }
                 ColumnLayout {
@@ -1656,7 +1657,7 @@ Scope {
                         Layout.fillWidth: true; spacing: 10
                         Sym { text: "speaker_group"; sz: 24; color: theme.iris }
                         Text { text: "Create the software EQ output?"; color: theme.text
-                            font.pixelSize: 18; font.family: "monospace"; font.bold: true }
+                            font.pixelSize: 18; font.family: Tok.mono; font.bold: true }
                     }
                     Text {
                         Layout.fillWidth: true; wrapMode: Text.WordWrap
@@ -1668,7 +1669,7 @@ Scope {
                             + "A “Universal EQ” output appears, and you pick it as your output device. Your "
                             + "main pipewire is NOT restarted, so nothing playing right now is interrupted. "
                             + "Undo it any time with “remove”."
-                        color: theme.sub; font.pixelSize: 11; font.family: "monospace"; lineHeight: 1.4
+                        color: theme.sub; font.pixelSize: 11; font.family: Tok.mono; lineHeight: 1.4
                     }
                     RowLayout {
                         Layout.fillWidth: true; spacing: 8
@@ -1683,7 +1684,7 @@ Scope {
             // ---------------- community preset browser ----------------
             Rectangle {
                 id: hubBrowser
-                visible: root.hubOpen; anchors.fill: parent; radius: 18
+                visible: root.hubOpen; anchors.fill: parent; radius: Tok.rCard
                 color: theme.a(theme.bg, 0.985); border.width: 1; border.color: theme.a(theme.iris, 0.34)
                 MouseArea { anchors.fill: parent }   // swallow clicks
 
@@ -1694,14 +1695,14 @@ Scope {
                         Layout.fillWidth: true; spacing: 10
                         Sym { text: "groups"; sz: 22; color: theme.iris }
                         Text { text: "Community presets"; color: theme.text
-                            font.pixelSize: 19; font.family: "monospace"; font.bold: true }
+                            font.pixelSize: 19; font.family: Tok.mono; font.bold: true }
                         Text {
                             text: root.hubState === "ok"
                                   ? (root.hubTotal > root.hubList.length
                                      ? ("· " + root.hubList.length + " of " + root.hubTotal + " · most downloaded first")
                                      : ("· " + root.hubTotal + " for this device family"))
                                   : "· from hub.moondroplab.tech"
-                            color: theme.faint; font.pixelSize: 11; font.family: "monospace"
+                            color: theme.faint; font.pixelSize: 11; font.family: Tok.mono
                             Layout.fillWidth: true; elide: Text.ElideRight
                         }
                         IconBtn { icon: "refresh"; onTapped: { root.hubState = "loading"
@@ -1714,7 +1715,7 @@ Scope {
 
                     // search — typing filters the whole library, not just what's listed
                     Rectangle {
-                        Layout.fillWidth: true; implicitHeight: 32; radius: 9
+                        Layout.fillWidth: true; implicitHeight: 32; radius: Tok.r
                         color: theme.a(theme.line, 0.4)
                         border.width: 1; border.color: theme.a(theme.iris, hubSearch.activeFocus ? 0.5 : 0.16)
                         RowLayout {
@@ -1725,7 +1726,7 @@ Scope {
                                 Layout.fillWidth: true
                                 text: root.hubQuery
                                 onTextChanged: root.hubQuery = text
-                                color: theme.text; font.pixelSize: 12; font.family: "monospace"
+                                color: theme.text; font.pixelSize: 12; font.family: Tok.mono
                                 selectByMouse: true; clip: true
                                 focus: root.hubOpen
                                 Keys.onEscapePressed: { if (text !== "") text = ""; else root.hubOpen = false }
@@ -1733,7 +1734,7 @@ Scope {
                                     anchors.verticalCenter: parent.verticalCenter
                                     visible: hubSearch.text === ""
                                     text: "search by name, author or description…"
-                                    color: theme.faint; font.pixelSize: 12; font.family: "monospace"
+                                    color: theme.faint; font.pixelSize: 12; font.family: Tok.mono
                                 }
                             }
                             Sym { text: "close"; sz: 14; color: theme.faint; visible: hubSearch.text !== ""
@@ -1753,14 +1754,14 @@ Scope {
                               : root.hubState === "error" ? ("couldn't load the library\n" + root.hubError)
                               : ""
                         color: root.hubState === "error" ? theme.bad : theme.faint
-                        font.pixelSize: 12; font.family: "monospace"; lineHeight: 1.4
+                        font.pixelSize: 12; font.family: Tok.mono; lineHeight: 1.4
                     }
                     Text {
                         Layout.fillWidth: true; Layout.fillHeight: true
                         visible: root.hubState === "ok" && root.hubList.length === 0
                         horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter
                         text: "nothing matches “" + root.hubQuery + "”"
-                        color: theme.faint; font.pixelSize: 12; font.family: "monospace"
+                        color: theme.faint; font.pixelSize: 12; font.family: Tok.mono
                     }
 
                     // ---- preview: what the selected curve actually does ----
@@ -1768,7 +1769,7 @@ Scope {
                         Layout.fillWidth: true
                         implicitHeight: root.hubSel !== "" ? 186 : 0
                         visible: root.hubSel !== "" && root.hubState === "ok"
-                        radius: 10; clip: true
+                        radius: Tok.r; clip: true
                         color: theme.a(theme.panel, 0.6)
                         border.width: 1; border.color: theme.a(theme.iris, 0.14)
                         Behavior on implicitHeight { NumberAnimation { duration: 130; easing.type: Easing.OutCubic } }
@@ -1780,17 +1781,17 @@ Scope {
                                 Text {
                                     Layout.fillWidth: true; elide: Text.ElideRight; maximumLineCount: 1
                                     text: root.hubSelTitle
-                                    color: theme.text; font.pixelSize: 11; font.family: "monospace"; font.bold: true
+                                    color: theme.text; font.pixelSize: 11; font.family: Tok.mono; font.bold: true
                                 }
                                 // legend, same names the official uses
                                 Rectangle { implicitWidth: 9; implicitHeight: 2; color: "#c86fd0" }
-                                Text { text: "Flat"; color: theme.faint; font.pixelSize: 9; font.family: "monospace" }
+                                Text { text: "Flat"; color: theme.faint; font.pixelSize: 9; font.family: Tok.mono }
                                 Rectangle { implicitWidth: 9; implicitHeight: 2; color: theme.bad; Layout.leftMargin: 4 }
-                                Text { text: "Flat (Equalized)"; color: theme.faint; font.pixelSize: 9; font.family: "monospace" }
+                                Text { text: "Flat (Equalized)"; color: theme.faint; font.pixelSize: 9; font.family: Tok.mono }
                                 // the official's eye: does the drawn level include pre-gain
                                 Rectangle {
                                     Layout.leftMargin: 6
-                                    implicitWidth: 26; implicitHeight: 18; radius: 6
+                                    implicitWidth: 26; implicitHeight: 18; radius: Tok.r
                                     color: preEye.containsMouse ? theme.a(theme.iris, 0.2) : theme.a(theme.line, 0.4)
                                     border.width: 1; border.color: theme.a(theme.iris, 0.16)
                                     Sym { anchors.centerIn: parent; sz: 12
@@ -1802,7 +1803,7 @@ Scope {
                                 }
                                 Text {
                                     text: "pre " + root.pregain.toFixed(1) + " dB"
-                                    color: theme.faint; font.pixelSize: 9; font.family: "monospace"
+                                    color: theme.faint; font.pixelSize: 9; font.family: Tok.mono
                                 }
                             }
                             RespChart {
@@ -1817,7 +1818,7 @@ Scope {
                         }
                         Text {
                             anchors.centerIn: parent; visible: root.hubPreLoading
-                            text: "…"; color: theme.faint; font.pixelSize: 20; font.family: "monospace"
+                            text: "…"; color: theme.faint; font.pixelSize: 20; font.family: Tok.mono
                         }
                         // A community curve is bands only — it says nothing about headroom.
                         // With YOUR pre-gain applied, this is what it would actually output.
@@ -1826,7 +1827,7 @@ Scope {
                             anchors.rightMargin: 10; anchors.bottomMargin: 18
                             visible: root.hubPreview.length > 0 && root.hubPreOvershoot > 0.05
                             text: "clips by " + root.hubPreOvershoot.toFixed(1) + " dB at this pre-gain"
-                            color: theme.warn; font.pixelSize: 9; font.family: "monospace"
+                            color: theme.warn; font.pixelSize: 9; font.family: Tok.mono
                         }
                     }
 
@@ -1850,14 +1851,14 @@ Scope {
                             visible: hubView.contentY > 120
                             opacity: visible ? 1 : 0
                             Behavior on opacity { NumberAnimation { duration: 120 } }
-                            implicitWidth: 92; implicitHeight: 26; radius: 13
+                            implicitWidth: 92; implicitHeight: 26; radius: Tok.r
                             color: topMa.containsMouse ? theme.iris : theme.a(theme.bg, 0.94)
                             border.width: 1; border.color: theme.a(theme.iris, 0.45)
                             RowLayout {
                                 anchors.centerIn: parent; spacing: 5
                                 Sym { text: "arrow_upward"; sz: 13
                                     color: topMa.containsMouse ? theme.bg : theme.frost }
-                                Text { text: "top"; font.pixelSize: 10; font.family: "monospace"; font.bold: true
+                                Text { text: "top"; font.pixelSize: 10; font.family: Tok.mono; font.bold: true
                                     color: topMa.containsMouse ? theme.bg : theme.frost }
                             }
                             MouseArea {
@@ -1869,7 +1870,7 @@ Scope {
                         delegate: Rectangle {
                             id: hp
                             required property var modelData
-                            width: hubView.width; implicitHeight: 46; radius: 9
+                            width: hubView.width; implicitHeight: 46; radius: Tok.r
                             // These rows hold arbitrary text from strangers. The script
                             // already flattens whitespace, but clip is the backstop that
                             // keeps one weird row from painting over its neighbours.
@@ -1897,29 +1898,29 @@ Scope {
                                         Layout.fillWidth: true; elide: Text.ElideRight
                                         maximumLineCount: 1
                                         text: hp.modelData.title !== "" ? hp.modelData.title : "(untitled)"
-                                        color: theme.text; font.pixelSize: 12; font.family: "monospace"
+                                        color: theme.text; font.pixelSize: 12; font.family: Tok.mono
                                     }
                                     Text {
                                         Layout.fillWidth: true; elide: Text.ElideRight
                                         maximumLineCount: 1
                                         text: hp.modelData.author
                                               + (hp.modelData.desc !== "" ? "  ·  " + hp.modelData.desc : "")
-                                        color: theme.faint; font.pixelSize: 10; font.family: "monospace"
+                                        color: theme.faint; font.pixelSize: 10; font.family: Tok.mono
                                     }
                                 }
                                 RowLayout {
                                     spacing: 4
                                     Sym { text: "download"; sz: 12; color: theme.faint }
                                     Text { text: "" + hp.modelData.downloads; color: theme.frost
-                                        font.pixelSize: 10; font.family: "monospace" }
+                                        font.pixelSize: 10; font.family: Tok.mono }
                                     Sym { text: "favorite"; sz: 12; color: theme.faint; Layout.leftMargin: 6 }
                                     Text { text: "" + hp.modelData.likes; color: theme.frost
-                                        font.pixelSize: 10; font.family: "monospace" }
+                                        font.pixelSize: 10; font.family: Tok.mono }
                                 }
                                 // Apply is its own target. Clicking the row only draws the
                                 // curve; writing 8 bands to the DAC should take aim.
                                 Rectangle {
-                                    implicitWidth: 62; implicitHeight: 24; radius: 7
+                                    implicitWidth: 62; implicitHeight: 24; radius: Tok.r
                                     color: root.hubBusy === hp.modelData.uuid ? theme.a(theme.iris, 0.3)
                                          : applyMa.containsMouse ? theme.iris : theme.a(theme.line, 0.5)
                                     border.width: 1
@@ -1928,7 +1929,7 @@ Scope {
                                         anchors.centerIn: parent
                                         text: root.hubBusy === hp.modelData.uuid ? "…" : "apply"
                                         color: applyMa.containsMouse && root.hubBusy === "" ? theme.bg : theme.sub
-                                        font.pixelSize: 10; font.family: "monospace"; font.bold: true
+                                        font.pixelSize: 10; font.family: Tok.mono; font.bold: true
                                     }
                                     MouseArea {
                                         id: applyMa; anchors.fill: parent; hoverEnabled: true
@@ -1948,7 +1949,7 @@ Scope {
                         text: "Click a preset to see its curve — nothing touches the DAC until you press apply. "
                             + "Applying overwrites all " + root.bandCount + " bands live, and stays out of flash "
                             + "until you save. Pre-gain is left alone — published presets don't carry one."
-                        color: theme.faint; font.pixelSize: 10; font.family: "monospace"; lineHeight: 1.3
+                        color: theme.faint; font.pixelSize: 10; font.family: Tok.mono; lineHeight: 1.3
                     }
                 }
             }
@@ -1956,7 +1957,7 @@ Scope {
             // ---------------- in-panel file browser ----------------
             Rectangle {
                 id: fileBrowser
-                visible: root.fileOpen; anchors.fill: parent; radius: 18
+                visible: root.fileOpen; anchors.fill: parent; radius: Tok.rCard
                 color: theme.a(theme.bg, 0.985); border.width: 1; border.color: theme.a(theme.iris, 0.34)
                 MouseArea { anchors.fill: parent }   // swallow clicks
 
@@ -1980,9 +1981,9 @@ Scope {
                         Layout.fillWidth: true; spacing: 10
                         Sym { text: root.fileMode === "import" ? "folder_open" : "save_as"; sz: 22; color: theme.iris }
                         Text { text: root.fileMode === "import" ? "Import EQ" : "Export EQ"
-                            color: theme.text; font.pixelSize: 19; font.family: "monospace"; font.bold: true }
+                            color: theme.text; font.pixelSize: 19; font.family: Tok.mono; font.bold: true }
                         Text { text: root.fileMode === "import" ? "· AutoEQ/REW .txt or a .json backup" : "· writes to the folder you're in"
-                            color: theme.faint; font.pixelSize: 11; font.family: "monospace" }
+                            color: theme.faint; font.pixelSize: 11; font.family: Tok.mono }
                         Item { Layout.fillWidth: true }
                         IconBtn { icon: "close"; onTapped: root.fileOpen = false }
                     }
@@ -1998,21 +1999,21 @@ Scope {
                             delegate: Rectangle {
                                 id: sc
                                 required property var modelData
-                                implicitHeight: 24; implicitWidth: scT.width + 18; radius: 7
+                                implicitHeight: 24; implicitWidth: scT.width + 18; radius: Tok.r
                                 color: scMa.containsMouse ? theme.a(theme.iris, 0.2) : theme.a(theme.line, 0.3)
                                 border.width: 1; border.color: theme.a(theme.iris, 0.14)
-                                Text { id: scT; anchors.centerIn: parent; text: sc.modelData.nm; color: theme.sub; font.pixelSize: 10; font.family: "monospace" }
+                                Text { id: scT; anchors.centerIn: parent; text: sc.modelData.nm; color: theme.sub; font.pixelSize: 10; font.family: Tok.mono }
                                 MouseArea { id: scMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
                                     onClicked: root.fileDir = sc.modelData.d }
                             }
                         }
                         Text { Layout.fillWidth: true; elide: Text.ElideLeft; text: root.fileDir
-                            color: theme.frost; font.pixelSize: 11; font.family: "monospace" }
+                            color: theme.frost; font.pixelSize: 11; font.family: Tok.mono }
                     }
 
                     // listing
                     Rectangle {
-                        Layout.fillWidth: true; Layout.fillHeight: true; radius: 11
+                        Layout.fillWidth: true; Layout.fillHeight: true; radius: Tok.r
                         color: theme.a(theme.panel, 0.5); border.width: 1; border.color: theme.a(theme.iris, 0.12); clip: true
                         ListView {
                             id: fileList
@@ -2024,17 +2025,17 @@ Scope {
                                 required property string fileName
                                 required property string filePath
                                 required property bool fileIsDir
-                                width: fileList.width; height: 30; radius: 7
+                                width: fileList.width; height: 30; radius: Tok.r
                                 color: rowMa.containsMouse ? theme.a(theme.iris, 0.16) : "transparent"
                                 RowLayout {
                                     anchors.fill: parent; anchors.leftMargin: 9; anchors.rightMargin: 9; spacing: 9
                                     Sym { text: row.fileIsDir ? "folder" : (/\.json$/i.test(row.fileName) ? "data_object" : "description")
                                         sz: 15; color: row.fileIsDir ? theme.iris : theme.faint }
                                     Text { Layout.fillWidth: true; elide: Text.ElideRight; text: row.fileName
-                                        color: row.fileIsDir ? theme.text : theme.sub; font.pixelSize: 12; font.family: "monospace" }
+                                        color: row.fileIsDir ? theme.text : theme.sub; font.pixelSize: 12; font.family: Tok.mono }
                                     Text { visible: !row.fileIsDir && root.fileMode === "import"
                                         text: /\.json$/i.test(row.fileName) ? "backup" : "AutoEQ/REW"
-                                        color: theme.faint; font.pixelSize: 9; font.family: "monospace" }
+                                        color: theme.faint; font.pixelSize: 9; font.family: Tok.mono }
                                 }
                                 MouseArea {
                                     id: rowMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
@@ -2049,14 +2050,14 @@ Scope {
                         Text {
                             anchors.centerIn: parent; visible: folderModel.count === 0
                             text: root.fileMode === "import" ? "no .txt or .json files here" : "no existing exports here"
-                            color: theme.faint; font.pixelSize: 11; font.family: "monospace"
+                            color: theme.faint; font.pixelSize: 11; font.family: Tok.mono
                         }
                     }
 
                     // export controls
                     RowLayout {
                         Layout.fillWidth: true; spacing: 8; visible: root.fileMode === "export"
-                        Text { text: "FORMAT"; color: theme.faint; font.pixelSize: 9; font.family: "monospace"; font.bold: true; font.letterSpacing: 1 }
+                        Text { text: "FORMAT"; color: theme.faint; font.pixelSize: 9; font.family: Tok.mono; font.bold: true; font.letterSpacing: 1 }
                         Repeater {
                             model: [ { k: "json",     nm: "JSON backup",  d: "restore later with import" },
                                      { k: "pipewire", nm: "PipeWire EQ",  d: "software EQ for any output device" } ]
@@ -2064,11 +2065,11 @@ Scope {
                                 id: fmt
                                 required property var modelData
                                 readonly property bool on: root.exportFmt === fmt.modelData.k
-                                implicitHeight: 30; implicitWidth: fmtT.width + 20; radius: 8
+                                implicitHeight: 30; implicitWidth: fmtT.width + 20; radius: Tok.r
                                 color: fmt.on ? theme.a(theme.iris, 0.22) : theme.a(theme.line, 0.28)
                                 border.width: 1; border.color: theme.a(theme.iris, fmt.on ? 0.5 : 0.14)
                                 Text { id: fmtT; anchors.centerIn: parent; text: fmt.modelData.nm
-                                    color: fmt.on ? theme.frost : theme.sub; font.pixelSize: 10; font.family: "monospace"; font.bold: fmt.on }
+                                    color: fmt.on ? theme.frost : theme.sub; font.pixelSize: 10; font.family: Tok.mono; font.bold: fmt.on }
                                 MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
                                     onClicked: {
                                         root.exportFmt = fmt.modelData.k;
@@ -2078,14 +2079,14 @@ Scope {
                         }
                         Text { text: root.exportFmt === "pipewire" ? "runs the same curves in software — works with any DAC/speakers"
                                                                    : "a full device snapshot you can re-import"
-                            color: theme.faint; font.pixelSize: 10; font.family: "monospace"
+                            color: theme.faint; font.pixelSize: 10; font.family: Tok.mono
                             Layout.fillWidth: true; elide: Text.ElideRight }
                     }
                     RowLayout {
                         Layout.fillWidth: true; spacing: 8; visible: root.fileMode === "export"
-                        Text { text: "FILE"; color: theme.faint; font.pixelSize: 9; font.family: "monospace"; font.bold: true; font.letterSpacing: 1 }
+                        Text { text: "FILE"; color: theme.faint; font.pixelSize: 9; font.family: Tok.mono; font.bold: true; font.letterSpacing: 1 }
                         Rectangle {
-                            Layout.fillWidth: true; implicitHeight: 32; radius: 8
+                            Layout.fillWidth: true; implicitHeight: 32; radius: Tok.r
                             color: theme.a(theme.line, 0.3); border.width: 1
                             border.color: nameIn.activeFocus ? theme.a(theme.iris, 0.5) : theme.a(theme.iris, 0.14)
                             TextInput {
@@ -2094,7 +2095,7 @@ Scope {
                                 verticalAlignment: TextInput.AlignVCenter
                                 text: root.exportName
                                 onTextChanged: root.exportName = text
-                                color: theme.text; font.pixelSize: 12; font.family: "monospace"
+                                color: theme.text; font.pixelSize: 12; font.family: Tok.mono
                                 selectByMouse: true; clip: true
                                 onAccepted: root.doExport()
                             }
@@ -2108,14 +2109,14 @@ Scope {
 
             // ---------------- in-panel tuning guide ----------------
             Rectangle {
-                visible: root.helpOpen; anchors.fill: parent; radius: 18
+                visible: root.helpOpen; anchors.fill: parent; radius: Tok.rCard
                 color: theme.a(theme.bg, 0.985); border.width: 1; border.color: theme.a(theme.iris, 0.34)
                 MouseArea { anchors.fill: parent }   // swallow clicks
                 ColumnLayout {
                     anchors.fill: parent; anchors.margins: 22; spacing: 12
                     RowLayout { Layout.fillWidth: true; spacing: 10
                         Sym { text: "school"; sz: 22; color: theme.iris }
-                        Text { text: "How to tune"; color: theme.text; font.pixelSize: 19; font.family: "monospace"; font.bold: true }
+                        Text { text: "How to tune"; color: theme.text; font.pixelSize: 19; font.family: Tok.mono; font.bold: true }
                         Item { Layout.fillWidth: true }
                         IconBtn { icon: "close"; onTapped: root.helpOpen = false }
                     }
@@ -2126,7 +2127,7 @@ Scope {
 
                             // ---- the one-paragraph version ----
                             Rectangle {
-                                Layout.fillWidth: true; radius: 12
+                                Layout.fillWidth: true; radius: Tok.r
                                 color: theme.a(theme.iris, 0.09); border.width: 1; border.color: theme.a(theme.iris, 0.24)
                                 implicitHeight: introRow.height + 26
                                 RowLayout {
@@ -2137,8 +2138,8 @@ Scope {
                                     ColumnLayout {
                                         Layout.fillWidth: true; spacing: 4
                                         Text { text: "EQ is just “make some frequencies louder or quieter”."
-                                            color: theme.text; font.pixelSize: 14; font.family: "monospace"; font.bold: true }
-                                        Text { Layout.fillWidth: true; wrapMode: Text.WordWrap; color: theme.sub; font.pixelSize: 12; font.family: "monospace"; lineHeight: 1.35
+                                            color: theme.text; font.pixelSize: 14; font.family: Tok.mono; font.bold: true }
+                                        Text { Layout.fillWidth: true; wrapMode: Text.WordWrap; color: theme.sub; font.pixelSize: 12; font.family: Tok.mono; lineHeight: 1.35
                                             text: "Each of the " + root.bandCount + " columns is one filter. Give it a shape, a frequency, how much (gain) and how wide (Q). "
                                                   + "Drag a dot on the graph for big moves, use the column steppers for fine ones, scroll on the graph to change Q. "
                                                   + "Changes are heard instantly — nothing is permanent until you hit save to flash." }
@@ -2171,18 +2172,18 @@ Scope {
                                     ]
                                     delegate: Rectangle {
                                         required property var modelData
-                                        Layout.fillWidth: true; radius: 9; implicitHeight: 42
+                                        Layout.fillWidth: true; radius: Tok.r; implicitHeight: 42
                                         color: theme.a(theme.line, 0.16); border.width: 1; border.color: theme.a(theme.iris, 0.1)
                                         RowLayout {
                                             anchors.fill: parent; anchors.leftMargin: 10; anchors.rightMargin: 12; spacing: 11
                                             Rectangle {
-                                                implicitWidth: 34; implicitHeight: 20; radius: 6
+                                                implicitWidth: 34; implicitHeight: 20; radius: Tok.r
                                                 color: theme.a(theme.iris, 0.14); border.width: 1; border.color: theme.a(theme.iris, 0.3)
-                                                Text { anchors.centerIn: parent; text: modelData.ab; color: theme.text; font.pixelSize: 10; font.family: "monospace"; font.bold: true }
+                                                Text { anchors.centerIn: parent; text: modelData.ab; color: theme.text; font.pixelSize: 10; font.family: Tok.mono; font.bold: true }
                                             }
                                             MiniCurve { band: modelData.band; stroke: theme.frost }
-                                            Text { text: modelData.nm; color: theme.text; font.pixelSize: 12; font.family: "monospace"; font.bold: true; Layout.preferredWidth: 82 }
-                                            Text { Layout.fillWidth: true; wrapMode: Text.WordWrap; text: modelData.d; color: theme.sub; font.pixelSize: 11; font.family: "monospace" }
+                                            Text { text: modelData.nm; color: theme.text; font.pixelSize: 12; font.family: Tok.mono; font.bold: true; Layout.preferredWidth: 82 }
+                                            Text { Layout.fillWidth: true; wrapMode: Text.WordWrap; text: modelData.d; color: theme.sub; font.pixelSize: 11; font.family: Tok.mono }
                                         }
                                     }
                                 }
@@ -2207,9 +2208,9 @@ Scope {
                                         readonly property var rd: root.regionDefs[modelData.i]
                                         Layout.fillWidth: true; spacing: 10
                                         Rectangle { implicitWidth: 4; implicitHeight: 15; radius: 2; color: rd.c }
-                                        Text { text: rd.n; color: rd.c; font.pixelSize: 11; font.family: "monospace"; font.bold: true; Layout.preferredWidth: 84 }
-                                        Text { text: root.fmtHz(rd.f1) + "–" + root.fmtHz(rd.f2); color: theme.faint; font.pixelSize: 11; font.family: "monospace"; Layout.preferredWidth: 74 }
-                                        Text { Layout.fillWidth: true; text: modelData.d; color: theme.sub; font.pixelSize: 11; font.family: "monospace" }
+                                        Text { text: rd.n; color: rd.c; font.pixelSize: 11; font.family: Tok.mono; font.bold: true; Layout.preferredWidth: 84 }
+                                        Text { text: root.fmtHz(rd.f1) + "–" + root.fmtHz(rd.f2); color: theme.faint; font.pixelSize: 11; font.family: Tok.mono; Layout.preferredWidth: 74 }
+                                        Text { Layout.fillWidth: true; text: modelData.d; color: theme.sub; font.pixelSize: 11; font.family: Tok.mono }
                                     }
                                 }
                             }
@@ -2229,15 +2230,15 @@ Scope {
                                     ]
                                     delegate: Rectangle {
                                         required property var modelData
-                                        Layout.fillWidth: true; Layout.preferredWidth: 1; radius: 9; implicitHeight: 40
+                                        Layout.fillWidth: true; Layout.preferredWidth: 1; radius: Tok.r; implicitHeight: 40
                                         color: theme.a(theme.line, 0.16); border.width: 1; border.color: theme.a(theme.iris, 0.1)
                                         RowLayout {
                                             anchors.fill: parent; anchors.leftMargin: 9; anchors.rightMargin: 10; spacing: 9
                                             MiniCurve { band: modelData.band; span: 6; stroke: theme.iris }
                                             ColumnLayout {
                                                 Layout.fillWidth: true; spacing: 0
-                                                Text { text: modelData.nm; color: theme.text; font.pixelSize: 11; font.family: "monospace"; font.bold: true }
-                                                Text { color: theme.frost; font.pixelSize: 10; font.family: "monospace"
+                                                Text { text: modelData.nm; color: theme.text; font.pixelSize: 11; font.family: Tok.mono; font.bold: true }
+                                                Text { color: theme.frost; font.pixelSize: 10; font.family: Tok.mono
                                                     text: root.typeName(modelData.band.type) + " · " + root.fmtHz(modelData.band.frequency) + " Hz · "
                                                           + (modelData.band.gain >= 0 ? "+" : "") + modelData.band.gain + " dB · Q" + modelData.band.q }
                                             }

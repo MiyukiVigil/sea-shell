@@ -60,20 +60,25 @@ Scope {
     onShownChanged: { if (shown) { held = true; holdTimer.stop() } else holdTimer.restart() }
     Timer { id: holdTimer; interval: 90; onTriggered: { root.held = false; field.text = ""; root.query = "" } }
 
+    // ---------- industrial token shim ----------
+    // Colours come from the shared Tok singleton (see shell.qml). This surface used to carry its
+    // own copy of the ramp AND its own appearance.json parse, so it drifted from the bar every
+    // time the palette changed. The `theme.*` vocabulary is kept because the call sites below
+    // speak it; only the source of the values moved.
     QtObject {
         id: theme
-        readonly property bool light: root.cfgLight
-        readonly property color _acc: root.accent
-        readonly property real  _ah:  _acc.hslHue >= 0 ? _acc.hslHue : 0.55
-        readonly property color bg:    light ? Qt.hsla(_ah, 0.20, 0.945, 1) : Qt.hsla(_ah, 0.36, 0.070, 1)
-        readonly property color line:  light ? Qt.hsla(_ah, 0.16, 0.780, 1) : Qt.hsla(_ah, 0.24, 0.205, 1)
-        readonly property color text:  light ? "#0c1520" : "#e2e9f4"
-        readonly property color sub:   light ? "#2c4256" : "#a6b6cf"
-        readonly property color faint: light ? "#48606f" : "#6f8099"
-        readonly property color iris:  light ? Qt.darker(root.accent, 2.4)  : root.accent
-        readonly property color frost: light ? Qt.darker(root.accent, 1.7)  : Qt.lighter(root.accent, 1.22)
-        readonly property color warn:  light ? "#b9820f" : "#f4c542"
-        readonly property color bad:   light ? "#d1495b" : "#f38ba8"
+        readonly property bool  light: Tok.light
+        readonly property color bg:    Tok.bg
+        readonly property color panel: Tok.surface
+        readonly property color line:  Tok.ruleHard
+        readonly property color text:  Tok.ink
+        readonly property color sub:   Tok.ink2
+        readonly property color faint: Tok.ink3
+        readonly property color iris:  Tok.accent
+        readonly property color frost: Tok.ink2
+        readonly property color good:  Tok.ok
+        readonly property color warn:  Tok.warn
+        readonly property color bad:   Tok.crit
         function a(c, al) { return Qt.rgba(c.r, c.g, c.b, al) }
     }
 
@@ -219,7 +224,7 @@ Scope {
         {l:"Shut down",       s:"systemctl poweroff",       i:"mode_off_on",        c:"systemctl poweroff", warn:true},
         {l:"Log out",         s:"systemctl --user is-active -q 'wayland-wm@*.service' && uwsm stop || { hyprctl dispatch 'hl.dsp.exit()'; sleep 3; loginctl terminate-session self; }",    i:"logout",             c:"systemctl --user is-active -q 'wayland-wm@*.service' && uwsm stop || { hyprctl dispatch 'hl.dsp.exit()'; sleep 3; loginctl terminate-session self; }", warn:true},
         {l:"Reload Hyprland", s:"hyprctl reload",           i:"refresh",            c:"hyprctl reload"},
-        {l:"Restart bar",     s:"quickshell sea-shell",      i:"replay",             c:"pkill -xf 'qs -c sea-shell'; sleep 0.3; hyprctl dispatch \"hl.dsp.exec_cmd('qs -c sea-shell')\""}
+        {l:"Restart bar",     s:"quickshell sea-shell",      i:"replay",             c:"sh ~/.config/quickshell/sea-shell/sea-bar-supervisor.sh --restart"}
     ]
 
     // ---------- async file search (~ mode, debounced) ----------
@@ -414,7 +419,7 @@ Scope {
             height: head.height + 12 + Math.min(8, Math.max(1, root.results.length)) * 52 + hints.height + 26
             anchors.horizontalCenter: parent.horizontalCenter
             y: parent.height * 0.16
-            radius: root.cfgRadius
+            radius: Tok.rCard
             // glassy matte — translucent so the compositor blur (sea-shell:launcher
             // layerrule) frosts the wallpaper behind it; soft cool tint, no gloss.
             color: theme.a(theme.bg, theme.light ? 0.60 : 0.52)
@@ -456,11 +461,11 @@ Scope {
                 TextInput {
                     id: field
                     anchors { left: lens.right; leftMargin: 12; right: badge.left; rightMargin: 10; verticalCenter: parent.verticalCenter }
-                    color: theme.text; font.pixelSize: 16; font.family: "monospace"
+                    color: theme.text; font.pixelSize: 16; font.family: Tok.mono
                     clip: true
                     onTextChanged: root.query = text
                     Text { text: "apps  ·  >run  =calc  ~files  ?web  ;clip  :sys  .emoji"; visible: field.text===""
-                        color: theme.faint; font.pixelSize: 14; font.family: "monospace"; anchors.verticalCenter: parent.verticalCenter }
+                        color: theme.faint; font.pixelSize: 14; font.family: Tok.mono; anchors.verticalCenter: parent.verticalCenter }
                     Keys.onEscapePressed: root.close()
                     Keys.onReturnPressed: (e)=> {
                         if ((e.modifiers & Qt.ControlModifier) && root.results[root.sel] && root.results[root.sel].type==="run")
@@ -478,10 +483,10 @@ Scope {
                 Rectangle {
                     id: badge
                     anchors { right: parent.right; rightMargin: 16; verticalCenter: parent.verticalCenter }
-                    width: badgeTxt.width + 16; height: 22; radius: 11
+                    width: badgeTxt.width + 16; height: 22; radius: Tok.r
                     color: theme.a(theme.iris, 0.14); border.width: 1; border.color: theme.a(theme.iris, 0.3)
                     Text { id: badgeTxt; anchors.centerIn: parent; text: root.modeBadge
-                        color: theme.frost; font.pixelSize: 10; font.family: "monospace"; font.bold: true }
+                        color: theme.frost; font.pixelSize: 10; font.family: Tok.mono; font.bold: true }
                 }
                 Rectangle { width: parent.width - 28; height: 1; color: theme.a(theme.iris, 0.22)
                     anchors { bottom: parent.bottom; horizontalCenter: parent.horizontalCenter } }
@@ -498,7 +503,7 @@ Scope {
                 delegate: Rectangle {
                     required property var modelData
                     required property int index
-                    width: list.width; height: 52; radius: 10
+                    width: list.width; height: 52; radius: Tok.r
                     color: index===root.sel ? theme.a(theme.iris, 0.15) : rowMa.containsMouse ? theme.a(theme.iris, 0.07) : "transparent"
                     // icon: real app icon when we have one, Material glyph otherwise, letter-tile fallback
                     Item {
@@ -507,7 +512,7 @@ Scope {
                         property string ip: modelData.entry ? Quickshell.iconPath(modelData.entry.icon, true) : ""
                         IconImage { anchors.fill: parent; visible: ic.ip!=="" && !modelData.emoji; source: ic.ip }
                         // clipboard image entry → live thumbnail (decoded from cliphist); falls back to the glyph until it's ready
-                        Rectangle { visible: !!modelData.clipImg; anchors.fill: parent; radius: 7; clip: true
+                        Rectangle { visible: !!modelData.clipImg; anchors.fill: parent; radius: Tok.r; clip: true
                             color: theme.a(theme.iris, 0.10); border.width: 1; border.color: theme.a(theme.iris, 0.35)
                             Image { id: thumbImg; anchors.fill: parent; anchors.margins: 1; asynchronous: true; cache: false
                                 fillMode: Image.PreserveAspectCrop; sourceSize.width: 60; sourceSize.height: 60
@@ -519,18 +524,18 @@ Scope {
                         Text { anchors.centerIn: parent; visible: ic.ip==="" && !!modelData.mi && !modelData.emoji && !modelData.clipImg; text: modelData.mi||""
                             font.family: "Material Symbols Outlined"; font.pixelSize: 22
                             color: modelData.warn ? theme.bad : theme.iris }
-                        Rectangle { anchors.fill: parent; radius: 8; visible: ic.ip==="" && !modelData.mi && !modelData.emoji
+                        Rectangle { anchors.fill: parent; radius: Tok.r; visible: ic.ip==="" && !modelData.mi && !modelData.emoji
                             color: theme.a(theme.iris,0.18); border.width: 1; border.color: theme.a(theme.iris,0.4)
                             Text { anchors.centerIn: parent; text: (modelData.entry?modelData.entry.name:"?").charAt(0).toUpperCase()
-                                color: theme.frost; font.pixelSize: 15; font.bold: true; font.family: "monospace" } }
+                                color: theme.frost; font.pixelSize: 15; font.bold: true; font.family: Tok.mono } }
                     }
                     Column {
                         anchors { left: ic.right; leftMargin: 12; right: favStar.left; rightMargin: 8; verticalCenter: parent.verticalCenter }
                         spacing: 1
                         Text { width: parent.width; elide: Text.ElideRight; textFormat: Text.StyledText
-                            text: modelData.title; color: theme.text; font.pixelSize: 14; font.family: "monospace" }
+                            text: modelData.title; color: theme.text; font.pixelSize: 14; font.family: Tok.mono }
                         Text { width: parent.width; elide: Text.ElideRight; visible: text!==""
-                            text: modelData.sub||""; color: theme.faint; font.pixelSize: 11; font.family: "monospace" }
+                            text: modelData.sub||""; color: theme.faint; font.pixelSize: 11; font.family: Tok.mono }
                     }
                     Text { id: favStar
                         anchors { right: parent.right; rightMargin: 14; verticalCenter: parent.verticalCenter }
@@ -550,10 +555,10 @@ Scope {
                 anchors.bottom: parent.bottom; anchors.bottomMargin: 8
                 Text { anchors { left: parent.left; leftMargin: 18; verticalCenter: parent.verticalCenter }
                     text: root.results.length + (root.results.length===1 ? " result" : " results")
-                    color: theme.faint; font.pixelSize: 10; font.family: "monospace" }
+                    color: theme.faint; font.pixelSize: 10; font.family: Tok.mono }
                 Text { anchors { right: parent.right; rightMargin: 18; verticalCenter: parent.verticalCenter }
                     text: "↑↓ move · ⏎ open · alt+1–9 quick · esc close"
-                    color: theme.faint; font.pixelSize: 10; font.family: "monospace" }
+                    color: theme.faint; font.pixelSize: 10; font.family: Tok.mono }
             }
         }
     }

@@ -31,19 +31,25 @@ ShellRoot {
     Process { running: true; command: ["sh","-c","cat \"$HOME/.config/sea-shell/appearance.json\" 2>/dev/null"]
         stdout: StdioCollector { id: apOut; onStreamFinished: { try { var j=JSON.parse(apOut.text); if(j.accent) root.accent=j.accent; if(j.scale!==undefined) root.cfgScale=j.scale; if(j.mode!==undefined) root.cfgLight=(""+j.mode==="light") } catch(e){} } } }
 
+    // ---------- industrial token shim ----------
+    // Colours come from the shared Tok singleton (see shell.qml). This surface used to carry its
+    // own copy of the ramp AND its own appearance.json parse, so it drifted from the bar every
+    // time the palette changed. The `theme.*` vocabulary is kept because the call sites below
+    // speak it; only the source of the values moved.
     QtObject {
         id: theme
-        readonly property bool light: root.cfgLight
-        readonly property color _acc: root.accent
-        readonly property real  _ah:  _acc.hslHue >= 0 ? _acc.hslHue : 0.55
-        readonly property color bg:    light ? Qt.hsla(_ah, 0.20, 0.945, 1) : Qt.hsla(_ah, 0.36, 0.070, 1)
-        readonly property color line:  light ? Qt.hsla(_ah, 0.16, 0.780, 1) : Qt.hsla(_ah, 0.24, 0.205, 1)
-        readonly property color text:  light ? "#0c1520" : "#e2e9f4"
-        readonly property color sub:   light ? "#2c4256" : "#a6b6cf"
-        readonly property color faint: light ? "#48606f" : "#6f8099"
-        readonly property color iris:  light ? Qt.darker(root.accent, 2.4) : root.accent
-        readonly property color frost: light ? Qt.darker(root.accent, 1.7) : Qt.lighter(root.accent, 1.22)
-        readonly property color warn:  light ? "#b9820f" : "#f4c542"
+        readonly property bool  light: Tok.light
+        readonly property color bg:    Tok.bg
+        readonly property color panel: Tok.surface
+        readonly property color line:  Tok.ruleHard
+        readonly property color text:  Tok.ink
+        readonly property color sub:   Tok.ink2
+        readonly property color faint: Tok.ink3
+        readonly property color iris:  Tok.accent
+        readonly property color frost: Tok.ink2
+        readonly property color good:  Tok.ok
+        readonly property color warn:  Tok.warn
+        readonly property color bad:   Tok.crit
         function a(c, al) { return Qt.rgba(c.r, c.g, c.b, al) }
     }
 
@@ -76,7 +82,7 @@ ShellRoot {
         property string label: ""
         property string hotkey: ""
         signal fire()
-        width: 118; height: 96; radius: 14
+        width: 118; height: 96; radius: Tok.rCard
         color: sm.containsMouse ? theme.a(theme.iris, 0.18) : theme.a(theme.bg, 0.96)
         border.width: 1; border.color: sm.containsMouse ? theme.iris : theme.a(theme.iris, 0.24)
         Behavior on color { ColorAnimation { duration: 100 } }
@@ -85,10 +91,10 @@ ShellRoot {
             Text { anchors.horizontalCenter: parent.horizontalCenter; text: parent.parent.icon
                 font.family: "Material Symbols Outlined"; font.pixelSize: 30; color: theme.frost }
             Text { anchors.horizontalCenter: parent.horizontalCenter; text: parent.parent.label
-                color: theme.text; font.pixelSize: 11; font.family: "monospace"; width: 106
+                color: theme.text; font.pixelSize: 11; font.family: Tok.mono; width: 106
                 horizontalAlignment: Text.AlignHCenter; elide: Text.ElideMiddle }
             Text { anchors.horizontalCenter: parent.horizontalCenter; text: parent.parent.hotkey
-                color: theme.faint; font.pixelSize: 9; font.family: "monospace" }
+                color: theme.faint; font.pixelSize: 9; font.family: Tok.mono }
         }
         MouseArea { id: sm; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
             onClicked: parent.fire() }
@@ -126,13 +132,13 @@ ShellRoot {
             anchors.centerIn: parent
             width: buttons.width + 44
             height: buttons.height + 96
-            radius: 18
+            radius: Tok.rCard
             color: theme.a(theme.bg, 0.97)
             border.width: 1; border.color: theme.a(theme.iris, 0.34)
             MouseArea { anchors.fill: parent }
 
             Text { anchors { top: parent.top; topMargin: 16; horizontalCenter: parent.horizontalCenter }
-                text: "screenshot"; color: theme.iris; font.pixelSize: 13; font.family: "monospace"; font.bold: true }
+                text: "screenshot"; color: theme.iris; font.pixelSize: 13; font.family: Tok.mono; font.bold: true }
 
             Row {
                 id: buttons
@@ -158,26 +164,26 @@ ShellRoot {
                 anchors { bottom: parent.bottom; bottomMargin: 12; horizontalCenter: parent.horizontalCenter }
                 spacing: 8
                 Rectangle {
-                    width: svTxt.width + 34; height: 22; radius: 11
+                    width: svTxt.width + 34; height: 22; radius: Tok.r
                     anchors.verticalCenter: parent.verticalCenter
                     color: root.save ? theme.a(theme.iris, 0.3) : theme.a(theme.line, 0.5)
                     border.width: 1; border.color: root.save ? theme.iris : theme.a(theme.line, 0.9)
                     Text { id: svTxt; anchors { left: parent.left; leftMargin: 24; verticalCenter: parent.verticalCenter }
                         text: "save to ~/Pictures"; color: root.save ? theme.frost : theme.faint
-                        font.pixelSize: 10; font.family: "monospace" }
-                    Rectangle { width: 10; height: 10; radius: 5; anchors { left: parent.left; leftMargin: 8; verticalCenter: parent.verticalCenter }
+                        font.pixelSize: 10; font.family: Tok.mono }
+                    Rectangle { width: 10; height: 10; radius: Tok.r; anchors { left: parent.left; leftMargin: 8; verticalCenter: parent.verticalCenter }
                         color: root.save ? theme.frost : theme.faint }
                     MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.save = !root.save }
                 }
                 Text { anchors.verticalCenter: parent.verticalCenter
                     text: root.save ? "· file + clipboard" : "· clipboard only"
-                    color: theme.faint; font.pixelSize: 10; font.family: "monospace" }
+                    color: theme.faint; font.pixelSize: 10; font.family: Tok.mono }
             }
         }
         Text {
             anchors { horizontalCenter: parent.horizontalCenter; top: card.bottom; topMargin: 18 }
             text: "1–9 screens · r region · w window · a all · s save · esc cancel"
-            color: theme.faint; font.pixelSize: 11; font.family: "monospace"
+            color: theme.faint; font.pixelSize: 11; font.family: Tok.mono
         }
     }
 }

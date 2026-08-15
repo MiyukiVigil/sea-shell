@@ -27,14 +27,17 @@ hl.bind(mod .. " + A",         hl.dsp.exec_cmd(browser),                        
 hl.bind(mod .. " + S",         hl.dsp.exec_cmd(settings),                                      { description = "Control center" })
 hl.bind(mod .. " + SHIFT + E", hl.dsp.exec_cmd(dac),                                           { description = "Moondrop EQ" })
 hl.bind(mod .. " + SHIFT + W", hl.dsp.exec_cmd(wallpick),                                      { description = "Wallpaper picker" })
-hl.bind(mod .. " + N",         hl.dsp.exec_cmd("~/.config/quickshell/sea-shell/sea-wallpaper-cycle.sh next"), { description = "Next wallpaper" })
-hl.bind(mod .. " + SHIFT + N", hl.dsp.exec_cmd("~/.config/quickshell/sea-shell/sea-wallpaper-cycle.sh prev"), { description = "Previous wallpaper" })
+-- Routed through the shell rather than straight at the script so the switch gets a dip-to-black
+-- transition. Animated wallpapers run on mpvpaper, which cannot transition at all — the shell
+-- draws the fade over the swap instead. Falls back to the bare script if the bar isn't running.
+hl.bind(mod .. " + N",         hl.dsp.exec_cmd("qs -c sea-shell ipc call wallpaper next 2>/dev/null || ~/.config/quickshell/sea-shell/sea-wallpaper-cycle.sh next"), { description = "Next wallpaper" })
+hl.bind(mod .. " + SHIFT + N", hl.dsp.exec_cmd("qs -c sea-shell ipc call wallpaper prev 2>/dev/null || ~/.config/quickshell/sea-shell/sea-wallpaper-cycle.sh prev"), { description = "Previous wallpaper" })
 hl.bind(mod .. " + SHIFT + D", hl.dsp.exec_cmd("~/.config/quickshell/sea-shell/sea-toggle-theme.sh"),        { description = "Toggle light/dark" })
 hl.bind(mod .. " + K",         hl.dsp.exec_cmd(keybinds),                                      { description = "Keybind cheat-sheet" })
 hl.bind(mod .. " + Escape",    hl.dsp.exec_cmd(powermenu),                                     { description = "Power menu" })
 hl.bind(mod .. " + ALT + L",   hl.dsp.exec_cmd("~/.config/quickshell/sea-shell/sea-lock.sh"),  { description = "Lock screen" })
 hl.bind(mod .. " + SHIFT + R", hl.dsp.exec_cmd("hyprctl reload"),                              { description = "Reload Hyprland" })
-hl.bind(mod .. " + SHIFT + B", hl.dsp.exec_cmd([[pkill -xf 'qs -c sea-shell'; qs -c sea-shell &]]), { description = "Restart bar" })
+hl.bind(mod .. " + SHIFT + B", hl.dsp.exec_cmd("sh ~/.config/quickshell/sea-shell/sea-bar-supervisor.sh --restart"), { description = "Restart bar" })
 
 -- ---------------- window switcher (alt-tab) ----------------
 -- hold ALT, press Tab to cycle a visual switcher; release ALT to focus. Escape cancels.
@@ -110,6 +113,9 @@ hl.bind("switch:off:Lid Switch", hl.dsp.dpms({ action = "on" }), { locked = true
 hl.bind("Print",              hl.dsp.exec_cmd(shotmenu), { description = "Screenshot menu" })
 hl.bind(mod .. " + Print",    hl.dsp.exec_cmd([[pgrep -x slurp >/dev/null || { quickshell -c sea-shell ipc call shell pin; grim -g "$(slurp)" /tmp/sea-capture.png && quickshell -p ~/.config/quickshell/sea-shell/screenshot-editor.qml; }]]), { description = "Screenshot region" })
 hl.bind(mod .. " + SHIFT + S", hl.dsp.exec_cmd([[pgrep -x slurp >/dev/null || { quickshell -c sea-shell ipc call shell pin; grim -g "$(slurp)" /tmp/sea-capture.png && quickshell -p ~/.config/quickshell/sea-shell/screenshot-editor.qml; }]]), { description = "Screenshot region" })
+-- OCR a region straight to the clipboard (needs tesseract). The slurp guard matches the
+-- screenshot binds above: a second selection while one is already open just cancels both.
+hl.bind(mod .. " + SHIFT + O", hl.dsp.exec_cmd([[pgrep -x slurp >/dev/null || ~/.config/quickshell/sea-shell/sea-ocr.sh eng]]), { description = "OCR region to clipboard" })
 
 -- ---------------- clipboard history (needs cliphist + wl-clipboard) ----------------
 hl.bind(mod .. " + V", hl.dsp.exec_cmd("qs -c sea-shell ipc call launcher clipboard"), { description = "Clipboard history" })
@@ -117,6 +123,10 @@ hl.bind(mod .. " + V", hl.dsp.exec_cmd("qs -c sea-shell ipc call launcher clipbo
 -- ---------------- sea-shell 2.0 ----------------
 hl.bind(mod .. " + W", hl.dsp.exec_cmd("qs -c sea-shell ipc call shell toggleExpose"),           { description = "Mission Control" })
 hl.bind(mod .. " + D", hl.dsp.exec_cmd("~/.config/quickshell/sea-shell/sea-toggle.sh Dashboard"), { description = "Dashboard" })
+
+-- Game mode: strips blur/shadows/animations, kills the video wallpaper, performance profile,
+-- silences notifications — and restores every one of them to its previous value on the way out.
+hl.bind(mod .. " + SHIFT + G", hl.dsp.exec_cmd("~/.config/quickshell/sea-shell/sea-gamemode.sh toggle"), { description = "Game mode" })
 hl.bind(mod .. " + R", hl.dsp.exec_cmd("qs -c sea-shell ipc call recorder toggle"),              { description = "Screen Recording" })
 
 -- ---------------- screen magnifier (Hyprland cursor:zoom_factor) ----------------

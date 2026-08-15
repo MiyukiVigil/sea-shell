@@ -94,21 +94,25 @@ ShellRoot {
                 if(j.mode!==undefined) root.cfgLight=(""+j.mode==="light");
             } catch(e){} } } }
 
+    // ---------- industrial token shim ----------
+    // Colours come from the shared Tok singleton (see shell.qml). This surface used to carry its
+    // own copy of the ramp AND its own appearance.json parse, so it drifted from the bar every
+    // time the palette changed. The `theme.*` vocabulary is kept because the call sites below
+    // speak it; only the source of the values moved.
     QtObject {
         id: theme
-        readonly property bool light: root.cfgLight
-        readonly property color _acc: root.accent
-        readonly property real  _ah:  _acc.hslHue >= 0 ? _acc.hslHue : 0.55
-        readonly property color bg:    light ? Qt.hsla(_ah, 0.20, 0.945, 1) : Qt.hsla(_ah, 0.36, 0.070, 1)
-        readonly property color line:  light ? Qt.hsla(_ah, 0.16, 0.780, 1) : Qt.hsla(_ah, 0.24, 0.205, 1)
-        readonly property color text:  light ? "#0c1520" : "#e2e9f4"
-        readonly property color sub:   light ? "#2c4256" : "#a6b6cf"
-        readonly property color faint: light ? "#48606f" : "#6f8099"
-        readonly property color iris:  light ? Qt.darker(root.accent, 2.4) : root.accent
-        readonly property color frost: light ? Qt.darker(root.accent, 1.7) : Qt.lighter(root.accent, 1.22)
-        readonly property color good:  light ? "#2e7d32" : "#a6e3a1"
-        readonly property color bad:   light ? "#d1495b" : "#f38ba8"
-        readonly property color warn:  light ? "#c98a00" : "#f9e2af"
+        readonly property bool  light: Tok.light
+        readonly property color bg:    Tok.bg
+        readonly property color panel: Tok.surface
+        readonly property color line:  Tok.ruleHard
+        readonly property color text:  Tok.ink
+        readonly property color sub:   Tok.ink2
+        readonly property color faint: Tok.ink3
+        readonly property color iris:  Tok.accent
+        readonly property color frost: Tok.ink2
+        readonly property color good:  Tok.ok
+        readonly property color warn:  Tok.warn
+        readonly property color bad:   Tok.crit
         function a(c, al) { return Qt.rgba(c.r, c.g, c.b, al) }
     }
 
@@ -188,7 +192,7 @@ ShellRoot {
         property bool active: false
         property color tint: theme.sub
         signal act()
-        width: 34; height: 34; radius: 10
+        width: 34; height: 34; radius: Tok.r
         color: active ? theme.a(theme.iris, 0.28) : (tbm.containsMouse ? theme.a(theme.iris, 0.14) : "transparent")
         Behavior on color { ColorAnimation { duration: 90 } }
         Sym { anchors.centerIn: parent; text: tb.icon; sz: 18; color: tb.active ? theme.frost : tb.tint }
@@ -379,7 +383,7 @@ ShellRoot {
                             id: textEdit
                             visible: false
                             color: root.penColor
-                            font.family: "monospace"; font.bold: true
+                            font.family: Tok.mono; font.bold: true
                             font.pixelSize: Math.max(16, root.penSize * 4)
                             selectByMouse: true
                             function startAt(x, y) { textEdit.x = x; textEdit.y = y; text = ""; visible = true; forceActiveFocus(); }
@@ -403,7 +407,7 @@ ShellRoot {
                     anchors { horizontalCenter: parent.horizontalCenter; bottom: parent.bottom; bottomMargin: 26 }
                     scale: root.uiFor(mainWin.screen)
                     transformOrigin: Item.Bottom
-                    width: bar.implicitWidth + 28; height: 52; radius: 16
+                    width: bar.implicitWidth + 28; height: 52; radius: Tok.rCard
                     color: theme.a(theme.bg, 0.96)
                     border.width: 1; border.color: theme.a(theme.iris, 0.35)
 
@@ -411,10 +415,10 @@ ShellRoot {
                     Rectangle {
                         visible: root.hoverTip !== ""
                         anchors { bottom: parent.top; bottomMargin: 8; horizontalCenter: parent.horizontalCenter }
-                        width: tipTxt.implicitWidth + 18; height: 24; radius: 7
+                        width: tipTxt.implicitWidth + 18; height: 24; radius: Tok.r
                         color: theme.a(theme.bg, 0.98); border.width: 1; border.color: theme.a(theme.iris, 0.3)
                         Text { id: tipTxt; anchors.centerIn: parent; text: root.hoverTip
-                            color: theme.text; font.pixelSize: 11; font.family: "monospace" }
+                            color: theme.text; font.pixelSize: 11; font.family: Tok.mono }
                     }
 
                     RowLayout {
@@ -440,7 +444,7 @@ ShellRoot {
                                 delegate: Rectangle {
                                     required property var modelData
                                     readonly property bool sel: root.penColor.toString().toLowerCase() === modelData.toLowerCase()
-                                    width: 18; height: 18; radius: 9; color: modelData
+                                    width: 18; height: 18; radius: Tok.r; color: modelData
                                     border.width: sel ? 3 : 1
                                     border.color: sel ? theme.frost : theme.a(theme.line, 0.7)
                                     MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.penColor = modelData }
@@ -457,7 +461,7 @@ ShellRoot {
                                 delegate: Rectangle {
                                     required property var modelData
                                     readonly property bool sel: root.penSize === modelData
-                                    width: 26; height: 26; radius: 8
+                                    width: 26; height: 26; radius: Tok.r
                                     color: sel ? theme.a(theme.iris, 0.28) : "transparent"
                                     Rectangle { anchors.centerIn: parent; width: 3 + modelData; height: 3 + modelData; radius: width / 2
                                         color: sel ? theme.frost : theme.faint }
@@ -491,14 +495,14 @@ ShellRoot {
                     anchors { horizontalCenter: parent.horizontalCenter; top: parent.top; topMargin: 18 }
                     scale: root.uiFor(mainWin.screen)
                     transformOrigin: Item.Top
-                    width: hintTxt.implicitWidth + 24; height: 28; radius: 14
+                    width: hintTxt.implicitWidth + 24; height: 28; radius: Tok.rCard
                     color: theme.a(theme.bg, 0.92)
                     border.width: 1; border.color: theme.a(theme.iris, 0.3)
                     Text {
                         id: hintTxt
                         anchors.centerIn: parent
                         text: "b brush · a arrow · r rect · t text · c crop   ·   ⌃z undo · x clear   ·   ⌃c copy · ⌃s save · esc cancel"
-                        color: theme.sub; font.pixelSize: 11; font.family: "monospace"
+                        color: theme.sub; font.pixelSize: 11; font.family: Tok.mono
                     }
                 }
             }

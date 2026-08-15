@@ -32,7 +32,7 @@ def val(key, prop):
     sec = d.get(key, {})
     if sec.get('enabled', True): return ''
     return sec.get(prop, '') or ''
-print('HYPRLAND=%s KITTY=%s FASTFETCH=%s STARSHIP=%s HYPR_CUSTOM_ACTIVE=%s HYPR_CUSTOM_INACTIVE=%s KITTY_CUSTOM_ACCENT=%s KITTY_CUSTOM_BG=%s FASTFETCH_CUSTOM_ACCENT=%s STARSHIP_CUSTOM_ACCENT=%s' % (
+print('HYPRLAND=%s KITTY=%s FASTFETCH=%s STARSHIP=%s HYPR_CUSTOM_ACTIVE=%s HYPR_CUSTOM_INACTIVE=%s KITTY_CUSTOM_ACCENT=%s KITTY_CUSTOM_BG=%s FASTFETCH_CUSTOM_ACCENT=%s STARSHIP_CUSTOM_ACCENT=%s HYPR_GLOW=%s HYPR_CUSTOM_GLOW=%s' % (
     flag('hyprland'), flag('kitty'), flag('fastfetch'), flag('starship'),
     repr(val('hyprland', 'customActive')),
     repr(val('hyprland', 'customInactive')),
@@ -40,6 +40,10 @@ print('HYPRLAND=%s KITTY=%s FASTFETCH=%s STARSHIP=%s HYPR_CUSTOM_ACTIVE=%s HYPR_
     repr(val('kitty', 'customBg')),
     repr(val('fastfetch', 'customAccent')),
     repr(val('starship', 'customAccent')),
+    # The window glow is its own target: some people want matugen borders but a fixed glow.
+    # Defaults to enabled, like every other target.
+    '1' if d.get('hyprGlow', {}).get('enabled', True) else '0',
+    repr(val('hyprGlow', 'customColor')),
 ))
 OVPY
 }
@@ -66,6 +70,21 @@ apply_hyprland() {
     else
         inactive_val="rgba(${aa}55)"
     fi
+    # ---- window glow (decoration:shadow) ----
+    # This is the "glow" around a focused tile. It was hardcoded to sea-cyan in sea.lua and so
+    # stayed cyan on every wallpaper while the borders recoloured around it. Active glow is the
+    # accent at the same 0x44 alpha the default used; the inactive shadow is a heavily darkened
+    # accent at 0x66, which keeps it reading as depth rather than a second glow.
+    # `enabled: false` on a target does NOT mean "leave it alone" in this overrides file — it
+    # means "stop auto-matching and use my colour", which is why read_overrides only hands back
+    # a custom value when the target is disabled. Gating the custom branch on enabled=1 (as this
+    # first did) makes it unreachable and silently falls back to the accent.
+    local glow_src="$a"
+    [ "${HYPR_GLOW:-1}" != "1" ] && [ -n "${HYPR_CUSTOM_GLOW:-}" ] && glow_src="$HYPR_CUSTOM_GLOW"
+    local gs=${glow_src#\#}
+    local glow_a="rgba(${gs}44)"
+    local glow_i="rgba($(darken_hex "$glow_src")66)"
+
     local hd="$HOME/.config/hypr/sea-shell"; mkdir -p "$hd"
     # sea-shell 5.0+ is Lua-only: emit matugen.lua (dofile'd from hyprland.lua's sea.lua).
     # A plain colour becomes a string; the frost→accent gradient becomes { colors = {...}, angle = N }.
@@ -79,8 +98,33 @@ apply_hyprland() {
     esac
     printf 'hl.config({ general = { col = { active_border = %s, inactive_border = %s } } })\n' \
         "$lua_active" "$lua_inactive" > "$hd/matugen.lua"
-    hyprctl keyword general:col.active_border "$active_val" >/dev/null 2>&1
-    hyprctl keyword general:col.inactive_border "$inactive_val" >/dev/null 2>&1
+    printf 'hl.config({ decoration = { shadow = { color = "%s", color_inactive = "%s" } } })\n' \
+        "$glow_a" "$glow_i" >> "$hd/matugen.lua"
+    # Live apply. `hyprctl keyword` is LEGACY-parser only — under a Lua config it refuses with
+    # "keyword can't work with non-legacy parsers", so the borders kept the old accent until the
+    # next reload. Fall back to `hyprctl eval` with the same Lua we just wrote to matugen.lua.
+    hyprctl keyword general:col.active_border "$active_val" 2>/dev/null | grep -q '^ok' || \
+        hyprctl eval "hl.config({ general = { col = { active_border = $lua_active } } })" >/dev/null 2>&1
+    hyprctl keyword general:col.inactive_border "$inactive_val" 2>/dev/null | grep -q '^ok' || \
+        hyprctl eval "hl.config({ general = { col = { inactive_border = $lua_inactive } } })" >/dev/null 2>&1
+    # Live-apply the glow the same way. Verified against Hyprland 0.56: this eval really does
+    # move decoration:shadow:color (checked with `hyprctl getoption`), which is why it is safe
+    # to rely on rather than waiting for a reload.
+    hyprctl eval \
+        "hl.config({ decoration = { shadow = { color = \"$glow_a\", color_inactive = \"$glow_i\" } } })" >/dev/null 2>&1
+}
+
+# A very dark, slightly desaturated shade of the accent — the depth shadow behind unfocused
+# windows. Mirrors what the hand-picked sea-cyan default (#0a141e for #63c7dd) was doing.
+darken_hex() {
+    python3 -c "
+import sys, colorsys
+h = sys.argv[1].lstrip('#')
+r, g, b = (int(h[i:i+2], 16) / 255 for i in (0, 2, 4))
+hh, l, s = colorsys.rgb_to_hls(r, g, b)
+r, g, b = colorsys.hls_to_rgb(hh, 0.085, min(s, 0.55))
+print('%02x%02x%02x' % tuple(round(c * 255) for c in (r, g, b)))
+" "$1" 2>/dev/null || printf '0a141e'
 }
 
 # Apply hyprlock colours.

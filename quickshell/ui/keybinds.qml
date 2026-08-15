@@ -31,19 +31,25 @@ ShellRoot {
 
     component Sym: Text { property int sz: 16; font.family: "Material Symbols Outlined"; font.pixelSize: sz }
 
+    // ---------- industrial token shim ----------
+    // Colours come from the shared Tok singleton (see shell.qml). This surface used to carry its
+    // own copy of the ramp AND its own appearance.json parse, so it drifted from the bar every
+    // time the palette changed. The `theme.*` vocabulary is kept because the call sites below
+    // speak it; only the source of the values moved.
     QtObject {
         id: theme
-        readonly property bool light: root.cfgLight
-        readonly property color _acc: root.accent
-        readonly property real  _ah:  _acc.hslHue >= 0 ? _acc.hslHue : 0.55
-        readonly property color bg:    light ? Qt.hsla(_ah, 0.20, 0.945, 1) : Qt.hsla(_ah, 0.36, 0.070, 1)
-        readonly property color line:  light ? Qt.hsla(_ah, 0.16, 0.780, 1) : Qt.hsla(_ah, 0.24, 0.205, 1)
-        readonly property color text:  light ? "#0c1520" : "#e2e9f4"
-        readonly property color sub:   light ? "#2c4256" : "#a6b6cf"
-        readonly property color faint: light ? "#48606f" : "#6f8099"
-        readonly property color iris:  light ? Qt.darker(root.accent, 2.4)  : root.accent
-        readonly property color frost: light ? Qt.darker(root.accent, 1.7) : Qt.lighter(root.accent, 1.22)
-        readonly property color bad:   light ? "#d1495b" : "#f38ba8"
+        readonly property bool  light: Tok.light
+        readonly property color bg:    Tok.bg
+        readonly property color panel: Tok.surface
+        readonly property color line:  Tok.ruleHard
+        readonly property color text:  Tok.ink
+        readonly property color sub:   Tok.ink2
+        readonly property color faint: Tok.ink3
+        readonly property color iris:  Tok.accent
+        readonly property color frost: Tok.ink2
+        readonly property color good:  Tok.ok
+        readonly property color warn:  Tok.warn
+        readonly property color bad:   Tok.crit
         function a(c, al) { return Qt.rgba(c.r, c.g, c.b, al) }
     }
 
@@ -169,7 +175,7 @@ ShellRoot {
             anchors.centerIn: parent
             width: Math.min(parent.width - 80, 940)
             height: Math.min(parent.height - 80, 660)
-            radius: 18
+            radius: Tok.rCard
             color: theme.a(theme.bg, 0.98)
             border.width: 1; border.color: theme.a(theme.iris, 0.34)
             MouseArea { anchors.fill: parent }
@@ -180,10 +186,10 @@ ShellRoot {
                 RowLayout {
                     spacing: 12; Layout.fillWidth: true
                     SeaLogo { size: 28; card: theme.line; accent: theme.iris; highlight: theme.frost; rim: theme.iris }
-                    Text { text: "keybinds"; color: theme.text; font.pixelSize: 18; font.family: "monospace"; font.bold: true }
+                    Text { text: "keybinds"; color: theme.text; font.pixelSize: 18; font.family: Tok.mono; font.bold: true }
                     // search box — always focused; captures the rebind key while recording
                     Rectangle {
-                        Layout.fillWidth: true; implicitHeight: 30; radius: 8
+                        Layout.fillWidth: true; implicitHeight: 30; radius: Tok.r
                         color: theme.a(theme.line, 0.4)
                         border.width: 1; border.color: field.text!=="" ? theme.a(theme.iris,0.5) : theme.a(theme.iris,0.2)
                         Text { id: lens; text: "search"; font.family: "Material Symbols Outlined"; font.pixelSize: 14
@@ -191,11 +197,11 @@ ShellRoot {
                         TextInput {
                             id: field
                             anchors { left: lens.right; leftMargin: 8; right: parent.right; rightMargin: 10; verticalCenter: parent.verticalCenter }
-                            color: theme.text; font.pixelSize: 13; font.family: "monospace"; clip: true
+                            color: theme.text; font.pixelSize: 13; font.family: Tok.mono; clip: true
                             focus: true
                             onTextChanged: root.query = text
                             Text { text: "type to filter…"; visible: field.text===""; color: theme.faint
-                                font.pixelSize: 12; font.family: "monospace"; anchors.verticalCenter: parent.verticalCenter }
+                                font.pixelSize: 12; font.family: Tok.mono; anchors.verticalCenter: parent.verticalCenter }
                             Keys.onPressed: (e)=> {
                                 if (e.key === Qt.Key_Escape) {
                                     if (root.rec) { root.rec = null; root.conflict = "" }
@@ -223,7 +229,7 @@ ShellRoot {
                     }
                     // Add Button
                     Rectangle {
-                        implicitWidth: 30; implicitHeight: 30; radius: 8
+                        implicitWidth: 30; implicitHeight: 30; radius: Tok.r
                         color: addBtnMa.containsMouse ? theme.iris : theme.a(theme.line, 0.4)
                         border.width: 1; border.color: theme.a(theme.iris, 0.2)
                         Sym { anchors.centerIn: parent; text: "add"; sz: 18; color: addBtnMa.containsMouse ? theme.bg : theme.frost }
@@ -233,7 +239,7 @@ ShellRoot {
                             onClicked: { root.adding = !root.adding; root.addRecording = false; field.forceActiveFocus() }
                         }
                     }
-                    Text { text: root.shown.length + "/" + root.binds.length; color: theme.frost; font.pixelSize: 11; font.family: "monospace" }
+                    Text { text: root.shown.length + "/" + root.binds.length; color: theme.frost; font.pixelSize: 11; font.family: Tok.mono }
                 }
 
                 // ================= ADD BIND PANEL =================
@@ -241,7 +247,7 @@ ShellRoot {
                     visible: root.adding
                     Layout.fillWidth: true
                     implicitHeight: addFormCol.implicitHeight + 20
-                    radius: 10
+                    radius: Tok.r
                     color: theme.a(theme.line, 0.2)
                     border.width: 1; border.color: theme.a(theme.iris, 0.2)
                     ColumnLayout {
@@ -251,19 +257,19 @@ ShellRoot {
                         // Description
                         ColumnLayout {
                             spacing: 4; Layout.fillWidth: true
-                            Text { text: "description"; color: theme.faint; font.pixelSize: 10; font.family: "monospace" }
+                            Text { text: "description"; color: theme.faint; font.pixelSize: 10; font.family: Tok.mono }
                             Rectangle {
-                                Layout.fillWidth: true; implicitHeight: 32; radius: 6
+                                Layout.fillWidth: true; implicitHeight: 32; radius: Tok.r
                                 color: theme.a(theme.line, 0.4); border.width: 1
                                 border.color: descIn.activeFocus ? theme.iris : theme.a(theme.iris, 0.1)
                                 TextInput {
                                     id: descIn
                                     anchors.fill: parent; anchors.leftMargin: 8; anchors.rightMargin: 8
                                     verticalAlignment: TextInput.AlignVCenter
-                                    color: theme.text; font.pixelSize: 12; font.family: "monospace"
+                                    color: theme.text; font.pixelSize: 12; font.family: Tok.mono
                                     text: root.addDesc
                                     onTextChanged: root.addDesc = text
-                                    Text { text: "e.g. Launch Firefox"; visible: descIn.text===""; color: theme.faint; font.pixelSize: 12; font.family: "monospace"; anchors.verticalCenter: parent.verticalCenter }
+                                    Text { text: "e.g. Launch Firefox"; visible: descIn.text===""; color: theme.faint; font.pixelSize: 12; font.family: Tok.mono; anchors.verticalCenter: parent.verticalCenter }
                                 }
                             }
                         }
@@ -271,16 +277,16 @@ ShellRoot {
                         // Action / Command
                         ColumnLayout {
                             spacing: 4; Layout.fillWidth: true
-                            Text { text: "action / command"; color: theme.faint; font.pixelSize: 10; font.family: "monospace" }
+                            Text { text: "action / command"; color: theme.faint; font.pixelSize: 10; font.family: Tok.mono }
                             Rectangle {
-                                Layout.fillWidth: true; implicitHeight: 32; radius: 6
+                                Layout.fillWidth: true; implicitHeight: 32; radius: Tok.r
                                 color: theme.a(theme.line, 0.4); border.width: 1
                                 border.color: actionIn.activeFocus ? theme.iris : theme.a(theme.iris, 0.1)
                                 TextInput {
                                     id: actionIn
                                     anchors.fill: parent; anchors.leftMargin: 8; anchors.rightMargin: 8
                                     verticalAlignment: TextInput.AlignVCenter
-                                    color: theme.text; font.pixelSize: 12; font.family: "monospace"
+                                    color: theme.text; font.pixelSize: 12; font.family: Tok.mono
                                     text: root.addAction
                                     onTextChanged: root.addAction = text
                                 }
@@ -290,7 +296,7 @@ ShellRoot {
                         // Shortcut combination
                         ColumnLayout {
                             spacing: 4; Layout.fillWidth: true
-                            Text { text: "shortcut combination"; color: theme.faint; font.pixelSize: 10; font.family: "monospace" }
+                            Text { text: "shortcut combination"; color: theme.faint; font.pixelSize: 10; font.family: Tok.mono }
                             RowLayout {
                                 spacing: 10; Layout.fillWidth: true
                                 // Modifier chips
@@ -301,11 +307,11 @@ ShellRoot {
                                         delegate: Rectangle {
                                             required property string modelData
                                             readonly property bool on: root.addMods.indexOf(modelData) >= 0
-                                            width: amc.width + 14; height: 22; radius: 11
+                                            width: amc.width + 14; height: 22; radius: Tok.r
                                             color: on ? theme.a(theme.iris,0.3) : theme.a(theme.line,0.5)
                                             border.width: 1; border.color: on ? theme.iris : theme.a(theme.line,0.9)
                                             Text { id: amc; anchors.centerIn: parent; text: modelData
-                                                color: on ? theme.frost : theme.faint; font.pixelSize: 10; font.family: "monospace"; font.bold: on }
+                                                color: on ? theme.frost : theme.faint; font.pixelSize: 10; font.family: Tok.mono; font.bold: on }
                                             MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
                                                 onClicked: { var m = root.addMods.slice(); var i = m.indexOf(modelData);
                                                     if (i >= 0) m.splice(i,1); else m.push(modelData);
@@ -315,18 +321,18 @@ ShellRoot {
                                     }
                                 }
                                 
-                                Text { text: "+"; color: theme.faint; font.pixelSize: 12; font.family: "monospace" }
+                                Text { text: "+"; color: theme.faint; font.pixelSize: 12; font.family: Tok.mono }
 
                                 // Key capture button
                                 Rectangle {
-                                    implicitWidth: 120; implicitHeight: 24; radius: 6
+                                    implicitWidth: 120; implicitHeight: 24; radius: Tok.r
                                     color: root.addRecording ? theme.a(theme.bad, 0.2) : theme.a(theme.line, 0.4)
                                     border.width: 1; border.color: root.addRecording ? theme.bad : theme.a(theme.iris, 0.3)
                                     Text {
                                         anchors.centerIn: parent
                                         text: root.addRecording ? "press key…" : (root.addKey ? root.addKey : "set key combo")
                                         color: root.addRecording ? theme.bad : theme.frost
-                                        font.pixelSize: 11; font.family: "monospace"; font.bold: true
+                                        font.pixelSize: 11; font.family: Tok.mono; font.bold: true
                                     }
                                     MouseArea {
                                         anchors.fill: parent; cursorShape: Qt.PointingHandCursor
@@ -344,10 +350,10 @@ ShellRoot {
                             
                             // Cancel button
                             Rectangle {
-                                implicitWidth: 70; implicitHeight: 28; radius: 6
+                                implicitWidth: 70; implicitHeight: 28; radius: Tok.r
                                 color: cancelBtnMa.containsMouse ? theme.a(theme.bad, 0.15) : "transparent"
                                 border.width: 1; border.color: cancelBtnMa.containsMouse ? theme.bad : theme.a(theme.line, 0.5)
-                                Text { anchors.centerIn: parent; text: "Cancel"; color: cancelBtnMa.containsMouse ? theme.bad : theme.text; font.pixelSize: 11; font.family: "monospace" }
+                                Text { anchors.centerIn: parent; text: "Cancel"; color: cancelBtnMa.containsMouse ? theme.bad : theme.text; font.pixelSize: 11; font.family: Tok.mono }
                                 MouseArea {
                                     id: cancelBtnMa
                                     anchors.fill: parent; cursorShape: Qt.PointingHandCursor
@@ -358,10 +364,10 @@ ShellRoot {
                             // Save button
                             Rectangle {
                                 readonly property bool valid: root.addDesc.trim() !== "" && root.addKey !== "" && root.addAction.trim() !== ""
-                                implicitWidth: 90; implicitHeight: 28; radius: 6
+                                implicitWidth: 90; implicitHeight: 28; radius: Tok.r
                                 color: valid ? (saveBtnMa.containsMouse ? theme.iris : theme.a(theme.iris, 0.2)) : theme.a(theme.line, 0.2)
                                 border.width: 1; border.color: valid ? theme.iris : theme.a(theme.line, 0.5)
-                                Text { anchors.centerIn: parent; text: "Save Bind"; color: parent.valid ? (saveBtnMa.containsMouse ? theme.bg : theme.text) : theme.faint; font.pixelSize: 11; font.family: "monospace"; font.bold: true }
+                                Text { anchors.centerIn: parent; text: "Save Bind"; color: parent.valid ? (saveBtnMa.containsMouse ? theme.bg : theme.text) : theme.faint; font.pixelSize: 11; font.family: Tok.mono; font.bold: true }
                                 MouseArea {
                                     id: saveBtnMa
                                     anchors.fill: parent; enabled: parent.valid; cursorShape: parent.valid ? Qt.PointingHandCursor : Qt.ArrowCursor
@@ -389,17 +395,17 @@ ShellRoot {
                                 required property var modelData
                                 readonly property bool isRec: root.rec !== null && root.rec.desc === modelData.desc && root.rec.key === modelData.key
                                 width: (grid.width - grid.columnSpacing) / 2
-                                height: 34; radius: 8
+                                height: 34; radius: Tok.r
                                 color: isRec ? theme.a(theme.iris, 0.2) : hov.containsMouse ? theme.a(theme.iris, 0.12) : theme.a(theme.line, 0.32)
                                 border.width: 1; border.color: isRec ? theme.iris : theme.a(theme.iris, 0.12)
                                 RowLayout {
                                     anchors.fill: parent; anchors.leftMargin: 11; anchors.rightMargin: 11; spacing: 10
-                                    Text { text: modelData.desc; color: theme.text; font.pixelSize: 12; font.family: "monospace"; elide: Text.ElideRight; Layout.fillWidth: true }
+                                    Text { text: modelData.desc; color: theme.text; font.pixelSize: 12; font.family: Tok.mono; elide: Text.ElideRight; Layout.fillWidth: true }
                                     Text { visible: hov.containsMouse && modelData.canEdit && !isRec; text: "edit"
                                         font.family: "Material Symbols Outlined"; font.pixelSize: 14; color: theme.faint }
-                                    Rectangle { implicitHeight: 22; implicitWidth: kb.implicitWidth + 16; radius: 6
+                                    Rectangle { implicitHeight: 22; implicitWidth: kb.implicitWidth + 16; radius: Tok.r
                                         color: theme.a(theme.iris, 0.16); border.width: 1; border.color: theme.a(theme.iris, 0.4)
-                                        Text { id: kb; anchors.centerIn: parent; text: modelData.keys; color: theme.frost; font.pixelSize: 11; font.family: "monospace"; font.bold: true } }
+                                        Text { id: kb; anchors.centerIn: parent; text: modelData.keys; color: theme.frost; font.pixelSize: 11; font.family: Tok.mono; font.bold: true } }
                                 }
                                 MouseArea { id: hov; anchors.fill: parent; hoverEnabled: true
                                     cursorShape: modelData.canEdit ? Qt.PointingHandCursor : Qt.ArrowCursor
@@ -416,22 +422,22 @@ ShellRoot {
                     Layout.fillWidth: true; implicitHeight: 30
                     Text { anchors.centerIn: parent; visible: root.rec === null
                         text: "type to search · click a bind to rebind it · esc closes"
-                        color: theme.faint; font.pixelSize: 10; font.family: "monospace" }
+                        color: theme.faint; font.pixelSize: 10; font.family: Tok.mono }
                     Row {
                         anchors.centerIn: parent; spacing: 8; visible: root.rec !== null
                         Text { anchors.verticalCenter: parent.verticalCenter
                             text: "rebind “" + (root.rec ? root.rec.desc : "") + "”:"
-                            color: theme.text; font.pixelSize: 11; font.family: "monospace"; font.bold: true }
+                            color: theme.text; font.pixelSize: 11; font.family: Tok.mono; font.bold: true }
                         Repeater {
                             model: ["SUPER","CTRL","ALT","SHIFT"]
                             delegate: Rectangle {
                                 required property string modelData
                                 readonly property bool on: root.recMods.indexOf(modelData) >= 0
-                                width: mc.width + 14; height: 22; radius: 11
+                                width: mc.width + 14; height: 22; radius: Tok.r
                                 color: on ? theme.a(theme.iris,0.3) : theme.a(theme.line,0.5)
                                 border.width: 1; border.color: on ? theme.iris : theme.a(theme.line,0.9)
                                 Text { id: mc; anchors.centerIn: parent; text: modelData
-                                    color: on ? theme.frost : theme.faint; font.pixelSize: 10; font.family: "monospace"; font.bold: on }
+                                    color: on ? theme.frost : theme.faint; font.pixelSize: 10; font.family: Tok.mono; font.bold: on }
                                 MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
                                     onClicked: { var m = root.recMods.slice(); var i = m.indexOf(modelData);
                                         if (i >= 0) m.splice(i,1); else m.push(modelData);
@@ -443,7 +449,7 @@ ShellRoot {
                         Text { anchors.verticalCenter: parent.verticalCenter
                             text: root.conflict !== "" ? root.conflict : "now press the key · esc cancels"
                             color: root.conflict !== "" ? theme.bad : theme.sub
-                            font.pixelSize: 11; font.family: "monospace" }
+                            font.pixelSize: 11; font.family: Tok.mono }
                     }
                 }
             }

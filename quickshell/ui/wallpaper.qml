@@ -29,17 +29,25 @@ ShellRoot {
             if(j.mode!==undefined) root.cfgLight=(""+j.mode==="light");
             if(j.matugen!==undefined) root.matchColors=!!j.matugen; } catch(e){} } } }
 
+    // ---------- industrial token shim ----------
+    // Colours come from the shared Tok singleton (see shell.qml). This surface used to carry its
+    // own copy of the ramp AND its own appearance.json parse, so it drifted from the bar every
+    // time the palette changed. The `theme.*` vocabulary is kept because the call sites below
+    // speak it; only the source of the values moved.
     QtObject {
         id: theme
-        readonly property bool light: root.cfgLight
-        readonly property color _acc: root.accent
-        readonly property real  _ah:  _acc.hslHue >= 0 ? _acc.hslHue : 0.55
-        readonly property color bg:    light ? Qt.hsla(_ah, 0.20, 0.945, 1) : Qt.hsla(_ah, 0.36, 0.070, 1)
-        readonly property color line:  light ? Qt.hsla(_ah, 0.16, 0.780, 1) : Qt.hsla(_ah, 0.24, 0.205, 1)
-        readonly property color text:  light ? "#0c1520" : "#e2e9f4"
-        readonly property color faint: light ? "#48606f" : "#6f8099"
-        readonly property color iris:  light ? Qt.darker(root.accent, 2.4)  : root.accent
-        readonly property color frost: light ? Qt.darker(root.accent, 1.7) : Qt.lighter(root.accent, 1.22)
+        readonly property bool  light: Tok.light
+        readonly property color bg:    Tok.bg
+        readonly property color panel: Tok.surface
+        readonly property color line:  Tok.ruleHard
+        readonly property color text:  Tok.ink
+        readonly property color sub:   Tok.ink2
+        readonly property color faint: Tok.ink3
+        readonly property color iris:  Tok.accent
+        readonly property color frost: Tok.ink2
+        readonly property color good:  Tok.ok
+        readonly property color warn:  Tok.warn
+        readonly property color bad:   Tok.crit
         function a(c, al) { return Qt.rgba(c.r, c.g, c.b, al) }
     }
 
@@ -56,36 +64,18 @@ ShellRoot {
     property string matugenScript: Qt.resolvedUrl("matugen-accent.sh").toString().replace("file://", "")
     property string lockwallScript: Qt.resolvedUrl("sea-lockwall.sh").toString().replace("file://","")
     property string autopauseScript: Qt.resolvedUrl("sea-wallpaper-autopause.sh").toString().replace("file://","")
+    property string applyScript: Qt.resolvedUrl("sea-wallpaper-apply.sh").toString().replace("file://","")
     function setWall(p) {
-        var vid = isVideo(p);
         // persist the pick so it can be restored on login
         Quickshell.execDetached(["sh", "-c", "mkdir -p ~/.config/sea-shell && printf '%s' '" + p + "' > ~/.config/sea-shell/wallpaper"]);
         // sync lock screen background (first frame for video, direct copy for static)
         Quickshell.execDetached(["sh", root.lockwallScript, p]);
         // recolour the bar to match the wallpaper (matugen)
         if (root.matchColors) Quickshell.execDetached(["sh", root.matugenScript, p]);
-        if (vid) {
-            // animated: mpvpaper (install: pacman -S mpvpaper). An mpv IPC socket
-            // lets sea-wallpaper-autopause.sh pause playback while a fullscreen
-            // window covers the wallpaper (saves a lot of CPU/GPU).
-            Quickshell.execDetached(["sh", "-c",
-                "S=\"$XDG_RUNTIME_DIR/sea-mpvpaper.sock\"; " +
-                "if command -v mpvpaper >/dev/null; then pkill -x mpvpaper; sleep 0.2; rm -f \"$S\"; " +
-                "mpvpaper -o \"no-audio --loop-file=inf --panscan=1.0 --input-ipc-server=$S\" '*' '" + p + "' & disown; " +
-                "sh '" + root.autopauseScript + "' >/dev/null 2>&1 & disown; " +
-                "else notify-send 'sea-shell' 'Animated wallpapers need mpvpaper: pacman -S mpvpaper'; fi"]);
-        } else {
-            // static: swww (or its awww fork) → hyprpaper → mpvpaper (mpv can show a still) fallback
-            Quickshell.execDetached(["sh", "-c",
-                // the [p] bracket stops `pkill -f` from matching THIS sh -c command
-                // line (which contains the pattern) and killing itself mid-switch.
-                "pkill -x mpvpaper 2>/dev/null; pkill -f 'sea-wallpaper-auto[p]ause' 2>/dev/null; " +
-                "SW=$(command -v swww || command -v awww); SWD=$(command -v swww-daemon || command -v awww-daemon); " +
-                "if [ -n \"$SW\" ]; then \"$SW\" query >/dev/null 2>&1 || { \"$SWD\" & sleep 0.4; }; \"$SW\" img '" + p + "' --transition-type grow --transition-fps 60; " +
-                "elif command -v hyprpaper >/dev/null; then killall hyprpaper 2>/dev/null; hyprpaper & sleep 0.3; hyprctl hyprpaper preload '" + p + "'; hyprctl hyprpaper wallpaper ',\"" + p + "\"'; " +
-                "elif command -v mpvpaper >/dev/null; then mpvpaper -o 'no-audio --image-display-duration=inf --panscan=1.0' '*' '" + p + "' & disown; " +
-                "else notify-send 'sea-shell' 'Install a wallpaper daemon: pacman -S swww  (or hyprpaper / mpvpaper)'; fi"]);
-        }
+        // The whole swww/mpvpaper/hyprpaper ladder used to be inlined here as a shell string,
+        // duplicating sea-wallpaper-restore.sh — with the transition hardcoded to `grow` in
+        // both, so the picker and the SUPER+N keybind could not share a setting. One script now.
+        Quickshell.execDetached(["sh", root.applyScript, p]);
         Qt.quit()
     }
 
@@ -107,7 +97,7 @@ ShellRoot {
             anchors.centerIn: parent
             width: Math.min(parent.width / win.ui - 80, 900)
             height: Math.min(parent.height / win.ui - 80, 620)
-            radius: 18
+            radius: Tok.rCard
             color: theme.a(theme.bg, 0.98)
             border.width: 1; border.color: theme.a(theme.iris, 0.34)
             MouseArea { anchors.fill: parent }
@@ -118,20 +108,20 @@ ShellRoot {
                 RowLayout {
                     spacing: 12; Layout.fillWidth: true
                     SeaLogo { size: 28; card: theme.line; accent: theme.iris; highlight: theme.frost; rim: theme.iris }
-                    Text { text: "wallpapers"; color: theme.text; font.pixelSize: 18; font.family: "monospace"; font.bold: true }
-                    Text { text: "~/Pictures/wallpapers"; color: theme.faint; font.pixelSize: 11; font.family: "monospace" }
+                    Text { text: "wallpapers"; color: theme.text; font.pixelSize: 18; font.family: Tok.mono; font.bold: true }
+                    Text { text: "~/Pictures/wallpapers"; color: theme.faint; font.pixelSize: 11; font.family: Tok.mono }
                     Item { Layout.fillWidth: true }
                     // match-colours toggle (matugen)
                     Rectangle {
-                        implicitHeight: 30; implicitWidth: mcRow.implicitWidth + 22; radius: 8
+                        implicitHeight: 30; implicitWidth: mcRow.implicitWidth + 22; radius: Tok.r
                         color: root.matchColors ? theme.a(theme.iris,0.22) : theme.a(theme.line,0.5)
                         border.width: 1; border.color: root.matchColors ? theme.iris : theme.a(theme.iris,0.16)
                         RowLayout { id: mcRow; anchors.centerIn: parent; spacing: 7
                             Text { text: "auto_awesome"; font.family: "Material Symbols Outlined"; font.pixelSize: 15; color: root.matchColors?theme.frost:theme.faint }
-                            Text { text: "match colours"; color: root.matchColors?theme.text:theme.faint; font.pixelSize: 12; font.family: "monospace" } }
+                            Text { text: "match colours"; color: root.matchColors?theme.text:theme.faint; font.pixelSize: 12; font.family: Tok.mono } }
                         MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.matchColors = !root.matchColors }
                     }
-                    Text { text: root.papers.length + " found"; color: theme.frost; font.pixelSize: 11; font.family: "monospace" }
+                    Text { text: root.papers.length + " found"; color: theme.frost; font.pixelSize: 11; font.family: Tok.mono }
                 }
 
                 GridView {
@@ -163,7 +153,7 @@ ShellRoot {
                         }
 
                         Rectangle {
-                            anchors.fill: parent; anchors.margins: 6; radius: 10; clip: true
+                            anchors.fill: parent; anchors.margins: 6; radius: Tok.r; clip: true
                             color: theme.line
                             border.width: wm.containsMouse ? 2 : 1
                             border.color: wm.containsMouse ? theme.iris : theme.a(theme.iris, 0.2)
@@ -184,14 +174,14 @@ ShellRoot {
                             Rectangle {
                                 visible: cell.vid && cell.thumbReady
                                 anchors { top: parent.top; left: parent.left; margins: 6 }
-                                width: 22; height: 22; radius: 11; color: Qt.rgba(0, 0, 0, 0.5)
+                                width: 22; height: 22; radius: Tok.r; color: Qt.rgba(0, 0, 0, 0.5)
                                 Text { anchors.centerIn: parent; text: "play_arrow"; font.family: "Material Symbols Outlined"; font.pixelSize: 15; color: theme.frost }
                             }
                             Rectangle {
                                 anchors.bottom: parent.bottom; width: parent.width; height: 24
                                 color: Qt.rgba(0, 0, 0, 0.55)
                                 Text { anchors.centerIn: parent; width: parent.width - 12; elide: Text.ElideMiddle
-                                    text: root.base(modelData); color: theme.text; font.pixelSize: 11; font.family: "monospace"; horizontalAlignment: Text.AlignHCenter }
+                                    text: root.base(modelData); color: theme.text; font.pixelSize: 11; font.family: Tok.mono; horizontalAlignment: Text.AlignHCenter }
                             }
                             MouseArea { id: wm; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.setWall(modelData) }
                         }
@@ -202,7 +192,7 @@ ShellRoot {
                     visible: root.papers.length === 0
                     Layout.alignment: Qt.AlignHCenter
                     text: "no images in ~/Pictures/wallpapers — drop some jpg/png/webp there"
-                    color: theme.faint; font.pixelSize: 12; font.family: "monospace"
+                    color: theme.faint; font.pixelSize: 12; font.family: Tok.mono
                 }
             }
         }

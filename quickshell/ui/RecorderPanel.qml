@@ -235,22 +235,25 @@ Scope {
     Process { id: apReadProc; running: true; command: ["sh","-c","cat ~/.config/sea-shell/appearance.json 2>/dev/null || echo '{}'"]
         stdout: StdioCollector { id: apOut; onStreamFinished: { try { var j = JSON.parse(apOut.text.trim() || "{}");
             if (j.accent) root.apAccent = j.accent; if (j.mode !== undefined) root.apLight = ("" + j.mode === "light"); } catch(e){} } } }
+    // ---------- industrial token shim ----------
+    // Colours come from the shared Tok singleton (see shell.qml). This surface used to carry its
+    // own copy of the ramp AND its own appearance.json parse, so it drifted from the bar every
+    // time the palette changed. The `theme.*` vocabulary is kept because the call sites below
+    // speak it; only the source of the values moved.
     QtObject {
         id: theme
-        readonly property bool light: root.apLight
-        // Surfaces follow the accent HUE at low saturation, so the panel tracks matugen with
-        // the rest of the shell instead of sitting at a fixed navy/white while the bar recolours.
-        readonly property color _acc: root.apAccent
-        readonly property real  _ah:  _acc.hslHue >= 0 ? _acc.hslHue : 0.55
-        readonly property color bg:    light ? Qt.hsla(_ah, 0.20, 0.945, 1) : Qt.hsla(_ah, 0.36, 0.070, 1)
-        readonly property color line:  light ? Qt.hsla(_ah, 0.16, 0.780, 1) : Qt.hsla(_ah, 0.24, 0.205, 1)
-        readonly property color text:  light ? "#0c1520" : "#e2e9f4"
-        readonly property color sub:   light ? "#2c4256" : "#a6b6cf"
-        readonly property color faint: light ? "#48606f" : "#6f8099"
-        readonly property color iris:  light ? Qt.darker(root.apAccent, 2.4) : root.apAccent
-        readonly property color frost: light ? Qt.darker(root.apAccent, 1.7) : Qt.lighter(root.apAccent, 1.22)
-        readonly property color warn:  light ? "#b9820f" : "#f4c542"
-        readonly property color bad:   light ? "#d1495b" : "#f38ba8"
+        readonly property bool  light: Tok.light
+        readonly property color bg:    Tok.bg
+        readonly property color panel: Tok.surface
+        readonly property color line:  Tok.ruleHard
+        readonly property color text:  Tok.ink
+        readonly property color sub:   Tok.ink2
+        readonly property color faint: Tok.ink3
+        readonly property color iris:  Tok.accent
+        readonly property color frost: Tok.ink2
+        readonly property color good:  Tok.ok
+        readonly property color warn:  Tok.warn
+        readonly property color bad:   Tok.crit
         function a(c, al) { return Qt.rgba(c.r, c.g, c.b, al) }
     }
 
@@ -258,7 +261,7 @@ Scope {
         color: theme.iris; verticalAlignment: Text.AlignVCenter }
 
     component Head: Text {
-        color: theme.faint; font.pixelSize: 9; font.family: "monospace"; font.bold: true; font.letterSpacing: 1
+        color: theme.faint; font.pixelSize: 9; font.family: Tok.mono; font.bold: true; font.letterSpacing: 1
     }
 
     // A segmented choice. Carries no anchors of its own so it can live inside a Flow
@@ -272,7 +275,7 @@ Scope {
         signal tapped()
         implicitHeight: 28
         implicitWidth: Math.min(sg.maxW > 0 ? sg.maxW : 9999, sgt.implicitWidth + 20)
-        radius: 8
+        radius: Tok.r
         opacity: sg.enabled ? 1 : 0.4
         color: sg.on ? theme.iris : (sgm.containsMouse ? theme.a(theme.iris, 0.18) : theme.a(theme.line, 0.4))
         border.width: 1; border.color: theme.a(theme.iris, sg.on ? 0.6 : 0.18)
@@ -283,7 +286,7 @@ Scope {
             width: Math.min(implicitWidth, sg.width - 16)
             elide: Text.ElideRight
             text: sg.label; color: sg.on ? theme.bg : theme.sub
-            font.pixelSize: 11; font.family: "monospace"; font.bold: sg.on
+            font.pixelSize: 11; font.family: Tok.mono; font.bold: sg.on
         }
         MouseArea { id: sgm; anchors.fill: parent; enabled: sg.enabled
             hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: sg.tapped() }
@@ -292,7 +295,7 @@ Scope {
     component IconBtn: Rectangle {
         id: ib
         property string icon: ""; property int sz: 30; signal tapped()
-        implicitWidth: sz + 4; implicitHeight: sz + 4; radius: 8
+        implicitWidth: sz + 4; implicitHeight: sz + 4; radius: Tok.r
         color: ibm.containsMouse ? theme.a(theme.iris, 0.18) : "transparent"
         Sym { anchors.centerIn: parent; text: ib.icon; sz: Math.round(ib.sz * 0.6); color: theme.sub }
         MouseArea { id: ibm; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: ib.tapped() }
@@ -301,13 +304,13 @@ Scope {
     component TextBtn: Rectangle {
         id: tb
         property string label: ""; property string icon: ""; property bool primary: false; signal tapped()
-        implicitHeight: 32; implicitWidth: tbr.width + 22; radius: 9
+        implicitHeight: 32; implicitWidth: tbr.width + 22; radius: Tok.r
         opacity: tb.enabled ? 1 : 0.4
         color: tb.primary ? (tbm.containsMouse ? theme.frost : theme.iris) : (tbm.containsMouse ? theme.a(theme.iris, 0.18) : theme.a(theme.line, 0.4))
         border.width: 1; border.color: theme.a(theme.iris, tb.primary ? 0.5 : 0.2)
         RowLayout { id: tbr; anchors.centerIn: parent; spacing: 7
             Sym { text: tb.icon; sz: 15; color: tb.primary ? theme.bg : theme.frost }
-            Text { text: tb.label; color: tb.primary ? theme.bg : theme.sub; font.pixelSize: 11; font.family: "monospace"; font.bold: tb.primary } }
+            Text { text: tb.label; color: tb.primary ? theme.bg : theme.sub; font.pixelSize: 11; font.family: Tok.mono; font.bold: tb.primary } }
         MouseArea { id: tbm; anchors.fill: parent; enabled: tb.enabled; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: tb.tapped() }
     }
 
@@ -332,7 +335,7 @@ Scope {
             anchors.centerIn: parent
             width: 560
             height: card.implicitHeight + 40
-            radius: 18
+            radius: Tok.rCard
             color: theme.a(theme.bg, 0.98)
             border.width: 1; border.color: theme.a(theme.iris, 0.34)
             MouseArea { anchors.fill: parent }
@@ -348,7 +351,7 @@ Scope {
                     Layout.fillWidth: true; spacing: 12
                     Sym { text: "videocam"; sz: 26; color: theme.iris }
                     ColumnLayout { spacing: 1; Layout.fillWidth: true
-                        Text { text: "record"; color: theme.text; font.pixelSize: 20; font.family: "monospace"; font.bold: true }
+                        Text { text: "record"; color: theme.text; font.pixelSize: 20; font.family: Tok.mono; font.bold: true }
                         Text {
                             text: root.wfAvail
                                   ? (root.captureLabel + " · " + (root.audio === "none" ? "no audio"
@@ -357,7 +360,7 @@ Scope {
                                      + " · " + root.fps + "fps " + root.format)
                                   : "wf-recorder is not installed"
                             color: root.wfAvail ? theme.faint : theme.bad
-                            font.pixelSize: 11; font.family: "monospace"
+                            font.pixelSize: 11; font.family: Tok.mono
                             Layout.fillWidth: true; elide: Text.ElideRight
                         }
                     }
@@ -443,7 +446,7 @@ Scope {
                     // The one thing that silently produces a dead audio track.
                     Rectangle {
                         Layout.fillWidth: true; visible: root.exclusiveWarn
-                        implicitHeight: exw.implicitHeight + 16; radius: 9
+                        implicitHeight: exw.implicitHeight + 16; radius: Tok.r
                         color: theme.a(theme.warn, 0.14)
                         border.width: 1; border.color: theme.a(theme.warn, 0.4)
                         RowLayout {
@@ -458,7 +461,7 @@ Scope {
                                 text: (root.exclusiveName || "A DAC") + " is playing bit-perfect, straight to ALSA. "
                                       + "That bypasses pipewire, so the monitor this records from will be silent. "
                                       + "Record the mic, or take the player out of exclusive mode."
-                                color: theme.warn; font.pixelSize: 10; font.family: "monospace"; lineHeight: 1.3
+                                color: theme.warn; font.pixelSize: 10; font.family: Tok.mono; lineHeight: 1.3
                             }
                         }
                     }
@@ -492,7 +495,7 @@ Scope {
                               : root.format === "webm"
                               ? "webm/VP9 is the slowest to encode; on a long capture the CPU may not keep up."
                               : "mkv keeps every frame written so far, even if the recording never stops cleanly."
-                        color: theme.faint; font.pixelSize: 10; font.family: "monospace"; lineHeight: 1.3
+                        color: theme.faint; font.pixelSize: 10; font.family: Tok.mono; lineHeight: 1.3
                     }
                 }
 
@@ -507,7 +510,7 @@ Scope {
                     Text {
                         // whatever the script will really use, not a hardcoded guess
                         text: root.dir !== "" ? root.dir : "~/Videos/Recordings"
-                        color: theme.faint; font.pixelSize: 10; font.family: "monospace"
+                        color: theme.faint; font.pixelSize: 10; font.family: Tok.mono
                         elide: Text.ElideLeft; Layout.maximumWidth: 220
                     }
                 }
@@ -518,7 +521,7 @@ Scope {
                     Text {
                         Layout.fillWidth: true
                         text: root.capture === "region" ? "enter → drag a region" : "enter → record"
-                        color: theme.faint; font.pixelSize: 10; font.family: "monospace"
+                        color: theme.faint; font.pixelSize: 10; font.family: Tok.mono
                     }
                     TextBtn { label: "cancel"; icon: "close"; onTapped: root.close() }
                     TextBtn { label: "record"; icon: "fiber_manual_record"; primary: true
@@ -544,13 +547,13 @@ Scope {
 
         Rectangle {
             anchors.centerIn: parent
-            width: 132; height: 132; radius: 66
+            width: 132; height: 132; radius: Tok.rCard
             color: theme.a(theme.bg, 0.86)
             border.width: 2; border.color: theme.a(theme.bad, 0.8)
             Text {
                 anchors.centerIn: parent
                 text: "" + root.ticking
-                color: theme.text; font.pixelSize: 64; font.family: "monospace"; font.bold: true
+                color: theme.text; font.pixelSize: 64; font.family: Tok.mono; font.bold: true
             }
             scale: root.ticking > 0 ? 1 : 0.8
             Behavior on scale { NumberAnimation { duration: 160; easing.type: Easing.OutBack } }
