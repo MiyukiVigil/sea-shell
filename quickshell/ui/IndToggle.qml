@@ -31,9 +31,17 @@ Item {
         }
     }
 
+    // CONTROLLED, not self-driving. Every caller binds `on` to the real state — root.wifiOn,
+    // root.btOn, root.warpConnected — and acts on `toggled`. Flipping `sw.on` here assigned over
+    // that binding and destroyed it, so from the first click onward the switch showed what it had
+    // been clicked to rather than what was true: a WARP connect that failed, or a radio something
+    // else turned off, left the switch stuck in the wrong position for the life of the shell.
+    //
+    // Reporting the intended value and letting the owner's state come back is a beat slower on
+    // screen, which is honest — the radio really has not changed yet.
     MouseArea {
         anchors.fill: parent
         cursorShape: sw.enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
-        onClicked: if (sw.enabled) { sw.on = !sw.on; sw.toggled(sw.on) }
+        onClicked: if (sw.enabled) sw.toggled(!sw.on)
     }
 }
