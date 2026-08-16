@@ -5,6 +5,100 @@ All notable changes to **sea-shell** are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.1.0] - 2026-08-16
+
+**The widgets update.** Bar widgets you can actually configure, a rebuilt media panel, and
+lyrics that tell you how to pronounce them.
+
+The through-line is data that was already being collected and never reaching the screen.
+`sea-sysmon.sh` had been sampling CPU, RAM, GPU, VRAM, temperatures and power every three
+seconds since the pill was written — and the pill rendered exactly one of those numbers, so a
+6GB card had its VRAM measured on every tick and displayed nowhere. Notifications recorded
+their action buttons and drew them only on the popup. The Wi-Fi scan parsed each network's
+security type and threw it away for a padlock glyph.
+
+> **Nothing moves and nothing is lost.** Every new key defaults to the previous behaviour: the
+> System Monitor still shows CPU alone until you add to it, the microphone widget is off, and
+> lyrics romanisation is on only when the panel is open.
+
+### Added
+
+- **Lyrics pronunciation and translation.** Romaji under Japanese lines, Revised Romanisation
+  under Korean, pinyin under Chinese — offline, via `pykakasi`/`pypinyin` and a pure-algorithm
+  Hangul pass, computed once per track. Translation is opt-in and shells out to
+  `translate-shell`. Both are stacked *under* the original rather than replacing it, because
+  singing along needs both at once. Both are line-aligned with the lyrics or discarded
+  entirely — the panel indexes them with the same `lyrIdx`, so a result off by one line would
+  confidently show the reading of the wrong lyric.
+- **The System Monitor pill is configurable.** Eight readings — CPU, RAM, GPU and VRAM, each as
+  a percentage or an absolute, plus both temperatures — in any combination, chosen in
+  *Settings → Bar*. GPU readings remove themselves on a machine with no discrete card rather
+  than rendering a dash.
+- **Microphone widget.** Input level on the bar, click to mute, red while muted. Off by
+  default. Reads `@DEFAULT_AUDIO_SOURCE@` through `wpctl` so it follows the default source
+  changing the way the volume keys do, and re-samples after a toggle instead of assuming.
+- **The clock dropdown folds.** Calendar, Upcoming, Timer and World Clock each collapse from
+  their header and stay that way. It stacked to roughly 720px with no cap, which ran off the
+  bottom of anything shorter than 1080p; fully folded it is about 120px. A running countdown
+  stays visible on the folded Timer header, since that is when you would look.
+- **Notification actions in the centre.** They were recorded on every notification and drawn
+  only on the transient popup, so anything that timed out or arrived during Do Not Disturb
+  landed in history with a Reply button that existed in the data and nowhere on screen. They
+  render dead once the server releases the notification rather than staying pressable.
+
+### Changed
+
+- **The media panel is rebuilt.** Square rounded album art as the anchor instead of an 84px
+  thumbnail; the level meter rides the art's bottom edge instead of taking a 38px band of its
+  own; remaining time rather than total, in tabular mono so it stops re-measuring on every
+  tick; one filled primary control instead of five of equal weight; and the signal chain —
+  *out via …*, bit-perfect, the DAC model — promoted from two 10px lines under the album name
+  to a strip of its own. It is the most specific thing this panel knows and the one thing no
+  other shell can tell you.
+- **The Wi-Fi panel shows what it already knew.** Signal strength as a number, mono and
+  tabular, next to the bars — the scan sorts on it and the panel re-probes every 8s to keep it
+  moving, yet it only ever reached the screen as one of three icons. Security is named
+  (`WPA2`, `WPA3`, `OPEN`, `WEP`) instead of a padlock at 60% opacity, with open and WEP
+  networks flagged as warnings. The list also says when it has capped itself at eight.
+- **Track details read like a readout.** Keys as tracked uppercase labels, values in mono —
+  a bitrate, a release year and a sink name are readings, and the panel rendered them in the
+  same face as prose.
+
+### Fixed
+
+- **Every toggle in the shell detached from reality after one click.** `IndToggle` assigned
+  over its own `on` property before emitting, which destroyed the caller's binding — so from
+  the first press onward Wi-Fi, Bluetooth, Caffeine, Audio and WARP showed what they had been
+  clicked to rather than what was true. A WARP connect that failed, or a radio something else
+  turned off, stayed wrong for the life of the session.
+- **The DAC widget was missing from the bar widget list** — and from five other places. Most
+  damaging: `saveAppearance()` rebuilds `appearance.json` from scratch, so every settings save
+  silently deleted `wgDac`. The pill only survived because `reconcileOrder` re-added it from
+  the default each boot, which is also why its position never stuck. The same list had
+  `wgUpdates` and `wgNet` in it twice, so both showed as duplicate rows and dragging either
+  wrote the duplicate to disk; `reconcileOrder` now de-duplicates so a damaged config heals.
+- **Saved bar layouts dropped two widgets.** Network Speed and Updates were toggleable in the
+  panel but absent from `barToggleKeys`, so switching between saved layouts left them wherever
+  they happened to be.
+- **Lyrics sometimes belonged to a different song.** The last search step queries lrclib by
+  title alone — deliberately, since MPRIS and lrclib disagree on how to spell artists — and
+  the parser then took the first result that had any lyrics. "Embers" returns every song ever
+  called Embers. Results are now filtered by duration within ±7s with a fuzzy artist match
+  preferred, and no match beats a confident wrong one.
+- **Album art was never rounded**, in three separate panels. `clip: true` on a `Rectangle`
+  clips children to the bounding box and ignores the radius, so no radius value would have
+  worked; the art sat square-cornered inside a rounded frame. Now `ClippingRectangle`.
+- **The media transport was not centred.** `Row` lays children out left to right and leaves
+  `y` at 0, so the 48px play button hung 6px below its 36px neighbours. Hiding unsupported
+  shuffle and loop compounded it — a `Row` drops invisible children and re-centres on what is
+  left, so a player reporting loop but not shuffle pushed play off-axis. The row is now always
+  five slots, with unsupported controls dimmed and inert rather than absent.
+
+### Packaging
+
+- `python-pykakasi`, `pypinyin` and `translate-shell` added to the installer's repo packages.
+  All three are in `extra`, so the lyrics features need no AUR helper.
+
 ## [6.0.0] - 2026-08-15
 
 **A dock, and an interface that reads like an instrument.**

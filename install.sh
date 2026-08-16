@@ -183,6 +183,8 @@ REPO_PKGS=(
   zenity                                              # file picker behind KDE Connect "send file"
   ttf-nerd-fonts-symbols                              # brand/distro logo glyphs on the System page
   python-hidapi                                       # Moondrop DAC EQ panel (USB-HID control)
+  python-pykakasi pypinyin                            # lyrics pronunciation — kana/kanji→romaji, hanzi→pinyin (both offline)
+  translate-shell                                     # lyrics translation (Google's unofficial endpoint; optional, degrades quietly)
 )
 # AUR packages — need an AUR helper (paru/yay); bootstrapped below if absent.
 AUR_PKGS=(

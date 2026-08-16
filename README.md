@@ -4,7 +4,7 @@
 notification daemon, screen recorder and a parametric EQ are one Quickshell process — not six
 tools glued together. The whole palette follows your wallpaper.
 
-**`v6.0.0`** · [seashell.miyukivigil.tech](https://seashell.miyukivigil.tech) ·
+**`v6.1.0`** · [seashell.miyukivigil.tech](https://seashell.miyukivigil.tech) ·
 [changelog](https://seashell.miyukivigil.tech/changelog.html)
 
 ![The sea-shell desktop — translucent bar at the top, animated wallpaper, and the dock at the bottom](https://seashell.miyukivigil.tech/images/v6/hero.webp)
@@ -115,7 +115,7 @@ The same build, four wallpapers — only the image changed:
 
 | | | | |
 |:---:|:---:|:---:|:---:|
-| ![](https://seashell.miyukivigil.tech/images/v6/wall-whales.webp) | ![](https://seashell.miyukivigil.tech/images/v6/wall-zelda.webp) | ![](https://seashell.miyukivigil.tech/images/v6/wall-selena.webp) | ![](https://seashell.miyukivigil.tech/images/v6/wall-minecraft.webp) |
+| ![](https://seashell.miyukivigil.tech/images/v6/wp-whales.webp) | ![](https://seashell.miyukivigil.tech/images/v6/wp-zelda.webp) | ![](https://seashell.miyukivigil.tech/images/v6/wp-selena.webp) | ![](https://seashell.miyukivigil.tech/images/v6/wp-minecraft.webp) |
 | `#bdc8d3` | `#d6c4aa` | `#e0bfb9` | `#c1c6d6` |
 
 ### Light and dark
