@@ -457,6 +457,7 @@ ShellRoot {
     property bool   cfgDockLabels: true
     property bool cfgMpris: true
     property bool cfgDac: true
+    property bool cfgMic: false     // off by default: most people do not need a permanent mic pill
     property bool cfgTray: true
     property bool cfgWeather: true
     property bool cfgClipboard: true
@@ -479,7 +480,7 @@ ShellRoot {
     // Values are the widget ids; the bar positions each right-group pill by its index here,
     // so reordering this list reorders the pills. Unknown/absent ids fall to the far end.
     // wgMpris is the centre pill and ignores its position; wgRec is the transient recorder.
-    readonly property var defaultWidgetOrder: ["wgMpris","wgTray","wgQuick","wgUpdates","wgNet","wgWeather","wgClipboard","wgNotif","wgWifi","wgBluetooth","wgKdeconnect","wgCaffeine","wgNight","wgSystem","wgDac","wgVolume","wgBattery","wgRec","wgClock","wgPower"]
+    readonly property var defaultWidgetOrder: ["wgMpris","wgTray","wgQuick","wgUpdates","wgNet","wgWeather","wgClipboard","wgNotif","wgWifi","wgBluetooth","wgKdeconnect","wgCaffeine","wgNight","wgSystem","wgDac","wgMic","wgVolume","wgBattery","wgRec","wgClock","wgPower"]
     property var cfgWidgetOrder: root.defaultWidgetOrder
     // left cluster order (logo · workspaces · window-title) — drag-reorder in Settings → Bar widgets
     readonly property var defaultLeftOrder: ["lgLogo","lgWork","lgTitle"]
@@ -492,7 +493,14 @@ ShellRoot {
     // the power button, which is deliberately last, so every new widget arrived
     // in the one position nothing should occupy.
     function reconcileOrder(order, def) {
-        var res = order.slice();
+        // Drop repeats before anything else. A saved order can legitimately contain the same id
+        // twice: settings.qml's copy of the default list carried wgUpdates and wgNet in it twice,
+        // so its reorder list showed two identical rows and dragging either wrote the duplicate
+        // straight back out to disk. The registries match again, but a config written by any
+        // build up to 6.0 still holds the damage, and a repeated id renders a repeated pill.
+        var res = [];
+        for (var d = 0; d < order.length; d++)
+            if (res.indexOf(order[d]) < 0) res.push(order[d]);
         for (var i = 0; i < def.length; i++) {
             if (res.indexOf(def[i]) >= 0) continue;
             var at = res.length;                       // nothing to anchor to → end
@@ -565,6 +573,7 @@ ShellRoot {
             if (j.mode    !== undefined) root.cfgLight = (""+j.mode === "light");
             if (j.wgMpris !== undefined) root.cfgMpris = !!j.wgMpris;
             if (j.wgDac !== undefined) root.cfgDac = !!j.wgDac;
+            if (j.wgMic !== undefined) root.cfgMic = !!j.wgMic;
             if (j.wgTray !== undefined) root.cfgTray = !!j.wgTray;
             if (j.wgWeather !== undefined) root.cfgWeather = !!j.wgWeather;
             if (j.wgClipboard !== undefined) root.cfgClipboard = !!j.wgClipboard;
@@ -587,6 +596,7 @@ ShellRoot {
             if (j.night !== undefined) root.cfgNight = !!j.night;
             if (j.nightTemp !== undefined) root.cfgNightTemp = j.nightTemp;
             if (j.nightAuto !== undefined) root.cfgNightAuto = !!j.nightAuto;
+            if (j.sysShow !== undefined && Array.isArray(j.sysShow) && j.sysShow.length > 0) root.cfgSysShow = j.sysShow;
             if (j.widgetOrder !== undefined && Array.isArray(j.widgetOrder) && j.widgetOrder.length > 0) root.cfgWidgetOrder = root.reconcileOrder(j.widgetOrder, root.defaultWidgetOrder);
             if (j.leftOrder !== undefined && Array.isArray(j.leftOrder) && j.leftOrder.length > 0) root.cfgLeftOrder = root.reconcileOrder(j.leftOrder, root.defaultLeftOrder);
             if (j.monitors !== undefined && j.monitors && typeof j.monitors === "object") root.cfgMonitors = j.monitors;
@@ -893,8 +903,38 @@ ShellRoot {
         root.dacActive ? (root.dacModel + (root.dacExclusive ? " · exclusive" : ""))
                        : root.sinkShort(Pipewire.defaultAudioSink)
 
+    // ---------- microphone ----------
+    // The only genuinely absent widget: Volume covers the sink and nothing in the shell has ever
+    // touched the source, so an open mic was invisible. wpctl is the authority rather than the
+    // Pipewire binding because @DEFAULT_AUDIO_SOURCE@ follows the default-source change the same
+    // way the volume keys do — tracking a node id instead would go stale the moment it moves.
+    property bool  micMuted: false
+    property real  micVol:   0
+    property string micName: ""
+    Process { id: micProc; running: true
+        command: ["sh","-c","wpctl get-volume @DEFAULT_AUDIO_SOURCE@ 2>/dev/null; "
+                          + "wpctl inspect @DEFAULT_AUDIO_SOURCE@ 2>/dev/null | grep -m1 node.nick"]
+        stdout: StdioCollector { id: micOut; onStreamFinished: {
+            var t = micOut.text;
+            var m = t.match(/Volume:\s*([0-9.]+)/);
+            root.micVol   = m ? parseFloat(m[1]) : 0;
+            root.micMuted = t.indexOf("MUTED") >= 0;
+            var n = t.match(/node\.nick\s*=\s*"([^"]*)"/);
+            root.micName = n ? n[1] : "";
+        } } }
+    Timer { interval: 3000; running: true; repeat: true; triggeredOnStart: true; onTriggered: micProc.running = true }
+    function micToggle() {
+        Quickshell.execDetached(["sh","-c","wpctl set-mute @DEFAULT_AUDIO_SOURCE@ toggle"]);
+        micSettle.restart();
+    }
+    // act, then re-sample: wpctl can refuse, and a pill that reports what it was clicked to say
+    // rather than what is true is the bug IndToggle had.
+    Timer { id: micSettle; interval: 250; repeat: false; onTriggered: micProc.running = true }
+
     // ---------- wifi ----------
     property var wifiList: []
+    property int wifiSeen: 0          // distinct SSIDs the scan found, before the list is capped
+    readonly property bool wifiScanning: wifiScan.running
     property string ssid: ""
     property bool wifiOn: false
     // Connection state comes from the DEVICE state (authoritative + instant), NOT from
@@ -945,14 +985,28 @@ ShellRoot {
             for (var i=0;i<lines.length;i++){ if(!lines[i])continue; var p=lines[i].split(":");
                 var sid=p.slice(3).join(":").replace(/\\:/g,":");   // terse mode escapes ':' in SSIDs
                 if(!sid) continue;
-                var e={active:(p[0]==="yes")||(root.ssid!=="" && sid===root.ssid),signal:parseInt(p[1])||0,secure:(p[2]||"").length>0,ssid:sid};
+                var e={active:(p[0]==="yes")||(root.ssid!=="" && sid===root.ssid),signal:parseInt(p[1])||0,secure:(p[2]||"").length>0,sec:(p[2]||""),ssid:sid};
                 if (!(sid in best)) { best[sid]=e; order.push(sid) }
                 else if (e.signal > best[sid].signal) { e.active = e.active || best[sid].active; best[sid]=e }
                 else if (e.active) best[sid].active = true; }
             var out = order.map(function(s){ return best[s] });
             out.sort(function(a,b){ return b.signal - a.signal });
+            root.wifiSeen = out.length;
             root.wifiList = out.slice(0,8);
         } }
+    }
+    // nmcli's SECURITY column is a space-separated list — "WPA1 WPA2", "WPA2 802.1X" — and the row
+    // has room for one short word, so report the strongest scheme present: that is what the link
+    // will negotiate. An open network is NAMED rather than shown nothing, because a row with no
+    // marking on it reads as one that failed to render, not one with no encryption.
+    function wifiSecLabel(s) {
+        var t = ("" + (s || "")).toUpperCase();
+        if (!t.length)              return "OPEN";
+        if (t.indexOf("WPA3") >= 0) return "WPA3";
+        if (t.indexOf("WPA2") >= 0) return "WPA2";
+        if (t.indexOf("WPA")  >= 0) return "WPA";
+        if (t.indexOf("WEP")  >= 0) return "WEP";
+        return t.split(" ")[0];
     }
     Timer { interval: 30000; running: true; repeat: true; triggeredOnStart: true; onTriggered: root.wifiRescan(false) }
     // dropdown open → the list has to be live: re-probe on open (triggeredOnStart) and keep
@@ -1262,6 +1316,50 @@ ShellRoot {
     }
     // only poll while a bar is visible; 3s is a good live/quiet balance
     Timer { interval: 3000; running: true; repeat: true; triggeredOnStart: true; onTriggered: sysProc.running = true }
+    // WHICH of those the bar pill actually shows.
+    //
+    // sea-sysmon.sh has been sampling all eleven values every 3s since the pill was written, and
+    // the pill rendered exactly one of them — so a machine with a 6GB dGPU had its VRAM measured
+    // on every tick and displayed nowhere. The metric list is a setting because there is no right
+    // answer: a laptop wants battery-cheap CPU, a gaming box wants VRAM, and both are one line.
+    property var cfgSysShow: ["cpu"]
+    readonly property var sysMetrics: ({
+        cpu:  { l: "CPU",  v: function(){ return Math.round(root.cpuUsage) + "%" },
+                c: function(){ return root.loadColor(root.cpuTemp, 78, 90) } },
+        cput: { l: "CPU °", v: function(){ return Math.round(root.cpuTemp) + "°" },
+                c: function(){ return root.loadColor(root.cpuTemp, 78, 90) } },
+        ram:  { l: "RAM",  v: function(){ return Math.round(root.memPct) + "%" },
+                c: function(){ return root.loadColor(root.memPct, 80, 92) } },
+        ramg: { l: "RAM GiB", v: function(){ return root.memUsed.toFixed(1) + "G" },
+                c: function(){ return root.loadColor(root.memPct, 80, 92) } },
+        gpu:  { l: "GPU",  v: function(){ return Math.round(root.gpuUsage) + "%" },
+                c: function(){ return root.loadColor(root.gpuTemp, 75, 87) } },
+        gput: { l: "GPU °", v: function(){ return Math.round(root.gpuTemp) + "°" },
+                c: function(){ return root.loadColor(root.gpuTemp, 75, 87) } },
+        vram: { l: "VRAM", v: function(){ return root.gpuMemTotal > 0
+                    ? Math.round(root.gpuMemUsed/root.gpuMemTotal*100) + "%" : "—" },
+                c: function(){ return root.loadColor(root.gpuMemTotal > 0
+                    ? root.gpuMemUsed/root.gpuMemTotal*100 : 0, 80, 93) } },
+        vramg:{ l: "VRAM GiB", v: function(){ return root.gpuMemUsed.toFixed(1) + "G" },
+                c: function(){ return root.loadColor(root.gpuMemTotal > 0
+                    ? root.gpuMemUsed/root.gpuMemTotal*100 : 0, 80, 93) } }
+    })
+    // GPU metrics are dropped rather than shown as "—" on a machine with no discrete card.
+    readonly property var sysShown: {
+        var out = [];
+        for (var i = 0; i < root.cfgSysShow.length; i++) {
+            var k = root.cfgSysShow[i];
+            if (!root.sysMetrics[k]) continue;
+            if (!root.hasGpu && (k === "gpu" || k === "gput" || k === "vram" || k === "vramg")) continue;
+            out.push(k);
+        }
+        return out.length ? out : ["cpu"];
+    }
+    readonly property string sysPillText: {
+        var out = [];
+        for (var i = 0; i < root.sysShown.length; i++) out.push(root.sysMetrics[root.sysShown[i]].v());
+        return out.join("  ");
+    }
     // color a value by thermal/load severity (green → warn → bad)
     function loadColor(v, warnAt, badAt) { return v >= badAt ? theme.bad : v >= warnAt ? theme.warn : theme.good }
 
@@ -1419,6 +1517,49 @@ ShellRoot {
     property string plainLyrics: ""
     property string lyricsState: "idle"  // idle | loading | ok | plain | none
     property string lyricsKey: ""
+    // Pronunciation and translation ride ALONGSIDE root.lyrics, indexed by the same lyrIdx —
+    // sea-lyrics-aux.py only ever returns arrays the same length as what it was given, so an
+    // index that is valid for one is valid for all three.
+    property var lyrRomaji: []
+    property var lyrTrans: []
+    property bool cfgLyrRomaji: true
+    property bool cfgLyrTrans: false
+    property string lyrAuxKey: ""            // trackKey the current aux result belongs to
+    Process { running: true; command: ["sh","-c","cat ~/.config/sea-shell/lyrics.json 2>/dev/null || echo '{}'"]
+        stdout: StdioCollector { id: lyrCfgOut; onStreamFinished: {
+            try { var j = JSON.parse(lyrCfgOut.text.trim() || "{}");
+                if (j.romaji !== undefined) root.cfgLyrRomaji = !!j.romaji;
+                if (j.translate !== undefined) root.cfgLyrTrans = !!j.translate;
+            } catch(e) {}
+        } } }
+    function lyrSaveCfg() {
+        var o = JSON.stringify({ romaji: root.cfgLyrRomaji, translate: root.cfgLyrTrans });
+        Quickshell.execDetached(["sh","-c","mkdir -p ~/.config/sea-shell && printf '%s' '"+o+"' > ~/.config/sea-shell/lyrics.json"]);
+    }
+    readonly property string _lyrAuxPath: Qt.resolvedUrl("sea-lyrics-aux.py").toString().replace("file://","")
+    Process { id: lyrAux
+        stdout: StdioCollector { id: lyrAuxOut; onStreamFinished: {
+            // Same staleness rule the lyrics fetch uses: a slow romanisation for the previous
+            // track must not land under the one we already switched to.
+            if (root.lyrAuxKey !== root.trackKey) return;
+            try { var j = JSON.parse(lyrAuxOut.text || "{}");
+                root.lyrRomaji = (j.romaji && j.romaji.length === root.lyrics.length) ? j.romaji : [];
+                root.lyrTrans  = (j.trans  && j.trans.length  === root.lyrics.length) ? j.trans  : [];
+            } catch(e) { root.lyrRomaji = []; root.lyrTrans = [] }
+        } } }
+    function lyrRunAux() {
+        root.lyrRomaji = []; root.lyrTrans = [];
+        if (!root.lyrics.length) return;
+        if (!root.cfgLyrRomaji && !root.cfgLyrTrans) return;
+        var lines = []; for (var i=0;i<root.lyrics.length;i++) lines.push(root.lyrics[i].l);
+        root.lyrAuxKey = root.trackKey;
+        lyrAux.running = false;
+        lyrAux.command = ["sh","-c","printf '%s' \"$SEA_LYR\" | python3 " + root._lyrAuxPath];
+        lyrAux.environment = ({ SEA_LYR: JSON.stringify({ lines: lines, translate: root.cfgLyrTrans, to: "en" }) });
+        lyrAux.running = true;
+    }
+    function lyrToggleRomaji()  { root.cfgLyrRomaji = !root.cfgLyrRomaji; root.lyrSaveCfg(); root.lyrRunAux() }
+    function lyrToggleTrans()   { root.cfgLyrTrans  = !root.cfgLyrTrans;  root.lyrSaveCfg(); root.lyrRunAux() }
     readonly property string trackKey: root.player ? (root.player.trackArtist||"")+"|"+(root.player.trackTitle||"") : ""
     onTrackKeyChanged: { root.lyricsState = "idle"; root.lyrics = []; root.plainLyrics = "";
         if (root.lyricsOpen && root.openPop==="mpris") root.fetchLyrics();
@@ -1524,10 +1665,40 @@ ShellRoot {
         var parts = raw.split("\x1e"), rec = null;
         for (var p=0;p<parts.length && !rec;p++) {
             try { var j = JSON.parse(parts[p]); } catch(e) { continue }
-            if (Array.isArray(j)) {                       // search results: first entry that HAS lyrics
-                var f = null;
-                for (var q=0;q<j.length;q++) if (j[q] && (j[q].syncedLyrics || j[q].plainLyrics)) { f = j[q]; break }
-                j = f;
+            if (Array.isArray(j)) {
+                // A search reply is a list of DIFFERENT SONGS, and the third fetch step searches
+                // on title alone — so "Embers" comes back with every song anyone ever called
+                // Embers, and taking the first one with lyrics is exactly how another band's
+                // words end up scrolling under yours.
+                //
+                // Duration is the cheap discriminator: same title and within a few seconds of the
+                // same length is the same recording nearly every time. Artist is checked too but
+                // cannot be required — the whole reason step 3 exists is that MPRIS and lrclib
+                // disagree about how to spell the artist.
+                var want = root.player ? Math.round(root.player.length || 0) : 0;
+                var pick = null, loose = null;
+                for (var q=0;q<j.length;q++) {
+                    var c = j[q]; if (!c || !(c.syncedLyrics || c.plainLyrics)) continue;
+                    if (!loose) loose = c;
+                    var d = Math.round(c.duration || 0);
+                    if (!(want > 0 && d > 0)) continue;   // no length to compare on → cannot verify → refuse
+                    var off = Math.abs(d - want);
+                    var ar = ("" + (c.artistName || "")).toLowerCase();
+                    var me = ("" + (root.player ? (root.player.trackArtist||"") : "")).toLowerCase();
+                    var sameArtist = !!(me && ar && (ar.indexOf(me) >= 0 || me.indexOf(ar) >= 0));
+                    // TWO tolerances, because the two things this fallback catches look nothing alike.
+                    // A romanised-artist miss (MPRIS "Shihoko Hirata" vs lrclib "平田志穂子") is the SAME
+                    // recording, so its length matches almost exactly. A different band's song that
+                    // merely shares a title is only ever coincidentally close — Jinjer's "Ape" is 196s
+                    // against RED in BLUE's 202s, which sailed through a flat ±7s window and put the
+                    // wrong band's words on screen. So: loose only when the artist agrees.
+                    if (off > (sameArtist ? 7 : 2)) continue;
+                    if (sameArtist) { pick = c; break }
+                    if (!pick) pick = c;                  // near-exact length; keep looking for an artist too
+                }
+                // Nothing within range of the right length means the match is wrong, and "no
+                // lyrics found" beats confidently scrolling someone else's song.
+                j = pick || (want > 0 ? null : loose);
             }
             if (j && (j.syncedLyrics || j.plainLyrics)) rec = j;
         }
@@ -1539,7 +1710,7 @@ ShellRoot {
                 var txt = m[3].trim(); if (txt === "") txt = "♪";
                 out.push({ t: parseInt(m[1],10)*60 + parseFloat(m[2]), l: txt });
             });
-            if (out.length) { out.sort((a,b)=>a.t-b.t); root.lyrics = out; root.lyricsState = "ok"; return }
+            if (out.length) { out.sort((a,b)=>a.t-b.t); root.lyrics = out; root.lyricsState = "ok"; root.lyrRunAux(); return }
         }
         if (rec.plainLyrics) { root.plainLyrics = rec.plainLyrics; root.lyricsState = "plain"; return }
         root.lyricsState = "none";
@@ -1949,14 +2120,30 @@ ShellRoot {
                 if (j.pomoEvery) root.pomoEvery    = j.pomoEvery;
                 if (j.pomoDnd !== undefined) root.pomoDnd = !!j.pomoDnd;
                 if (Array.isArray(j.zones)) root.wcZones = j.zones;
+                if (Array.isArray(j.calFold)) root.calFold = j.calFold;
             } catch (e) {}
         } } }
     function tmrSaveCfg() {
         var o = { pomoFocus: root.pomoFocusMin, pomoBreak: root.pomoBreakMin, pomoLong: root.pomoLongMin,
-                  pomoEvery: root.pomoEvery, pomoDnd: root.pomoDnd, zones: root.wcZones };
+                  pomoEvery: root.pomoEvery, pomoDnd: root.pomoDnd, zones: root.wcZones,
+                  calFold: root.calFold };
         var s = JSON.stringify(o).replace(/'/g, "'\\''");
         Quickshell.execDetached(["sh","-c","mkdir -p ~/.config/sea-shell && printf '%s' '" + s + "' > ~/.config/sea-shell/timers.json"]);
     }
+    // Which sections of the clock dropdown are folded away.
+    //
+    // The panel stacks a month grid, the event list, the timer block and the world clock into one
+    // uncapped column — about 720px with a full month and a few events, which runs off the bottom
+    // of anything shorter than 1080p. Folding is per section and remembered, so the panel reopens
+    // the shape you left it in rather than resetting to its tallest form every time.
+    property var calFold: []
+    function calFolded(k) { return root.calFold.indexOf(k) >= 0 }
+    function calToggleFold(k) {
+        var a = root.calFold.slice(); var i = a.indexOf(k);
+        if (i >= 0) a.splice(i, 1); else a.push(k);
+        root.calFold = a; root.tmrSaveCfg();
+    }
+
     // world clock: one process prints "zone|HH:mm|ddd" per configured zone; refreshed each minute while open
     property var wcTimes: []                 // [{zone,label,time,day}]
     Process { id: wcProc
@@ -2011,7 +2198,7 @@ ShellRoot {
                     acts.push({ i: ai, t: ("" + (n.actions[ai].text || "")) });
             } catch (e) {}
             if (acts.length > 0) {
-                try { n.tracked = true; root.noteObjs[k] = n; } catch (e) { acts = []; }
+                try { n.tracked = true; root.noteObjs[k] = n; root.noteObjsRev++; } catch (e) { acts = []; }
             }
             entry.actions = acts;
             root.notes = [entry].concat(root.notes).slice(0, 40);
@@ -2030,10 +2217,16 @@ ShellRoot {
     // Deliberately NOT inside `notes` — that array is JSON.stringify'd to disk on every change,
     // and a QObject in there would corrupt the history file.
     property var noteObjs: ({})
+    // Mutating a JS object does not re-evaluate anything that read it, so a button bound to
+    // "is this notification still live" would never notice the server letting it go. The counter
+    // is the dependency the bindings actually watch.
+    property int noteObjsRev: 0
+    function noteLive(k) { return root.noteObjsRev >= 0 && root.noteObjs[k] !== undefined }
     function noteRelease(k) {
         var n = root.noteObjs[k]; if (!n) return;
         try { n.tracked = false; } catch (e) {}
         delete root.noteObjs[k];
+        root.noteObjsRev++;
     }
     function noteInvoke(k, idx) {
         var n = root.noteObjs[k];
@@ -2104,6 +2297,30 @@ ShellRoot {
         property int sz: 16
         font.family: "Material Symbols Outlined"; font.pixelSize: sz
         color: theme.frost; verticalAlignment: Text.AlignVCenter
+    }
+
+    // A foldable section header for the clock dropdown. Carries the section's headline fact on
+    // the right — a count, a running countdown — so a folded section still says whether there is
+    // anything under it worth opening. No children: the body it controls is wrapped by the caller,
+    // because a `default property alias` on a Column would swallow this component's own rows.
+    component CalHead: Item {
+        id: ch
+        property string skey: ""
+        property string title: ""
+        property string summary: ""
+        readonly property bool folded: root.calFolded(ch.skey)
+        width: parent ? parent.width : 0
+        height: 14
+        Text { anchors.left: parent.left; anchors.verticalCenter: parent.verticalCenter
+            text: ch.title; color: theme.frost; font.pixelSize: 9; font.family: root.cfgFont
+            font.bold: true; font.letterSpacing: 1 }
+        Text { anchors.right: chev.left; anchors.rightMargin: 5; anchors.verticalCenter: parent.verticalCenter
+            text: ch.summary; color: theme.faint; font.pixelSize: 9; font.family: root.cfgFont }
+        Sym { id: chev; anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
+            text: ch.folded ? "expand_more" : "expand_less"; sz: 13
+            color: chm.containsMouse ? theme.iris : theme.faint }
+        MouseArea { id: chm; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+            onClicked: root.calToggleFold(ch.skey) }
     }
 
     component Slider: Item {
@@ -2652,126 +2869,185 @@ ShellRoot {
                                     MouseArea { id: pcMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
                                         onClicked: root.playerSel = index } } } }
 
-                        // art + track info
-                        Row { width: parent.width; spacing: 13
-                            Rectangle { width: 84; height: 84; radius: Tok.r; color: theme.a(theme.line,0.6); clip: true
-                                border.width: 1; border.color: theme.a(theme.iris,0.35)
-                                Image { anchors.fill: parent; asynchronous: true; fillMode: Image.PreserveAspectCrop
-                                    source: (root.player && root.player.trackArtUrl) ? root.player.trackArtUrl : ""; visible: status===Image.Ready }
-                                Sym { anchors.centerIn: parent; text: "music_note"; sz: 34; color: theme.faint; visible: !(root.player && root.player.trackArtUrl && root.player.trackArtUrl!=="") } }
-                            Column { anchors.verticalCenter: parent.verticalCenter; width: parent.width - 97; spacing: 3
-                                Text {
-                                    width: parent.width; elide: Text.ElideRight
-                                    text: root.player ? (root.player.trackTitle||"—") : "—"; color: theme.text; font.pixelSize: 15; font.family: root.cfgFont; font.bold: true
-                                }
-                                Text {
-                                    width: parent.width; elide: Text.ElideRight; visible: text!==""
-                                    text: root.player ? (root.player.trackArtist||"") : ""; color: theme.sub; font.pixelSize: 12; font.family: root.cfgFont
-                                }
-                                Text {
-                                    width: parent.width; elide: Text.ElideRight; visible: text!==""
-                                    text: root.player ? (root.player.trackAlbum||"") : ""; color: theme.faint; font.pixelSize: 10; font.family: root.cfgFont
-                                }
-                                // gold badge: only appears for direct-ALSA (bit-perfect) playback, e.g. SONE.
-                                // When the card being driven that way is a Moondrop, the badge names it:
-                                // the model comes from the script's own registry, read straight off ALSA,
-                                // so it holds even though pipewire is bypassed. Click opens that DAC's EQ.
-                                //
-                                // The MouseArea WRAPS the Row rather than filling it — anchors.fill on a
-                                // child of a Row makes Qt refuse to lay the Row out at all ("Row will not
-                                // function"), which silently deletes the badge.
-                                MouseArea {
-                                    visible: root.hqInfo !== ""
-                                    implicitWidth: hqRow.implicitWidth; implicitHeight: hqRow.implicitHeight
-                                    hoverEnabled: true
-                                    cursorShape: root.dacExclusive ? Qt.PointingHandCursor : Qt.ArrowCursor
-                                    onClicked: if (root.dacExclusive) dacPanel.toggle()
-                                    Row { id: hqRow; spacing: 5
-                                        Sym { anchors.verticalCenter: parent.verticalCenter; text: "verified"; sz: 13; color: theme.warn }
-                                        Text { anchors.verticalCenter: parent.verticalCenter
-                                            text: root.hqInfo + (root.dacExclusive ? " · " + root.dacModel : "")
-                                            color: theme.warn; font.pixelSize: 10; font.family: root.cfgFont; font.bold: true } } }
-                                // What it is coming OUT of. MPRIS cannot tell you this — a player knows
-                                // nothing about routing — and pipewire alone can't either, since a
-                                // bit-perfect player bypasses the graph entirely. A Moondrop is named
-                                // from the script's registry; anything else falls back to pipewire's
-                                // own name for the sink.
-                                MouseArea {
-                                    visible: root.player !== null
-                                    implicitWidth: outRow.implicitWidth; implicitHeight: outRow.implicitHeight
-                                    hoverEnabled: true
-                                    cursorShape: root.dacActive ? Qt.PointingHandCursor : Qt.ArrowCursor
-                                    onClicked: if (root.dacActive) dacPanel.toggle()
-                                    Row { id: outRow; spacing: 5
-                                        Sym { anchors.verticalCenter: parent.verticalCenter
-                                            text: root.dacActive ? "graphic_eq" : "volume_up"; sz: 13
-                                            color: root.dacActive ? theme.iris : theme.faint }
-                                        Text { anchors.verticalCenter: parent.verticalCenter; text: "out via " + root.outputLabel
-                                            color: root.dacActive ? theme.iris : theme.sub
-                                            font.pixelSize: 10; font.family: root.cfgFont; font.bold: root.dacActive } } } } }
-
-                        // cava visualizer
-                        Item { width: parent.width; height: 38
-                            Row { anchors.fill: parent; spacing: 3
+                        // ---- ART, with the level meter riding its bottom edge ----
+                        //
+                        // The art was an 84px thumbnail beside three lines of text, and the cava
+                        // meter was a 38px band under it doing nothing a shorter one could not. The
+                        // art is the one thing in here worth looking at, so it takes the full width;
+                        // the meter sits on it and costs no height at all.
+                        // ClippingRectangle, not Rectangle: `clip: true` on a plain Rectangle clips
+                        // children to its BOUNDING BOX and ignores the radius entirely, so the art
+                        // kept four square corners inside a rounded frame no matter what radius was
+                        // set. Quickshell's ClippingRectangle clips to the rounded shape itself.
+                        ClippingRectangle {
+                            id: artBox
+                            // SQUARE, because cover art is — a 0.62 box cropped the top and bottom off
+                            // every sleeve to make a shape nothing is delivered in. At full panel width
+                            // it then dominated everything under it, so it sits at 62% and centred:
+                            // still the anchor, no longer the entire panel.
+                            anchors.horizontalCenter: parent.horizontalCenter
+                            width: Math.round(parent.width * 0.62); height: width
+                            radius: Tok.r
+                            color: theme.a(theme.line, 0.6)
+                            border.width: 1; border.color: theme.a(theme.iris, 0.25)
+                            Image { id: artImg; anchors.fill: parent; asynchronous: true
+                                fillMode: Image.PreserveAspectCrop
+                                source: (root.player && root.player.trackArtUrl) ? root.player.trackArtUrl : ""
+                                visible: status === Image.Ready }
+                            Sym { anchors.centerIn: parent; text: "music_note"; sz: 46; color: theme.faint
+                                visible: !artImg.visible }
+                            // The meter sits ON the art, so it has to stay out of its way: a slim
+                            // band of hairlines rather than the slab of blocks it was, and a scrim
+                            // that only fades in under the band itself instead of a hard 32px shelf
+                            // cutting across the bottom third of every sleeve.
+                            Rectangle { anchors.left: parent.left; anchors.right: parent.right
+                                anchors.bottom: parent.bottom; height: 22
+                                visible: root.vizBars.length > 0 && artImg.visible
+                                color: theme.a(theme.bg, 0.34) }
+                            Row { id: vizRow
+                                anchors.left: parent.left; anchors.right: parent.right; anchors.bottom: parent.bottom
+                                anchors.leftMargin: 8; anchors.rightMargin: 8; anchors.bottomMargin: 6
+                                height: 12; spacing: 3
                                 Repeater { model: root.vizBars.length
                                     delegate: Rectangle { required property int index
-                                        width: (mprCol.width - (root.vizBars.length-1)*3) / Math.max(1, root.vizBars.length)
-                                        height: Math.max(2, (root.vizBars[index]||0)/100*38); anchors.bottom: parent.bottom
-                                        radius: 2; color: theme.a(theme.iris, 0.55 + 0.4*((root.vizBars[index]||0)/100)) } } }
-                            Text { anchors.centerIn: parent; visible: root.vizBars.length===0; text: "…"; color: theme.faint; font.pixelSize: 12; font.family: root.cfgFont } }
+                                        width: Math.max(1, (vizRow.width - (root.vizBars.length-1)*3) / Math.max(1, root.vizBars.length))
+                                        height: Math.max(1.5, (root.vizBars[index]||0)/100*12)
+                                        anchors.bottom: parent.bottom; radius: 0
+                                        color: theme.a(theme.iris, 0.55 + 0.45*((root.vizBars[index]||0)/100)) } } } }
 
-                        // seekable progress
-                        Column { width: parent.width; spacing: 4; visible: root.player && root.player.length>0
-                            Item { width: parent.width; height: 14
-                                Rectangle { id: seekTrack; anchors.verticalCenter: parent.verticalCenter; width: parent.width; height: seekMa.containsMouse||seekMa.pressed ? 7 : 5; radius: Tok.r; color: theme.a(theme.line,0.85)
+                        // ---- title · artist — album folded onto the artist line, one row saved ----
+                        Column { width: parent.width; spacing: 2
+                            Text { width: parent.width; elide: Text.ElideRight
+                                text: root.player ? (root.player.trackTitle||"\u2014") : "\u2014"
+                                color: theme.text; font.pixelSize: 17; font.family: root.cfgFont; font.bold: true }
+                            Text { width: parent.width; elide: Text.ElideRight; visible: text !== ""
+                                text: {
+                                    if (!root.player) return "";
+                                    var a = root.player.trackArtist || "", al = root.player.trackAlbum || "";
+                                    return (a && al) ? a + "  \u00b7  " + al : (a || al);
+                                }
+                                color: theme.sub; font.pixelSize: 12; font.family: root.cfgFont } }
+
+                        // ---- seek ----
+                        Column { width: parent.width; spacing: 5; visible: root.player && root.player.length>0
+                            Item { width: parent.width; height: 12
+                                Rectangle { id: seekTrack; anchors.verticalCenter: parent.verticalCenter; width: parent.width
+                                    height: seekMa.containsMouse||seekMa.pressed ? 6 : 4; radius: Tok.r; color: theme.a(theme.line,0.85)
                                     Behavior on height { NumberAnimation { duration: 90 } }
                                     Rectangle { height: parent.height; radius: Tok.r; color: theme.iris
                                         width: parent.width * (root.player && root.player.length>0 ? Math.max(0,Math.min(1, root.mprisPos/root.player.length)) : 0) } }
+                                // the handle exists only while you are pointing at the bar
+                                Rectangle { visible: seekMa.containsMouse || seekMa.pressed
+                                    width: 10; height: 10; radius: Tok.rSmall; color: theme.iris
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    x: Math.max(0, Math.min(parent.width - width,
+                                        seekTrack.width * (root.player && root.player.length>0 ? root.mprisPos/root.player.length : 0) - width/2)) }
                                 MouseArea { id: seekMa; anchors.fill: parent; hoverEnabled: true
                                     cursorShape: (root.player && root.player.canSeek) ? Qt.PointingHandCursor : Qt.ArrowCursor
                                     function seekTo(x) { if (!root.player || !root.player.canSeek || !(root.player.length>0)) return;
                                         var f = Math.max(0, Math.min(1, x/width)); root.player.position = f*root.player.length; root.mprisPos = f*root.player.length }
                                     onPressed: (e)=> seekTo(e.x)
                                     onPositionChanged: (e)=> { if (pressed) seekTo(e.x) } } }
-                            Row { width: parent.width
-                                Text { text: root.fmtTime(root.mprisPos); color: theme.faint; font.pixelSize: 10; font.family: root.cfgFont }
-                                Item { width: parent.width - 90; height: 1 }
-                                Text { text: root.fmtTime(root.player ? root.player.length : 0); color: theme.faint; font.pixelSize: 10; font.family: root.cfgFont; horizontalAlignment: Text.AlignRight; width: 44 } } }
+                            Item { width: parent.width; height: 12
+                                IndText { anchors.left: parent.left; anchors.verticalCenter: parent.verticalCenter
+                                    mono: true; sz: 10; color: theme.sub; text: root.fmtTime(root.mprisPos) }
+                                // REMAINING, not total. Mid-track the number you want is how much is
+                                // left, and the total is already implied by the bar. Mono and tabular
+                                // so it stops twitching — the old row used the UI face, so the whole
+                                // line re-measured itself on every tick.
+                                IndText { anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
+                                    mono: true; sz: 10; color: theme.faint
+                                    text: "-" + root.fmtTime(Math.max(0, (root.player ? root.player.length : 0) - root.mprisPos)) } } }
 
-                        // controls: shuffle · prev · play · next · loop
-                        Row { anchors.horizontalCenter: parent.horizontalCenter; spacing: 10
-                            Rectangle { width: 34; height: 34; radius: Tok.r; visible: root.player ? root.player.shuffleSupported : false
-                                color: sh.containsMouse ? theme.a(theme.iris,0.2) : "transparent"
-                                Sym { anchors.centerIn: parent; text: "shuffle"; sz: 18; color: (root.player&&root.player.shuffle) ? theme.iris : theme.faint }
-                                MouseArea { id: sh; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: if(root.player) root.player.shuffle = !root.player.shuffle } }
-                            Rectangle { width: 38; height: 38; radius: Tok.r; color: pv.containsMouse?theme.a(theme.iris,0.2):"transparent"
-                                Sym { anchors.centerIn: parent; text: "skip_previous"; sz: 22; color: (root.player&&root.player.canGoPrevious)?theme.frost:theme.faint }
+                        // ---- transport: ONE primary, the rest recede ----
+                        // Five same-weight buttons made you read the row to find play. It is now the
+                        // only filled control in the panel, which is the whole point of an accent.
+                        // The row is ALWAYS five slots wide — 32·36·48·36·32 — so play sits on the
+                        // panel's axis by construction. Hiding unsupported controls was what broke
+                        // that: a Row drops invisible children from layout and re-centres on what is
+                        // left, so a player that reports loop but not shuffle pushed play off-axis,
+                        // and one that reports neither made the row silently lose two buttons.
+                        // Unsupported now reads as unavailable — dimmed and inert — which is a fact
+                        // about the player, not a reason to rearrange the furniture.
+                        // Every button anchors its OWN verticalCenter: a Row lays children out left
+                        // to right and leaves y at 0, so the 48px play button hung 6px lower than the
+                        // 36px ones beside it and only looked centred because it is the biggest thing
+                        // in the row.
+                        Row { anchors.horizontalCenter: parent.horizontalCenter; spacing: 8; height: 48
+                            Rectangle { width: 32; height: 32; radius: Tok.r; anchors.verticalCenter: parent.verticalCenter
+                                readonly property bool can: root.player ? root.player.shuffleSupported : false
+                                opacity: can ? 1.0 : 0.32
+                                color: (can && sh.containsMouse) ? theme.a(theme.iris,0.16) : "transparent"
+                                Sym { anchors.centerIn: parent; text: "shuffle"; sz: 17; color: (root.player&&root.player.shuffle) ? theme.iris : theme.faint }
+                                MouseArea { id: sh; anchors.fill: parent; hoverEnabled: true
+                                    cursorShape: parent.can ? Qt.PointingHandCursor : Qt.ArrowCursor
+                                    onClicked: if(parent.can && root.player) root.player.shuffle = !root.player.shuffle } }
+                            Rectangle { width: 36; height: 36; radius: Tok.r; anchors.verticalCenter: parent.verticalCenter; color: pv.containsMouse?theme.a(theme.iris,0.16):"transparent"
+                                Sym { anchors.centerIn: parent; text: "skip_previous"; sz: 22; color: (root.player&&root.player.canGoPrevious)?theme.text:theme.faint }
                                 MouseArea { id: pv; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: if(root.player) root.player.previous() } }
-                            Rectangle { width: 46; height: 46; radius: Tok.r; color: pp.containsMouse?theme.iris:theme.a(theme.iris,0.22); border.width: 1; border.color: theme.iris
-                                Sym { anchors.centerIn: parent; text: (root.player&&root.player.isPlaying)?"pause":"play_arrow"; sz: 26; color: pp.containsMouse?theme.bg:theme.frost }
+                            Rectangle { width: 48; height: 48; radius: Tok.r; anchors.verticalCenter: parent.verticalCenter; color: theme.iris
+                                opacity: pp.containsMouse ? 0.85 : 1.0
+                                Behavior on opacity { NumberAnimation { duration: 120 } }
+                                Sym { anchors.centerIn: parent; text: (root.player&&root.player.isPlaying)?"pause":"play_arrow"; sz: 27; color: Tok.accentInk }
                                 MouseArea { id: pp; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: if(root.player) root.player.togglePlaying() } }
-                            Rectangle { width: 38; height: 38; radius: Tok.r; color: nx.containsMouse?theme.a(theme.iris,0.2):"transparent"
-                                Sym { anchors.centerIn: parent; text: "skip_next"; sz: 22; color: (root.player&&root.player.canGoNext)?theme.frost:theme.faint }
+                            Rectangle { width: 36; height: 36; radius: Tok.r; anchors.verticalCenter: parent.verticalCenter; color: nx.containsMouse?theme.a(theme.iris,0.16):"transparent"
+                                Sym { anchors.centerIn: parent; text: "skip_next"; sz: 22; color: (root.player&&root.player.canGoNext)?theme.text:theme.faint }
                                 MouseArea { id: nx; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: if(root.player) root.player.next() } }
-                            Rectangle { width: 34; height: 34; radius: Tok.r; visible: root.player ? root.player.loopSupported : false
-                                color: lp.containsMouse ? theme.a(theme.iris,0.2) : "transparent"
-                                Sym { anchors.centerIn: parent; sz: 18
+                            Rectangle { width: 32; height: 32; radius: Tok.r; anchors.verticalCenter: parent.verticalCenter
+                                readonly property bool can: root.player ? root.player.loopSupported : false
+                                opacity: can ? 1.0 : 0.32
+                                color: (can && lp.containsMouse) ? theme.a(theme.iris,0.16) : "transparent"
+                                Sym { anchors.centerIn: parent; sz: 17
                                     text: (root.player&&root.player.loopState===MprisLoopState.Track) ? "repeat_one" : "repeat"
                                     color: (root.player&&root.player.loopState!==MprisLoopState.None) ? theme.iris : theme.faint }
-                                MouseArea { id: lp; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
-                                    onClicked: { if(!root.player) return; root.player.loopState = root.player.loopState===MprisLoopState.None ? MprisLoopState.Playlist : root.player.loopState===MprisLoopState.Playlist ? MprisLoopState.Track : MprisLoopState.None } } } }
+                                MouseArea { id: lp; anchors.fill: parent; hoverEnabled: true
+                                    cursorShape: parent.can ? Qt.PointingHandCursor : Qt.ArrowCursor
+                                    onClicked: { if(!parent.can || !root.player) return; root.player.loopState = root.player.loopState===MprisLoopState.None ? MprisLoopState.Playlist : root.player.loopState===MprisLoopState.Playlist ? MprisLoopState.Track : MprisLoopState.None } } } }
 
-                        // player volume
+                        // ---- signal chain ----
+                        // The one thing no other shell can tell you: where the audio is actually
+                        // going, and whether it is arriving untouched. It was two 10px lines wedged
+                        // under the album name. It is the most specific fact this panel holds, so it
+                        // gets a strip of its own and reads like the instrument readout it is.
+                        Rectangle {
+                            width: parent.width; height: 26; radius: Tok.r
+                            visible: root.player !== null
+                            color: theme.a(theme.line, 0.35)
+                            border.width: 1
+                            border.color: root.dacActive ? theme.a(theme.iris,0.35) : theme.a(theme.line,0.9)
+                            MouseArea { anchors.fill: parent; hoverEnabled: true
+                                cursorShape: root.dacActive ? Qt.PointingHandCursor : Qt.ArrowCursor
+                                onClicked: if (root.dacActive) dacPanel.toggle() }
+                            Row { anchors.left: parent.left; anchors.leftMargin: 8
+                                anchors.right: hqChip.left; anchors.rightMargin: 6
+                                anchors.verticalCenter: parent.verticalCenter; spacing: 6
+                                Sym { anchors.verticalCenter: parent.verticalCenter
+                                    text: root.dacActive ? "graphic_eq" : "volume_up"; sz: 13
+                                    color: root.dacActive ? theme.iris : theme.faint }
+                                IndText { anchors.verticalCenter: parent.verticalCenter; mono: true; sz: 9
+                                    text: "OUT"; color: theme.faint; font.letterSpacing: 1 }
+                                Text { anchors.verticalCenter: parent.verticalCenter
+                                    text: root.outputLabel; elide: Text.ElideRight
+                                    color: root.dacActive ? theme.iris : theme.sub
+                                    font.pixelSize: 11; font.family: root.cfgFont; font.bold: root.dacActive } }
+                            IndChip { id: hqChip
+                                anchors.right: parent.right; anchors.rightMargin: 6
+                                anchors.verticalCenter: parent.verticalCenter
+                                visible: root.hqInfo !== ""
+                                text: root.hqInfo + (root.dacExclusive ? " \u00b7 " + root.dacModel : "")
+                                tone: "warn" } }
+
+                        // ---- player volume ----
                         Row { width: parent.width; spacing: 8; visible: root.player ? root.player.volumeSupported : false
-                            Sym { anchors.verticalCenter: parent.verticalCenter; text: "volume_down"; sz: 16; color: theme.faint }
-                            Item { width: parent.width - 48; height: 14; anchors.verticalCenter: parent.verticalCenter
-                                Rectangle { anchors.verticalCenter: parent.verticalCenter; width: parent.width; height: 4; radius: 2; color: theme.a(theme.line,0.85)
-                                    Rectangle { height: parent.height; radius: 2; color: theme.a(theme.iris,0.8)
+                            Sym { anchors.verticalCenter: parent.verticalCenter; text: "volume_down"; sz: 15; color: theme.faint }
+                            Item { width: parent.width - 48; height: 12; anchors.verticalCenter: parent.verticalCenter
+                                Rectangle { anchors.verticalCenter: parent.verticalCenter; width: parent.width; height: 4; radius: Tok.r; color: theme.a(theme.line,0.85)
+                                    Rectangle { height: parent.height; radius: Tok.r; color: theme.a(theme.iris,0.8)
                                         width: parent.width * (root.player ? Math.max(0,Math.min(1,root.player.volume)) : 0) } }
                                 MouseArea { anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
                                     function setV(x) { if (root.player) root.player.volume = Math.max(0, Math.min(1, x/width)) }
                                     onPressed: (e)=> setV(e.x); onPositionChanged: (e)=> { if (pressed) setV(e.x) } } }
-                            Sym { anchors.verticalCenter: parent.verticalCenter; text: "volume_up"; sz: 16; color: theme.faint } }
+                            Sym { anchors.verticalCenter: parent.verticalCenter; text: "volume_up"; sz: 15; color: theme.faint } }
 
                         // details (left) + lyrics (right) toggles — each panel opens BESIDE the card as a sidecar
                         Row { width: parent.width; spacing: 8; height: 26
@@ -2799,7 +3075,7 @@ ShellRoot {
                     Rectangle {
                         id: lyrPanel
                         visible: root.lyricsOpen && root.openPop === "mpris"
-                        width: 300; height: mprisDrop.card.height
+                        width: 340; height: mprisDrop.card.height
                         // right of the card; flips to the left near the screen edge
                         x: (mprisDrop.card.x + mprisDrop.card.width + 10 + width > mprisDrop.swN - 8)
                            ? mprisDrop.card.x - width - 10 : mprisDrop.card.x + mprisDrop.card.width + 10
@@ -2811,21 +3087,59 @@ ShellRoot {
                                 Sym { anchors.verticalCenter: parent.verticalCenter; text: "lyrics"; sz: 15; color: theme.iris }
                                 Text { anchors.verticalCenter: parent.verticalCenter; text: "lyrics"; color: theme.text; font.pixelSize: 12; font.bold: true; font.family: root.cfgFont }
                                 Item { width: parent.width - 150; height: 1 }
-                                Text { anchors.verticalCenter: parent.verticalCenter; text: root.lyricsState==="ok" ? "synced" : ""; color: theme.faint; font.pixelSize: 9; font.family: root.cfgFont } }
+                                Row { anchors.verticalCenter: parent.verticalCenter; anchors.right: parent.right; spacing: 5
+                                    Repeater { model: [{k:"r",l:"あ→a"},{k:"t",l:"EN"}]
+                                        delegate: Rectangle { required property var modelData
+                                            readonly property bool on: modelData.k==="r" ? root.cfgLyrRomaji : root.cfgLyrTrans
+                                            height: 18; radius: Tok.rSmall; width: lxT.implicitWidth + 12
+                                            color: on ? theme.a(theme.iris,0.28) : theme.a(theme.line,0.5)
+                                            border.width: 1; border.color: on ? theme.iris : theme.a(theme.line,0.9)
+                                            Text { id: lxT; anchors.centerIn: parent; text: modelData.l
+                                                color: on ? theme.text : theme.faint; font.pixelSize: 9; font.family: root.cfgFont }
+                                            MouseArea { anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                                onClicked: modelData.k==="r" ? root.lyrToggleRomaji() : root.lyrToggleTrans() } } }
+                                    Text { anchors.verticalCenter: parent.verticalCenter; text: root.lyricsState==="ok" ? "synced" : ""; color: theme.faint; font.pixelSize: 9; font.family: root.cfgFont } } }
                             Rectangle { width: parent.width; height: 1; color: theme.a(theme.iris,0.2) }
-                            Item { width: parent.width; height: parent.height - 34
+                            // height was hardcoded to `- 34` against a header that has since grown a
+                            // row of 18px chips, so the list ran past the bottom of the panel
+                            Item { width: parent.width; height: parent.height - 44
                                 Text { anchors.centerIn: parent; visible: root.lyricsState==="loading"; text: "fetching lyrics…"; color: theme.faint; font.pixelSize: 11; font.family: root.cfgFont }
                                 Text { anchors.centerIn: parent; visible: root.lyricsState==="none"; text: "no lyrics found"; color: theme.faint; font.pixelSize: 11; font.family: root.cfgFont }
                                 // synced: follows playback, current line highlighted, click to seek
                                 ListView { id: lyrView; anchors.fill: parent; visible: root.lyricsState==="ok"; clip: true
                                     model: root.lyrics; spacing: 3
+                                    // the active line sits mid-panel, so lines were being sliced in half
+                                    // at both edges; the list now runs out past them and fades instead
+                                    topMargin: 2; bottomMargin: 10
+                                    maximumFlickVelocity: 1400
                                     delegate: Item { required property var modelData; required property int index
-                                        width: lyrView.width; height: lyT.height + 8
-                                        Text { id: lyT; width: parent.width; anchors.verticalCenter: parent.verticalCenter
+                                        // Stacked rather than a mode switch: singing along needs the
+                                        // original and the reading at the same time, not one or the other.
+                                        readonly property string sub2: {
+                                            var r = (root.cfgLyrRomaji && root.lyrRomaji.length > index) ? root.lyrRomaji[index] : "";
+                                            var t = (root.cfgLyrTrans  && root.lyrTrans.length  > index) ? root.lyrTrans[index]  : "";
+                                            // Romaji is dropped when it only echoes a Latin line back — but
+                                            // compared on letters alone, because pykakasi re-spaces around
+                                            // punctuation ("Yeah, yeah" → "Yeah , yeah") and an exact compare
+                                            // therefore never matched, printing every English chorus twice.
+                                            if (r) {
+                                                var norm = function(x) { return ("" + x).toLowerCase().replace(/[^a-z0-9]/g, "") };
+                                                if (norm(r) === norm(modelData.l)) r = "";
+                                            }
+                                            return (r && t) ? r + "\n" + t : (r || t);
+                                        }
+                                        width: lyrView.width; height: lyCol.height + 8
+                                        Column { id: lyCol; width: parent.width; anchors.verticalCenter: parent.verticalCenter; spacing: 1
+                                        Text { id: lyT; width: parent.width
                                             text: modelData.l; wrapMode: Text.Wrap; horizontalAlignment: Text.AlignHCenter
                                             color: index===root.lyrIdx ? theme.frost : (index<root.lyrIdx ? theme.faint : theme.sub)
                                             font.pixelSize: index===root.lyrIdx ? 14 : 12; font.bold: index===root.lyrIdx; font.family: root.cfgFont
                                             Behavior on color { ColorAnimation { duration: 150 } } }
+                                        Text { width: parent.width; visible: parent.parent.sub2 !== ""
+                                            text: parent.parent.sub2; wrapMode: Text.Wrap; horizontalAlignment: Text.AlignHCenter
+                                            color: index===root.lyrIdx ? theme.iris : theme.faint
+                                            font.pixelSize: index===root.lyrIdx ? 11 : 10; font.family: root.cfgFont
+                                            font.italic: true } }
                                         MouseArea { anchors.fill: parent; cursorShape: (root.player&&root.player.canSeek)?Qt.PointingHandCursor:Qt.ArrowCursor
                                             onClicked: { if (root.player && root.player.canSeek) { root.player.position = modelData.t; root.mprisPos = modelData.t } } } }
                                     Connections { target: root; function onLyrIdxChanged() { if (root.lyrIdx >= 0) lyrView.positionViewAtIndex(root.lyrIdx, ListView.Center) } } }
@@ -2857,8 +3171,11 @@ ShellRoot {
                                 Text { anchors.verticalCenter: parent.verticalCenter; text: "track details"; color: theme.text; font.pixelSize: 12; font.bold: true; font.family: root.cfgFont } }
                             Rectangle { width: parent.width; height: 1; color: theme.a(theme.iris,0.2) }
                             // large album art
-                            Rectangle { anchors.horizontalCenter: parent.horizontalCenter
-                                width: Math.min(parent.width, 150); height: width; radius: Tok.r; clip: true
+                            // ClippingRectangle for the same reason the player's art is one: a plain
+                            // Rectangle clips to its bounding box and leaves the image square-cornered
+                            // inside a rounded frame.
+                            ClippingRectangle { anchors.horizontalCenter: parent.horizontalCenter
+                                width: Math.min(parent.width, 150); height: width; radius: Tok.r
                                 color: theme.a(theme.line,0.6); border.width: 1; border.color: theme.a(theme.iris,0.3)
                                 Image { anchors.fill: parent; asynchronous: true; fillMode: Image.PreserveAspectCrop
                                     source: (root.player && root.player.trackArtUrl) ? root.player.trackArtUrl : ""; visible: status===Image.Ready }
@@ -2897,16 +3214,21 @@ ShellRoot {
                                     delegate: Item { required property var modelData
                                         width: infoRows.width
                                         implicitHeight: Math.max(16, valTxt.implicitHeight + 2)
-                                        Text { id: keyTxt
-                                            anchors.left: parent.left; anchors.top: parent.top
-                                            width: Math.min(implicitWidth, parent.width * 0.34); elide: Text.ElideRight
-                                            text: modelData.k; color: theme.faint; font.pixelSize: 11; font.family: root.cfgFont }
-                                        Text { id: valTxt
+                                        // Key as a tracked uppercase label, value in mono: this is a
+                                        // readout of facts about a file — codec, bitrate, release year,
+                                        // sink — and the shell's own token file says machine-readable
+                                        // values are mono and prose is sans. It was all one face before,
+                                        // so nothing in the panel told you which was which.
+                                        IndLabel { id: keyTxt
+                                            anchors.left: parent.left; anchors.top: parent.top; anchors.topMargin: 1
+                                            width: Math.min(implicitWidth, parent.width * 0.38); elide: Text.ElideRight
+                                            sz: 9; text: modelData.k }
+                                        IndText { id: valTxt
                                             anchors.left: keyTxt.right; anchors.leftMargin: 10
                                             anchors.right: parent.right; anchors.top: parent.top
                                             horizontalAlignment: Text.AlignRight
                                             wrapMode: Text.WordWrap; maximumLineCount: 2; elide: Text.ElideRight
-                                            text: modelData.v; color: theme.text; font.pixelSize: 11; font.family: root.cfgFont } }
+                                            mono: true; sz: 11; text: modelData.v; color: theme.text } }
                                 }
                                 Item { width: infoRows.width; height: 16
                                     Text { anchors.left: parent.left; anchors.verticalCenter: parent.verticalCenter; text: "Elapsed"; color: theme.faint; font.pixelSize: 11; font.family: root.cfgFont }
@@ -3058,6 +3380,17 @@ ShellRoot {
                         // show the connected device name, plus its battery % when the device reports one
                         value: root.btActive ? (root.btName(root.btActive) + (root.btActive.batteryAvailable ? "  " + Math.round((root.btActive.battery||0)*100) + "%" : "")) : "" }
 
+                    // ---- MICROPHONE ----
+                    // Muted is the state worth shouting about, so it takes the crit colour: an open
+                    // mic you think is muted is the failure that matters, and the reverse is worse.
+                    Pill { owner: bar; id: micPill; key: "mic"
+                        property string wid: "wgMic"; x: rightGroup.xFor(wid); anchors.verticalCenter: parent.verticalCenter
+                        visible: root.cfgMic
+                        icon: root.micMuted ? "mic_off" : "mic"
+                        accent: root.micMuted ? theme.bad : theme.good
+                        value: root.micMuted ? "" : Math.round(root.micVol*100) + "%"
+                        onClicked: root.micToggle() }
+
                     // ---- KDE CONNECT ----
                     // icon-only when there's nothing to say; the phone's battery is the one
                     // number worth bar space (the name would eat 150px and is in the dropdown).
@@ -3095,8 +3428,8 @@ ShellRoot {
                     Pill { owner: bar; id: sysPill; key: "sys"
                         property string wid: "wgSystem"; x: rightGroup.xFor(wid); anchors.verticalCenter: parent.verticalCenter
                         visible: root.cfgSystem
-                        icon: "speed"; value: Math.round(root.cpuUsage)+"%"
-                        accent: root.loadColor(root.cpuTemp, 78, 90) }
+                        icon: "speed"; value: root.sysPillText
+                        accent: root.sysMetrics[root.sysShown[0]].c() }
                     
 
                     // ---- VOLUME ----
@@ -3428,7 +3761,7 @@ ShellRoot {
                             Flickable { width: parent.width; height: Math.min(390, listCol.implicitHeight); contentHeight: listCol.implicitHeight; clip: true; boundsBehavior: Flickable.StopAtBounds; visible: root.notes.length>0
                                 Column { id: listCol; width: parent.width; spacing: 6
                                     Repeater { model: root.notes
-                                        delegate: Rectangle { required property var modelData; width: listCol.width; radius: Tok.r
+                                        delegate: Rectangle { id: nrow; required property var modelData; width: listCol.width; radius: Tok.r
                                             implicitHeight: ec.implicitHeight + 16; color: theme.a(theme.line,0.38)
                                             border.width: 1; border.color: modelData.urgency===2 ? theme.a(theme.bad,0.45) : theme.a(theme.iris,0.12)
                                             Column { id: ec; anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top; anchors.margins: 10; spacing: 3
@@ -3445,7 +3778,34 @@ ShellRoot {
                                                     Text { id: noteTime; anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
                                                         text: modelData.time; color: theme.faint; font.pixelSize: 10; font.family: root.cfgFont; width: 46; horizontalAlignment: Text.AlignRight } }
                                                 Text { width: parent.width; visible: modelData.summary!==""; text: modelData.summary; color: theme.text; font.pixelSize: 12; font.family: root.cfgFont; wrapMode: Text.WordWrap }
-                                                Text { width: parent.width; visible: modelData.body!==""; text: modelData.body; color: theme.sub; font.pixelSize: 11; font.family: root.cfgFont; wrapMode: Text.WordWrap; maximumLineCount: 3; elide: Text.ElideRight; textFormat: Text.PlainText } } } } } } } }
+                                                Text { width: parent.width; visible: modelData.body!==""; text: modelData.body; color: theme.sub; font.pixelSize: 11; font.family: root.cfgFont; wrapMode: Text.WordWrap; maximumLineCount: 3; elide: Text.ElideRight; textFormat: Text.PlainText }
+                                                // The actions were recorded on every notification and drawn on
+                                                // none of them here, so anything that timed out or arrived
+                                                // during DND landed in history with its buttons in the data
+                                                // and nowhere on screen — a Reply you could see the trace of
+                                                // and not press.
+                                                //
+                                                // They only fire while the sending app still holds the
+                                                // notification open; once the server releases it the button is
+                                                // inert, so it goes visibly dead rather than staying pressable
+                                                // and quietly doing nothing.
+                                                Flow { width: parent.width; spacing: 5; topPadding: 3
+                                                    visible: nrow.modelData.actions !== undefined && nrow.modelData.actions.length > 0
+                                                    Repeater { model: nrow.modelData.actions || []
+                                                        delegate: Rectangle { id: nact
+                                                            required property var modelData
+                                                            readonly property bool live: root.noteLive(nrow.modelData.key)
+                                                            height: 22; radius: Tok.r; width: nactT.implicitWidth + 18
+                                                            opacity: nact.live ? 1.0 : 0.4
+                                                            color: (nact.live && naMa.containsMouse) ? theme.a(theme.iris,0.24) : theme.a(theme.line,0.55)
+                                                            border.width: 1
+                                                            border.color: nact.live ? theme.a(theme.iris,0.35) : theme.a(theme.line,0.9)
+                                                            Text { id: nactT; anchors.centerIn: parent
+                                                                text: nact.modelData.t; color: nact.live ? theme.text : theme.faint
+                                                                font.pixelSize: 10; font.family: root.cfgFont }
+                                                            MouseArea { id: naMa; anchors.fill: parent; hoverEnabled: true
+                                                                cursorShape: nact.live ? Qt.PointingHandCursor : Qt.ArrowCursor
+                                                                onClicked: if (nact.live) root.noteInvoke(nrow.modelData.key, nact.modelData.i) } } } } } } } } } } }
                     Drop { screen: bar.screen
                         id: wifiDrop; host: root.barVertical ? wifiPillVert : wifiPill; shown: root.openPop ==="wifi" && root.openBar === bar
                         cardW: 290; cardH: wifiCol.implicitHeight + 28
@@ -3466,18 +3826,57 @@ ShellRoot {
                                 delegate: Column { id: netRow; required property var modelData; width: parent.width; spacing: 3
                                     readonly property bool asking: root.wifiPwFor === netRow.modelData.ssid
                                     readonly property bool saved: root.wifiSaved.indexOf(netRow.modelData.ssid) >= 0
+                                    readonly property string secLbl: root.wifiSecLabel(netRow.modelData.sec)
+                                    // ONE chip per row, carrying whichever fact is worth the width here.
+                                    // An unencrypted or WEP network is a warning and always wins; past
+                                    // that, "remembered" is what explains the row's behaviour (it joins
+                                    // without asking), and only an unknown network needs its scheme named.
+                                    readonly property string chipText:
+                                          netRow.secLbl === "OPEN" || netRow.secLbl === "WEP" ? netRow.secLbl
+                                        : netRow.modelData.active                             ? ""
+                                        : netRow.saved                                        ? "SAVED"
+                                        : netRow.secLbl
+                                    readonly property string chipTone:
+                                          netRow.secLbl === "OPEN" || netRow.secLbl === "WEP" ? "warn"
+                                        : netRow.saved                                        ? "accent" : "neutral"
                                     Rectangle { width: parent.width; height: 34; radius: Tok.r
                                         color: netRow.modelData.active ? theme.a(theme.iris,0.18) : (netRow.asking ? theme.a(theme.iris,0.10) : (wm.containsMouse ? theme.a(theme.line,0.45) : "transparent"))
                                         border.width: netRow.modelData.active ? 1 : 0; border.color: theme.a(theme.iris,0.3)
                                         // base click zone sits UNDER the forget hitbox
                                         MouseArea { id: wm; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
                                             onClicked: { if(netRow.modelData.active) return; if(netRow.asking) root.wifiPwFor=""; else root.wifiConnect(netRow.modelData.ssid, netRow.modelData.secure) } }
-                                        Row { anchors.fill: parent; anchors.leftMargin: 10; anchors.rightMargin: 10; spacing: 8
-                                            Sym { anchors.verticalCenter: parent.verticalCenter; text: netRow.modelData.signal>66?"signal_wifi_4_bar":netRow.modelData.signal>33?"network_wifi_3_bar":"network_wifi_1_bar"; sz: 16; color: netRow.modelData.active?theme.iris:theme.frost }
-                                            Text { anchors.verticalCenter: parent.verticalCenter; width: parent.width - 64 - (netRow.saved ? 46 : 0); elide: Text.ElideRight; text: netRow.modelData.ssid; color: netRow.modelData.active ? theme.text : theme.sub; font.pixelSize: 12; font.family: root.cfgFont; font.bold: netRow.modelData.active }
-                                            // knowing a network is remembered explains why it joins without asking
-                                            IndChip { anchors.verticalCenter: parent.verticalCenter; visible: netRow.saved && !netRow.modelData.active; text: "saved" }
-                                            Sym { anchors.verticalCenter: parent.verticalCenter; text: netRow.modelData.active?"check_circle":"lock"; sz: 13; color: netRow.modelData.active?theme.good:theme.a(theme.faint,0.6); visible: netRow.modelData.secure||netRow.modelData.active } }
+                                        // Anchored rather than laid out in a Row: the old row sized the
+                                        // SSID by subtracting magic numbers for whatever might sit to its
+                                        // right, and the forget button — anchored to the same right edge —
+                                        // was drawn straight over the trailing glyph.
+                                        Sym { id: sigIcon
+                                            anchors.left: parent.left; anchors.leftMargin: 10; anchors.verticalCenter: parent.verticalCenter
+                                            text: netRow.modelData.signal>66?"signal_wifi_4_bar":netRow.modelData.signal>33?"network_wifi_3_bar":"network_wifi_1_bar"
+                                            sz: 16; color: netRow.modelData.active ? theme.iris : theme.faint }
+                                        Row { id: rightBits
+                                            anchors.right: parent.right; anchors.rightMargin: 10
+                                            anchors.verticalCenter: parent.verticalCenter; spacing: 6
+                                            // yields the right edge to the forget button rather than
+                                            // being overdrawn by it
+                                            visible: !(netRow.saved && (wm.containsMouse || fgm.containsMouse))
+                                            IndChip { anchors.verticalCenter: parent.verticalCenter
+                                                visible: netRow.chipText !== ""; text: netRow.chipText; tone: netRow.chipTone }
+                                            // The scan sorts on this and the dropdown re-probes the air
+                                            // every 8s to keep it moving — but it only ever reached the
+                                            // screen as one of three icon buckets, so the number that
+                                            // decides which network to join was the one thing the panel
+                                            // would not tell you. Mono and tabular so it cannot reflow
+                                            // the row from under the cursor between polls.
+                                            IndText { anchors.verticalCenter: parent.verticalCenter
+                                                mono: true; sz: 11; width: 18; horizontalAlignment: Text.AlignRight
+                                                text: netRow.modelData.signal
+                                                color: netRow.modelData.active ? theme.text : theme.sub } }
+                                        Text { anchors.left: sigIcon.right; anchors.leftMargin: 8
+                                            anchors.right: rightBits.left; anchors.rightMargin: 8
+                                            anchors.verticalCenter: parent.verticalCenter
+                                            elide: Text.ElideRight; text: netRow.modelData.ssid
+                                            color: netRow.modelData.active ? theme.text : theme.sub
+                                            font.pixelSize: 12; font.family: root.cfgFont; font.bold: netRow.modelData.active }
                                         // forget — only for remembered networks, and only on hover so it can't be hit by accident
                                         Rectangle {
                                             anchors.verticalCenter: parent.verticalCenter; anchors.right: parent.right; anchors.rightMargin: 6
@@ -3497,7 +3896,14 @@ ShellRoot {
                                         Rectangle { width: 36; height: 32; radius: Tok.r; color: jm.containsMouse?theme.iris:theme.a(theme.iris,0.2); border.width: 1; border.color: theme.iris
                                             Sym { anchors.centerIn: parent; text: "arrow_forward"; sz: 14; color: jm.containsMouse?theme.bg:theme.frost }
                                             MouseArea { id: jm; anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.wifiJoin(netRow.modelData.ssid, pwIn.text) } } } } }
-                            Text { visible: root.wifiList.length===0; text: "scanning…"; color: theme.faint; font.pixelSize: 11; font.family: root.cfgFont; topPadding: 4 }
+                            Text { visible: root.wifiList.length===0
+                                text: root.wifiScanning ? "scanning…" : "no networks in range"
+                                color: theme.faint; font.pixelSize: 11; font.family: root.cfgFont; topPadding: 4 }
+                            // The list has always been capped at the top 8 by signal and never said so,
+                            // which reads as "these are all the networks there are" when it is not.
+                            Text { visible: root.wifiSeen > root.wifiList.length
+                                text: "+" + (root.wifiSeen - root.wifiList.length) + " weaker, hidden"
+                                color: theme.faint; font.pixelSize: 10; font.family: root.cfgFont; topPadding: 3 }
 
                             // ---- VPN Section ----
                             Item { height: 2; width: 1 }
@@ -3505,24 +3911,25 @@ ShellRoot {
                             Item { height: 4; width: 1 }
 
                             // Cloudflare WARP row
-                            Item { width: parent.width; height: 26
+                            //
+                            // It sat at 11px sub-ink with a faint icon while the networks above it were
+                            // 12px — so the one row here that is a control read as a greyed-out caption,
+                            // and nothing but the switch said it could be pressed. It now carries the
+                            // same weight as a network row, and the shared IndToggle replaces the
+                            // hand-rolled switch that was the only one in the shell not using it.
+                            Item { width: parent.width; height: 30
                                 Row { anchors.verticalCenter: parent.verticalCenter; anchors.left: parent.left; spacing: 7
-                                    Sym { anchors.verticalCenter: parent.verticalCenter; text: "security"; sz: 14
-                                        color: root.warpConnected ? theme.good : theme.faint }
+                                    Sym { anchors.verticalCenter: parent.verticalCenter; text: "security"; sz: 15
+                                        color: root.warpConnected ? theme.good : theme.sub }
                                     Text { anchors.verticalCenter: parent.verticalCenter
-                                        text: "Cloudflare WARP"; color: theme.sub; font.pixelSize: 11; font.family: root.cfgFont }
+                                        text: "Cloudflare WARP"
+                                        color: root.warpConnected ? theme.text : theme.sub
+                                        font.pixelSize: 12; font.family: root.cfgFont }
                                     Text { anchors.verticalCenter: parent.verticalCenter
                                         visible: root.warpConnected
                                         text: "· " + root.warpMode; color: theme.faint; font.pixelSize: 10; font.family: root.cfgFont } }
-                                // WARP toggle switch
-                                Rectangle { anchors.verticalCenter: parent.verticalCenter; anchors.right: parent.right
-                                    width: 36; height: 20; radius: Tok.r
-                                    color: root.warpConnected ? theme.good : theme.a(theme.line, 0.85)
-                                    border.width: 1; border.color: root.warpConnected ? theme.a(theme.good,0.5) : theme.a(theme.iris,0.3)
-                                    Behavior on color { ColorAnimation { duration: 120 } }
-                                    Rectangle { width: 15; height: 15; radius: Tok.r; color: theme.frost; anchors.verticalCenter: parent.verticalCenter
-                                        x: root.warpConnected ? 19 : 2; Behavior on x { NumberAnimation { duration: 130 } } }
-                                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.warpToggle() } } }
+                                IndToggle { anchors.verticalCenter: parent.verticalCenter; anchors.right: parent.right
+                                    on: root.warpConnected; onToggled: root.warpToggle() } }
 
                             // WARP mode chips (only when WARP is connected)
                             Row { visible: root.warpConnected; spacing: 5; topPadding: 2
@@ -3874,7 +4281,17 @@ ShellRoot {
                             property int today: dt.getDate()
                             property int lead: new Date(yr, mo, 1).getDay()
                             property var days: { var arr=[]; var n=new Date(yr, mo+1, 0).getDate(); for(var i=1;i<=n;i++) arr.push(i); return arr }
-                            Text { anchors.horizontalCenter: parent.horizontalCenter; text: Qt.formatDateTime(clock.date,"MMMM yyyy"); color: theme.frost; font.pixelSize: 14; font.family: root.cfgFont; font.bold: true }
+                            // The month keeps its own title row rather than a CalHead: it is the panel's
+                            // identity, not a section label, so it stays centred and full size and only
+                            // borrows the chevron.
+                            Item { width: parent.width; height: 20
+                                Text { anchors.centerIn: parent; text: Qt.formatDateTime(clock.date,"MMMM yyyy"); color: theme.frost; font.pixelSize: 14; font.family: root.cfgFont; font.bold: true }
+                                Sym { anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
+                                    text: root.calFolded("cal") ? "expand_more" : "expand_less"; sz: 13
+                                    color: mgm.containsMouse ? theme.iris : theme.faint }
+                                MouseArea { id: mgm; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                    onClicked: root.calToggleFold("cal") } }
+                            Column { width: parent.width; spacing: 10; visible: !root.calFolded("cal")
                             // at-a-glance counts for today / the next 7 days
                             Text { anchors.horizontalCenter: parent.horizontalCenter
                                 readonly property int todayN: root.calEvents.filter(function(e){ return (""+e.date) === root.calTodayKey(); }).length
@@ -3907,15 +4324,14 @@ ShellRoot {
                                             visible: parent.hasEvent && !parent.isToday
                                             width: 3; height: 3; radius: 1.5; color: theme.frost
                                             anchors.bottom: parent.bottom; anchors.bottomMargin: 3; anchors.horizontalCenter: parent.horizontalCenter } } } }
+                            }
                             Rectangle { width: parent.width; height: 1; color: theme.a(theme.iris, 0.15) }
                             Column {
                                 width: parent.width; spacing: 5
-                                Item { width: parent.width; height: 12
-                                    Text { anchors.left: parent.left; anchors.verticalCenter: parent.verticalCenter
-                                        text: "UPCOMING"; color: theme.frost; font.pixelSize: 9; font.family: root.cfgFont; font.bold: true; font.letterSpacing: 1 }
-                                    Text { anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
-                                        visible: root.calUpcoming.length > 4; text: "+" + (root.calUpcoming.length - 4) + " more"
-                                        color: theme.faint; font.pixelSize: 9; font.family: root.cfgFont } }
+                                CalHead { skey: "up"; title: "UPCOMING"
+                                    summary: root.calUpcoming.length === 0 ? "none"
+                                           : root.calUpcoming.length + (root.calUpcoming.length > 4 ? " · +" + (root.calUpcoming.length - 4) + " more" : "") }
+                                Column { width: parent.width; spacing: 5; visible: !root.calFolded("up")
                                 Text { visible: root.calUpcoming.length === 0; text: "nothing coming up"; color: theme.faint; font.pixelSize: 10; font.family: root.cfgFont }
                                 Repeater {
                                     model: root.calUpcoming.slice(0, 4)
@@ -3938,14 +4354,16 @@ ShellRoot {
                                                 Text { text: evRow.rel + "  ·  " + Qt.formatDate(root.calDate(evRow.modelData.date), "ddd") + (evRow.modelData.time ? "  ·  " + evRow.modelData.time : "")
                                                     color: evRow.soon ? theme.frost : theme.faint; font.pixelSize: 9; font.family: root.cfgFont } } } } } }
 
+                            }
                             // ================= TIMER · POMODORO =================
                             Rectangle { width: parent.width; height: 1; color: theme.a(theme.iris, 0.15) }
                             Column { width: parent.width; spacing: 6
-                                Item { width: parent.width; height: 12
-                                    Text { anchors.left: parent.left; anchors.verticalCenter: parent.verticalCenter
-                                        text: root.pomoActive ? "POMODORO" : "TIMER"; color: theme.frost; font.pixelSize: 9; font.family: root.cfgFont; font.bold: true; font.letterSpacing: 1 }
-                                    Text { anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter; visible: root.pomoActive
-                                        text: "session " + (root.pomoDone + (root.pomoPhase==="focus"?1:0)); color: theme.faint; font.pixelSize: 9; font.family: root.cfgFont } }
+                                // A running countdown is the one thing that must survive folding: the
+                                // section is exactly where you look to find out how long is left.
+                                CalHead { skey: "tmr"; title: root.pomoActive ? "POMODORO" : "TIMER"
+                                    summary: root.tmrRunning ? root.tmrText
+                                           : (root.pomoActive ? "session " + (root.pomoDone + (root.pomoPhase==="focus"?1:0)) : "off") }
+                                Column { width: parent.width; spacing: 6; visible: !root.calFolded("tmr")
 
                                 // ---- active countdown ----
                                 Column { width: parent.width; spacing: 6; visible: root.tmrRunning
@@ -4019,12 +4437,13 @@ ShellRoot {
                                             Sym { anchors.centerIn: parent; text: root.pomoDnd?"notifications_off":"notifications"; sz: 13; color: root.pomoDnd?theme.iris:theme.faint }
                                             MouseArea { anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: { root.pomoDnd = !root.pomoDnd; root.tmrSaveCfg() } } } } } }
 
+                            }
                             // ================= WORLD CLOCK =================
                             Rectangle { width: parent.width; height: 1; color: theme.a(theme.iris, 0.15) }
                             Column { width: parent.width; spacing: 5
-                                Item { width: parent.width; height: 12
-                                    Text { anchors.left: parent.left; anchors.verticalCenter: parent.verticalCenter
-                                        text: "WORLD CLOCK"; color: theme.frost; font.pixelSize: 9; font.family: root.cfgFont; font.bold: true; font.letterSpacing: 1 } }
+                                CalHead { skey: "wc"; title: "WORLD CLOCK"
+                                    summary: root.wcZones.length === 0 ? "none" : root.wcZones.length + " cities" }
+                                Column { width: parent.width; spacing: 5; visible: !root.calFolded("wc")
                                 Repeater { model: root.wcTimes
                                     delegate: Rectangle { required property var modelData; width: parent.width; height: 28; radius: Tok.r
                                         color: wcm.containsMouse ? theme.a(theme.line,0.4) : "transparent"
@@ -4048,7 +4467,7 @@ ShellRoot {
                                             Row { id: wcAddRow; anchors.centerIn: parent; spacing: 3
                                                 Sym { anchors.verticalCenter: parent.verticalCenter; text: "add"; sz: 11; color: theme.frost }
                                                 Text { anchors.verticalCenter: parent.verticalCenter; text: modelData.l; color: theme.text; font.pixelSize: 9; font.family: root.cfgFont } }
-                                            MouseArea { id: wcaMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.wcAdd(modelData.z) } } } } } } }
+                                            MouseArea { id: wcaMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.wcAdd(modelData.z) } } } } } } } }
                     Drop { screen: bar.screen
                         id: pwrDrop; host: root.barVertical ? pwrPillVert : pwrPill; shown: root.openPop ==="pwr" && root.openBar === bar
                         cardW: 210; cardH: pwrCol.implicitHeight + 28
