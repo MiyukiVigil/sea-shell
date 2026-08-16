@@ -193,6 +193,7 @@ AUR_PKGS=(
   ttf-material-symbols-variable       # the bar's icon font (stable pkg; the -git one won't build)
   swww                                # static / image wallpapers
   mpvpaper                            # animated (video) wallpapers
+  python-syncedlyrics                 # second-chance lyrics lookup (NetEase · Musixmatch) when lrclib misses
 )
 
 require_arch() {

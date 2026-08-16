@@ -5,6 +5,43 @@ All notable changes to **sea-shell** are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.1.1] - 2026-08-16
+
+Lyrics, four days of them in one afternoon. 6.1.0 shipped romanisation against a lyrics
+source that turns out not to have the songs it was romanising.
+
+### Added
+
+- **A second lyrics source.** lrclib stays the first stop — keyless and fast — but its
+  catalogue thins out badly outside Western releases. `syncedlyrics` now runs when lrclib
+  misses, querying NetEase then Musixmatch, which is where the Japanese and Korean catalogue
+  actually lives. *Ape* by RED in BLUE is absent from lrclib entirely; NetEase has it.
+
+  The fallback searches artist **and** title, never title alone. It returns a bare LRC string
+  with no duration, so the length check that guards lrclib results cannot apply to it —
+  requiring both fields is what stands in for that.
+
+### Fixed
+
+- **Lyrics still matched a different song.** 6.1.0 filtered search results to ±7s of the right
+  length, and Jinjer's *Ape* is 196s against RED in BLUE's 202s — it passed by one second. The
+  window is now ±7s **only when the artist also agrees**, and ±2s otherwise: a romanised-artist
+  miss is the same recording and matches almost exactly, whereas a different band's song
+  sharing a title is only ever coincidentally close. A missing duration on either side is now
+  a refusal rather than a pass.
+- **Every NetEase result would have parsed as empty.** lrclib writes `[mm:ss.xx]`; NetEase
+  writes `[mm:ss:xx]`, with a colon before the centiseconds. The timestamp pattern accepted
+  only the dot, so a good lookup would have come back as an empty list and read as "no lyrics
+  found".
+- **Romanisation printed every English line twice.** The check that drops romaji when it only
+  echoes a Latin line back compared the strings exactly, but pykakasi re-spaces around
+  punctuation — `Yeah, yeah` becomes `Yeah , yeah` — so it never matched. Compared on letters
+  and digits now.
+
+### Packaging
+
+- `python-syncedlyrics` added to the installer's AUR packages.
+
 ## [6.1.0] - 2026-08-16
 
 **The widgets update.** Bar widgets you can actually configure, a rebuilt media panel, and

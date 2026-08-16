@@ -100,11 +100,54 @@ def translate(lines, to):
     return ["" if not lines[i].strip() else got[i] for i in range(len(got))]
 
 
+def find(artist, title):
+    """Second-chance lyrics lookup, for tracks lrclib has never heard of.
+
+    lrclib is keyless and fast so it stays the first stop, but its catalogue thins out badly
+    outside Western releases — "Ape" by RED in BLUE is absent entirely, and the title-only
+    fallback then finds a different band's song of the same name. syncedlyrics queries
+    NetEase and Musixmatch, which is exactly where the Japanese and Korean catalogue lives.
+
+    It returns a bare LRC string with no duration, so the caller cannot length-check this the
+    way it checks lrclib. The search is artist AND title though, not title alone, which is
+    what made the lrclib fallback dangerous in the first place.
+    """
+    try:
+        import syncedlyrics
+    except ImportError:
+        return ""
+    q = ("%s %s" % (title, artist)).strip()
+    if not q:
+        return ""
+    # NetEase only, and deliberately not the all-providers sweep.
+    #
+    # Musixmatch answers 401 to every request syncedlyrics makes and is retried five times;
+    # Megalobiz refuses the connection outright. Between them the sweep burns roughly thirty
+    # seconds re-confirming that two endpoints are still broken, and the user sits watching an
+    # empty panel for all of it before being told there are no lyrics. NetEase is the only
+    # provider in the set that both works and covers the catalogue lrclib misses, so a fast
+    # "no lyrics found" is worth more than a slow one that ends the same way.
+    #
+    # `sys.stderr` is redirected because syncedlyrics narrates every retry, and this runs from
+    # a Process whose output is parsed as JSON.
+    import contextlib
+    import io as _io
+    try:
+        with contextlib.redirect_stderr(_io.StringIO()):
+            got = syncedlyrics.search(q, providers=["NetEase"])
+    except Exception:
+        return ""
+    return got if (got and "[" in got) else ""
+
+
 def main():
     try:
         req = json.load(sys.stdin)
     except Exception:
         req = {}
+    if req.get("find"):
+        json.dump({"lrc": find(req.get("artist") or "", req.get("title") or "")}, sys.stdout)
+        return
     lines = req.get("lines") or []
     out = {"romaji": [], "trans": []}
     if lines:

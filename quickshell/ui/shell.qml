@@ -1657,6 +1657,40 @@ ShellRoot {
     }
     Process { id: lyrProc
         stdout: StdioCollector { id: lyrOut; onStreamFinished: root.parseLyrics(lyrOut.text) } }
+    // [mm:ss.xx] is lrclib's spelling; NetEase writes [mm:ss:xx] with a colon before the
+    // centiseconds, and the old pattern accepted only the dot — so every NetEase line failed to
+    // match and a perfectly good result came back as an empty list.
+    function parseLrc(text) {
+        var out = [], re = /\[(\d+):(\d+)(?:[.:](\d+))?\](.*)/;
+        ("" + text).split("\n").forEach(function (line) {
+            var m = re.exec(line); if (!m) return;
+            var cs = m[3] ? parseFloat("0." + m[3]) : 0;
+            var txt = m[4].trim(); if (txt === "") txt = "♪";
+            out.push({ t: parseInt(m[1],10)*60 + parseInt(m[2],10) + cs, l: txt });
+        });
+        out.sort(function(a,b){ return a.t-b.t });
+        return out;
+    }
+    // Second chance when lrclib has never heard of the track — see find() in sea-lyrics-aux.py.
+    property string lyrFindKey: ""
+    Process { id: lyrFind
+        stdout: StdioCollector { id: lyrFindOut; onStreamFinished: {
+            if (root.lyrFindKey !== root.trackKey) return;
+            var got = [];
+            try { var j = JSON.parse(lyrFindOut.text || "{}"); if (j.lrc) got = root.parseLrc(j.lrc); } catch (e) {}
+            if (got.length) { root.lyrics = got; root.lyricsState = "ok"; root.lyrRunAux(); }
+            else root.lyricsState = "none";
+        } } }
+    function lyrFindElsewhere() {
+        if (!root.player) { root.lyricsState = "none"; return }
+        root.lyrFindKey = root.trackKey;
+        lyrFind.running = false;
+        lyrFind.command = ["sh","-c","printf '%s' \"$SEA_FIND\" | python3 " + root._lyrAuxPath];
+        lyrFind.environment = ({ SEA_FIND: JSON.stringify({ find: true,
+            artist: root.player.trackArtist || "", title: root.player.trackTitle || "" }) });
+        lyrFind.running = true;
+    }
+
     function parseLyrics(raw) {
         // strip + verify the "artist|title\x1f" header the fetch stamped on its reply; a reply
         // for a track we've since switched away from is stale — drop it so it can't overwrite.
@@ -1702,15 +1736,10 @@ ShellRoot {
             }
             if (j && (j.syncedLyrics || j.plainLyrics)) rec = j;
         }
-        if (!rec) { root.lyricsState = "none"; return }
+        if (!rec) { root.lyrFindElsewhere(); return }
         if (rec.syncedLyrics) {
-            var out = [], re = /\[(\d+):(\d+(?:\.\d+)?)\](.*)/;
-            rec.syncedLyrics.split("\n").forEach(line => {
-                var m = re.exec(line); if (!m) return;
-                var txt = m[3].trim(); if (txt === "") txt = "♪";
-                out.push({ t: parseInt(m[1],10)*60 + parseFloat(m[2]), l: txt });
-            });
-            if (out.length) { out.sort((a,b)=>a.t-b.t); root.lyrics = out; root.lyricsState = "ok"; root.lyrRunAux(); return }
+            var out = root.parseLrc(rec.syncedLyrics);
+            if (out.length) { root.lyrics = out; root.lyricsState = "ok"; root.lyrRunAux(); return }
         }
         if (rec.plainLyrics) { root.plainLyrics = rec.plainLyrics; root.lyricsState = "plain"; return }
         root.lyricsState = "none";
