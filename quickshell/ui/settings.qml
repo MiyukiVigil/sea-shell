@@ -22,7 +22,7 @@ Scope {
     // release apart — the badge read v5.0.0 on a 6.0.0 install. A version badge that lies is worse
     // than no badge. The literal survives only as the fallback for a `qs -p` run out of the repo
     // with nothing deployed; the second path covers that case too (quickshell/ui/ → repo root).
-    property string seaVersion: "6.0.0"
+    property string seaVersion: "6.1.0"
     Process {
         running: true
         command: ["sh","-c","cat \"$HOME/.config/quickshell/sea-shell/VERSION\" 2>/dev/null || cat \"" + root.repo + "/../../VERSION\" 2>/dev/null"]
@@ -790,7 +790,10 @@ Scope {
     property int  apNightTemp: 4000          // night-light colour temperature (K)
     property bool apNightAuto: false         // night light follows dark mode
     // drag-reorderable order of the bar widgets (mirrors shell.qml cfgWidgetOrder)
-    readonly property var defaultWidgetOrder: ["wgMpris","wgTray","wgQuick","wgUpdates","wgNet","wgWeather","wgClipboard","wgNotif","wgWifi","wgBluetooth","wgKdeconnect","wgCaffeine","wgNight","wgUpdates","wgNet","wgSystem","wgVolume","wgBattery","wgRec","wgClock","wgPower"]
+    // MUST match shell.qml's defaultWidgetOrder — it is the same bar. This copy had drifted:
+    // wgUpdates and wgNet appeared twice (so the reorder list showed two identical rows, and
+    // dragging either wrote a duplicate into the saved order) and wgDac was missing entirely.
+    readonly property var defaultWidgetOrder: ["wgMpris","wgTray","wgQuick","wgUpdates","wgNet","wgWeather","wgClipboard","wgNotif","wgWifi","wgBluetooth","wgKdeconnect","wgCaffeine","wgNight","wgSystem","wgDac","wgMic","wgVolume","wgBattery","wgRec","wgClock","wgPower"]
     property var apWidgetOrder: root.defaultWidgetOrder
     // left cluster order (mirrors shell.qml cfgLeftOrder)
     readonly property var defaultLeftOrder: ["lgLogo","lgWork","lgTitle"]
@@ -824,6 +827,8 @@ Scope {
         wgNet:       { i: "swap_vert",             l: "Network Speed",     d: "Live download / upload throughput",                      prop: "wgNet" },
         wgUpdates:   { i: "system_update_alt",     l: "Updates",           d: "Pending pacman + AUR updates, with a one-click upgrade",  prop: "wgUpdates" },
         wgSystem:    { i: "speed",                 l: "System Monitor",    d: "Live CPU usage and system load",                        prop: "wgSystem" },
+        wgDac:       { i: "graphic_eq",            l: "DAC",               d: "Connected USB DAC — name, and the EQ/gain panel",       prop: "wgDac" },
+        wgMic:       { i: "mic",                   l: "Microphone",        d: "Input level, and click to mute — red while muted",      prop: "wgMic" },
         wgVolume:    { i: "volume_up",             l: "Volume",            d: "Sound level and output selector",                       prop: "wgVolume" },
         wgBattery:   { i: "battery_charging_full", l: "Battery",           d: "Remaining charge (laptops)",                            prop: "wgBattery" },
         wgRec:       { i: "videocam",              l: "Screen Recorder",   d: "Shows only while recording — no toggle",                 prop: "" },
@@ -1411,6 +1416,17 @@ Scope {
     property bool wgPower: true
     property bool wgQuick: true
     property bool wgNight: false
+    property bool wgDac: true
+    property bool wgMic: false
+    // Which readings the System Monitor pill shows. sea-sysmon.sh has always sampled all of them;
+    // this only decides which ones reach the bar.
+    property var apSysShow: ["cpu"]
+    function sysShowToggle(k) {
+        var a = root.apSysShow.slice(); var i = a.indexOf(k);
+        if (i >= 0) { if (a.length <= 1) return; a.splice(i, 1); }   // never let it empty out
+        else a.push(k);
+        root.apSysShow = a; root.saveAppearance();
+    }
     // ---------- matugen per-target overrides ----------
     property bool ovrHyprland: true
     property bool ovrHyprGlow: true
@@ -1490,6 +1506,9 @@ Scope {
             if(j.wgPower!==undefined) root.wgPower=!!j.wgPower;
             if(j.wgQuick!==undefined) root.wgQuick=!!j.wgQuick;
             if(j.wgNight!==undefined) root.wgNight=!!j.wgNight;
+            if(j.wgDac!==undefined) root.wgDac=!!j.wgDac;
+            if(j.wgMic!==undefined) root.wgMic=!!j.wgMic;
+            if(j.sysShow!==undefined && Array.isArray(j.sysShow) && j.sysShow.length) root.apSysShow=j.sysShow;
             if(j.autoHide!==undefined) root.apAutoHide=!!j.autoHide;
             if(j.hideFullscreen!==undefined) root.apHideFullscreen=!!j.hideFullscreen;
             if(j.night!==undefined) root.apNight=!!j.night;
@@ -1558,6 +1577,9 @@ Scope {
             wgPower: root.wgPower,
             wgQuick: root.wgQuick,
             wgNight: root.wgNight,
+            wgDac: root.wgDac,
+            wgMic: root.wgMic,
+            sysShow: root.apSysShow,
             autoHide: root.apAutoHide,
             hideFullscreen: root.apHideFullscreen,
             night: root.apNight,
@@ -1614,6 +1636,8 @@ Scope {
         if (p.wgPower !== undefined) root.wgPower = p.wgPower;
         if (p.wgQuick !== undefined) root.wgQuick = p.wgQuick;
         if (p.wgNight !== undefined) root.wgNight = p.wgNight;
+        if (p.wgDac !== undefined) root.wgDac = p.wgDac;
+        if (p.wgMic !== undefined) root.wgMic = p.wgMic;
         if (p.autoHide !== undefined) root.apAutoHide = p.autoHide;
         if (p.hideFullscreen !== undefined) root.apHideFullscreen = p.hideFullscreen;
         if (p.night !== undefined) root.apNight = p.night;
@@ -1635,7 +1659,11 @@ Scope {
     }
 
     // ---------- bar layout presets (just the bar: widget order · left order · widget on/off) ----------
-    readonly property var barToggleKeys: ["wgMpris","wgTray","wgWeather","wgClipboard","wgNotif","wgWifi","wgBluetooth","wgKdeconnect","wgCaffeine","wgNight","wgSystem","wgVolume","wgBattery","wgClock","wgPower","wgQuick"]
+    // Every widget that HAS a toggle must be listed here, or a saved bar layout neither stores nor
+    // restores it — wgNet and wgUpdates were toggleable in the panel but absent from this list, so
+    // switching between saved layouts left those two wherever they happened to be. wgRec is the
+    // only correct omission: the recorder pill shows itself while recording and has no toggle.
+    readonly property var barToggleKeys: ["wgMpris","wgTray","wgWeather","wgClipboard","wgNotif","wgWifi","wgBluetooth","wgKdeconnect","wgCaffeine","wgNight","wgSystem","wgVolume","wgBattery","wgClock","wgPower","wgQuick","wgDac","wgNet","wgUpdates","wgMic"]
     property var barLayouts: []
     Process { id: barLayoutsReadProc; running: true; command: ["sh","-c","cat \"$HOME/.config/sea-shell/bar-layouts.json\" 2>/dev/null || echo '[]'"]
         stdout: StdioCollector { id: blOut; onStreamFinished: { try { root.barLayouts = JSON.parse(blOut.text) } catch(e){ root.barLayouts = [] } } } }
@@ -1664,7 +1692,7 @@ Scope {
     function saveAppearance() {
         if (!root.apLoaded) return;      // see apLoaded — never write defaults over a real config
         var cf = '['; for(var i=0;i<root.apCustomFonts.length;i++){ cf += (i?',':'') + '\"'+root.apCustomFonts[i]+'\"'; } cf += ']';
-        var j = '{\"radius\":'+Math.round(root.apRadius)+',\"opacity\":'+root.apOpacity.toFixed(2)+',\"height\":'+Math.round(root.apHeight)+',\"scale\":'+root.apScale.toFixed(2)+',\"accent\":\"'+root.apAccent+'\",\"font\":\"'+root.apFont+'\",\"customFonts\":'+cf+',\"mode\":\"'+(root.apLight?'light':'dark')+'\",\"matugen\":'+(root.apMatugen?'true':'false')+',\"scheme\":\"'+root.apScheme+'\",\"barFill\":\"'+root.apBarFill+'\",\"edge\":\"'+root.apEdge+'\",\"dock\":'+(root.apDock?'true':'false')+',\"dockEdge\":\"'+root.apDockEdge+'\",\"dockIcon\":'+Math.round(root.apDockIcon)+',\"dockMode\":\"'+root.apDockMode+'\",\"dockZoom\":'+(root.apDockZoom?'true':'false')+',\"dockRunning\":'+(root.apDockRunning?'true':'false')+',\"dockLabels\":'+(root.apDockLabels?'true':'false')+',\"autoDark\":'+(root.apAutoDark?'true':'false')+',\"darkStart\":\"'+root.apDarkStart+'\",\"darkEnd\":\"'+root.apDarkEnd+'\",\"appMode\":\"'+root.apAppMode+'\",\"wgMpris\":'+(root.wgMpris?'true':'false')+',\"wgTray\":'+(root.wgTray?'true':'false')+',\"wgWeather\":'+(root.wgWeather?'true':'false')+',\"wgClipboard\":'+(root.wgClipboard?'true':'false')+',\"wgNotif\":'+(root.wgNotif?'true':'false')+',\"wgWifi\":'+(root.wgWifi?'true':'false')+',\"wgBluetooth\":'+(root.wgBluetooth?'true':'false')+',\"wgKdeconnect\":'+(root.wgKdeconnect?'true':'false')+',\"wgCaffeine\":'+(root.wgCaffeine?'true':'false')+',\"wgNet\":'+(root.wgNet?'true':'false')+',\"wgUpdates\":'+(root.wgUpdates?'true':'false')+',\"wgSystem\":'+(root.wgSystem?'true':'false')+',\"wgVolume\":'+(root.wgVolume?'true':'false')+',\"wgBattery\":'+(root.wgBattery?'true':'false')+',\"wgClock\":'+(root.wgClock?'true':'false')+',\"wgPower\":'+(root.wgPower?'true':'false')+',\"wgQuick\":'+(root.wgQuick?'true':'false')+',\"wgNight\":'+(root.wgNight?'true':'false')+',\"autoHide\":'+(root.apAutoHide?'true':'false')+',\"hideFullscreen\":'+(root.apHideFullscreen?'true':'false')+',\"night\":'+(root.apNight?'true':'false')+',\"nightTemp\":'+Math.round(root.apNightTemp)+',\"nightAuto\":'+(root.apNightAuto?'true':'false')+',\"mouseSens\":'+root.apMouseSens.toFixed(2)+',\"accelProfile\":\"'+root.apAccelProfile+'\",\"mouseNatural\":'+(root.apMouseNatural?'true':'false')+',\"tpNatural\":'+(root.apTpNatural?'true':'false')+',\"tpScroll\":'+root.apTpScroll.toFixed(2)+',\"tpTap\":'+(root.apTpTap?'true':'false')+',\"tpDwt\":'+(root.apTpDwt?'true':'false')+',\"vrr\":'+Math.round(root.apVrr)+',\"wpTransition\":\"'+root.apWpTransition+'\",\"wpTransitionFps\":'+Math.round(root.apWpTransitionFps)+',\"wpTransitionDur\":'+root.apWpTransitionDur.toFixed(2)+',\"wpRotate\":'+(root.apWpRotate?'true':'false')+',\"wpRotateMins\":'+Math.round(root.apWpRotateMins)+',\"wpRotateMode\":\"'+root.apWpRotateMode+'\",\"widgetOrder\":'+JSON.stringify(root.apWidgetOrder)+',\"leftOrder\":'+JSON.stringify(root.apLeftOrder)+',\"monitors\":'+JSON.stringify(root.apMonitors)+'}';
+        var j = '{\"radius\":'+Math.round(root.apRadius)+',\"opacity\":'+root.apOpacity.toFixed(2)+',\"height\":'+Math.round(root.apHeight)+',\"scale\":'+root.apScale.toFixed(2)+',\"accent\":\"'+root.apAccent+'\",\"font\":\"'+root.apFont+'\",\"customFonts\":'+cf+',\"mode\":\"'+(root.apLight?'light':'dark')+'\",\"matugen\":'+(root.apMatugen?'true':'false')+',\"scheme\":\"'+root.apScheme+'\",\"barFill\":\"'+root.apBarFill+'\",\"edge\":\"'+root.apEdge+'\",\"dock\":'+(root.apDock?'true':'false')+',\"dockEdge\":\"'+root.apDockEdge+'\",\"dockIcon\":'+Math.round(root.apDockIcon)+',\"dockMode\":\"'+root.apDockMode+'\",\"dockZoom\":'+(root.apDockZoom?'true':'false')+',\"dockRunning\":'+(root.apDockRunning?'true':'false')+',\"dockLabels\":'+(root.apDockLabels?'true':'false')+',\"autoDark\":'+(root.apAutoDark?'true':'false')+',\"darkStart\":\"'+root.apDarkStart+'\",\"darkEnd\":\"'+root.apDarkEnd+'\",\"appMode\":\"'+root.apAppMode+'\",\"wgMpris\":'+(root.wgMpris?'true':'false')+',\"wgTray\":'+(root.wgTray?'true':'false')+',\"wgWeather\":'+(root.wgWeather?'true':'false')+',\"wgClipboard\":'+(root.wgClipboard?'true':'false')+',\"wgNotif\":'+(root.wgNotif?'true':'false')+',\"wgWifi\":'+(root.wgWifi?'true':'false')+',\"wgBluetooth\":'+(root.wgBluetooth?'true':'false')+',\"wgKdeconnect\":'+(root.wgKdeconnect?'true':'false')+',\"wgCaffeine\":'+(root.wgCaffeine?'true':'false')+',\"wgNet\":'+(root.wgNet?'true':'false')+',\"wgUpdates\":'+(root.wgUpdates?'true':'false')+',\"wgSystem\":'+(root.wgSystem?'true':'false')+',\"wgVolume\":'+(root.wgVolume?'true':'false')+',\"wgBattery\":'+(root.wgBattery?'true':'false')+',\"wgClock\":'+(root.wgClock?'true':'false')+',\"wgPower\":'+(root.wgPower?'true':'false')+',\"wgQuick\":'+(root.wgQuick?'true':'false')+',\"wgNight\":'+(root.wgNight?'true':'false')+',\"wgDac\":'+(root.wgDac?'true':'false')+',\"wgMic\":'+(root.wgMic?'true':'false')+',\"autoHide\":'+(root.apAutoHide?'true':'false')+',\"hideFullscreen\":'+(root.apHideFullscreen?'true':'false')+',\"night\":'+(root.apNight?'true':'false')+',\"nightTemp\":'+Math.round(root.apNightTemp)+',\"nightAuto\":'+(root.apNightAuto?'true':'false')+',\"mouseSens\":'+root.apMouseSens.toFixed(2)+',\"accelProfile\":\"'+root.apAccelProfile+'\",\"mouseNatural\":'+(root.apMouseNatural?'true':'false')+',\"tpNatural\":'+(root.apTpNatural?'true':'false')+',\"tpScroll\":'+root.apTpScroll.toFixed(2)+',\"tpTap\":'+(root.apTpTap?'true':'false')+',\"tpDwt\":'+(root.apTpDwt?'true':'false')+',\"vrr\":'+Math.round(root.apVrr)+',\"wpTransition\":\"'+root.apWpTransition+'\",\"wpTransitionFps\":'+Math.round(root.apWpTransitionFps)+',\"wpTransitionDur\":'+root.apWpTransitionDur.toFixed(2)+',\"wpRotate\":'+(root.apWpRotate?'true':'false')+',\"wpRotateMins\":'+Math.round(root.apWpRotateMins)+',\"wpRotateMode\":\"'+root.apWpRotateMode+'\",\"sysShow\":'+JSON.stringify(root.apSysShow)+',\"widgetOrder\":'+JSON.stringify(root.apWidgetOrder)+',\"leftOrder\":'+JSON.stringify(root.apLeftOrder)+',\"monitors\":'+JSON.stringify(root.apMonitors)+'}';
         run("mkdir -p \"$HOME/.config/sea-shell\" && printf '%s' '"+j+"' > \"$HOME/.config/sea-shell/appearance.json\"");
     }
     // apply the system app dark/light preference independently from the shell theme
@@ -3605,6 +3633,40 @@ Scope {
                                     }
                                 }
                             }
+                            // ---- per-widget options ----
+                            // The first of these. sea-sysmon.sh samples cpu, ram, gpu, vram, temps and
+                            // power every 3 seconds and the pill rendered exactly one of them, so a 6GB
+                            // card had its VRAM measured on every tick and shown nowhere.
+                            Section { title: "system monitor"; icon: "speed"; Layout.topMargin: 8 }
+                            Text {
+                                text: "which readings reach the bar pill. all of them are already being sampled, so adding one costs nothing. GPU readings hide themselves on a machine with no discrete card."
+                                color: theme.faint; font.pixelSize: 11; font.family: root.apFont; Layout.bottomMargin: 6
+                                Layout.fillWidth: true; wrapMode: Text.WordWrap
+                            }
+                            Flow {
+                                Layout.fillWidth: true; Layout.bottomMargin: 4; spacing: 6
+                                Repeater {
+                                    model: [{k:"cpu",l:"CPU %"},{k:"cput",l:"CPU temp"},
+                                            {k:"ram",l:"RAM %"},{k:"ramg",l:"RAM GiB"},
+                                            {k:"gpu",l:"GPU %"},{k:"gput",l:"GPU temp"},
+                                            {k:"vram",l:"VRAM %"},{k:"vramg",l:"VRAM GiB"}]
+                                    delegate: Rectangle {
+                                        required property var modelData
+                                        readonly property bool on: root.apSysShow.indexOf(modelData.k) >= 0
+                                        height: 27; radius: Tok.r; width: smTxt.implicitWidth + 20
+                                        color: on ? theme.a(theme.iris, 0.25)
+                                             : (smMa.containsMouse ? theme.a(theme.line, 0.7) : theme.a(theme.line, 0.4))
+                                        border.width: 1; border.color: on ? theme.iris : theme.a(theme.iris, 0.2)
+                                        Text { id: smTxt; anchors.centerIn: parent; text: modelData.l
+                                            color: on ? theme.text : theme.sub
+                                            font.pixelSize: 11; font.family: root.apFont; font.bold: on }
+                                        MouseArea { id: smMa; anchors.fill: parent; hoverEnabled: true
+                                            cursorShape: Qt.PointingHandCursor
+                                            onClicked: root.sysShowToggle(modelData.k) }
+                                    }
+                                }
+                            }
+
                             // ---- left cluster order (logo · workspaces · window-title) ----
                             Section { title: "left side"; icon: "align_horizontal_left"; Layout.topMargin: 8 }
                             Text {
