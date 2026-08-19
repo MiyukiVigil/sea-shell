@@ -13,6 +13,7 @@ import Quickshell.Services.Mpris
 import Quickshell.Services.Notifications
 import Quickshell.Bluetooth
 import QtQuick
+import QtQuick.Effects
 import QtQuick.Layouts
 
 ShellRoot {
@@ -107,22 +108,24 @@ ShellRoot {
     // (SUPER+S) or, in-process, settingsLoader.item.openTab(n). asynchronous → never blocks
     // the bar at login; the item lands ~½s after startup, long before the user opens it.
     Loader { id: settingsLoader; asynchronous: true; active: true; source: Qt.resolvedUrl("settings.qml") }
-    function openSettings(tab) { if (settingsLoader.item) settingsLoader.item.openTab(tab) }
 
-    // Moondrop DAC parametric-EQ panel — resident overlay, toggled via its "dac" IPC
-    // (SUPER+SHIFT+E). No-ops gracefully when no Moondrop device is connected.
-    DacPanel { id: dacPanel }
+    // The first-run tour. Resident like settings, and for the same reason: it owns an IPC
+    // target ("welcome") that Settings → System calls to show it again, and it decides for
+    // itself whether this is a first run. A Loader rather than a type, because a QML file
+    // whose name starts lowercase cannot be used as one.
+    Loader { id: welcomeLoader; asynchronous: true; active: true; source: Qt.resolvedUrl("welcome.qml") }
+    function openSettings(tab) { if (settingsLoader.item) settingsLoader.item.openTab(tab) }
 
     // Screen recorder chooser — resident overlay, toggled via its "recorder" IPC
     // (SUPER+R). It owns the whole SUPER+R semantic: stops a running recording,
     // otherwise opens. `recording` is fed from the status poll above so it knows which.
     // The exclusive hold is passed through so it can warn that system audio recorded
-    // from a monitor will be silent while a DAC is playing bit-perfect past pipewire.
+    // from a monitor will be silent while something is playing bit-perfect past pipewire.
     RecorderPanel {
         id: recPanel
         recording: root.recordingActive
-        exclusiveHold: root.dacExclusive
-        exclusiveName: root.dacModel
+        exclusiveHold: root.exclusiveHold
+        exclusiveName: root.exclHolder
     }
     property string openPop: ""      // only one dropdown open at a time
     property var openBar: null       // …and only on the monitor whose pill was clicked
@@ -207,15 +210,67 @@ ShellRoot {
     // then a fresh process — a hard cut with a black flash. Most of this user's library is
     // video, so the backend transition almost never ran.
     //
-    // The compositor can't fix that, but the shell can: dip a full-screen layer to black over
-    // the swap and lift it once the new wallpaper is up. It works for EVERY backend — mpvpaper,
-    // awww, hyprpaper — because it never touches them; it just covers the seam.
-    property real wallFade: 0                  // 0 = clear, 1 = fully black
+    // The compositor can't fix that, but the shell can: cover the seam with a full-screen
+    // layer, let the swap happen behind it, and uncover once the new wallpaper is up. It
+    // works for EVERY backend — mpvpaper, awww, hyprpaper — because it never touches them.
+    //
+    // It used to do that by dipping to black, which states nothing except that something
+    // stalled: the same darkness for next as for previous, and no way to tell a transition
+    // from a hung process. It is now a PANEL THAT TRAVELS, entering from the side you are
+    // coming from and leaving towards the side you are going to, so the direction of the
+    // switch is in the motion. The picker's commit shares the vocabulary — see the slot in
+    // wallpaper.qml; both are the shell's ground moving over a seam, not a light going out.
+    property real wallPanelX: 1                // screen widths: +1/-1 = off-stage, 0 = covering
+    property int  wallPanelDir: 1              // +1 next (enters from the right), -1 previous
+    property bool wallPanelAnim: false         // off while the panel is parked off-stage
+    // What it switched TO. The panel has to sit covered for as long as mpvpaper needs to put
+    // a first frame up, and a blank hold is the whole reason this read as a stall: the eye is
+    // given six hundred milliseconds and nothing to do with them. Naming the wallpaper turns
+    // the wait into the answer to "which one did I just land on".
+    property string wallPanelName: ""
+    // True for exactly as long as the panel sits covered waiting on the daemon. Drives the
+    // one honest thing that can be shown during a wait whose length is not ours to choose:
+    // how much of it is left.
+    property bool wallHold: false
+    // Separate from `wallHold`, and later than it: the cartridge sits in view for a beat after
+    // the panel lands before it goes in. Dropping it the instant the panel arrived meant the
+    // one thing worth watching was over in 260ms of a 1.1s sequence, and the rest of the hold
+    // went back to being a progress bar on an empty plate.
+    property bool wallDrop: false
+    Timer {
+        id: wallDropTimer; interval: 170; repeat: false
+        onTriggered: root.wallDrop = true
+    }
+    // Gated on the thumbnail, not on a timer: the cartridge holds until there is a picture in
+    // it, then goes in. A blank frame dropping into a slot is worse than no cartridge at all.
+    onWallPanelThumbChanged: if (root.wallPanelThumb.length) wallDropTimer.restart()
+    property string wallPanelThumb: ""
+    Process {
+        id: wallNameRead
+        command: ["sh", "-c",
+                  "sleep 0.08; printf '%s\\n' \"$HOME\"; cat \"$HOME/.config/sea-shell/wallpaper\" 2>/dev/null"]
+        stdout: StdioCollector { id: wnOut; onStreamFinished: {
+            var lines = wnOut.text.split("\n");
+            var home = (lines[0] || "").trim();
+            var t = (lines[1] || "").trim();
+            root.wallPanelName = t ? t.slice(t.lastIndexOf("/") + 1) : "";
+            // The picker already cached a poster frame for every clip; the cycle can show the
+            // same one instead of a caption. A still is its own poster.
+            if (!t) { root.wallPanelThumb = ""; return }
+            var low = t.toLowerCase();
+            var moving = [".mp4", ".webm", ".gif", ".mkv", ".mov"].some(function (e) {
+                return low.lastIndexOf(e) === low.length - e.length;
+            });
+            root.wallPanelThumb = moving
+                ? home + "/.cache/sea-shell/wallthumbs/" + root.wallPanelName + ".w1280.jpg"
+                : t;
+        } }
+    }
     property bool wallFading: false
-    // Kept short on purpose. The black hold below is fixed by how long mpvpaper takes to show a
-    // first frame, so the fades are the only part worth trimming — at 0.45× the whole switch sat
-    // near 1.6s of darkness, which reads as a stall rather than a transition.
-    readonly property int wallFadeMs: Math.max(120, Math.round(root.cfgWpTransitionDur * 1000 * 0.28))
+    // Kept short on purpose. The covered hold below is fixed by how long mpvpaper takes to
+    // show a first frame, so the slides are the only part worth trimming — at 0.45× the whole
+    // switch sat near 1.6s of nothing, which reads as a stall rather than a transition.
+    readonly property int wallSlideMs: Math.max(160, Math.round(root.cfgWpTransitionDur * 1000 * 0.26))
     property real cfgWpTransitionDur: 1        // mirrors appearance.json wpTransitionDur
 
     IpcHandler {
@@ -224,24 +279,67 @@ ShellRoot {
         function next(): void { root.wallCycle("next") }
         function prev(): void { root.wallCycle("prev") }
         function random(): void { root.wallCycle("random") }
+
+        // `qs -c sea-shell ipc call wallpaper set /path/to/image`
+        //
+        // Setting a wallpaper was something only the picker and the cycle keybinds could
+        // do, because each of them carried its own copy of what that means — write the
+        // path, apply it, sync the lock screen, re-derive the palette. Anything else
+        // wanting to change the wallpaper could write the config file and get none of the
+        // rest. sea-wallpaper-set.sh is now that sequence, and this is the door to it.
+        function set(path: string): void { root.wallSet(path) }
+    }
+
+    // Same curtain as a cycle: whatever asked for this is not the picker, so the panel is
+    // the only thing that tells the user a switch is happening at all.
+    property string wallSetPath: ""
+    function wallSet(path) {
+        if (root.wallFading || !path || !path.length) return;
+        root.wallSetPath = path;
+        root.wallCycle("set");
     }
 
     property string wallCycleDir: "next"
     function wallCycle(dir) {
         if (root.wallFading) return;           // ignore a second press mid-transition
-        root.wallCycleDir = (dir === "prev" || dir === "random") ? dir : "next";
+        root.wallCycleDir = (dir === "prev" || dir === "random" || dir === "set") ? dir : "next";
+        root.wallPanelDir = (dir === "prev") ? -1 : 1;
+        // Park the panel off-stage with the Behavior DISABLED, and only then create the
+        // window. Animating it in from the same tick the delegate is built would find the
+        // Rectangle already at its destination — the panel would blink into place covering
+        // the screen instead of sliding on. Hence the tick of delay in wallInTimer.
+        root.wallPanelAnim = false;
+        root.wallPanelX = root.wallPanelDir;
+        root.wallPanelName = "";
+        root.wallPanelThumb = "";
+        root.wallDrop = false;
         root.wallFading = true;
-        root.wallFade = 1;                     // Behavior animates it; swapTimer fires at the bottom
-        wallSwapTimer.interval = root.wallFadeMs;
-        wallSwapTimer.restart();
+        wallInTimer.restart();
+    }
+    Timer {
+        id: wallInTimer; interval: 16; repeat: false
+        onTriggered: {
+            root.wallPanelAnim = true;
+            root.wallPanelX = 0;               // slides on; swapTimer fires when it has arrived
+            wallSwapTimer.interval = root.wallSlideMs;
+            wallSwapTimer.restart();
+        }
     }
     // at full black: perform the actual switch
     Timer {
         id: wallSwapTimer; repeat: false
         onTriggered: {
-            Quickshell.execDetached(["sh",
-                Qt.resolvedUrl("sea-wallpaper-cycle.sh").toString().replace("file://",""),
-                root.wallCycleDir]);
+            if (root.wallCycleDir === "set") {
+                Quickshell.execDetached(["sh",
+                    Qt.resolvedUrl("sea-wallpaper-set.sh").toString().replace("file://",""),
+                    root.wallSetPath]);
+            } else {
+                Quickshell.execDetached(["sh",
+                    Qt.resolvedUrl("sea-wallpaper-cycle.sh").toString().replace("file://",""),
+                    root.wallCycleDir]);
+            }
+            wallNameRead.running = true;       // fills the hold with what it landed on
+            root.wallHold = true;
             // mpvpaper needs its pkill + 0.2s settle + process start before the first frame is
             // up; lifting the curtain earlier just shows the flash we came here to hide. Static
             // wallpapers are ready far sooner, but awww is doing its own transition underneath
@@ -252,9 +350,22 @@ ShellRoot {
     }
     Timer {
         id: wallLiftTimer; repeat: false
-        onTriggered: { root.wallFade = 0; wallDoneTimer.interval = root.wallFadeMs; wallDoneTimer.restart() }
+        onTriggered: {
+            // Off towards where you were headed, not back the way it came.
+            root.wallHold = false;
+            root.wallPanelX = -root.wallPanelDir;
+            wallDoneTimer.interval = root.wallSlideMs;
+            wallDoneTimer.restart();
+        }
     }
-    Timer { id: wallDoneTimer; repeat: false; onTriggered: root.wallFading = false }
+    Timer {
+        id: wallDoneTimer; repeat: false
+        onTriggered: {
+            root.wallFading = false;           // tears the window down
+            root.wallPanelAnim = false;        // reset off-stage for the next press
+            root.wallPanelX = 1;
+        }
+    }
 
     // One curtain per monitor. Bottom layer: above the background (where mpvpaper and awww
     // draw) but below every real window, so it only ever darkens visible wallpaper — never
@@ -272,10 +383,190 @@ ShellRoot {
             exclusionMode: ExclusionMode.Ignore
             mask: Region {}                    // fully click-through
             Rectangle {
-                anchors.fill: parent
-                color: "#000000"
-                opacity: root.wallFade
-                Behavior on opacity { NumberAnimation { duration: root.wallFadeMs; easing.type: Easing.InOutQuad } }
+                width: parent.width; height: parent.height
+                x: root.wallPanelX * parent.width
+                color: Tok.bg
+
+                // A full-face vent grille. This was a flat field with a caption on it, which
+                // is why it still read as bland however well it was timed — the panel itself
+                // said nothing. At this spacing it costs one Repeater and turns the covering
+                // panel into the blank side of a rack unit sliding across the screen, which is
+                // the same equipment the picker's deck is made of.
+                Row {
+                    anchors.centerIn: parent
+                    spacing: Math.round(22 * root.uiFor(modelData))
+                    Repeater {
+                        model: Math.ceil(parent.parent.width / (22 * root.uiFor(modelData))) + 2
+                        Rectangle {
+                            width: Math.max(1, Math.round(root.uiFor(modelData)))
+                            height: parent.parent.parent.height
+                            color: Tok.alpha(Tok.ink3, 0.16)
+                        }
+                    }
+                }
+
+                // The x binding stays intact: a Behavior intercepts a binding-driven change
+                // rather than overwriting it, which a NumberAnimation on the same property
+                // would have done permanently on the first run.
+                //
+                // Asymmetric easing, because arriving and leaving are not the same event. It
+                // decelerates ON (it has come to cover something and stops) and accelerates
+                // OFF (it is done and gets out of the way). One curve for both read as a
+                // single mechanical sweep in each direction, which is what made it dull.
+                Behavior on x {
+                    enabled: root.wallPanelAnim
+                    NumberAnimation {
+                        duration: root.wallSlideMs
+                        easing.type: root.wallPanelX === 0 ? Easing.OutCubic : Easing.InCubic
+                    }
+                }
+                // The leading edge, so the panel has a direction and not just a presence: a
+                // machined lip — the accent rule with a hairline set just behind it — on
+                // whichever side it is travelling towards.
+                Rectangle {
+                    id: lip
+                    width: Math.max(3, Math.round(3 * root.uiFor(modelData)))
+                    height: parent.height
+                    x: root.wallPanelDir > 0 ? 0 : parent.width - width
+                    color: Tok.accent
+                }
+                Rectangle {
+                    width: 1; height: parent.height
+                    x: root.wallPanelDir > 0 ? lip.width + 2 : parent.width - lip.width - 3
+                    color: Tok.ruleHard
+                }
+
+                // What it landed on, held in the middle of the panel while the swap happens
+                // behind it. Direction first, in the tracked label style, then the file.
+                Rectangle {
+                    anchors.centerIn: parent
+                    width: plateCol.implicitWidth + Tok.s12 * 2 * root.uiFor(modelData)
+                    height: plateCol.implicitHeight + Tok.s8 * root.uiFor(modelData)
+                    color: Tok.surface
+                    radius: Tok.rSmall
+                    opacity: root.wallPanelX === 0 ? 1 : 0
+                    Behavior on opacity { NumberAnimation { duration: 140; easing.type: Easing.OutCubic } }
+
+                    IndRule { anchors { left: parent.left; right: parent.right; top: parent.top } hard: true }
+                    IndRule { anchors { left: parent.left; right: parent.right; bottom: parent.bottom } hard: true }
+
+                    // the deck's vent motif, both ends, so the plate reads as equipment
+                    Repeater {
+                        model: 2
+                        Row {
+                            required property int index
+                            anchors.verticalCenter: parent.verticalCenter
+                            anchors.left: index === 0 ? parent.left : undefined
+                            anchors.right: index === 1 ? parent.right : undefined
+                            anchors.leftMargin: Tok.s4 * root.uiFor(modelData)
+                            anchors.rightMargin: Tok.s4 * root.uiFor(modelData)
+                            spacing: Math.max(2, Math.round(3 * root.uiFor(modelData)))
+                            Repeater {
+                                model: 5
+                                Rectangle {
+                                    width: Math.max(1, Math.round(root.uiFor(modelData)))
+                                    height: Math.round(14 * root.uiFor(modelData))
+                                    color: Tok.alpha(Tok.ink3, 0.30)
+                                }
+                            }
+                        }
+                    }
+
+                Column {
+                    id: plateCol
+                    anchors.centerIn: parent
+                    spacing: Tok.s3 * root.uiFor(modelData)
+
+                    // A working deck, not a caption. The hold is the machine loading the next
+                    // cartridge, so it shows exactly that: the wallpaper you are about to get,
+                    // dropping into a slot. Same event as the picker's commit, same language,
+                    // and it turns the wait into the thing you are waiting for.
+                    Item {
+                        id: loadBay
+                        anchors.horizontalCenter: parent.horizontalCenter
+                        width: Math.round(232 * root.uiFor(modelData))
+                        height: Math.round(118 * root.uiFor(modelData))
+                        clip: true
+
+                        Rectangle {
+                            id: miniCart
+                            width: Math.round(208 * root.uiFor(modelData))
+                            height: Math.round(117 * root.uiFor(modelData))
+                            x: (loadBay.width - width) / 2
+                            // parked clear of the slot until the swap has actually happened,
+                            // then driven all the way through the clip boundary
+                            y: root.wallDrop ? loadBay.height : Math.round(6 * root.uiFor(modelData))
+                            Behavior on y {
+                                NumberAnimation { duration: 360; easing.type: Easing.InQuad }
+                            }
+                            color: Tok.sunken
+                            radius: Tok.rSmall
+                            border.width: Math.max(1, Math.round(2 * root.uiFor(modelData)))
+                            border.color: Tok.accent
+                            clip: true
+                            Image {
+                                anchors.fill: parent
+                                anchors.margins: parent.border.width
+                                source: root.wallPanelThumb ? "file://" + root.wallPanelThumb : ""
+                                fillMode: Image.PreserveAspectCrop
+                                asynchronous: true; cache: true
+                                sourceSize.width: 420
+                            }
+                        }
+                    }
+
+                    // the slot it goes into
+                    Item {
+                        anchors.horizontalCenter: parent.horizontalCenter
+                        width: loadBay.width
+                        height: Math.round(12 * root.uiFor(modelData))
+                        Rectangle {
+                            anchors.fill: parent
+                            color: Qt.darker(Tok.sunken, Tok.light ? 2.1 : 1.6)
+                            radius: Tok.rSmall
+                        }
+                    }
+
+                    IndText {
+                        anchors.horizontalCenter: parent.horizontalCenter
+                        mono: true
+                        sz: Math.round(Tok.tLabel * root.uiFor(modelData))
+                        font.weight: 600
+                        font.letterSpacing: 1.6
+                        font.capitalization: Font.AllUppercase
+                        color: Tok.accent
+                        text: root.wallPanelDir > 0 ? "next  →" : "←  previous"
+                    }
+                    IndText {
+                        anchors.horizontalCenter: parent.horizontalCenter
+                        mono: true
+                        sz: Math.round(Tok.tDense * root.uiFor(modelData))
+                        color: Tok.ink
+                        text: root.wallPanelName
+                        elide: Text.ElideMiddle
+                        width: Math.min(implicitWidth, parent.parent.width * 0.6)
+                        horizontalAlignment: Text.AlignHCenter
+                    }
+                    // The wait, drawn. mpvpaper's first frame is not ours to hurry, so the
+                    // only decent thing to do with the hold is say how much of it is left —
+                    // which is feedback, the one job that earns an animation. It fills for
+                    // exactly the length of the hold, on a hairline track, in the accent.
+                    Rectangle {
+                        anchors.horizontalCenter: parent.horizontalCenter
+                        width: 200 * root.uiFor(modelData)
+                        height: Math.max(1, Math.round(root.uiFor(modelData)))
+                        color: Tok.rule
+                        Rectangle {
+                            width: root.wallHold ? parent.width : 0
+                            height: parent.height
+                            color: Tok.accent
+                            Behavior on width {
+                                NumberAnimation { duration: 620; easing.type: Easing.Linear }
+                            }
+                        }
+                    }
+                }
+                }
             }
         }
     }
@@ -456,7 +747,6 @@ ShellRoot {
     property bool   cfgDockRunning: true     // show running apps that are not pinned
     property bool   cfgDockLabels: true
     property bool cfgMpris: true
-    property bool cfgDac: true
     property bool cfgMic: false     // off by default: most people do not need a permanent mic pill
     property bool cfgTray: true
     property bool cfgWeather: true
@@ -474,13 +764,120 @@ ShellRoot {
     property bool cfgUpdates: true        // pending pacman/AUR update count
     property bool cfgNet: true            // live network throughput
     property bool cfgNightWidget: false   // Night-light toggle pill on the bar
+    // ---------- bar shape, workspaces, and the mark ----------
+    // All three used to be facts about the bar rather than settings: one continuous strip,
+    // workspaces as circles that grow, and the sea-shell logo, always. The first thing on
+    // somebody's bar should be able to say what the MACHINE is.
+    property string cfgBarShape: "bar"      // bar | pills
+    property string cfgWsStyle:  "grow"     // grow | pill | circle
+    property string cfgWsLabel:  "arabic"   // what the workspace is CALLED on the bar
+    property string cfgBarLogo:  "auto"     // auto | sea | cachy | <distro glyph> | custom
+    property string cfgBarLogoPath: ""
+
+    // /etc/os-release, read synchronously — the mark is on the first frame or it is a flash.
+    // Same reasoning as the palette; see the FileView above.
+    FileView {
+        id: osRelease
+        path: "/etc/os-release"
+        blockLoading: true
+        Component.onCompleted: root.parseOsRelease(osRelease.text())
+        onLoaded: root.parseOsRelease(osRelease.text())
+    }
+    property string distroId: ""
+    property string distroLike: ""
+    function parseOsRelease(t) {
+        if (!t) return;
+        var lines = t.split("\n");
+        for (var i = 0; i < lines.length; i++) {
+            var m = /^(ID|ID_LIKE)=(.*)$/.exec(lines[i].trim());
+            if (!m) continue;
+            var v = m[2].replace(/^"|"$/g, "").trim().toLowerCase();
+            if (m[1] === "ID") root.distroId = v; else root.distroLike = v;
+        }
+    }
+    // What "auto" resolves to. CachyOS gets the drawn mark because Nerd Fonts ships no
+    // glyph for it; anything ID_LIKE=arch that we do not know by name falls back to the
+    // Arch glyph rather than to the shell's own logo, because that is still true.
+    readonly property string logoKind: {
+        if (root.cfgBarLogo !== "auto") return root.cfgBarLogo;
+        var id = root.distroId;
+        if (id === "cachyos") return "cachy";
+        var known = ["arch","alpine","artix","debian","endeavouros","fedora","gentoo",
+                     "manjaro","mint","nixos","opensuse","pop","ubuntu","void"];
+        if (known.indexOf(id) >= 0) return id;
+        if (id === "linuxmint") return "mint";
+        if (id.indexOf("opensuse") === 0) return "opensuse";
+        if (id === "pop_os" || id === "popos") return "pop";
+        if (root.distroLike.indexOf("arch") >= 0) return "arch";
+        if (root.distroLike.indexOf("debian") >= 0) return "debian";
+        if (root.distroLike.indexOf("fedora") >= 0) return "fedora";
+        return id.length ? "tux" : "sea";
+    }
+    readonly property bool barPills: root.cfgBarShape === "pills"
+
+    // ---------- what a workspace is CALLED ----------
+    // The bar has always said "1 2 3" because that is what Hyprland calls them, which is a
+    // reason to default to it and no reason at all to be stuck with it. Every scheme below
+    // falls back to the plain number once it runs out of symbols — ⚅ is the last die, ⑳ the
+    // last circled numeral, and a workspace 21 that rendered as a blank box would be worse
+    // than one that admits it is 21.
+    function wsRoman(n) {
+        if (n < 1 || n > 3999) return "" + n;
+        var v = [1000,900,500,400,100,90,50,40,10,9,5,4,1];
+        var g = ["M","CM","D","CD","C","XC","L","XL","X","IX","V","IV","I"];
+        var out = "";
+        for (var i = 0; i < v.length; i++) while (n >= v[i]) { out += g[i]; n -= v[i] }
+        return out;
+    }
+    function wsMandarin(n) {
+        var d = ["", "一", "二", "三", "四", "五", "六", "七", "八", "九"];
+        if (n < 1 || n > 99) return "" + n;
+        if (n < 10) return d[n];
+        if (n === 10) return "十";
+        var tens = Math.floor(n / 10), ones = n % 10;
+        return (tens > 1 ? d[tens] : "") + "十" + (ones ? d[ones] : "");
+    }
+    // Not every scheme's symbols exist in the UI font. CookieRun — the font this shell is
+    // actually being used with — has the circled numerals and NOT the dice, so ⚀⚁⚂ rendered
+    // as three tofu boxes on the bar. Probed rather than hardcoded, the same way the bar's
+    // Nerd Font is, and the scheme falls back to plain numbers if nothing on the machine
+    // can draw it.
+    readonly property string symbolFamily: {
+        var fams = Qt.fontFamilies();
+        var prefs = ["DejaVu Sans", "Noto Sans Symbols2", "Adwaita Mono", "DejaVu Sans Mono"];
+        for (var i = 0; i < prefs.length; i++)
+            if (fams.indexOf(prefs[i]) >= 0) return prefs[i];
+        for (var j = 0; j < fams.length; j++)
+            if (fams[j].indexOf("Nerd Font") >= 0) return fams[j];
+        return "";
+    }
+    // Which schemes need it, and whether we can honour them at all.
+    readonly property bool wsNeedsSymbol: root.cfgWsLabel === "dice"
+    readonly property string wsFontFamily: root.wsNeedsSymbol && root.symbolFamily !== ""
+                                           ? root.symbolFamily : root.cfgFont
+
+    function wsLabelFor(n) {
+        switch (root.cfgWsLabel) {
+        case "roman":    return root.wsRoman(n);
+        case "mandarin": return root.wsMandarin(n);
+        case "letters":  return (n >= 1 && n <= 26) ? String.fromCharCode(64 + n) : "" + n;
+        case "circled":  return (n >= 1 && n <= 20) ? String.fromCharCode(0x2460 + n - 1) : "" + n;
+        case "dice":     return (n >= 1 && n <= 6 && root.symbolFamily !== "")
+                                ? String.fromCharCode(0x2680 + n - 1) : "" + n;
+        // Every workspace the same mark: which one you are on is said by the fill alone,
+        // and where you are in the row by position. The most minimal the bar goes.
+        case "dots":     return "\u25cf";
+        default:         return "" + n;
+        }
+    }
+
     property bool cfgAutoHide: false      // auto-hide the bar; reveal by pushing the cursor to the edge
     property bool cfgHideFullscreen: false // hide the bar while a window is fullscreen (reveal on hover)
     // order of the right-hand bar widgets (drag-reorder in Settings → Bar widgets).
     // Values are the widget ids; the bar positions each right-group pill by its index here,
     // so reordering this list reorders the pills. Unknown/absent ids fall to the far end.
     // wgMpris is the centre pill and ignores its position; wgRec is the transient recorder.
-    readonly property var defaultWidgetOrder: ["wgMpris","wgTray","wgQuick","wgUpdates","wgNet","wgWeather","wgClipboard","wgNotif","wgWifi","wgBluetooth","wgKdeconnect","wgCaffeine","wgNight","wgSystem","wgDac","wgMic","wgVolume","wgBattery","wgRec","wgClock","wgPower"]
+    readonly property var defaultWidgetOrder: ["wgMpris","wgTray","wgQuick","wgUpdates","wgNet","wgWeather","wgClipboard","wgNotif","wgWifi","wgBluetooth","wgKdeconnect","wgCaffeine","wgNight","wgSystem","wgMic","wgVolume","wgBattery","wgRec","wgClock","wgPower"]
     property var cfgWidgetOrder: root.defaultWidgetOrder
     // left cluster order (logo · workspaces · window-title) — drag-reorder in Settings → Bar widgets
     readonly property var defaultLeftOrder: ["lgLogo","lgWork","lgTitle"]
@@ -547,9 +944,19 @@ ShellRoot {
     readonly property real dropOpacity: root.cfgLight ? Math.max(0.55, root.cfgOpacity)
                                                       : Math.max(0.35, root.cfgOpacity)
     Process { running: true; command: ["sh","-c","d=\"$HOME/.config/sea-shell\"; mkdir -p \"$d\"; touch \"$d/kitty-matugen.conf\"; [ -f \"$d/appearance.json\" ] || printf '{\"radius\":14,\"opacity\":0.80,\"height\":42,\"accent\":\"#63c7dd\",\"font\":\"monospace\"}' > \"$d/appearance.json\"; echo \"$d/appearance.json\""]
-        stdout: StdioCollector { id: apprPathOut; onStreamFinished: apprFile.path = apprPathOut.text.trim() } }
+        // Seeding only. It used to also be what TOLD the FileView below where the file is,
+        // which meant the bar's own colours waited on a shell fork before they could even
+        // start loading — the second half of the blue flash. The path is known without
+        // asking anything; only the mkdir/touch/seed needs a shell.
+        stdout: StdioCollector { id: apprPathOut; onStreamFinished: apprFile.reload() } }
     FileView {
-        id: apprFile; path: ""; watchChanges: true
+        id: apprFile
+        path: Quickshell.env("HOME") + "/.config/sea-shell/appearance.json"
+        // Read before the first frame, for the same reason Tok.qml blocks: everything the
+        // bar draws is a function of this file, and drawing once without it is a flash of
+        // the defaults.
+        blockLoading: true
+        watchChanges: true
         function apply() { try {
             reload();                                  // pull the latest bytes (needed for live changes)
             var t = text(); if(!t || !t.trim()) return; var j = JSON.parse(t);
@@ -572,7 +979,6 @@ ShellRoot {
             if (j.font    !== undefined && (""+j.font).length>0)   root.cfgFont   = j.font;
             if (j.mode    !== undefined) root.cfgLight = (""+j.mode === "light");
             if (j.wgMpris !== undefined) root.cfgMpris = !!j.wgMpris;
-            if (j.wgDac !== undefined) root.cfgDac = !!j.wgDac;
             if (j.wgMic !== undefined) root.cfgMic = !!j.wgMic;
             if (j.wgTray !== undefined) root.cfgTray = !!j.wgTray;
             if (j.wgWeather !== undefined) root.cfgWeather = !!j.wgWeather;
@@ -591,6 +997,11 @@ ShellRoot {
             if (j.wgUpdates !== undefined) root.cfgUpdates = !!j.wgUpdates;
             if (j.wgNet !== undefined) root.cfgNet = !!j.wgNet;
             if (j.wgNight !== undefined) root.cfgNightWidget = !!j.wgNight;
+            if (j.barShape === "bar" || j.barShape === "pills") root.cfgBarShape = j.barShape;
+            if (j.wsStyle === "grow" || j.wsStyle === "pill" || j.wsStyle === "circle") root.cfgWsStyle = j.wsStyle;
+            if (j.wsLabel !== undefined && (""+j.wsLabel).length > 0) root.cfgWsLabel = ""+j.wsLabel;
+            if (j.barLogo !== undefined && (""+j.barLogo).length > 0) root.cfgBarLogo = ""+j.barLogo;
+            if (j.barLogoPath !== undefined) root.cfgBarLogoPath = ""+j.barLogoPath;
             if (j.autoHide !== undefined) root.cfgAutoHide = !!j.autoHide;
             if (j.hideFullscreen !== undefined) root.cfgHideFullscreen = !!j.hideFullscreen;
             if (j.night !== undefined) root.cfgNight = !!j.night;
@@ -602,6 +1013,10 @@ ShellRoot {
             if (j.monitors !== undefined && j.monitors && typeof j.monitors === "object") root.cfgMonitors = j.monitors;
             if ((root.cfgLight ? 1 : 0) !== root._appliedMode) root.applyMode();  // sync system + kitty on flip/startup
         } catch(e) {} }
+        // Same trap as Tok.qml: with blockLoading the bytes are present when construction
+        // finishes and NO load signal is emitted, so onLoaded alone never fires and the
+        // bar draws its first frame against the defaults regardless.
+        Component.onCompleted: apply()
         onLoaded: apply()
         onFileChanged: apply()
     }
@@ -799,58 +1214,25 @@ ShellRoot {
         root.audioCycleRoute(e || { id: pwId, sink_id: -1 });
     }
 
-    // ---------- moondrop dac ----------
-    // Identifying the DAC rides entirely on PipeWire, and deliberately never opens
-    // the device. ALSA publishes a USB card's vendor/product as "USB<vid>:<pid>" in
-    // alsa.components ("USB35d8:011d" for a DAWN PRO2) -- exactly the key the
-    // script's registry is indexed by -- so a passive indicator needs no hidraw at
-    // all. That matters: DacPanel serialises every call through one queue because
-    // two processes on the same hidraw pick up each other's replies. A pill that
-    // polled --json would be the second process.
-    //
-    // The registry itself comes from the script (--registry is the one flag that
-    // touches no hardware), so this file never hardcodes a product ID.
-    readonly property string _dacScript: Qt.resolvedUrl("moondrop_control.py").toString().replace("file://","")
-    property var dacRegistry: null
-    Process {
-        id: dacRegProc
-        command: ["python3", root._dacScript, "--registry"]
-        running: true
-        stdout: StdioCollector { id: dacRegOut; onStreamFinished: {
-            try { root.dacRegistry = JSON.parse(dacRegOut.text.trim() || "null"); }
-            catch (e) { root.dacRegistry = null; }   // no registry → no pill, rather than a guess
-        } }
-    }
-
-    // "USB35d8:011d" → "011d". Empty for anything that isn't this vendor.
-    function dacPidOf(node) {
-        if (!node || !node.properties || !root.dacRegistry) return "";
-        var comp = node.properties["alsa.components"] || "";
-        var m = new RegExp("USB" + root.dacRegistry.vendor_id + ":([0-9a-fA-F]{4})", "i").exec(comp);
-        return m ? m[1].toLowerCase() : "";
-    }
-    readonly property var dacNode: {
-        if (!root.dacRegistry) return null;
-        var ns = root.sinks;
-        for (var i = 0; i < ns.length; i++) if (root.dacPidOf(ns[i]) !== "") return ns[i];
-        return null;
-    }
-    readonly property string dacPidPw: root.dacPidOf(root.dacNode)
-    // ---- exclusive / bit-perfect playback ----
+    // ---------- exclusive (bit-perfect) playback ----------
     // PipeWire is NOT the source of truth for playback. A bit-perfect player (SONE,
     // TIDAL) opens the card directly via exclusive ALSA: the graph never sees the
     // stream, defaultAudioSink cheerfully reports "Speaker" while the music is
-    // physically going through the DAC, and PipeWire may not even keep a node for
-    // a card it cannot open. So identification here goes around PipeWire entirely —
-    // the kernel says who holds the card, and /proc/asound/cardN/usbid says what
-    // that card IS ("35d8:011d"), which is the same USB pair the script's registry
-    // is keyed by. One scan answers both "is anything bypassing the graph" and
-    // "is that thing a Moondrop".
+    // physically going out another device, and PipeWire may not even keep a node for
+    // a card it cannot open. So this goes around PipeWire entirely — the kernel says
+    // who holds the card.
+    //
+    // What survives here is deliberately GENERIC. This used to be half of a Moondrop
+    // DAC integration, keyed to a vendor registry, and the DAC panel is gone — but
+    // "something has taken the card and pipewire cannot see the audio" is not a
+    // Moondrop fact. The recorder needs it, because system audio captured from a
+    // monitor while a card is held exclusively records silence.
     property string exclCard: ""     // ALSA card index held outside pipewire
     property string exclUsbId: ""    // its "vid:pid", empty for non-USB cards
     property string exclHolder: ""   // owning process name, e.g. "alsa-writer"
+    readonly property bool exclusiveHold: root.exclCard !== ""
     Process {
-        id: dacExclProc
+        id: exclProc
         command: ["sh","-c",
             "for d in /proc/asound/card*/pcm*p/sub*; do " +
               "[ -f \"$d/status\" ] || continue; " +
@@ -862,46 +1244,17 @@ ShellRoot {
               "printf '%s|%s|%s' \"$c\" \"$(cat /proc/asound/card$c/usbid 2>/dev/null)\" \"$comm\"; " +
               "exit 0; " +
             "done"]
-        stdout: StdioCollector { id: dacExclOut; onStreamFinished: {
-            var p = dacExclOut.text.trim().split("|");
+        stdout: StdioCollector { id: exclOut; onStreamFinished: {
+            var p = exclOut.text.trim().split("|");
             root.exclCard = p[0] || ""; root.exclUsbId = (p[1] || "").toLowerCase(); root.exclHolder = p[2] || "";
         } } }
-    // Cannot be gated on dacPresent: presence now partly DEPENDS on this scan, and
-    // a timer waiting on its own result never fires. It is a few /proc reads.
     Timer { interval: 8000; running: true; repeat: true; triggeredOnStart: true
-            onTriggered: dacExclProc.running = true }
-
-    // The exclusively-held card, named through the script's registry — "" when
-    // nothing bypasses pipewire, or when what does isn't a DAC we know.
-    readonly property string dacPidExcl: {
-        if (!root.dacRegistry || root.exclUsbId === "") return "";
-        var p = root.exclUsbId.split(":");
-        if (p.length !== 2 || p[0] !== root.dacRegistry.vendor_id) return "";
-        return root.dacRegistry.supported[p[1]] ? p[1] : "";
-    }
-    // Prefer PipeWire's answer (reactive, no polling); fall back to the ALSA scan,
-    // which is the only one that still works once the card has been taken.
-    readonly property string dacPid: root.dacPidPw !== "" ? root.dacPidPw : root.dacPidExcl
-    readonly property bool dacPresent: root.dacPid !== ""
-    readonly property bool dacExclusive: root.dacPidExcl !== ""
-    // Two ways it counts as the output: PipeWire routes to it, or something
-    // bypassed PipeWire and took the card for itself.
-    readonly property bool dacActive: root.dacExclusive
-                                      || (root.dacNode !== null && Pipewire.defaultAudioSink !== null
-                                          && Pipewire.defaultAudioSink.id === root.dacNode.id)
-    // Whichever path found it, the NAME comes from the script's registry — nothing
-    // here hardcodes a product ID.
-    readonly property string dacModel: (root.dacRegistry && root.dacPid && root.dacRegistry.supported[root.dacPid]) || ""
-    // Recognised-but-not-driveable (the Old Fashioned) stays out of the pill: it is
-    // a Moondrop, but the panel cannot tune it, so claiming otherwise would lie.
-    readonly property bool dacSupported: root.dacModel !== ""
+            onTriggered: exclProc.running = true }
 
     // Short name for a sink: the nickname ("Speaker") beats the description
     // ("Alder Lake PCH-P High Definition Audio Controller Speaker") on a bar.
     function sinkShort(n) { return n ? (n.nickname || n.description || n.name || "output") : "—" }
-    readonly property string outputLabel:
-        root.dacActive ? (root.dacModel + (root.dacExclusive ? " · exclusive" : ""))
-                       : root.sinkShort(Pipewire.defaultAudioSink)
+    readonly property string outputLabel: root.sinkShort(Pipewire.defaultAudioSink)
 
     // ---------- microphone ----------
     // The only genuinely absent widget: Volume covers the sink and nothing in the shell has ever
@@ -1473,7 +1826,7 @@ ShellRoot {
     }
 
     // ---------- bit-perfect quality readout ----------
-    // Players like SONE (TIDAL) in bit-perfect mode bypass pipewire and open the DAC
+    // Players like SONE (TIDAL) in bit-perfect mode bypass pipewire and open the card
     // directly via ALSA — the kernel's hw_params then holds the TRUE stream format.
     // We report the first RUNNING playback substream not owned by pipewire.
     property string hqInfo: ""
@@ -2055,6 +2408,10 @@ ShellRoot {
             var t = text(); if (!t || !t.trim()) return;
             root.applyGame(!!JSON.parse(t).on);
         } catch (e) {} }
+        // Same trap as Tok.qml: with blockLoading the bytes are present when construction
+        // finishes and NO load signal is emitted, so onLoaded alone never fires and the
+        // bar draws its first frame against the defaults regardless.
+        Component.onCompleted: apply()
         onLoaded: apply()
         onFileChanged: apply()
     }
@@ -2405,6 +2762,34 @@ ShellRoot {
         height: implicitHeight
         clip: true
 
+        // A CLIP ALONE CUTS MID-GLYPH. The strip was chopped dead straight at both ends, so
+        // a title scrolling past showed half a character hanging at each edge — which reads
+        // as a rendering fault rather than as text continuing. It fades out instead.
+        //
+        // Only while it is actually scrolling: a title that fits needs no mask, and a render
+        // layer per pill for nothing is a layer per pill for nothing.
+        layer.enabled: mq.scrolling
+        layer.effect: MultiEffect {
+            maskEnabled: true
+            maskSource: mqMask
+        }
+        Item {
+            id: mqMask
+            anchors.fill: parent
+            visible: false
+            layer.enabled: true
+            Rectangle {
+                anchors.fill: parent
+                gradient: Gradient {
+                    orientation: Gradient.Horizontal
+                    GradientStop { position: 0.00; color: "transparent" }
+                    GradientStop { position: 0.08; color: "white" }
+                    GradientStop { position: 0.92; color: "white" }
+                    GradientStop { position: 1.00; color: "transparent" }
+                }
+            }
+        }
+
         // Both copies live in ONE strip that scrolls as a single unit. (Previously the
         // ghost bound its x to the animated primary's x — bindings on an animated
         // property lag frame-to-frame, so the ghost fell behind and the loop looked
@@ -2747,13 +3132,49 @@ ShellRoot {
                 // (at 0% the fill and outline both vanish and only the chips remain), so it is
                 // left alone. The rim is the part that changes: a hairline rule rather than an
                 // accent tint, so the accent goes back to marking active state only.
-                color: theme.a(root.barFillColor, root.cfgOpacity)
-                border.width: root.cfgOpacity < 0.06 ? 0 : 1
+                // In PILL mode the strip itself carries nothing: the three clusters grow
+                // their own grounds below, and one continuous background behind them would
+                // just be the bar again with extra outlines drawn on it.
+                color: root.barPills ? "transparent" : theme.a(root.barFillColor, root.cfgOpacity)
+                border.width: (root.barPills || root.cfgOpacity < 0.06) ? 0 : 1
                 border.color: Tok.ruleHard
 
                 Item {
                     id: horizontalBarLayout
                     anchors.fill: parent
+
+                    // ---- PILL MODE: a ground per cluster ----
+                    // Two, not three: the centre cluster is the media pill, which already has
+                    // its own rounded ground — putting an island behind it would be a pill
+                    // drawn around a pill. So the left and right clusters get one each and the
+                    // middle one is simply itself.
+                    //
+                    // z:-1 rather than declaration order, because these have to sit behind
+                    // siblings that are declared further down and positioned by xFor().
+                    Rectangle {
+                        z: -1
+                        visible: root.barPills && leftGroup.width > 0
+                        anchors.fill: leftGroup
+                        anchors.margins: -6
+                        anchors.leftMargin: -9
+                        anchors.rightMargin: -9
+                        radius: Tok.rCard
+                        color: theme.a(root.barFillColor, root.cfgOpacity)
+                        border.width: root.cfgOpacity < 0.06 ? 0 : 1
+                        border.color: Tok.ruleHard
+                    }
+                    Rectangle {
+                        z: -1
+                        visible: root.barPills && rightGroup.width > 0
+                        anchors.fill: rightGroup
+                        anchors.margins: -6
+                        anchors.leftMargin: -9
+                        anchors.rightMargin: -9
+                        radius: Tok.rCard
+                        color: theme.a(root.barFillColor, root.cfgOpacity)
+                        border.width: root.cfgOpacity < 0.06 ? 0 : 1
+                        border.color: Tok.ruleHard
+                    }
                     // Never use visible:false — a hidden subtree collapses its Text pills'
                     // implicitWidth to 0 and doesn't recover on re-show, which is what wiped
                     // the right group when switching orientation. Stay laid-out; reveal via
@@ -2793,8 +3214,10 @@ ShellRoot {
                         }
                         return Math.max(0, tot - leftGroup.gap);
                     }
-                    SeaLogo { property string lid: "lgLogo"; x: leftGroup.xFor(lid); anchors.verticalCenter: parent.verticalCenter
+                    BarLogo { property string lid: "lgLogo"; x: leftGroup.xFor(lid); anchors.verticalCenter: parent.verticalCenter
                         size: 24
+                        kind: root.logoKind
+                        imagePath: root.cfgBarLogoPath
                         card: theme.panel; accent: theme.iris; highlight: theme.frost; rim: theme.iris
                         MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: launcher.toggle() } }
                     Grid { property string lid: "lgWork"; x: leftGroup.xFor(lid); anchors.verticalCenter: parent.verticalCenter
@@ -2816,15 +3239,46 @@ ShellRoot {
                                 // it is open. (A Positioner skips invisible children outright, so
                                 // this leaves no gap where the chip used to be.)
                                 visible: modelData.id > 0
-                                // active workspace grows along the bar's long axis
-                                width:  foc ? 36 : 24
+                                // Two ways to say which one you are on.
+                                //   grow — a circle per workspace, the active one stretching
+                                //          into a pill along the bar's long axis. Movement
+                                //          carries the state, so it survives any palette.
+                                //   pill — every workspace the same pill, the active one
+                                //          filled. Nothing moves; the row keeps a fixed width,
+                                //          which is what people want it back for.
+                                //   grow   — a rounded chip per workspace, the active one
+                                //            stretching along the bar's long axis. Movement
+                                //            carries the state, so it survives any palette.
+                                //   pill   — every workspace the same chip, the active one
+                                //            filled. Nothing moves; the row keeps a fixed
+                                //            width, which is what people want it back for.
+                                //   circle — the same, actually round. Wide labels (VIII, 十二)
+                                //            push it out rather than being clipped, so it is a
+                                //            circle when it can be and a lozenge when it cannot.
+                                readonly property real labelW: wsLabelTxt.implicitWidth + 14
+                                //   grow   — a chip each, the active one stretching along the
+                                //            bar. Its corner radius follows the roundness
+                                //            slider, so at a low roundness these are rounded
+                                //            SQUARES, not circles.
+                                //   pill   — every workspace the same chip, the active one
+                                //            filled. Nothing moves; the row keeps a fixed width.
+                                //   circle — the old shape, properly: true circles that STRETCH
+                                //            into a true pill on the one you are on. The radius
+                                //            is half the height rather than the roundness
+                                //            slider, so it is round at any setting.
+                                width:  root.cfgWsStyle === "circle" ? (foc ? Math.max(38, labelW) : Math.max(24, labelW))
+                                      : root.cfgWsStyle === "pill"   ? Math.max(30, labelW)
+                                      : (foc ? Math.max(36, labelW) : Math.max(24, labelW))
                                 height: 24
-                                radius: Tok.r   // circle → pill when active
+                                radius: root.cfgWsStyle === "circle" ? height / 2 : Tok.r
                                 color: foc ? theme.iris : theme.a(theme.line,0.55)
                                 border.width: 1; border.color: foc ? theme.frost : theme.a(theme.iris,0.18)
                                 Behavior on width  { NumberAnimation { duration: 180; easing.type: Easing.OutBack } }
                                 Behavior on color { ColorAnimation { duration: 160 } }
-                                Text { anchors.centerIn: parent; text: modelData.id; color: foc ? theme.bg : theme.sub; font.pixelSize: 12; font.family: root.cfgFont; font.bold: foc }
+                                Text { id: wsLabelTxt; anchors.centerIn: parent
+                                    text: root.wsLabelFor(modelData.id)
+                                    color: foc ? theme.bg : theme.sub
+                                    font.pixelSize: 12; font.family: root.wsFontFamily; font.bold: foc }
                                 MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: Hyprland.dispatch("hl.dsp.focus({ workspace = "+modelData.id+" })") }
                             }
                         }
@@ -3043,27 +3497,23 @@ ShellRoot {
                             visible: root.player !== null
                             color: theme.a(theme.line, 0.35)
                             border.width: 1
-                            border.color: root.dacActive ? theme.a(theme.iris,0.35) : theme.a(theme.line,0.9)
-                            MouseArea { anchors.fill: parent; hoverEnabled: true
-                                cursorShape: root.dacActive ? Qt.PointingHandCursor : Qt.ArrowCursor
-                                onClicked: if (root.dacActive) dacPanel.toggle() }
+                            border.color: theme.a(theme.line,0.9)
                             Row { anchors.left: parent.left; anchors.leftMargin: 8
                                 anchors.right: hqChip.left; anchors.rightMargin: 6
                                 anchors.verticalCenter: parent.verticalCenter; spacing: 6
                                 Sym { anchors.verticalCenter: parent.verticalCenter
-                                    text: root.dacActive ? "graphic_eq" : "volume_up"; sz: 13
-                                    color: root.dacActive ? theme.iris : theme.faint }
+                                    text: "volume_up"; sz: 13; color: theme.faint }
                                 IndText { anchors.verticalCenter: parent.verticalCenter; mono: true; sz: 9
                                     text: "OUT"; color: theme.faint; font.letterSpacing: 1 }
                                 Text { anchors.verticalCenter: parent.verticalCenter
                                     text: root.outputLabel; elide: Text.ElideRight
-                                    color: root.dacActive ? theme.iris : theme.sub
-                                    font.pixelSize: 11; font.family: root.cfgFont; font.bold: root.dacActive } }
+                                    color: theme.sub
+                                    font.pixelSize: 11; font.family: root.cfgFont } }
                             IndChip { id: hqChip
                                 anchors.right: parent.right; anchors.rightMargin: 6
                                 anchors.verticalCenter: parent.verticalCenter
                                 visible: root.hqInfo !== ""
-                                text: root.hqInfo + (root.dacExclusive ? " \u00b7 " + root.dacModel : "")
+                                text: root.hqInfo + (root.exclusiveHold ? " \u00b7 exclusive" : "")
                                 tone: "warn" } }
 
                         // ---- player volume ----
@@ -3485,27 +3935,6 @@ ShellRoot {
                         icon: charging?"battery_charging_full":pct>=90?"battery_full":pct>=60?"battery_5_bar":pct>=35?"battery_3_bar":pct>=15?"battery_1_bar":"battery_alert"
                         value: pct+"%"; accent: charging?theme.good:pct<=20?theme.bad:theme.frost }
                     
-
-                    // ---- MOONDROP DAC PILL ----
-                    // Transient, like the recorder: it exists only while a DAC the
-                    // panel can actually drive is plugged in.
-                    //
-                    // "Active" is carried by the NAME, not by colour. Colour alone
-                    // can't do it: in light mode theme.iris is Qt.darker(accent,2.4)
-                    // and lands within a few percent of theme.faint, and matugen can
-                    // repoint the accent at any wallpaper colour — so an accent-vs-
-                    // faint swap is unreadable in exactly the theme it has to work in.
-                    // Icon alone = plugged in. Icon + model = audio is going through it.
-                    // Left-click opens the EQ panel, right-click routes audio here.
-                    Pill { owner: bar; id: dacPill; icon: "graphic_eq"
-                        property string wid: "wgDac"; x: rightGroup.xFor(wid); anchors.verticalCenter: parent.verticalCenter
-                        visible: root.cfgDac && root.dacSupported
-                        accent: root.dacActive ? theme.iris : theme.faint
-                        value: root.dacActive ? root.dacModel : ""
-                        maxTextW: 130
-                        onClicked: dacPanel.toggle()
-                        onRightClicked: if (root.dacNode) Pipewire.preferredDefaultAudioSink = root.dacNode
-                    }
 
                     // ---- SCREEN RECORDER PILL ----
                     // Transient: it exists only while something is being recorded.
@@ -4575,7 +5004,12 @@ ShellRoot {
                                     color: foc ? theme.iris : theme.a(theme.line, 0.55)
                                     border.width: 1; border.color: foc ? theme.frost : theme.a(theme.iris, 0.18)
                                     Behavior on height { NumberAnimation { duration: 180; easing.type: Easing.OutBack } }
-                                    Text { anchors.centerIn: parent; text: modelData.id; color: foc ? theme.bg : theme.sub; font.pixelSize: 12; font.family: root.cfgFont; font.bold: foc }
+                                    Text {
+                                        anchors.centerIn: parent
+                                        text: root.wsLabelFor(modelData.id)
+                                        color: foc ? theme.bg : theme.sub
+                                        font.pixelSize: 12; font.family: root.wsFontFamily; font.bold: foc
+                                    }
                                     MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: Hyprland.dispatch("hl.dsp.focus({ workspace = "+modelData.id+" })") }
                                 }
                             }
@@ -4953,12 +5387,23 @@ ShellRoot {
     // (the alt-tab switcher HUD lives up top, next to its state + the `switcher` IPC —
     //  a single thumbnail-based overlay; there is deliberately no second one here.)
 
-    // ===== Exposé Mission Control HUD overlay =====
+    // ===== Exposé — every workspace, as a map of where things actually are =====
+    //
+    // The version this replaces drew a fixed 280x180 card per workspace in a Flow, inside a
+    // box clamped to 1000x700 and centred — so on a 1080p screen three workspaces sat in the
+    // top-left eighth of a mostly empty page. Inside each card, the windows were 122x60 tiles
+    // laid out left to right in the order the compositor happened to list them.
+    //
+    // That last part is the real fault. An exposé is a MAP: its whole job is that the picture
+    // of a workspace matches the shape of the workspace, so you recognise the one you want by
+    // its layout rather than by reading three labels. Windows are now drawn at their true
+    // relative positions and sizes within the monitor, and a card is the monitor's own aspect
+    // ratio, so a workspace with a wide editor and a narrow terminal beside it LOOKS like that.
     property bool exposeActive: false
     // refresh on the way in: the tiles read titles/classes and focus by address out of
     // lastIpcObject, which goes empty on a long-lived shell until something asks for it.
     function toggleExpose() { if (!root.exposeActive) Hyprland.refreshToplevels(); root.exposeActive = !root.exposeActive }
-    
+
     PanelWindow {
         id: exposeWin
         readonly property real ui: root.uiFor(exposeWin.screen)
@@ -4969,154 +5414,322 @@ ShellRoot {
         WlrLayershell.namespace: "sea-shell:expose"
         WlrLayershell.keyboardFocus: WlrKeyboardFocus.Exclusive
         exclusionMode: ExclusionMode.Ignore
-        
-        // dim background scrim
+
+        // Real workspaces only, in order. Hyprland numbers special workspaces from -98 down;
+        // the scratchpad is an overlay on wherever you already are, not a place to go.
+        readonly property var wsList: {
+            var out = [];
+            var all = Hyprland.workspaces ? Hyprland.workspaces.values : [];
+            for (var i = 0; i < all.length; i++) if (all[i] && all[i].id > 0) out.push(all[i]);
+            out.sort(function (a, b) { return a.id - b.id });
+            return out;
+        }
+        // The monitor's shape, which is the shape every card takes.
+        readonly property real screenAspect: (exposeWin.screen && exposeWin.screen.height > 0)
+                                             ? exposeWin.screen.width / exposeWin.screen.height : 16 / 9
+        property int sel: 0
+        onVisibleChanged: if (visible) {
+            // open on the one you are standing in, so Enter is a no-op and the arrows start
+            // from where you are rather than from workspace 1
+            for (var i = 0; i < exposeWin.wsList.length; i++)
+                if (Hyprland.focusedWorkspace && exposeWin.wsList[i].id === Hyprland.focusedWorkspace.id)
+                    exposeWin.sel = i;
+        }
+        function go(i) {
+            if (i < 0 || i >= exposeWin.wsList.length) return;
+            Hyprland.dispatch("hl.dsp.focus({ workspace = " + exposeWin.wsList[i].id + " })");
+            root.exposeActive = false;
+        }
+
         Rectangle {
-            anchors.fill: parent; color: theme.bg          // fully opaque — a focus mode, no desktop bleed-through
+            anchors.fill: parent
+            color: Tok.bg                       // opaque: a focus mode, no desktop bleed-through
             MouseArea { anchors.fill: parent; onClicked: root.exposeActive = false }
-            
+
             FocusScope {
                 anchors.fill: parent; focus: exposeWin.visible
-                Keys.onEscapePressed: root.exposeActive = false
-                
-                ColumnLayout {
-                    anchors.centerIn: parent
-                    scale: exposeWin.ui              // authored native; scaled around its centre
-                    // clamp in native space so the scaled HUD still fits the screen
-                    width: Math.min(parent.width / exposeWin.ui - 100, 1000)
-                    height: Math.min(parent.height / exposeWin.ui - 100, 700); spacing: 20
-                    
-                    // Header
-                    RowLayout {
-                        Layout.fillWidth: true
-                        Text { text: "MISSION CONTROL / EXPOSÉ"; color: theme.text; font.pixelSize: 22; font.bold: true; font.family: root.cfgFont }
-                        Item { Layout.fillWidth: true }
-                        Rectangle {
-                            implicitWidth: 32; implicitHeight: 32; radius: Tok.r
-                            color: expClMa.containsMouse ? theme.a(theme.iris, 0.25) : theme.a(theme.line, 0.4)
-                            border.width: 1; border.color: theme.a(theme.iris, 0.16)
-                            Sym { anchors.centerIn: parent; text: "close"; sz: 16; color: theme.frost }
-                            MouseArea { id: expClMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.exposeActive = false }
+                Keys.onPressed: (e) => {
+                    var n = exposeWin.wsList.length, cols = grid.cols;
+                    switch (e.key) {
+                    case Qt.Key_Escape: root.exposeActive = false; e.accepted = true; return;
+                    case Qt.Key_Left:   exposeWin.sel = Math.max(0, exposeWin.sel - 1); e.accepted = true; return;
+                    case Qt.Key_Right:  exposeWin.sel = Math.min(n - 1, exposeWin.sel + 1); e.accepted = true; return;
+                    case Qt.Key_Up:     exposeWin.sel = Math.max(0, exposeWin.sel - cols); e.accepted = true; return;
+                    case Qt.Key_Down:   exposeWin.sel = Math.min(n - 1, exposeWin.sel + cols); e.accepted = true; return;
+                    case Qt.Key_Return:
+                    case Qt.Key_Enter:
+                    case Qt.Key_Space:  exposeWin.go(exposeWin.sel); e.accepted = true; return;
+                    }
+                    // 1..9 jumps straight to that workspace — the same keys that switch to it
+                    // normally, doing the same thing here.
+                    if (e.key >= Qt.Key_1 && e.key <= Qt.Key_9) {
+                        var want = e.key - Qt.Key_0;
+                        for (var i = 0; i < n; i++)
+                            if (exposeWin.wsList[i].id === want) { exposeWin.go(i); e.accepted = true; return }
+                    }
+                }
+
+                // ---- header ----
+                Item {
+                    id: expHead
+                    anchors { top: parent.top; left: parent.left; right: parent.right
+                              margins: Math.round(40 * exposeWin.ui) }
+                    height: Math.round(30 * exposeWin.ui)
+                    Row {
+                        anchors.left: parent.left; anchors.verticalCenter: parent.verticalCenter
+                        spacing: Math.round(12 * exposeWin.ui)
+                        IndText {
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: "workspaces"; mono: true
+                            sz: Math.round(Tok.tPanel * exposeWin.ui)
+                            font.weight: 700; color: Tok.ink
+                        }
+                        IndText {
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: exposeWin.wsList.length + " · " + (Hyprland.toplevels ? Hyprland.toplevels.values.length : 0) + " windows"
+                            mono: true; sz: Math.round(Tok.tData * exposeWin.ui); color: Tok.ink3
                         }
                     }
-                    
-                    // Grid of workspaces
-                    Flow {
-                        Layout.fillWidth: true; Layout.fillHeight: true; spacing: 20
+                    IndText {
+                        anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
+                        mono: true; sz: Math.round(Tok.tLabel * exposeWin.ui); color: Tok.ink2
+                        text: "← →  choose      1–9  jump      enter  go      esc  close"
+                    }
+                }
+                Rectangle {
+                    anchors { top: expHead.bottom; left: expHead.left; right: expHead.right
+                              topMargin: Math.round(12 * exposeWin.ui) }
+                    height: 1; color: Tok.ruleHard
+                }
+
+                // ---- the grid ----
+                // Sized to the space rather than to a constant: the cards are as large as the
+                // screen allows, which is the point of taking the whole screen.
+                Item {
+                    id: grid
+                    anchors {
+                        top: expHead.bottom; left: parent.left; right: parent.right; bottom: parent.bottom
+                        topMargin: Math.round(46 * exposeWin.ui)
+                        leftMargin: Math.round(40 * exposeWin.ui)
+                        rightMargin: Math.round(40 * exposeWin.ui)
+                        bottomMargin: Math.round(40 * exposeWin.ui)
+                    }
+                    readonly property int n: exposeWin.wsList.length
+                    readonly property real gap: Math.round(22 * exposeWin.ui)
+                    // Try every column count and keep whichever makes the biggest card that
+                    // still fits both ways. Four workspaces on a wide screen want one row;
+                    // twelve want three.
+                    readonly property int cols: {
+                        if (grid.n <= 0) return 1;
+                        var best = 1, bestW = 0;
+                        for (var c = 1; c <= grid.n; c++) {
+                            var rows = Math.ceil(grid.n / c);
+                            var w = (grid.width - grid.gap * (c - 1)) / c;
+                            var h = (grid.height - grid.gap * (rows - 1)) / rows;
+                            var fit = Math.min(w, h * exposeWin.screenAspect);
+                            if (fit > bestW) { bestW = fit; best = c }
+                        }
+                        return best;
+                    }
+                    readonly property real cardW: {
+                        var rows = Math.ceil(grid.n / grid.cols);
+                        var w = (grid.width - grid.gap * (grid.cols - 1)) / grid.cols;
+                        var h = (grid.height - grid.gap * (rows - 1)) / rows;
+                        return Math.max(120, Math.min(w, h * exposeWin.screenAspect));
+                    }
+                    readonly property real cardH: grid.cardW / exposeWin.screenAspect
+
+                    Grid {
+                        anchors.centerIn: parent
+                        columns: grid.cols
+                        spacing: grid.gap
                         Repeater {
-                            model: Hyprland.workspaces ? Hyprland.workspaces.values : []
+                            model: exposeWin.wsList
                             delegate: Rectangle {
-                                id: wsBox
+                                id: wsCard
                                 required property var modelData
-                                width: 280; height: 180; radius: Tok.r
-                                color: theme.a(theme.line, 0.55); border.width: 1
-                                border.color: Hyprland.focusedWorkspace && Hyprland.focusedWorkspace.id === modelData.id ? theme.iris : theme.a(theme.iris, 0.12)
+                                required property int index
+                                readonly property bool focused: Hyprland.focusedWorkspace
+                                                                && Hyprland.focusedWorkspace.id === modelData.id
+                                readonly property bool picked: exposeWin.sel === index
+                                width: grid.cardW; height: grid.cardH
+                                radius: Tok.rSmall
                                 clip: true
-                                // compose captures into one FBO so a ScreencopyView texture node can't
-                                // leak a stray thumbnail outside the card (the same fix as the switcher)
+                                color: Tok.surface
+                                border.width: wsCard.picked ? 2 : 1
+                                border.color: wsCard.picked ? Tok.accent
+                                            : (cardMa.containsMouse ? Tok.ink3 : Tok.ruleHard)
+                                Behavior on border.color { ColorAnimation { duration: Tok.mFast } }
+                                // compose captures into one FBO so a ScreencopyView texture node
+                                // can't leak a stray thumbnail outside the card
                                 layer.enabled: true
 
-                                ColumnLayout {
-                                    anchors.fill: parent; anchors.margins: 12; spacing: 10
-                                    
-                                    // Workspace header
-                                    RowLayout {
-                                        Layout.fillWidth: true
-                                        Text { text: "Workspace " + modelData.id; color: theme.text; font.pixelSize: 12; font.bold: true; font.family: root.cfgFont }
-                                        Item { Layout.fillWidth: true }
-                                        Text { text: modelData.name; color: theme.faint; font.pixelSize: 10; font.family: root.cfgFont }
-                                    }
-                                    
-                                    // Live thumbnails of the windows in this workspace — click to jump
-                                    Flow {
-                                        Layout.fillWidth: true; Layout.fillHeight: true; clip: true; spacing: 6
-                                        Repeater {
-                                            // EMPTY while exposé is closed. The PanelWindow above is only
-                                            // `visible: false`, not destroyed — and in QML that keeps every
-                                            // child alive, so this Repeater used to hold one ScreencopyView
-                                            // per window on the system, permanently, each pinned to that
-                                            // window's wayland handle. When a window dies (closing a game or
-                                            // emulator) the capture outlives its source, which is a prime
-                                            // suspect for the fatal "Wayland connection ... Invalid argument"
-                                            // that kills the whole bar. Nothing needs capturing when the
-                                            // overlay isn't on screen; emptying the model destroys them.
-                                            model: {
-                                                if (!root.exposeActive) return [];
-                                                var m = Hyprland.toplevels ? Hyprland.toplevels.values : [];
-                                                var out = [];
-                                                for (var i = 0; i < m.length; i++) {
-                                                    var t = m[i];
-                                                    // use the LIVE .workspace ref, not lastIpcObject.workspace —
-                                                    // the latter is a stale snapshot, so windows land in the wrong card.
-                                                    if (t && t.workspace && t.workspace.id === wsBox.modelData.id) out.push(t);
-                                                }
-                                                return out;
+                                // the workspace's own ground, so a window sitting on it reads as
+                                // a window on a desktop rather than a tile on a card
+                                Rectangle { anchors.fill: parent; anchors.margins: wsCard.border.width
+                                            color: Tok.sunken }
+
+                                // ---- the map ----
+                                Item {
+                                    id: map
+                                    anchors.fill: parent
+                                    anchors.margins: wsCard.border.width
+                                    readonly property real sx: exposeWin.screen ? map.width / exposeWin.screen.width : 0
+                                    readonly property real sy: exposeWin.screen ? map.height / exposeWin.screen.height : 0
+
+                                    Repeater {
+                                        // EMPTY while exposé is closed. The PanelWindow above is
+                                        // only `visible: false`, not destroyed — and in QML that
+                                        // keeps every child alive, so this used to hold one
+                                        // ScreencopyView per window on the system, permanently,
+                                        // each pinned to that window's wayland handle. When a
+                                        // window dies the capture outlives its source, which is a
+                                        // prime suspect for the fatal "Wayland connection …
+                                        // Invalid argument" that kills the whole bar.
+                                        model: {
+                                            if (!root.exposeActive) return [];
+                                            var m = Hyprland.toplevels ? Hyprland.toplevels.values : [];
+                                            var out = [];
+                                            for (var i = 0; i < m.length; i++) {
+                                                var t = m[i];
+                                                if (t && t.workspace && t.workspace.id === wsCard.modelData.id) out.push(t);
                                             }
-                                            delegate: Rectangle {
-                                                id: winTile
-                                                required property var modelData
-                                                readonly property string cls: {
-                                                    try {
-                                                        if (!modelData) return "";
-                                                        var c = (modelData.lastIpcObject && modelData.lastIpcObject.class)
-                                                            || (modelData.wayland && modelData.wayland.appId) || "";
-                                                        return ("" + c).toLowerCase();
-                                                    } catch(e) { return ""; }
+                                            return out;
+                                        }
+                                        delegate: Rectangle {
+                                            id: winTile
+                                            required property var modelData
+                                            readonly property var ipc: (modelData && modelData.lastIpcObject) || null
+                                            readonly property string cls: {
+                                                try {
+                                                    if (!modelData) return "";
+                                                    var c = (winTile.ipc && winTile.ipc.class)
+                                                        || (modelData.wayland && modelData.wayland.appId) || "";
+                                                    return ("" + c).toLowerCase();
+                                                } catch (e) { return "" }
+                                            }
+                                            // Real geometry, mapped into the card. `at` is in
+                                            // layout coordinates across all monitors, so the
+                                            // screen's own origin comes off first.
+                                            readonly property var at: (winTile.ipc && winTile.ipc.at) || [0, 0]
+                                            readonly property var sz: (winTile.ipc && winTile.ipc.size) || [0, 0]
+                                            readonly property real ox: exposeWin.screen ? exposeWin.screen.x : 0
+                                            readonly property real oy: exposeWin.screen ? exposeWin.screen.y : 0
+                                            readonly property bool mapped: winTile.sz[0] > 0 && winTile.sz[1] > 0
+                                            x: winTile.mapped ? (winTile.at[0] - winTile.ox) * map.sx : 0
+                                            y: winTile.mapped ? (winTile.at[1] - winTile.oy) * map.sy : 0
+                                            width:  winTile.mapped ? Math.max(18, winTile.sz[0] * map.sx) : map.width
+                                            height: winTile.mapped ? Math.max(14, winTile.sz[1] * map.sy) : map.height
+                                            radius: Tok.rSmall
+                                            clip: true
+                                            color: Tok.raised
+                                            border.width: 1
+                                            border.color: winMa.containsMouse ? Tok.accent : Tok.ruleHard
+                                            Behavior on border.color { ColorAnimation { duration: Tok.mFast } }
+
+                                            ScreencopyView {
+                                                id: winScv
+                                                anchors.fill: parent
+                                                anchors.margins: 1
+                                                captureSource: (winTile.modelData && winTile.modelData.wayland)
+                                                               ? winTile.modelData.wayland : null
+                                                live: root.exposeActive
+                                                visible: hasContent
+                                            }
+                                            IconImage {
+                                                anchors.centerIn: parent
+                                                implicitSize: Math.min(40, Math.max(16, winTile.height * 0.4))
+                                                asynchronous: true
+                                                visible: !winScv.hasContent
+                                                source: Quickshell.iconPath(winTile.cls, "application-x-executable")
+                                            }
+                                            // The name, only when the tile is big enough to carry
+                                            // one. A 14px strip of 8px text is not a label.
+                                            Rectangle {
+                                                anchors { left: parent.left; right: parent.right; bottom: parent.bottom }
+                                                height: Math.round(16 * exposeWin.ui)
+                                                visible: winTile.height > 54 * exposeWin.ui
+                                                color: Tok.alpha(Tok.bg, 0.82)
+                                                IndText {
+                                                    anchors { fill: parent; leftMargin: 5; rightMargin: 5 }
+                                                    verticalAlignment: Text.AlignVCenter
+                                                    elide: Text.ElideRight
+                                                    text: winTile.cls || "window"
+                                                    mono: true; sz: Math.round(Tok.tLabel * exposeWin.ui)
+                                                    color: Tok.ink2
                                                 }
-                                                width: 122; height: 60; radius: Tok.r; clip: true
-                                                color: theme.a(theme.bg, 0.55)
-                                                border.width: 1; border.color: theme.a(theme.iris, 0.14)
-                                                ScreencopyView {
-                                                    id: winScv
-                                                    anchors.fill: parent
-                                                    captureSource: (winTile.modelData && winTile.modelData.wayland) ? winTile.modelData.wayland : null
-                                                    live: root.exposeActive
-                                                    visible: hasContent
-                                                }
-                                                IconImage {
-                                                    anchors.centerIn: parent; implicitSize: 24; asynchronous: true
-                                                    visible: !winScv.hasContent
-                                                    source: Quickshell.iconPath(winTile.cls, "application-x-executable")
-                                                }
-                                                // title strip
-                                                Rectangle {
-                                                    anchors { left: parent.left; right: parent.right; bottom: parent.bottom }
-                                                    height: 15; color: theme.a(theme.panel, 0.9)
-                                                    Text {
-                                                        anchors.fill: parent; anchors.leftMargin: 5; anchors.rightMargin: 5
-                                                        verticalAlignment: Text.AlignVCenter; elide: Text.ElideRight
-                                                        text: winTile.cls || "window"
-                                                        color: theme.sub; font.pixelSize: 8; font.family: root.cfgFont
-                                                    }
-                                                }
-                                                // click anywhere → focus that window
-                                                MouseArea {
-                                                    anchors.fill: parent; cursorShape: Qt.PointingHandCursor
-                                                    onClicked: {
-                                                        var o = winTile.modelData.lastIpcObject;
-                                                        if (o && o.address) Hyprland.dispatch("hl.dsp.focus({ window = 'address:" + o.address + "' })");
-                                                        else if (winTile.modelData.wayland) winTile.modelData.wayland.activate();
-                                                        root.exposeActive = false;
-                                                    }
-                                                }
-                                                // close button — declared last so it wins the click in its corner
-                                                Rectangle {
-                                                    anchors { top: parent.top; right: parent.right; margins: 3 }
-                                                    width: 16; height: 16; radius: Tok.r
-                                                    color: winClMa.containsMouse ? theme.bad : theme.a(theme.bg, 0.7)
-                                                    Sym { anchors.centerIn: parent; text: "close"; sz: 11; color: winClMa.containsMouse ? theme.bg : theme.faint }
-                                                    MouseArea {
-                                                        id: winClMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
-                                                        onClicked: {
-                                                            var o = winTile.modelData.lastIpcObject;
-                                                            if (o && o.address) Hyprland.dispatch("hl.dsp.window.close({ window = 'address:" + o.address + "' })");
-                                                            else if (winTile.modelData.wayland) winTile.modelData.wayland.close();
-                                                        }
-                                                    }
+                                            }
+                                            MouseArea {
+                                                id: winMa
+                                                anchors.fill: parent; hoverEnabled: true
+                                                cursorShape: Qt.PointingHandCursor
+                                                onClicked: {
+                                                    var o = winTile.ipc;
+                                                    if (o && o.address) Hyprland.dispatch("hl.dsp.focuswindow('address:" + o.address + "')");
+                                                    root.exposeActive = false;
                                                 }
                                             }
                                         }
                                     }
+                                }
+
+                                // ---- the label plate ----
+                                // Bottom of the card, over the map: a workspace's number is the
+                                // thing you are scanning for, and it should not be competing for
+                                // space with the map it labels.
+                                Rectangle {
+                                    anchors { left: parent.left; right: parent.right; bottom: parent.bottom
+                                              margins: wsCard.border.width }
+                                    height: Math.round(26 * exposeWin.ui)
+                                    color: Tok.alpha(Tok.bg, 0.9)
+                                    Rectangle { anchors { left: parent.left; right: parent.right; top: parent.top }
+                                                height: 1; color: Tok.ruleHard }
+                                    Row {
+                                        anchors { left: parent.left; leftMargin: Math.round(9 * exposeWin.ui)
+                                                  verticalCenter: parent.verticalCenter }
+                                        spacing: Math.round(8 * exposeWin.ui)
+                                        Rectangle {
+                                            anchors.verticalCenter: parent.verticalCenter
+                                            width: Math.round(7 * exposeWin.ui); height: width; radius: width / 2
+                                            color: wsCard.focused ? Tok.accent : Tok.alpha(Tok.ink3, 0.4)
+                                        }
+                                        IndText {
+                                            anchors.verticalCenter: parent.verticalCenter
+                                            text: root.wsLabelFor(wsCard.modelData.id)
+                                            mono: true; sz: Math.round(Tok.tData * exposeWin.ui)
+                                            font.weight: 700
+                                            color: wsCard.focused ? Tok.accent : Tok.ink
+                                        }
+                                        IndText {
+                                            anchors.verticalCenter: parent.verticalCenter
+                                            text: wsCard.modelData.name && ("" + wsCard.modelData.name) !== ("" + wsCard.modelData.id)
+                                                  ? ("" + wsCard.modelData.name) : ""
+                                            mono: true; sz: Math.round(Tok.tLabel * exposeWin.ui); color: Tok.ink3
+                                        }
+                                    }
+                                }
+
+                                // An empty workspace is still a place you can go, and saying so
+                                // beats an unexplained blank card.
+                                IndText {
+                                    anchors.centerIn: parent
+                                    visible: !(Hyprland.toplevels && Hyprland.toplevels.values.some(function (t) {
+                                        return t && t.workspace && t.workspace.id === wsCard.modelData.id }))
+                                    text: "empty"; mono: true
+                                    sz: Math.round(Tok.tLabel * exposeWin.ui)
+                                    font.letterSpacing: 1.4 * exposeWin.ui
+                                    font.capitalization: Font.AllUppercase
+                                    color: Tok.ink3
+                                }
+
+                                MouseArea {
+                                    id: cardMa
+                                    anchors.fill: parent; hoverEnabled: true
+                                    cursorShape: Qt.PointingHandCursor
+                                    acceptedButtons: Qt.LeftButton
+                                    z: -1                     // window tiles keep their own clicks
+                                    onEntered: exposeWin.sel = wsCard.index
+                                    onClicked: exposeWin.go(wsCard.index)
                                 }
                             }
                         }

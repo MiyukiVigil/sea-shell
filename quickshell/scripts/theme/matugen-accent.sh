@@ -7,6 +7,7 @@
 #
 # Writes ~/.config/sea-shell/appearance.json (accent, other fields preserved) and
 # ~/.config/sea-shell/kitty-matugen.conf (kitty overrides; sea-cyan.conf includes it).
+here="$(dirname "$0")"
 DEFAULT="#63c7dd"
 cfg="$HOME/.config/sea-shell/appearance.json"
 kitty="$HOME/.config/sea-shell/kitty-matugen.conf"
@@ -189,12 +190,14 @@ PY
 
 set_accent() {   # $1 = hex, preserving every other appearance.json field
     python3 - "$cfg" "$1" <<'PY'
-import json, sys
+import json, os, sys
 cfg, col = sys.argv[1], sys.argv[2]
 try: d = json.load(open(cfg))
 except Exception: d = {"radius": 14, "opacity": 0.82, "height": 42, "font": "monospace"}
 d["accent"] = col
-json.dump(d, open(cfg, "w"))
+_t = cfg + ".tmp"
+with open(_t, "w") as _fh: json.dump(d, _fh)
+os.replace(_t, cfg)   # atomic: the bar watches this file and a torn read is a lost theme change
 PY
 }
 
@@ -223,10 +226,32 @@ if [ "$matugen_enabled" = "True" ]; then
     wp=$(printf '%s' "$1" | tr -d '\n\r')
     [ -z "$wp" ] && wp=$(cat "$HOME/.config/sea-shell/wallpaper" 2>/dev/null | tr -d '\n\r')
     [ -z "$wp" ] && exit 1
+    # A moving wallpaper has to be reduced to one frame before matugen can look at it —
+    # but the wallpaper indexer has ALREADY cut that frame and cached it, so this used to
+    # re-decode the source clip on every single switch. Timed at 0.42s per cycle against a
+    # JPEG that was sitting in ~/.cache/sea-shell/wallthumbs the whole time.
+    #
+    # And it took frame ZERO, which is the frame the poster deliberately avoids: a great
+    # many wallpaper clips open on black, and a black frame hands the entire desktop a
+    # palette derived from black. The poster seeks a second in for exactly that reason.
     case "$wp" in
         *.mp4|*.webm|*.mkv|*.mov|*.gif)
-            f=/tmp/sea-matugen-frame.png
-            ffmpeg -y -i "$wp" -vframes 1 "$f" >/dev/null 2>&1 && wp="$f" ;;
+            ix=""
+            for c in "$here/sea-wallpaper-index.py" "$here/../wallpaper/sea-wallpaper-index.py"; do
+                [ -f "$c" ] && { ix="$c"; break; }
+            done
+            poster=""
+            [ -n "$ix" ] && poster=$(python3 "$ix" --poster "$wp" 2>/dev/null)
+            if [ -n "$poster" ] && [ -f "$poster" ]; then
+                wp="$poster"
+            else
+                # No indexer reachable, or it could not extract — fall back to what this
+                # did before, seeking a second in the way the poster would have.
+                f=/tmp/sea-matugen-frame.png
+                ffmpeg -y -ss 1 -i "$wp" -vframes 1 "$f" >/dev/null 2>&1 \
+                    || ffmpeg -y -i "$wp" -vframes 1 "$f" >/dev/null 2>&1
+                [ -f "$f" ] && wp="$f"
+            fi ;;
     esac
 fi
 
@@ -275,7 +300,9 @@ kitty_accent = custom_acc if custom_acc else global_accent
 try: d = json.load(open(cfg))
 except Exception: d = {"radius": 14, "opacity": 0.82, "height": 42, "font": "monospace"}
 d["accent"] = global_accent
-json.dump(d, open(cfg, "w"))
+_t = cfg + ".tmp"
+with open(_t, "w") as _fh: json.dump(d, _fh)
+os.replace(_t, cfg)   # atomic: the bar watches this file and a torn read is a lost theme change
 
 # Terminal palettes are built with a CONTRAST-AWARE, hue-preserving algorithm rather than
 # matugen's raw base16 — that base16 is unreadable on saturated wallpapers (a hot-pink image

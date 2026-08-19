@@ -12,7 +12,27 @@ set -e
 DEST="$HOME/.config/sea-shell/sea-lockwall.png"
 LOCK_CONF="$HOME/.config/hypr/hyprlock.conf"
 
+# The lock screen can keep its OWN image. Until now this ran on every apply and
+# unconditionally overwrote the lock background with whatever the desktop had just
+# switched to, so "I want a different picture on the lock screen" was not expressible.
+# wpLockOwn pins it; wpLock is what it is pinned to.
+pinned="$(python3 - <<'PYEOF' 2>/dev/null
+import json, os
+try:
+    j = json.load(open(os.path.expanduser("~/.config/sea-shell/appearance.json")))
+except Exception:
+    j = {}
+p = os.path.expanduser(str(j.get("wpLock") or "")) if j.get("wpLockOwn") else ""
+print(p if p and os.path.isfile(p) else "")
+PYEOF
+)"
+
 wp="${1:-}"
+if [ -n "$pinned" ]; then
+    # A pin outranks the argument: the caller is sea-wallpaper-set.sh telling us what the
+    # DESKTOP just changed to, which is exactly the thing being overridden.
+    wp="$pinned"
+fi
 if [ -z "$wp" ]; then
     wp="$(cat "$HOME/.config/sea-shell/wallpaper" 2>/dev/null || true)"
 fi

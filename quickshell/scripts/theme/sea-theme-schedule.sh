@@ -6,7 +6,7 @@
 cfg="$HOME/.config/sea-shell/appearance.json"
 [ -f "$cfg" ] || exit 0
 python3 - "$cfg" <<'PY'
-import json, sys, datetime
+import json, os, sys, datetime
 cfg = sys.argv[1]
 try: d = json.load(open(cfg))
 except Exception: sys.exit(0)
@@ -23,5 +23,7 @@ is_dark = (start <= cur < end) if start <= end else (cur >= start or cur < end)
 want = "dark" if is_dark else "light"
 if d.get("mode") != want:
     d["mode"] = want
-    json.dump(d, open(cfg, "w"))
+    _t = cfg + ".tmp"
+with open(_t, "w") as _fh: json.dump(d, _fh)
+os.replace(_t, cfg)   # atomic: the bar watches this file and a torn read is a lost theme change
 PY

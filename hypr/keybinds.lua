@@ -15,7 +15,6 @@ local wallpick  = "~/.config/quickshell/sea-shell/sea-toggle.sh wallpaper"
 local powermenu = "~/.config/quickshell/sea-shell/sea-toggle.sh power"
 local keybinds  = "~/.config/quickshell/sea-shell/sea-toggle.sh keybinds"
 local shotmenu  = "~/.config/quickshell/sea-shell/sea-toggle.sh screenshot"
-local dac       = "qs -c sea-shell ipc call dac toggle"        -- Moondrop DAC EQ panel (resident)
 
 -- ---------------- apps ----------------
 hl.bind(mod .. " + T",         hl.dsp.exec_cmd(term),                                          { description = "Terminal" })
@@ -25,7 +24,6 @@ hl.bind(mod .. " + Space",     hl.dsp.exec_cmd(menu),                           
 hl.bind(mod .. " + E",         hl.dsp.exec_cmd("nautilus"),                                    { description = "File manager" })
 hl.bind(mod .. " + A",         hl.dsp.exec_cmd(browser),                                       { description = "Browser" })
 hl.bind(mod .. " + S",         hl.dsp.exec_cmd(settings),                                      { description = "Control center" })
-hl.bind(mod .. " + SHIFT + E", hl.dsp.exec_cmd(dac),                                           { description = "Moondrop EQ" })
 hl.bind(mod .. " + SHIFT + W", hl.dsp.exec_cmd(wallpick),                                      { description = "Wallpaper picker" })
 -- Routed through the shell rather than straight at the script so the switch gets a dip-to-black
 -- transition. Animated wallpapers run on mpvpaper, which cannot transition at all — the shell

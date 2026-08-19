@@ -1,10 +1,10 @@
 # sea-shell
 
 **A Hyprland desktop shell, not a status bar.** The bar, dock, launcher, control center,
-notification daemon, screen recorder and a parametric EQ are one Quickshell process — not six
+notification daemon and screen recorder are one Quickshell process — not six
 tools glued together. The whole palette follows your wallpaper.
 
-**`v6.1.1`** · [seashell.miyukivigil.tech](https://seashell.miyukivigil.tech) ·
+**`v6.2.0`** · [seashell.miyukivigil.tech](https://seashell.miyukivigil.tech) ·
 [changelog](https://seashell.miyukivigil.tech/changelog.html)
 
 ![The sea-shell desktop — translucent bar at the top, animated wallpaper, and the dock at the bottom](https://seashell.miyukivigil.tech/images/v6/hero.webp)
@@ -39,7 +39,7 @@ Arch-based for the package install; the configs work anywhere with `--no-deps`.
 | **Launcher** | Apps with frecency ranking, plus commands, maths, file search, web, clipboard history and system actions. |
 | **Control center** | 20 tabs — appearance, widgets, dock, window rules, input, audio, display, network, bluetooth, disks, weather, calendar, keybinds, screen time, idle, power. |
 | **Notifications** | Its own daemon: popups, history, and action buttons. Don't run mako or dunst alongside. |
-| **Audio** | 8-band parametric EQ on a Moondrop DAC's own DSP, or through PipeWire with no DAC at all. Synced lyrics. Bit-perfect detection. |
+| **Audio** | Output routing, per-app volume, synced lyrics, bit-perfect detection. (Parametric EQ and DAC control live in [Hub Moon](https://hubmoon.miyukivigil.tech) now.) |
 | **Capture** | Screenshots with an editor, region OCR to clipboard, and a screen recorder with mic + system audio mixing. |
 | **Upkeep** | Over-the-air updates, a health check, backup/restore, and a supervisor that respawns the bar. |
 
@@ -110,6 +110,15 @@ today's app usage — with wi-fi, bluetooth, caffeine and audio toggles on the r
 Turn on **match colours** and `matugen` pulls a palette out of your wallpaper. Every surface
 follows it: the bar, the dock, the control center, kitty, starship, hyprlock, the window borders
 and the window glow.
+
+Set the shell up how you like it and save it as a **preset**, and it becomes a cartridge on a
+shelf: its own background steps, its accent as a band, its font and radius printed on the label,
+and a lamp lit on the one you are currently running. Click it to load it. The list this replaces
+described a preset as `accent: #dbc0c8`, which is the one format that cannot show you a colour
+scheme.
+
+The same object turns up wherever something is *loaded* rather than merely set: the wallpaper
+picker's commit, the day/night pair, and the theme shelf all use it.
 
 The same build, four wallpapers — only the image changed:
 
@@ -228,32 +237,24 @@ that's copying the game's frames across from the dGPU.
 
 ## Audio
 
-![The equaliser — 8 bands, a live response graph with labelled frequency regions, pre-gain and presets](https://seashell.miyukivigil.tech/images/v6/eq.webp)
+### The EQ moved to Hub Moon
 
-An **8-band parametric EQ** with a live frequency-response graph, an all-bands column editor,
-pre-gain, one-tap presets, and AutoEQ/REW import — `SUPER+SHIFT+E`.
+sea-shell used to carry an 8-band parametric EQ — a Moondrop DAC controller with a software
+PipeWire fallback, a response graph, and a browser for the public Moondrop Hub library. It is
+**gone**, and everything it did is done better by [**Hub Moon**](https://hubmoon.miyukivigil.tech),
+which is a whole application built for exactly this rather than a panel bolted to a desktop shell.
 
-**It works with or without a Moondrop DAC.** Plug one in (DAWN PRO2, FreeDSP, Rays, MOONRIVER 3…)
-and the filters run on the DAC's own DSP chip; edits are live and save-to-flash survives
-unplugging. With no DAC the same panel drives a **software EQ** through PipeWire — laptop
-speakers, another brand's DAC, bluetooth. It picks automatically, and a `DAC | software` toggle
-lets you force software even with a DAC plugged in (worth doing: software has no Q2.30 limit, so
-the shelf gains a DAC has to refuse work there).
+The other half of the reason is that it was *niche*: the single largest file in the project, in
+service of one manufacturer's USB DACs, on a shell most of whose users will never plug one in.
+`install.sh` offers to fetch Hub Moon for you if you are one of the people who will — asked, never
+assumed, and skipped entirely on a piped install.
 
-Two things the panel tells you up front in software mode: **nothing is audible until you press
-apply** (PipeWire 1.6 ignores per-band live control writes), and the first apply asks before
-creating the virtual output. That writes one config to `filter-chain.conf.d` and starts
-`filter-chain.service` — a *separate* PipeWire instance, so your main daemon is never restarted
-and nothing playing is interrupted.
-
-**Community presets** — the public [Moondrop Hub](https://hub.moondroplab.tech/) library, ~59,700
-curves searchable by name, author or description. Click one to see its curve; only *apply* touches
-the DAC. The preview also tells you whether that curve would clip at your pre-gain, which the
-preset itself cannot. Reading needs no account, and the panel only ever reads.
+sea-shell keeps the parts that are genuinely a *bar's* job: output routing, per-app volume, media
+control, lyrics, and the bit-perfect badge below.
 
 **Media and lyrics** — the centre pill opens a full player with album art, seekable progress,
 per-player volume, a live cava visualiser, and **time-synced lyrics** from lrclib.net that follow
-playback and let you click a line to seek. When a player holds the DAC directly over ALSA, a gold
+playback and let you click a line to seek. When a player holds the card directly over ALSA, a gold
 **bit-perfect** badge shows the true bit-depth and sample-rate, and the visualiser switches to an
 ambient wave — because PipeWire genuinely cannot see that stream.
 
@@ -261,17 +262,154 @@ ambient wave — because PipeWire genuinely cannot see that stream.
 
 ## Wallpapers · `SUPER+SHIFT+W`
 
-A grid of `~/Pictures/wallpapers`; click to set. **Static** images go through swww (or its awww
-fork) → hyprpaper → mpvpaper. **Animated** wallpapers (mp4/webm/gif) play via **mpvpaper**, and a
-listener pauses the video whenever a fullscreen window covers it, so a fullscreen game or video
-costs no wallpaper GPU.
+The picker **is** the wallpaper: the focused one fills the screen at full size and **moving ones
+play**, so you are looking at the thing you are choosing at the size *and the speed* you will get
+it — a poster frame cannot tell you whether the motion is a slow drift or a strobing city, and
+that is most of what you are choosing between. It opens on whatever is already up.
 
-- **Transitions** — fourteen swww transitions with your own fps and duration. `SUPER+N` cycles the
-  folder; because mpvpaper cannot transition at all, the shell draws a dip-to-black fade over the
-  swap so animated wallpapers change as cleanly as static ones.
-- **Auto-rotate** — off by default. Change every *n* minutes, going next, previous or random. The
-  setting is re-read every tick, so toggling it needs no restart and leaves no daemon running when
-  it's off.
+In front of that sits **a deck**, built the way rack gear is. A front panel does three things —
+it contains, labels and indicates — so: a *raised* bezel with the cartridge slot cut into it and
+alignment marks either side, then a panel divided into functional modules by hard rules. A counter,
+the readout, a vent grille, an indicator lamp. Depth is three background steps (raised bezel over
+surface panel over a darkened well), never shadow. There is no nameplate, no serial and no fake
+fixings: *"a lack of superfluous controls, styling or excessive markings"* is the point, and
+invented hardware markings would be exactly that.
+
+The accent obeys the same rule — **one accent, in isolation, never as decoration**. It marks the one
+thing happening now: the index while you are choosing, the step while the deck is loading, never
+both.
+
+Above the deck the wallpapers are **projections**: panels held between two guide rails, the
+unfocused ones carrying a fine raster because they are not resolved yet, the held one clean and
+locked with registration corners. The deck is on screen the whole time rather than conjured at the
+last moment, so the machine is the one fixed thing and everything else happens in relation to it.
+
+`←` `→` choose, or **drag the rail** — the preview tracks your thumb and snaps to whatever you let
+go over. The wheel steps too. **Just start typing to search**: the rail filters live, and the query
+lands in a window built out of the deck's own parts — a raised legend plate, a sunken well, a raised
+counter — rather than a text field borrowed from somewhere else. `enter` applies, `tab` cycles the
+filter (all · stills · motion · **recent**), `ctrl+s` sorts by name or by newest, `ctrl+m` toggles
+match-colours, `esc` clears the search and then closes. Clicking a frame focuses it; clicking the
+focused frame applies it.
+
+**`ctrl+v` imports.** Everything here could *choose* a wallpaper and nothing could add one — the
+folder was filled by a file manager or it was not filled. ctrl+v takes whatever is on the clipboard
+— raw image bytes out of a browser, a path, a `file://` URI, or an http URL it fetches — puts it in
+the wallpaper folder without ever overwriting anything, re-indexes, and lands focus on it.
+
+The folder is **`~/Pictures/wallpapers` unless you say otherwise** — Control center → Appearance →
+Wallpaper, with a folder browser behind the field. The walk is recursive, so **subfolders become
+collections** you can filter by, in a chip row beside the type filter. `sea-wallpaper-index.py` is
+the single definition of where the wallpapers are and what counts as one; the picker, the keybinds
+and the rotate daemon all ask it rather than each carrying a path of their own.
+
+Frames keep their own aspect ratio and share a baseline, so a folder of portrait and landscape
+wallpapers packs into a skyline instead of being cropped to a uniform grid. Away from centre they
+fall off in scale and opacity only — no perspective, no shadow.
+
+Applying it is a **cartridge insert**, and two things make that read. The card **never changes
+size** — growing it to fill the screen is a zoom, which is what the first attempt looked like; a
+cartridge is a fixed object that *travels* and is swallowed. And the machine is at the **bottom**,
+where the rail already is and where your hand already is, rather than floating mid-screen: a
+console sits on the desk in front of you, so you pick the cartridge up, hold it over the slot, and
+push it *down*.
+
+So: the ground clears and the machine appears — a console across the bottom with the slot cut into
+its top surface and a mono readout on its face, two **guide rails** down the card's travel, a
+**tick scale** along the stretch it actually moves through, and the **gate** it comes to rest on.
+That structure is the part that was missing when a 300 px card crossed four fifths of a blank
+screen: there was nothing for the motion to be measured against, so it read as small and
+arbitrary. Every mark has a job — the rails say where the card can go, the ticks say how far it has
+come, the gate says where it stops. None of it is texture.
+
+Then the card **dips** before it rises, which is the oldest trick in animation and the cheapest:
+80 ms of the wrong direction is what makes the pop read as force applied to an object rather than a
+position changing. **A label plate comes up in that same 80 ms** — filename, motion marker, keyed
+corner — so the projection on the rail becomes a physical cartridge exactly as you take hold of it,
+with no frame where an object with a nameplate appears out of a panel that never had one. It is
+also the one moment you can read what you are loading without looking anywhere else.
+
+It pops up the guides to the gate, overshooting a hair and settling, and holds for a beat. Then the
+**shutter parts** — two leaves across the slot, in the plane between the bezel and the darkness
+behind, so the opening reads as an opening even when the picker is idle. They open over 130 ms
+against a 210 ms fall, so the way is clear before the card arrives and the machine is never seen
+being hit by it. The **deck's lip throws a shadow** on the last of the travel, because a clip
+boundary on its own does not swallow a card so much as erase it a row of pixels at a time. The
+console takes the impact, the leaves snap shut behind the cartridge — faster than they opened, with
+an overshoot — and the **lamp reads contact**: dim while the card is in the air, full at the instant
+it lands, one ring thrown off and spent. A lamp that lights when the thing lands is the deck
+responding; a lamp that lights when you press a key is the keyboard responding. The readout names
+each step: `READY` · `INSERT` · `SEATED` · `LOADED`.
+
+And the wallpaper comes **out of the aperture it just went into** — the lid is eaten from its
+bottom edge upward with an accent hairline riding the boundary like a print head, and the deck
+follows a beat behind and travels off the bottom. In goes the cartridge, out comes the image,
+through one opening.
+
+The reveal is where fluidity is won or lost, and three things decide it. It **decelerates**
+(OutQuint, not InOutCubic — accelerating into the middle of the sweep is exactly where a
+thousand-pixel boundary is most visible as a boundary). It **softens as it travels**, so the edge
+stops being a line. And nothing is switched off at the end: the bezel, the well and the lip leave
+by *moving* with the deck, because four elements cutting to zero opacity on the last frame is a
+snap no easing can hide. Roughly 1.2 s, with the daemon running its own transition underneath, so
+the flourish costs no time the switch was not already going to spend.
+
+**Static** images go through swww (or its awww fork) → hyprpaper → mpvpaper. **Animated**
+wallpapers (mp4/webm/gif) play via **mpvpaper**, and a listener watches for a window going
+**genuinely fullscreen** — not merely filling the screen, because an ordinary maximised editor
+does that and pausing your wallpaper while you work is not what anyone means by "nobody can see
+it". When one does, it does not merely pause: a paused mpvpaper keeps its decoder, its surface and its **VRAM** for as
+long as it lives, and the thing covering the wallpaper is usually the thing that wanted that
+memory. So the poster frame goes up on swww *underneath* — where it is invisible, because mpvpaper
+is still drawing over it — and only then is mpvpaper killed, which means the swap has no black
+frame in either direction. It comes back when the wallpaper does. There is a matching **still frame
+on battery** for laptops; unplugging the mains emits no window event, so the listener carries a
+slow tick of its own to notice. `ffprobe`
+measures every file — size, dimensions, length — and `ffmpeg` cuts a poster frame out of each clip
+once, both memoised in `~/.cache/sea-shell/` (2.8 s cold, 28 ms warm). Playback in the picker is
+Qt's own ffmpeg backend, one clip at a time, released the instant focus moves or you commit, so it
+is never competing with mpvpaper for a decoder. All of it is optional: without ffmpeg the picker
+still lists and applies everything, it just cannot preview the moving ones.
+
+- **Transitions** — fourteen swww transitions with your own fps and duration. `SUPER+N` /
+  `SUPER+SHIFT+N` cycle the folder, and because mpvpaper cannot transition at all — switching one
+  means `pkill`, a gap, then a fresh process — the shell covers the seam itself, for every backend.
+  It does that with **a panel that travels**: it enters from the side you are coming from,
+  decelerating as it arrives; the swap happens behind it; then it accelerates away towards the side
+  you are going to. One accent lip on its leading edge, and while it is covered it names the file it
+  landed on and **loads it**: the wallpaper you are about to get, in a cartridge, dropping into a
+  slot — the same event as the picker's commit, in the same language. The drop is gated on the
+  thumbnail rather than on a clock, because a blank frame going into a slot is worse than no
+  cartridge at all. Under it, a hairline fills for exactly the length of the wait. A dip to black stated nothing
+  except that something had stalled, looked identical forwards and backwards, and gave the eye
+  620 ms of nothing to do — and that hold is fixed by how long mpvpaper takes to show a first frame,
+  so it cannot be shortened, only spent better. Same vocabulary as the picker's console: the shell's
+  ground moving over a seam, never a light going out.
+- **Auto-rotate** — off by default. Change every *n* minutes, going next, previous or random, and
+  optionally **stills only** (rotating into a video restarts a decoder every interval). The setting
+  is re-read every tick, so toggling it needs no restart and leaves no daemon running when it's off.
+- **`SUPER+SHIFT+N` is back, not minus one.** It used to find the current wallpaper's position in
+  the sorted folder and step back — so after a random jump, "previous" went to whatever sorted
+  before where you had landed, which is somewhere you had never been. It pops a back stack now,
+  exactly like a browser, and falls back to folder order only when there is nothing to go back to.
+  The same stack is the picker's **recent** filter.
+- **Random deals from a bag.** A fresh `shuf` every time repeats — over a folder of eleven you see
+  one twice long before you have seen them all, and nothing stopped it dealing the one already on
+  screen. The bag deals without replacement and reshuffles when it runs out.
+- **A day and a night wallpaper.** Pin two and they swap on schedule, using the *same*
+  `darkStart`/`darkEnd` auto dark mode already uses rather than a second pair of times. You choose
+  them by clicking a cartridge and picking off a shelf of your actual wallpapers. It outranks
+  auto-rotate: a pinned pair and a shuffle every thirty minutes are contradictory instructions.
+- **The lock screen can keep its own picture.** It used to be overwritten on every apply,
+  unconditionally, so wanting a different one there was not expressible. Pin one and it outranks
+  whatever the desktop just switched to.
+- **A frame cap for moving wallpapers** — 60 / 30 / 24, or as filmed. Capping halves the full-screen
+  blits the compositor does for a clip, which on a machine whose iGPU composites while the dGPU
+  renders is the cost that shows up. It does not reduce decoding, and the setting says so.
+- **Anything can set the wallpaper** — `qs -c sea-shell ipc call wallpaper set /path/to/image`
+  runs the whole sequence (path, daemon, lock screen, palette) behind the same travelling panel a
+  keybind gets. One script, `sea-wallpaper-set.sh`, is what a wallpaper change *consists of*;
+  `sea-wallpaper-apply.sh` remains the only thing that talks to the daemons.
 
 ---
 
@@ -293,7 +431,6 @@ and a "used by …" note.
 | `SUPER+R` | Screen recording — again to stop |
 | `Print` / `SUPER+Print` / `SUPER+SHIFT+S` | Screenshots |
 | `SUPER+SHIFT+O` | OCR a region to the clipboard |
-| `SUPER+SHIFT+E` | Parametric EQ |
 | `SUPER+SHIFT+G` | Game mode |
 | `SUPER+N` / `SUPER+SHIFT+N` | Next / previous wallpaper |
 | `SUPER+SHIFT+W` | Wallpaper picker |
@@ -366,7 +503,6 @@ sea-shell/
 │   ├── Dashboard.qml                 # dashboard (SUPER+D)
 │   ├── power.qml · keybinds.qml · wallpaper.qml · screenshot.qml
 │   ├── RecorderPanel.qml             # recorder chooser + countdown (SUPER+R)
-│   ├── DacPanel.qml                  # parametric EQ (SUPER+SHIFT+E)
 │   ├── Tok.qml                       # design tokens — one singleton, read by every surface
 │   └── Ind*.qml                      # shared components (table, panel, kpi, chip, …)
 ├── quickshell/scripts/
@@ -377,9 +513,10 @@ sea-shell/
 │   ├── system/sea-gamemode.sh        # game mode, with real restore
 │   ├── system/sea-window-rules.sh    # window-rules.json → rules.lua
 │   ├── system/sea-gestures.sh        # gestures.json → gestures.lua
-│   ├── system/moondrop_control.py    # Moondrop USB-HID controller (vendored)
-│   ├── system/sea-eq.py              # software EQ — a pipewire filter-chain, no DAC needed
-│   ├── wallpaper/sea-wallpaper-apply.sh   # the one place a wallpaper is applied
+│   ├── wallpaper/sea-wallpaper-set.sh     # what a wallpaper change CONSISTS of
+│   ├── wallpaper/sea-wallpaper-import.sh  # clipboard → a file in the wallpaper folder
+│   ├── wallpaper/sea-wallpaper-apply.sh   # the one place a daemon is talked to
+│   ├── wallpaper/sea-wallpaper-index.py   # the one definition of where wallpapers are
 │   ├── theme/matugen-accent.sh       # recolour the shell from the wallpaper
 │   └── … (lock, media, calendar, keybind and clipboard helpers)
 ├── hypr/sea.lua                      # borders, blur, shadow, animations, layer + window rules
@@ -424,10 +561,10 @@ Config and runtime data live in `~/.config/sea-shell/` — `appearance.json`, `d
 
 ## Credits
 
-Built by [MiyukiVigil](https://miyukivigil.tech). The DAC half is vendored from
-[hub_moon](https://hubmoon.miyukivigil.tech/), which documents the Moondrop protocol and the Hub
-API. Palette generation is [matugen](https://github.com/InioX/matugen); the shell itself is
-[Quickshell](https://quickshell.org/).
+Built by [MiyukiVigil](https://miyukivigil.tech). For parametric EQ and DAC control, use
+[**Hub Moon**](https://hubmoon.miyukivigil.tech/) — it is the same author's application for exactly
+that, and it does the job properly. Palette generation is
+[matugen](https://github.com/InioX/matugen); the shell itself is [Quickshell](https://quickshell.org/).
 
 ---
 

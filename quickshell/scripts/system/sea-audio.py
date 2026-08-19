@@ -2,7 +2,7 @@
 """sea-audio — PipeWire routing + device-info for the sea-shell "Sound" surface (4.0).
 
 This is the data/plumbing layer for the audio pieces the shell does NOT already have.
-It deliberately owns nothing the DAC panel / sea-eq.py already cover (EQ, filter-chains):
+It deliberately owns no EQ or filter-chain work — sea-shell has none; Hub Moon does that:
 its job is the three real gaps —
 
   1. per-app OUTPUT routing   — send one app to a specific sink, not just the default

@@ -22,7 +22,7 @@ Scope {
     // release apart — the badge read v5.0.0 on a 6.0.0 install. A version badge that lies is worse
     // than no badge. The literal survives only as the fallback for a `qs -p` run out of the repo
     // with nothing deployed; the second path covers that case too (quickshell/ui/ → repo root).
-    property string seaVersion: "6.1.1"
+    property string seaVersion: "6.2.0"
     Process {
         running: true
         command: ["sh","-c","cat \"$HOME/.config/quickshell/sea-shell/VERSION\" 2>/dev/null || cat \"" + root.repo + "/../../VERSION\" 2>/dev/null"]
@@ -72,12 +72,19 @@ Scope {
     }
 
     // ---------- native QML file browser ----------
+    // The browser used to start at a literal "/home/miyukivigil", which is one specific
+    // machine's home directory shipped inside the config.
+    readonly property string homeDir: Quickshell.env("HOME") || "/"
     property bool fileBrowserOpen: false
     property string fileBrowserPath: ""  // current directory (absolute path)
     property string fileBrowserFilter: "" // e.g. ".conf", ".ovpn", ".ics"
     property var fileBrowserCallback: null // function(path) called on file selection
     property var fileBrowserItems: []     // [{type, name}]
     property string fileBrowserTitle: ""
+    // Folder mode: files are hidden entirely and the header grows a "use this folder"
+    // action, because in a directory picker the thing you want is the place you are
+    // standing — there is nothing in the list to click.
+    property bool fileBrowserDirs: false
 
     Process {
         id: fileBrowserProc
@@ -96,8 +103,20 @@ Scope {
         } }
     }
 
+    function pickFolder(title, start, callback) {
+        root.fileBrowserTitle = title;
+        root.fileBrowserFilter = "";
+        root.fileBrowserDirs = true;
+        root.fileBrowserCallback = callback;
+        root.fileBrowserPath = (start && start.length && start.charAt(0) === "/")
+                             ? start : root.homeDir;
+        root.fileBrowserOpen = true;
+        refreshFileBrowser();
+    }
+
     function pickFile(title, filter, callback) {
         root.fileBrowserTitle = title;
+        root.fileBrowserDirs = false;
         var ext = "";
         if (filter) {
             var m = filter.match(/\*\.([a-zA-Z0-9]+)/);
@@ -107,7 +126,7 @@ Scope {
         root.fileBrowserFilter = ext;
         root.fileBrowserCallback = callback;
         if (!root.fileBrowserPath) {
-            root.fileBrowserPath = "/home/miyukivigil"; // default start
+            root.fileBrowserPath = root.homeDir;
         }
         root.fileBrowserOpen = true;
         refreshFileBrowser();
@@ -784,6 +803,65 @@ Scope {
         m[name][key] = val;
         root.apMonitors = m; root.saveAppearance();
     }
+    // ---------- the bar's own shape, workspaces and mark ----------
+    // All three used to be facts rather than settings. They live in a Bar tab of their own
+    // now: bar-specific controls were sharing "Appearance → bar theme" with the shell-wide
+    // dark/light switch and the GTK/Qt app preference, which are not about the bar at all.
+    property string apBarShape: "bar"       // bar | pills
+    property string apWsStyle:  "grow"      // grow | pill | circle
+    property string apWsLabel:  "arabic"    // what the workspace is CALLED on the bar
+    // The chip shows the SCHEME, not its name: you pick a numbering by seeing it, the same
+    // way you pick a logo by seeing it. "mandarin" tells you less than 一 二 三 does.
+    // Mirrors shell.qml: a scheme whose symbols nothing on this machine can draw is not
+    // offered at all, rather than offered as a row of tofu boxes.
+    readonly property string symbolFamily: {
+        var fams = Qt.fontFamilies();
+        var prefs = ["DejaVu Sans", "Noto Sans Symbols2", "Adwaita Mono", "DejaVu Sans Mono"];
+        for (var i = 0; i < prefs.length; i++)
+            if (fams.indexOf(prefs[i]) >= 0) return prefs[i];
+        for (var j = 0; j < fams.length; j++)
+            if (fams[j].indexOf("Nerd Font") >= 0) return fams[j];
+        return "";
+    }
+    readonly property var wsLabelChoices: [
+        { k: "arabic",   l: "1 2 3" },
+        { k: "roman",    l: "I II III" },
+        { k: "mandarin", l: "\u4e00 \u4e8c \u4e09" },
+        { k: "letters",  l: "A B C" },
+        { k: "circled",  l: "\u2460 \u2461 \u2462" },
+        { k: "dice",     l: "\u2680 \u2681 \u2682" },
+        { k: "dots",     l: "\u25cf \u25cf \u25cf" }
+    ]
+    property string apBarLogo:  "auto"      // auto | sea | cachy | <distro> | custom
+    property string apBarLogoPath: ""
+    readonly property var barLogoChoices: [
+        { k: "auto",        l: "auto" },
+        { k: "sea",         l: "sea-shell" },
+        { k: "cachy",       l: "cachyos" },
+        { k: "arch",        l: "arch" },
+        { k: "debian",      l: "debian" },
+        { k: "ubuntu",      l: "ubuntu" },
+        { k: "fedora",      l: "fedora" },
+        { k: "nixos",       l: "nixos" },
+        { k: "opensuse",    l: "opensuse" },
+        { k: "gentoo",      l: "gentoo" },
+        { k: "mint",        l: "mint" },
+        { k: "manjaro",     l: "manjaro" },
+        { k: "endeavouros", l: "endeavour" },
+        { k: "artix",       l: "artix" },
+        { k: "void",        l: "void" },
+        { k: "alpine",      l: "alpine" },
+        { k: "pop",         l: "pop!_os" },
+        { k: "tux",         l: "generic" },
+        { k: "custom",      l: "custom…" }
+    ]
+
+    // Written by welcome.qml, never by this panel — but this panel REBUILDS the whole file
+    // from its own properties on every save, so any key it does not carry is deleted. That is
+    // what kept resurrecting the first-run tour: change any setting, `welcomed` disappears,
+    // and the tour reopens over whatever you were doing. Carried through untouched.
+    property bool apWelcomed: false
+
     property bool apAutoHide: false          // auto-hide the bar (reveal on hover)
     property bool apHideFullscreen: false     // hide the bar while a window is fullscreen
     property bool apNight: false             // night light on/off (manual)
@@ -792,8 +870,8 @@ Scope {
     // drag-reorderable order of the bar widgets (mirrors shell.qml cfgWidgetOrder)
     // MUST match shell.qml's defaultWidgetOrder — it is the same bar. This copy had drifted:
     // wgUpdates and wgNet appeared twice (so the reorder list showed two identical rows, and
-    // dragging either wrote a duplicate into the saved order) and wgDac was missing entirely.
-    readonly property var defaultWidgetOrder: ["wgMpris","wgTray","wgQuick","wgUpdates","wgNet","wgWeather","wgClipboard","wgNotif","wgWifi","wgBluetooth","wgKdeconnect","wgCaffeine","wgNight","wgSystem","wgDac","wgMic","wgVolume","wgBattery","wgRec","wgClock","wgPower"]
+    // dragging either wrote a duplicate into the saved order) and one widget was missing.
+    readonly property var defaultWidgetOrder: ["wgMpris","wgTray","wgQuick","wgUpdates","wgNet","wgWeather","wgClipboard","wgNotif","wgWifi","wgBluetooth","wgKdeconnect","wgCaffeine","wgNight","wgSystem","wgMic","wgVolume","wgBattery","wgRec","wgClock","wgPower"]
     property var apWidgetOrder: root.defaultWidgetOrder
     // left cluster order (mirrors shell.qml cfgLeftOrder)
     readonly property var defaultLeftOrder: ["lgLogo","lgWork","lgTitle"]
@@ -827,7 +905,6 @@ Scope {
         wgNet:       { i: "swap_vert",             l: "Network Speed",     d: "Live download / upload throughput",                      prop: "wgNet" },
         wgUpdates:   { i: "system_update_alt",     l: "Updates",           d: "Pending pacman + AUR updates, with a one-click upgrade",  prop: "wgUpdates" },
         wgSystem:    { i: "speed",                 l: "System Monitor",    d: "Live CPU usage and system load",                        prop: "wgSystem" },
-        wgDac:       { i: "graphic_eq",            l: "DAC",               d: "Connected USB DAC — name, and the EQ/gain panel",       prop: "wgDac" },
         wgMic:       { i: "mic",                   l: "Microphone",        d: "Input level, and click to mute — red while muted",      prop: "wgMic" },
         wgVolume:    { i: "volume_up",             l: "Volume",            d: "Sound level and output selector",                       prop: "wgVolume" },
         wgBattery:   { i: "battery_charging_full", l: "Battery",           d: "Remaining charge (laptops)",                            prop: "wgBattery" },
@@ -847,7 +924,13 @@ Scope {
         }
     }
     ListModel { id: wgOrderModel }
-    Component.onCompleted: { root.wgSyncModel(); root.lgSyncModel() }
+    // Scanned once at startup rather than only when the wallpaper tab becomes visible: it
+    // costs ~26ms against a warm cache, and it means the count is right the first time the
+    // tab is opened instead of depending on a visibility transition that may already have
+    // happened. Folded in here because a QML object may only assign Component.onCompleted
+    // ONCE — a second one at root scope is "Property value set multiple times", which takes
+    // the whole panel out of the shell.
+    Component.onCompleted: { root.wgSyncModel(); root.lgSyncModel(); root.rescanWallpapers() }
     onApWidgetOrderChanged: if (!root.wgDragging) root.wgSyncModel()
     property bool wgDragging: false
     // left-cluster reorder helpers (parallel to the widget ones)
@@ -1390,6 +1473,34 @@ Scope {
     property real   apWpRotateMins: 30
     property string apWpRotateMode: "next"
     readonly property var wpRotateModes: ["next","prev","random"]
+    // WHERE the wallpapers are. This was hardcoded to ~/Pictures/wallpapers in the cycle
+    // script, in the indexer and — by omission — in the picker, so it could not be changed
+    // at all; and the flat listing meant a folder with any organisation in it indexed as
+    // empty. Subfolders are "collections" in the picker.
+    property string apWpDir: "~/Pictures/wallpapers"
+    property bool   apWpRecursive: true
+    // Rotating into a video respawns a decoder every interval; some folders are mostly
+    // clips and some people would rather the timer left those alone.
+    property bool   apWpRotateStills: false
+    // A paused mpvpaper still holds its decoder, its surface and its VRAM. Freeing it is
+    // the default because the thing covering the wallpaper is usually the thing that
+    // wanted that memory.
+    property bool   apWpCoverStill: true
+    property bool   apWpBatteryStill: false
+    // The pinned pair. Shares auto dark mode's OWN darkStart/darkEnd rather than carrying
+    // a second pair of times: "the desktop goes dark at 19:00" should mean one thing.
+    property bool   apWpDayNight: false
+    property string apWpDay: ""
+    property string apWpNight: ""
+    // The lock screen used to be overwritten on every single apply — sea-lockwall.sh ran
+    // unconditionally — so "a different picture on the lock screen" was not expressible.
+    property bool   apWpLockOwn: false
+    property string apWpLock: ""
+    // 0 = leave mpvpaper alone. Capping a 60fps clip to 30 halves the full-screen blits
+    // the compositor does for it, which on a machine whose iGPU composites while the dGPU
+    // renders is the cost that actually shows up.
+    property int    apWpVidFps: 0
+    readonly property var wpVidFpsOptions: [0, 60, 30, 24]
     property bool apAutoDark: false         // auto-switch dark/light by time of day
     property string apDarkStart: "19:00"    // dark begins
     property string apDarkEnd: "07:00"      // dark ends (light begins)
@@ -1416,7 +1527,6 @@ Scope {
     property bool wgPower: true
     property bool wgQuick: true
     property bool wgNight: false
-    property bool wgDac: true
     property bool wgMic: false
     // Which readings the System Monitor pill shows. sea-sysmon.sh has always sampled all of them;
     // this only decides which ones reach the bar.
@@ -1485,6 +1595,17 @@ Scope {
             if(j.wpRotate!==undefined) root.apWpRotate=!!j.wpRotate;
             if(j.wpRotateMins!==undefined) root.apWpRotateMins=j.wpRotateMins;
             if(j.wpRotateMode!==undefined && (""+j.wpRotateMode).length>0) root.apWpRotateMode=j.wpRotateMode;
+            if(j.wpDir!==undefined && (""+j.wpDir).length>0) root.apWpDir=""+j.wpDir;
+            if(j.wpRecursive!==undefined) root.apWpRecursive=!!j.wpRecursive;
+            if(j.wpRotateStills!==undefined) root.apWpRotateStills=!!j.wpRotateStills;
+            if(j.wpCoverStill!==undefined) root.apWpCoverStill=!!j.wpCoverStill;
+            if(j.wpBatteryStill!==undefined) root.apWpBatteryStill=!!j.wpBatteryStill;
+            if(j.wpDayNight!==undefined) root.apWpDayNight=!!j.wpDayNight;
+            if(j.wpDay!==undefined) root.apWpDay=""+j.wpDay;
+            if(j.wpNight!==undefined) root.apWpNight=""+j.wpNight;
+            if(j.wpLockOwn!==undefined) root.apWpLockOwn=!!j.wpLockOwn;
+            if(j.wpLock!==undefined) root.apWpLock=""+j.wpLock;
+            if(j.wpVidFps!==undefined) root.apWpVidFps=parseInt(j.wpVidFps)||0;
             if(j.edge==="top"||j.edge==="bottom"||j.edge==="left"||j.edge==="right") root.apEdge=j.edge;
             if(j.autoDark!==undefined) root.apAutoDark=!!j.autoDark; if(j.darkStart!==undefined) root.apDarkStart=j.darkStart; if(j.darkEnd!==undefined) root.apDarkEnd=j.darkEnd;
             if(j.appMode!==undefined && (j.appMode==="auto"||j.appMode==="dark"||j.appMode==="light")) root.apAppMode=j.appMode;
@@ -1506,9 +1627,14 @@ Scope {
             if(j.wgPower!==undefined) root.wgPower=!!j.wgPower;
             if(j.wgQuick!==undefined) root.wgQuick=!!j.wgQuick;
             if(j.wgNight!==undefined) root.wgNight=!!j.wgNight;
-            if(j.wgDac!==undefined) root.wgDac=!!j.wgDac;
             if(j.wgMic!==undefined) root.wgMic=!!j.wgMic;
             if(j.sysShow!==undefined && Array.isArray(j.sysShow) && j.sysShow.length) root.apSysShow=j.sysShow;
+            if(j.barShape==="bar"||j.barShape==="pills") root.apBarShape=j.barShape;
+            if(j.wsStyle==="grow"||j.wsStyle==="pill"||j.wsStyle==="circle") root.apWsStyle=j.wsStyle;
+            if(j.wsLabel!==undefined && (""+j.wsLabel).length>0) root.apWsLabel=""+j.wsLabel;
+            if(j.barLogo!==undefined && (""+j.barLogo).length>0) root.apBarLogo=""+j.barLogo;
+            if(j.barLogoPath!==undefined) root.apBarLogoPath=""+j.barLogoPath;
+            if(j.welcomed!==undefined) root.apWelcomed=!!j.welcomed;
             if(j.autoHide!==undefined) root.apAutoHide=!!j.autoHide;
             if(j.hideFullscreen!==undefined) root.apHideFullscreen=!!j.hideFullscreen;
             if(j.night!==undefined) root.apNight=!!j.night;
@@ -1577,7 +1703,6 @@ Scope {
             wgPower: root.wgPower,
             wgQuick: root.wgQuick,
             wgNight: root.wgNight,
-            wgDac: root.wgDac,
             wgMic: root.wgMic,
             sysShow: root.apSysShow,
             autoHide: root.apAutoHide,
@@ -1636,7 +1761,6 @@ Scope {
         if (p.wgPower !== undefined) root.wgPower = p.wgPower;
         if (p.wgQuick !== undefined) root.wgQuick = p.wgQuick;
         if (p.wgNight !== undefined) root.wgNight = p.wgNight;
-        if (p.wgDac !== undefined) root.wgDac = p.wgDac;
         if (p.wgMic !== undefined) root.wgMic = p.wgMic;
         if (p.autoHide !== undefined) root.apAutoHide = p.autoHide;
         if (p.hideFullscreen !== undefined) root.apHideFullscreen = p.hideFullscreen;
@@ -1663,7 +1787,7 @@ Scope {
     // restores it — wgNet and wgUpdates were toggleable in the panel but absent from this list, so
     // switching between saved layouts left those two wherever they happened to be. wgRec is the
     // only correct omission: the recorder pill shows itself while recording and has no toggle.
-    readonly property var barToggleKeys: ["wgMpris","wgTray","wgWeather","wgClipboard","wgNotif","wgWifi","wgBluetooth","wgKdeconnect","wgCaffeine","wgNight","wgSystem","wgVolume","wgBattery","wgClock","wgPower","wgQuick","wgDac","wgNet","wgUpdates","wgMic"]
+    readonly property var barToggleKeys: ["wgMpris","wgTray","wgWeather","wgClipboard","wgNotif","wgWifi","wgBluetooth","wgKdeconnect","wgCaffeine","wgNight","wgSystem","wgVolume","wgBattery","wgClock","wgPower","wgQuick","wgNet","wgUpdates","wgMic"]
     property var barLayouts: []
     Process { id: barLayoutsReadProc; running: true; command: ["sh","-c","cat \"$HOME/.config/sea-shell/bar-layouts.json\" 2>/dev/null || echo '[]'"]
         stdout: StdioCollector { id: blOut; onStreamFinished: { try { root.barLayouts = JSON.parse(blOut.text) } catch(e){ root.barLayouts = [] } } } }
@@ -1692,7 +1816,7 @@ Scope {
     function saveAppearance() {
         if (!root.apLoaded) return;      // see apLoaded — never write defaults over a real config
         var cf = '['; for(var i=0;i<root.apCustomFonts.length;i++){ cf += (i?',':'') + '\"'+root.apCustomFonts[i]+'\"'; } cf += ']';
-        var j = '{\"radius\":'+Math.round(root.apRadius)+',\"opacity\":'+root.apOpacity.toFixed(2)+',\"height\":'+Math.round(root.apHeight)+',\"scale\":'+root.apScale.toFixed(2)+',\"accent\":\"'+root.apAccent+'\",\"font\":\"'+root.apFont+'\",\"customFonts\":'+cf+',\"mode\":\"'+(root.apLight?'light':'dark')+'\",\"matugen\":'+(root.apMatugen?'true':'false')+',\"scheme\":\"'+root.apScheme+'\",\"barFill\":\"'+root.apBarFill+'\",\"edge\":\"'+root.apEdge+'\",\"dock\":'+(root.apDock?'true':'false')+',\"dockEdge\":\"'+root.apDockEdge+'\",\"dockIcon\":'+Math.round(root.apDockIcon)+',\"dockMode\":\"'+root.apDockMode+'\",\"dockZoom\":'+(root.apDockZoom?'true':'false')+',\"dockRunning\":'+(root.apDockRunning?'true':'false')+',\"dockLabels\":'+(root.apDockLabels?'true':'false')+',\"autoDark\":'+(root.apAutoDark?'true':'false')+',\"darkStart\":\"'+root.apDarkStart+'\",\"darkEnd\":\"'+root.apDarkEnd+'\",\"appMode\":\"'+root.apAppMode+'\",\"wgMpris\":'+(root.wgMpris?'true':'false')+',\"wgTray\":'+(root.wgTray?'true':'false')+',\"wgWeather\":'+(root.wgWeather?'true':'false')+',\"wgClipboard\":'+(root.wgClipboard?'true':'false')+',\"wgNotif\":'+(root.wgNotif?'true':'false')+',\"wgWifi\":'+(root.wgWifi?'true':'false')+',\"wgBluetooth\":'+(root.wgBluetooth?'true':'false')+',\"wgKdeconnect\":'+(root.wgKdeconnect?'true':'false')+',\"wgCaffeine\":'+(root.wgCaffeine?'true':'false')+',\"wgNet\":'+(root.wgNet?'true':'false')+',\"wgUpdates\":'+(root.wgUpdates?'true':'false')+',\"wgSystem\":'+(root.wgSystem?'true':'false')+',\"wgVolume\":'+(root.wgVolume?'true':'false')+',\"wgBattery\":'+(root.wgBattery?'true':'false')+',\"wgClock\":'+(root.wgClock?'true':'false')+',\"wgPower\":'+(root.wgPower?'true':'false')+',\"wgQuick\":'+(root.wgQuick?'true':'false')+',\"wgNight\":'+(root.wgNight?'true':'false')+',\"wgDac\":'+(root.wgDac?'true':'false')+',\"wgMic\":'+(root.wgMic?'true':'false')+',\"autoHide\":'+(root.apAutoHide?'true':'false')+',\"hideFullscreen\":'+(root.apHideFullscreen?'true':'false')+',\"night\":'+(root.apNight?'true':'false')+',\"nightTemp\":'+Math.round(root.apNightTemp)+',\"nightAuto\":'+(root.apNightAuto?'true':'false')+',\"mouseSens\":'+root.apMouseSens.toFixed(2)+',\"accelProfile\":\"'+root.apAccelProfile+'\",\"mouseNatural\":'+(root.apMouseNatural?'true':'false')+',\"tpNatural\":'+(root.apTpNatural?'true':'false')+',\"tpScroll\":'+root.apTpScroll.toFixed(2)+',\"tpTap\":'+(root.apTpTap?'true':'false')+',\"tpDwt\":'+(root.apTpDwt?'true':'false')+',\"vrr\":'+Math.round(root.apVrr)+',\"wpTransition\":\"'+root.apWpTransition+'\",\"wpTransitionFps\":'+Math.round(root.apWpTransitionFps)+',\"wpTransitionDur\":'+root.apWpTransitionDur.toFixed(2)+',\"wpRotate\":'+(root.apWpRotate?'true':'false')+',\"wpRotateMins\":'+Math.round(root.apWpRotateMins)+',\"wpRotateMode\":\"'+root.apWpRotateMode+'\",\"sysShow\":'+JSON.stringify(root.apSysShow)+',\"widgetOrder\":'+JSON.stringify(root.apWidgetOrder)+',\"leftOrder\":'+JSON.stringify(root.apLeftOrder)+',\"monitors\":'+JSON.stringify(root.apMonitors)+'}';
+        var j = '{\"radius\":'+Math.round(root.apRadius)+',\"opacity\":'+root.apOpacity.toFixed(2)+',\"height\":'+Math.round(root.apHeight)+',\"scale\":'+root.apScale.toFixed(2)+',\"accent\":\"'+root.apAccent+'\",\"font\":\"'+root.apFont+'\",\"customFonts\":'+cf+',\"mode\":\"'+(root.apLight?'light':'dark')+'\",\"matugen\":'+(root.apMatugen?'true':'false')+',\"scheme\":\"'+root.apScheme+'\",\"barFill\":\"'+root.apBarFill+'\",\"edge\":\"'+root.apEdge+'\",\"dock\":'+(root.apDock?'true':'false')+',\"dockEdge\":\"'+root.apDockEdge+'\",\"dockIcon\":'+Math.round(root.apDockIcon)+',\"dockMode\":\"'+root.apDockMode+'\",\"dockZoom\":'+(root.apDockZoom?'true':'false')+',\"dockRunning\":'+(root.apDockRunning?'true':'false')+',\"dockLabels\":'+(root.apDockLabels?'true':'false')+',\"autoDark\":'+(root.apAutoDark?'true':'false')+',\"darkStart\":\"'+root.apDarkStart+'\",\"darkEnd\":\"'+root.apDarkEnd+'\",\"appMode\":\"'+root.apAppMode+'\",\"wgMpris\":'+(root.wgMpris?'true':'false')+',\"wgTray\":'+(root.wgTray?'true':'false')+',\"wgWeather\":'+(root.wgWeather?'true':'false')+',\"wgClipboard\":'+(root.wgClipboard?'true':'false')+',\"wgNotif\":'+(root.wgNotif?'true':'false')+',\"wgWifi\":'+(root.wgWifi?'true':'false')+',\"wgBluetooth\":'+(root.wgBluetooth?'true':'false')+',\"wgKdeconnect\":'+(root.wgKdeconnect?'true':'false')+',\"wgCaffeine\":'+(root.wgCaffeine?'true':'false')+',\"wgNet\":'+(root.wgNet?'true':'false')+',\"wgUpdates\":'+(root.wgUpdates?'true':'false')+',\"wgSystem\":'+(root.wgSystem?'true':'false')+',\"wgVolume\":'+(root.wgVolume?'true':'false')+',\"wgBattery\":'+(root.wgBattery?'true':'false')+',\"wgClock\":'+(root.wgClock?'true':'false')+',\"wgPower\":'+(root.wgPower?'true':'false')+',\"wgQuick\":'+(root.wgQuick?'true':'false')+',\"wgNight\":'+(root.wgNight?'true':'false')+',\"wgMic\":'+(root.wgMic?'true':'false')+',\"barShape\":\"'+root.apBarShape+'\",\"wsStyle\":\"'+root.apWsStyle+'\",\"wsLabel\":\"'+root.apWsLabel+'\",\"barLogo\":\"'+root.apBarLogo+'\",\"barLogoPath\":'+JSON.stringify(root.apBarLogoPath)+',\"welcomed\":'+(root.apWelcomed?'true':'false')+',\"autoHide\":'+(root.apAutoHide?'true':'false')+',\"hideFullscreen\":'+(root.apHideFullscreen?'true':'false')+',\"night\":'+(root.apNight?'true':'false')+',\"nightTemp\":'+Math.round(root.apNightTemp)+',\"nightAuto\":'+(root.apNightAuto?'true':'false')+',\"mouseSens\":'+root.apMouseSens.toFixed(2)+',\"accelProfile\":\"'+root.apAccelProfile+'\",\"mouseNatural\":'+(root.apMouseNatural?'true':'false')+',\"tpNatural\":'+(root.apTpNatural?'true':'false')+',\"tpScroll\":'+root.apTpScroll.toFixed(2)+',\"tpTap\":'+(root.apTpTap?'true':'false')+',\"tpDwt\":'+(root.apTpDwt?'true':'false')+',\"vrr\":'+Math.round(root.apVrr)+',\"wpTransition\":\"'+root.apWpTransition+'\",\"wpTransitionFps\":'+Math.round(root.apWpTransitionFps)+',\"wpTransitionDur\":'+root.apWpTransitionDur.toFixed(2)+',\"wpRotate\":'+(root.apWpRotate?'true':'false')+',\"wpRotateMins\":'+Math.round(root.apWpRotateMins)+',\"wpRotateMode\":\"'+root.apWpRotateMode+'\",\"wpDir\":'+JSON.stringify(root.apWpDir)+',\"wpRecursive\":'+(root.apWpRecursive?'true':'false')+',\"wpRotateStills\":'+(root.apWpRotateStills?'true':'false')+',\"wpCoverStill\":'+(root.apWpCoverStill?'true':'false')+',\"wpBatteryStill\":'+(root.apWpBatteryStill?'true':'false')+',\"wpDayNight\":'+(root.apWpDayNight?'true':'false')+',\"wpDay\":'+JSON.stringify(root.apWpDay)+',\"wpNight\":'+JSON.stringify(root.apWpNight)+',\"wpLockOwn\":'+(root.apWpLockOwn?'true':'false')+',\"wpLock\":'+JSON.stringify(root.apWpLock)+',\"wpVidFps\":'+Math.round(root.apWpVidFps)+',\"sysShow\":'+JSON.stringify(root.apSysShow)+',\"widgetOrder\":'+JSON.stringify(root.apWidgetOrder)+',\"leftOrder\":'+JSON.stringify(root.apLeftOrder)+',\"monitors\":'+JSON.stringify(root.apMonitors)+'}';
         run("mkdir -p \"$HOME/.config/sea-shell\" && printf '%s' '"+j+"' > \"$HOME/.config/sea-shell/appearance.json\"");
     }
     // apply the system app dark/light preference independently from the shell theme
@@ -1712,6 +1836,8 @@ Scope {
     property string matugenScript: Qt.resolvedUrl("matugen-accent.sh").toString().replace("file://","")
     property string wpCycleScript:  Qt.resolvedUrl("sea-wallpaper-cycle.sh").toString().replace("file://","")
     property string wpRotateScript: Qt.resolvedUrl("sea-wallpaper-rotate.sh").toString().replace("file://","")
+    property string wpApplyScript:  Qt.resolvedUrl("sea-wallpaper-apply.sh").toString().replace("file://","")
+    property string lockwallScript: Qt.resolvedUrl("sea-lockwall.sh").toString().replace("file://","")
     property string pickScript: Qt.resolvedUrl("sea-pick-color.sh").toString().replace("file://","")
     property string pickingTarget: ""
     Process {
@@ -2149,6 +2275,9 @@ Scope {
         id: ch
         property string label: ""
         property string icon: ""
+        // Some chips ARE their symbol — the workspace numbering picker shows ⚀⚁⚂ rather than
+        // the word "dice" — and the UI font does not necessarily have them.
+        property string labelFont: Tok.mono
         property bool on: false
         signal picked()
         implicitWidth: chRow.implicitWidth + 24; implicitHeight: 32; radius: Tok.r
@@ -2157,7 +2286,7 @@ Scope {
         Behavior on color { ColorAnimation { duration: 100 } }
         Row { id: chRow; anchors.centerIn: parent; spacing: 6
             Sym { visible: ch.icon !== ""; anchors.verticalCenter: parent.verticalCenter; text: ch.icon; sz: 15; color: ch.on ? Tok.accentInk : Tok.ink2 }
-            Text { anchors.verticalCenter: parent.verticalCenter; text: ch.label; color: ch.on ? Tok.accentInk : Tok.ink; font.pixelSize: 12; font.family: Tok.mono; font.bold: ch.on } }
+            Text { anchors.verticalCenter: parent.verticalCenter; text: ch.label; color: ch.on ? Tok.accentInk : Tok.ink; font.pixelSize: 12; font.family: ch.labelFont; font.bold: ch.on } }
         MouseArea { id: chMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: ch.picked() }
     }
 
@@ -2201,6 +2330,467 @@ Scope {
                 onClicked: { root.run(parent.parent.cmd); if (parent.parent.quitAfter) root.closePanel() }
             }
         }
+    }
+
+    // ---------- the wallpaper shelf ----------
+    // The picker's index, read here too, so the day/night pair can be chosen by LOOKING at
+    // wallpapers rather than by typing two absolute paths into two text fields. Same script,
+    // same cache, same poster frames — settings is not allowed a second opinion about what
+    // is in the wallpaper folder.
+    property var wpIndex: []
+    property bool wpIndexBusy: false
+    Process {
+        id: wpIndexProc
+        command: ["python3", Qt.resolvedUrl("sea-wallpaper-index.py").toString().replace("file://","")]
+        stdout: StdioCollector { id: wpIxOut; onStreamFinished: {
+            var out = [], lines = wpIxOut.text.split("\n");
+            for (var i = 0; i < lines.length; i++) {
+                var f = lines[i].split("\t");
+                // EIGHT. The indexer grew an mtime column for the picker's "newest" sort and
+                // this length check was not moved with it, so every row failed and the folder
+                // reported zero wallpapers while being full of them.
+                // `< 8`, not `!== 8`. The indexer has grown a column twice now (collection, then
+                // mtime, then the full-resolution still) and each time an exact-length check
+                // somewhere silently dropped every row — a folder of wallpapers reporting
+                // itself empty. Extra columns are none of this parser's business.
+                if (f.length < 8 || !f[0]) continue;
+                out.push({ path: f[0], name: f[0].slice(f[0].lastIndexOf("/") + 1),
+                           poster: f[4], coll: f[6] || "", vid: f[4].length > 0 });
+            }
+            root.wpIndex = out;
+            root.wpIndexBusy = false;
+            root.wpScanned = true;
+            wpScanGuard.stop();
+        } }
+    }
+    // Scanned at least once, as opposed to scanned and genuinely empty. Without it "0
+    // wallpapers" is what a folder full of wallpapers looks like when the scan never ran, and
+    // the two are indistinguishable from the outside — which is exactly the state this got
+    // stuck in.
+    property bool wpScanned: false
+    function rescanWallpapers() {
+        if (root.wpIndexBusy) return;
+        root.wpIndexBusy = true;
+        wpIndexProc.running = true;
+        wpScanGuard.restart();
+    }
+    // If the process never reports back — it failed to start, python is missing, stdout never
+    // closed — `wpIndexBusy` would stay true forever and every later rescan, including the
+    // button, would return at the guard above. One wedged scan meant no scan ever again.
+    Timer {
+        id: wpScanGuard; interval: 12000; repeat: false
+        onTriggered: if (root.wpIndexBusy) { root.wpIndexBusy = false; root.wpScanned = true }
+    }
+
+    // The config stores whatever the user typed; the browser deals in absolute paths.
+    // Kept as "~/…" wherever it can be, because that is the form that survives being read
+    // on a machine whose home is somewhere else.
+    function expandHome(p) {
+        if (!p || !p.length) return root.homeDir;
+        if (p.charAt(0) === "~") return root.homeDir + p.slice(1);
+        return p;
+    }
+    function shortenHome(p) {
+        if (!p) return "";
+        return (p.indexOf(root.homeDir + "/") === 0) ? "~" + p.slice(root.homeDir.length) : p;
+    }
+    function wpStill(w) { return !w ? "" : (w.vid ? w.poster : w.path) }
+    function wpNamed(path) {
+        for (var i = 0; i < root.wpIndex.length; i++)
+            if (root.wpIndex[i].path === path) return root.wpIndex[i];
+        return null;
+    }
+    readonly property int wpCollCount: {
+        var seen = {}, n = 0;
+        for (var i = 0; i < root.wpIndex.length; i++) {
+            var c = root.wpIndex[i].coll;
+            if (c && !seen[c]) { seen[c] = true; n++ }
+        }
+        return n;
+    }
+
+    // ---- a wallpaper as a CARTRIDGE ----
+    // The picker commits by dropping a cartridge into a deck. Choosing which wallpaper is
+    // loaded automatically at dusk is the same act, decided in advance — so it is the same
+    // object: a labelled plate with a picture on it and a key notch down one side, sitting
+    // in a slot that is either occupied or plainly empty.
+    //
+    // The notch is not decoration. It is the one marking on here that says which way up
+    // this goes, which is the only thing a physical cartridge's shape ever told you.
+    component CartTile: Rectangle {
+        id: ct
+        property string slot: ""            // DAY / NIGHT — the tracked legend
+        property string path: ""
+        property bool armed: false          // waiting for a pick off the shelf
+        signal picked()
+        signal cleared()
+
+        readonly property var entry: root.wpNamed(ct.path)
+        readonly property bool filled: ct.path.length > 0
+
+        implicitWidth: 208; implicitHeight: 132
+        radius: Tok.rSmall
+        clip: true
+        color: Tok.sunken
+        border.width: ct.armed ? 2 : 1
+        border.color: ct.armed ? Tok.accent : (ctMa.containsMouse ? Tok.ink3 : Tok.ruleHard)
+        Behavior on border.color { ColorAnimation { duration: Tok.mFast } }
+
+        Image {
+            anchors { fill: parent; margins: ct.border.width; bottomMargin: 26 + ct.border.width }
+            visible: ct.filled
+            source: ct.entry ? "file://" + root.wpStill(ct.entry) : ""
+            fillMode: Image.PreserveAspectCrop
+            asynchronous: true; cache: true
+            sourceSize.height: 240
+        }
+
+        // empty slot — an opening with nothing in it, said the way the deck says it
+        Column {
+            anchors.centerIn: parent
+            anchors.verticalCenterOffset: -13
+            spacing: 4
+            visible: !ct.filled
+            Sym { anchors.horizontalCenter: parent.horizontalCenter
+                  text: "add_photo_alternate"; sz: 22; color: Tok.ink3 }
+            Text { anchors.horizontalCenter: parent.horizontalCenter
+                   text: ct.armed ? "pick one below" : "empty"
+                   color: ct.armed ? Tok.accent : Tok.ink3
+                   font.pixelSize: Tok.tLabel; font.family: Tok.mono
+                   font.letterSpacing: 1.2; font.capitalization: Font.AllUppercase }
+        }
+
+        // the label plate
+        Rectangle {
+            id: ctPlate
+            anchors { left: parent.left; right: parent.right; bottom: parent.bottom }
+            height: 26
+            color: Tok.raised
+            Rectangle { anchors { left: parent.left; right: parent.right; top: parent.top }
+                        height: 1; color: Tok.ruleHard }
+            Row {
+                anchors { left: parent.left; leftMargin: 8; right: ctClear.left; rightMargin: 6
+                          verticalCenter: parent.verticalCenter }
+                spacing: 8
+                Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: ct.slot; color: Tok.accent
+                    font.pixelSize: Tok.tLabel; font.family: Tok.mono; font.weight: 700
+                    font.letterSpacing: 1.3; font.capitalization: Font.AllUppercase
+                }
+                Rectangle { anchors.verticalCenter: parent.verticalCenter
+                            width: 1; height: 12; color: Tok.ruleHard }
+                Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: Math.max(0, parent.width - 96)
+                    text: ct.filled ? (ct.entry ? ct.entry.name : ct.path.slice(ct.path.lastIndexOf("/") + 1))
+                                    : "—"
+                    color: Tok.ink2; font.pixelSize: Tok.tData; font.family: Tok.mono
+                    elide: Text.ElideMiddle
+                }
+            }
+            Sym {
+                id: ctClear
+                anchors { right: parent.right; rightMargin: 7; verticalCenter: parent.verticalCenter }
+                visible: ct.filled
+                text: "backspace"; sz: 14
+                color: ctClearMa.containsMouse ? Tok.crit : Tok.ink3
+                MouseArea { id: ctClearMa; anchors.fill: parent; anchors.margins: -5
+                            hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                            onClicked: ct.cleared() }
+            }
+        }
+
+        // The key notch, in the ground's own colour so it reads as absent material rather
+        // than as a painted mark. TOP corner, which is where a cartridge is actually keyed —
+        // and, on the profile cartridge that shares this detail, the only edge where a
+        // notch does not take a bite out of the accent band that identifies it.
+        Rectangle {
+            anchors { right: parent.right; top: parent.top }
+            width: 18; height: 10
+            color: Tok.bg
+            Rectangle { anchors { left: parent.left; top: parent.top; bottom: parent.bottom }
+                        width: 1; color: Tok.ruleHard }
+            Rectangle { anchors { left: parent.left; right: parent.right; bottom: parent.bottom }
+                        height: 1; color: Tok.ruleHard }
+        }
+
+        // registration corners while armed — the same four brackets the picker puts on the
+        // panel it has hold of, meaning the same thing: this one is the target.
+        Repeater {
+            model: ct.armed ? 4 : 0
+            Item {
+                required property int index
+                readonly property bool onRight: (index % 2) === 1
+                readonly property bool onBottom: index >= 2
+                // 4px, matching the picker's brackets. At 3 they were technically drawn and
+                // practically invisible — the same measuring mistake the picker's own
+                // corners needed correcting for.
+                readonly property real arm: 16
+                width: arm; height: arm
+                x: onRight ? ct.width - arm : 0
+                y: onBottom ? ct.height - 26 - arm : 0
+                Rectangle { width: parent.arm; height: 4; color: Tok.accent
+                            y: parent.onBottom ? parent.arm - 4 : 0 }
+                Rectangle { width: 4; height: parent.arm; color: Tok.accent
+                            x: parent.onRight ? parent.arm - 4 : 0 }
+            }
+        }
+
+        MouseArea { id: ctMa; anchors.fill: parent; anchors.bottomMargin: 26
+                    hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                    onClicked: ct.picked() }
+    }
+
+    // ---- the shelf a cartridge is picked off ----
+    // Only while a slot is armed. A row of every wallpaper you own, permanently on display
+    // under slots that are already full, would be the largest thing on this page and would
+    // answer nothing. Two groups need one (the day/night pair, and the lock screen), which
+    // is why it is a component rather than a block of markup written twice.
+    component WallShelf: Rectangle {
+        id: sh
+        property bool open: false
+        property string chosen: ""
+        signal picked(string path)
+
+        Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14
+        // Via a plain property: QML has no Behavior on an ATTACHED property, so animating
+        // Layout.preferredHeight directly is not a slower open, it is an error.
+        property real shelfH: sh.open ? 104 : 0
+        Behavior on shelfH { NumberAnimation { duration: Tok.mBase; easing.type: Tok.mEase } }
+        Layout.preferredHeight: shelfH
+        visible: shelfH > 1
+        clip: true
+        radius: Tok.r
+        color: Tok.sunken
+        border.width: 1; border.color: Tok.ruleHard
+
+        Text {
+            anchors.centerIn: parent
+            visible: !root.wpIndex.length
+            text: root.wpIndexBusy ? "scanning…" : "no wallpapers in that folder"
+            color: theme.faint; font.pixelSize: 11; font.family: Tok.mono
+        }
+
+        ListView {
+            id: shelfList
+            anchors.fill: parent; anchors.margins: 10
+            orientation: ListView.Horizontal
+            spacing: 8
+            clip: true
+            model: root.wpIndex
+            delegate: Rectangle {
+                id: shelfItem
+                required property var modelData
+                readonly property bool isChosen: sh.chosen === modelData.path
+                width: 132; height: shelfList.height
+                radius: Tok.rSmall
+                clip: true
+                color: Tok.bg
+                border.width: shelfItem.isChosen ? 2 : 1
+                border.color: shelfItem.isChosen ? Tok.accent
+                            : (shelfMa.containsMouse ? Tok.ink3 : Tok.ruleHard)
+                Behavior on border.color { ColorAnimation { duration: Tok.mFast } }
+                Image {
+                    anchors.fill: parent; anchors.margins: shelfItem.border.width
+                    source: root.wpStill(shelfItem.modelData).length
+                            ? "file://" + root.wpStill(shelfItem.modelData) : ""
+                    fillMode: Image.PreserveAspectCrop
+                    asynchronous: true; cache: true
+                    sourceSize.height: 160
+                }
+                // motion marker, exactly as the picker draws it — a moving wallpaper is a
+                // different kind of thing and that has to be visible wherever one is offered
+                Rectangle {
+                    visible: shelfItem.modelData.vid
+                    anchors { top: parent.top; left: parent.left; margins: 4 }
+                    width: 16; height: 16; radius: Tok.rSmall
+                    color: Tok.alpha(Tok.bg, 0.72)
+                    Sym { anchors.centerIn: parent; text: "play_arrow"; sz: 12; color: Tok.ink }
+                }
+                MouseArea {
+                    id: shelfMa
+                    anchors.fill: parent; hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: sh.picked(shelfItem.modelData.path)
+                }
+            }
+        }
+    }
+
+    // ---- a theme profile as a CARTRIDGE ----
+    // Same object as the wallpaper pair above, for the same reason: a saved preset is a
+    // thing you LOAD into the machine, and loading one changes the whole desktop. The row
+    // of "Load" buttons this replaces described a preset in words — font, radius, and a hex
+    // string — which is the one way of showing a palette that cannot show you the palette.
+    //
+    // A profile has no picture, so its face IS its palette: the four background steps and
+    // the accent, laid out in the order the design language stacks them.
+    //
+    // The ramp is re-derived here rather than read from Tok, because Tok can only ever
+    // describe the palette that is currently ACTIVE — and every cartridge on this shelf is
+    // by definition one that is not.
+    function profHue(p) {
+        var c = Qt.color(p && p.accent ? p.accent : "#63c7dd");
+        return c.hslHue >= 0 ? c.hslHue : 0.55;
+    }
+    function profLight(p) { return p && ("" + p.mode) === "light" }
+    function profStep(p, i) {
+        var h = root.profHue(p), lt = root.profLight(p);
+        if (i === 0) return lt ? Qt.hsla(h, 0.07, 0.940, 1) : Qt.hsla(h, 0.14, 0.072, 1);  // bg
+        if (i === 1) return lt ? Qt.hsla(h, 0.09, 0.972, 1) : Qt.hsla(h, 0.13, 0.104, 1);  // surface
+        if (i === 2) return lt ? Qt.hsla(h, 0.10, 1.000, 1) : Qt.hsla(h, 0.12, 0.136, 1);  // raised
+        return lt ? Qt.hsla(h, 0.08, 0.898, 1) : Qt.hsla(h, 0.16, 0.046, 1);               // sunken
+    }
+    function profAccent(p) {
+        var c = Qt.color(p && p.accent ? p.accent : "#63c7dd");
+        var h = root.profHue(p), sat = c.hslSaturation;
+        return root.profLight(p)
+            ? Qt.hsla(h, Math.max(0.35, Math.min(0.95, sat)), 0.34, 1)
+            : Qt.hsla(h, Math.max(0.42, Math.min(0.95, sat)), 0.62, 1);
+    }
+    // Which cartridge is in the machine. Compared on what a profile actually sets rather
+    // than on its name, so a preset you have since edited stops claiming to be loaded.
+    function profLoaded(p) {
+        if (!p) return false;
+        return ("" + p.accent).toLowerCase() === ("" + root.apAccent).toLowerCase()
+            && ("" + p.font) === ("" + root.apFont)
+            && Math.round(p.radius) === Math.round(root.apRadius)
+            && root.profLight(p) === root.apLight;
+    }
+
+    component ProfileCart: Rectangle {
+        id: pc
+        property var profile: null
+        property bool loaded: false
+        signal load()
+        signal eject()
+
+        implicitWidth: 176; implicitHeight: 116
+        radius: Tok.rSmall
+        clip: true
+        color: Tok.sunken
+        border.width: pc.loaded ? 2 : 1
+        border.color: pc.loaded ? Tok.accent : (pcMa.containsMouse ? Tok.ink3 : Tok.ruleHard)
+        Behavior on border.color { ColorAnimation { duration: Tok.mFast } }
+        // The dip on press: 3px of the machine taking the object. Anticipation is the whole
+        // reason the picker's insert reads as force rather than as a position change, and it
+        // costs one Behavior here.
+        transform: Translate { y: pcMa.pressed ? 3 : 0
+                               Behavior on y { NumberAnimation { duration: 90; easing.type: Easing.OutQuad } } }
+
+        // The face. Three neutral steps and the accent, with hairlines between them —
+        // without those a low-saturation preset (the shipped "BW" is four shades of
+        // near-white) draws four bands you cannot tell apart, and the cartridge looks blank
+        // rather than pale. The rules are the profile's OWN rule colour, so the separation
+        // is drawn in the palette being previewed rather than in the one you are sitting in.
+        Item {
+            id: pcFace
+            anchors { fill: parent; margins: pc.border.width; bottomMargin: 26 + pc.border.width }
+
+            Column {
+                anchors.fill: parent
+                Repeater {
+                    model: 3
+                    Rectangle {
+                        required property int index
+                        width: pcFace.width
+                        height: (pcFace.height - 14) / 3
+                        color: root.profStep(pc.profile, index)
+                        Rectangle {
+                            anchors { left: parent.left; right: parent.right; bottom: parent.bottom }
+                            height: 1
+                            color: root.profLight(pc.profile)
+                                   ? Qt.hsla(root.profHue(pc.profile), 0.10, 0.845, 1)
+                                   : Qt.hsla(root.profHue(pc.profile), 0.12, 0.190, 1)
+                        }
+                    }
+                }
+                // The accent gets a band rather than a dot: it is the single fact that
+                // distinguishes one preset from another, and a 30px circle floating in the
+                // corner was decoration standing in for it.
+                Rectangle {
+                    width: pcFace.width; height: 14
+                    color: root.profAccent(pc.profile)
+                }
+            }
+
+            // light or dark, said once, in the palette's own ink
+            Sym {
+                anchors { left: parent.left; top: parent.top; margins: 7 }
+                text: root.profLight(pc.profile) ? "light_mode" : "dark_mode"
+                sz: 15
+                color: root.profLight(pc.profile) ? Qt.hsla(root.profHue(pc.profile), 0.16, 0.09, 1)
+                                                  : Qt.hsla(root.profHue(pc.profile), 0.08, 0.912, 1)
+            }
+
+            // The spec, printed on the label the way a spec is printed on hardware — in the
+            // preset's own secondary ink, over its own raised step. This is what the row
+            // this replaces spent a whole line of prose on.
+            Text {
+                anchors { left: parent.left; right: parent.right; leftMargin: 7; rightMargin: 7
+                          bottom: parent.bottom; bottomMargin: 19 }
+                text: (pc.profile ? pc.profile.font : "") + "  ·  r" + (pc.profile ? Math.round(pc.profile.radius) : 0)
+                color: root.profLight(pc.profile) ? Qt.hsla(root.profHue(pc.profile), 0.12, 0.310, 1)
+                                                  : Qt.hsla(root.profHue(pc.profile), 0.08, 0.680, 1)
+                font.pixelSize: Tok.tLabel; font.family: Tok.mono
+                font.letterSpacing: 0.6
+                elide: Text.ElideRight
+            }
+        }
+
+        Rectangle {
+            id: pcPlate
+            anchors { left: parent.left; right: parent.right; bottom: parent.bottom }
+            height: 26
+            color: Tok.raised
+            Rectangle { anchors { left: parent.left; right: parent.right; top: parent.top }
+                        height: 1; color: Tok.ruleHard }
+            Row {
+                anchors { left: parent.left; leftMargin: 8; right: pcEject.left; rightMargin: 6
+                          verticalCenter: parent.verticalCenter }
+                spacing: 7
+                // The status lamp, exactly as the deck runs it: lit for the one that is in.
+                Rectangle {
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: 7; height: 7; radius: 3.5
+                    color: pc.loaded ? Tok.accent : Tok.alpha(Tok.ink3, 0.40)
+                    Behavior on color { ColorAnimation { duration: Tok.mFast } }
+                }
+                Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: Math.max(0, parent.width - 26)
+                    text: pc.profile ? pc.profile.name : ""
+                    color: Tok.ink; font.pixelSize: Tok.tData; font.family: Tok.mono
+                    font.weight: pc.loaded ? 700 : 400
+                    elide: Text.ElideRight
+                }
+            }
+            Sym {
+                id: pcEject
+                anchors { right: parent.right; rightMargin: 7; verticalCenter: parent.verticalCenter }
+                text: "eject"; sz: 15
+                color: pcEjectMa.containsMouse ? Tok.crit : Tok.ink3
+                MouseArea { id: pcEjectMa; anchors.fill: parent; anchors.margins: -5
+                            hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                            onClicked: pc.eject() }
+            }
+        }
+
+        // the key notch — the one marking that says which way up this goes
+        Rectangle {
+            anchors { right: parent.right; top: parent.top }
+            width: 18; height: 10
+            color: Tok.bg
+            Rectangle { anchors { left: parent.left; top: parent.top; bottom: parent.bottom }
+                        width: 1; color: Tok.ruleHard }
+            Rectangle { anchors { left: parent.left; right: parent.right; bottom: parent.bottom }
+                        height: 1; color: Tok.ruleHard }
+        }
+
+        MouseArea { id: pcMa; anchors.fill: parent; anchors.bottomMargin: 26
+                    hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                    onClicked: pc.load() }
     }
 
     // a single tab button in the sidebar
@@ -2355,6 +2945,7 @@ Scope {
                             TabBtn { icon: "monitor_heart";        label: "System";      idx: 8 }
                             GroupLabel { text: "LOOK & FEEL" }
                             TabBtn { icon: "palette";              label: "Appearance";  idx: 4 }
+                            TabBtn { icon: "view_agenda";          label: "Bar";         idx: 20 }
                             TabBtn { icon: "widgets";              label: "Bar Widgets"; idx: 12 }
                             TabBtn { icon: "dock_to_bottom";       label: "Dock";        idx: 16 }
                             TabBtn { icon: "picture_in_picture";   label: "Window rules"; idx: 17 }
@@ -3113,7 +3704,7 @@ Scope {
                                 Layout.fillWidth: true; spacing: 6; Layout.bottomMargin: 8
                                 Repeater {
                                     model: [
-                                        { i: "settings_system_daydream", l: "bar theme" },
+                                        { i: "contrast", l: "theme" },
                                         { i: "palette", l: "colors" },
                                         { i: "tune", l: "targets" },
                                         { i: "font_download", l: "fonts" },
@@ -3168,33 +3759,6 @@ Scope {
                                             onPicked: { root.apAppMode=modelData.k; root.saveAppearance(); root.applyAppMode() } } } }
                                 Text { visible: root.apAppMode!=="auto"; text: "apps will stay " + root.apAppMode + " regardless of shell theme"; color: theme.iris; font.pixelSize: 10; font.family: Tok.mono; Layout.leftMargin: 14 }
 
-                                Section { title: "bar shape"; icon: "tune" }
-                                SliderRow { icon: "rounded_corner"; label: "roundness"; value: root.apRadius/26; readout: Math.round(root.apRadius)+"px"
-                                    onMoved: (v)=>{ root.apRadius = v*26; root.saveAppearance() } }
-                                RowLayout { Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; spacing: 12
-                                    Sym { text: "dock_to_right"; sz: 18; color: theme.sub; Layout.alignment: Qt.AlignVCenter }
-                                    Text { text: "position"; color: theme.sub; font.pixelSize: 12; font.family: Tok.mono; Layout.minimumWidth: 76 }
-                                    Flow { Layout.fillWidth: true; spacing: 6
-                                        Repeater { model: root.edges
-                                            delegate: Chip { required property var modelData; label: modelData; on: root.apEdge===modelData
-                                                onPicked: { root.apEdge=modelData; root.saveAppearance() } } } } }
-                                SliderRow { icon: "opacity"; label: "opacity"; tint: theme.frost; value: root.apOpacity; readout: Math.round(root.apOpacity*100)+"%"
-                                    onMoved: (v)=>{ root.apOpacity = v; root.saveAppearance() } }
-                                Text { visible: root.apOpacity < 0.06; text: "↑ 0% hides the bar background — only the buttons show"; color: theme.faint; font.pixelSize: 10; font.family: Tok.mono; Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14 }
-                                RowLayout { Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; spacing: 12
-                                    Sym { text: "format_color_fill"; sz: 18; color: theme.sub; Layout.alignment: Qt.AlignVCenter }
-                                    Text { text: "bar fill"; color: theme.sub; font.pixelSize: 12; font.family: Tok.mono; Layout.minimumWidth: 76 }
-                                    Flow { Layout.fillWidth: true; spacing: 6
-                                        Repeater { model: [{k:"matugen",l:"matugen"},{k:"black",l:"black"},{k:"white",l:"white"}]
-                                            delegate: Chip { required property var modelData; label: modelData.l; on: root.apBarFill===modelData.k
-                                                onPicked: { root.apBarFill=modelData.k; root.saveAppearance() } } } } }
-                                Text { visible: root.apBarFill!=="matugen" && root.apOpacity<0.99; text: "↑ set opacity to 100% for a solid " + root.apBarFill + " bar"; color: theme.faint; font.pixelSize: 10; font.family: Tok.mono; Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14 }
-                                SliderRow { icon: "height"; label: "bar height"; tint: theme.good; value: (root.apHeight-34)/20; readout: Math.round(root.apHeight)+"px"
-                                    onMoved: (v)=>{ root.apHeight = 34 + v*20; root.saveAppearance() } }
-                                ToggleCard { icon: "swipe_up"; title: "auto-hide bar"; desc: "tucks the bar away · push the cursor to the edge to reveal it"
-                                    on: root.apAutoHide; onToggled: { root.apAutoHide=!root.apAutoHide; root.saveAppearance() } }
-                                ToggleCard { visible: !root.apAutoHide; icon: "fullscreen"; title: "hide when fullscreen"; desc: "only auto-hides while a window is fullscreen (e.g. video, games)"
-                                    on: root.apHideFullscreen; onToggled: { root.apHideFullscreen=!root.apHideFullscreen; root.saveAppearance() } }
                             }
 
                             // SUB-TAB 1: Colors
@@ -3455,9 +4019,118 @@ Scope {
                                 Text { text: "changes apply to the bar live"; color: theme.faint; font.pixelSize: 10; font.family: Tok.mono; Layout.leftMargin: 14 }
                             }
 
-                            // SUB-TAB 4: Wallpaper — switch transition + auto-rotate
+                            // SUB-TAB 4: Wallpaper — folder · transition · rotation · pair · motion
                             ColumnLayout {
+                                id: wpTab
                                 visible: root.apSubTab === 4; Layout.fillWidth: true; spacing: 12
+                                // "" | day | night — which cartridge slot the shelf is filling.
+                                property string armed: ""
+                                // Both: onVisibleChanged covers arriving at the tab, and
+                                // Component.onCompleted covers the panel opening with this
+                                // tab already selected — where visibility never changes and
+                                // the shelf would sit empty saying "0 wallpapers".
+                                onVisibleChanged: if (visible && !root.wpIndex.length) root.rescanWallpapers()
+                                Component.onCompleted: if (visible && !root.wpIndex.length) root.rescanWallpapers()
+                                // …and whenever the PANEL opens. The two above only fire when
+                                // this tab's visibility changes, so a panel left sitting on
+                                // this tab with an empty index — which is what an earlier
+                                // failed scan leaves behind — had no way to try again short of
+                                // the re-scan button.
+                                Connections {
+                                    target: root
+                                    function onShownChanged() {
+                                        if (root.shown && wpTab.visible && !root.wpIndex.length)
+                                            root.rescanWallpapers();
+                                    }
+                                }
+
+                                Section { title: "wallpaper folder"; icon: "folder_open" }
+                                Text {
+                                    text: "the picker, the SUPER+N keybinds and auto-rotate all read this one folder"
+                                    color: theme.faint; font.pixelSize: 10; font.family: Tok.mono
+                                    Layout.leftMargin: 14
+                                }
+                                Rectangle {
+                                    Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14
+                                    implicitHeight: 38; radius: Tok.r
+                                    color: theme.a(theme.line, 0.4)
+                                    border.width: 1
+                                    border.color: wpDirIn.activeFocus ? theme.iris : theme.a(theme.iris, 0.16)
+                                    RowLayout {
+                                        anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 10
+                                        spacing: 8
+                                        Sym { text: "folder"; sz: 17; color: theme.sub }
+                                        TextInput {
+                                            id: wpDirIn
+                                            Layout.fillWidth: true
+                                            verticalAlignment: TextInput.AlignVCenter
+                                            color: theme.text; font.pixelSize: 13; font.family: Tok.mono
+                                            clip: true; selectByMouse: true
+                                            selectionColor: theme.a(theme.iris, 0.4)
+                                            Component.onCompleted: text = root.apWpDir
+                                            // Committed on ↵, not on every keystroke: saving per character
+                                            // would re-scan the folder once per letter of the path you are
+                                            // still halfway through typing.
+                                            onAccepted: {
+                                                root.apWpDir = text.trim().length ? text.trim() : "~/Pictures/wallpapers";
+                                                wpDirIn.text = root.apWpDir;
+                                                root.saveAppearance();
+                                                root.rescanWallpapers();
+                                            }
+                                        }
+                                        Text {
+                                            visible: wpDirIn.text.trim() !== root.apWpDir
+                                            text: "↵ to save"; color: theme.iris
+                                            font.pixelSize: 10; font.family: Tok.mono
+                                        }
+                                        Rectangle {
+                                            implicitWidth: 28; implicitHeight: 26; radius: Tok.rSmall
+                                            color: wpBrowseMa.containsMouse ? theme.a(theme.iris, 0.22) : "transparent"
+                                            border.width: 1; border.color: theme.a(theme.iris, 0.25)
+                                            Sym { anchors.centerIn: parent; text: "folder_open"; sz: 15
+                                                  color: wpBrowseMa.containsMouse ? theme.iris : theme.sub }
+                                            MouseArea {
+                                                id: wpBrowseMa
+                                                anchors.fill: parent; hoverEnabled: true
+                                                cursorShape: Qt.PointingHandCursor
+                                                onClicked: root.pickFolder("wallpaper folder",
+                                                                           root.expandHome(root.apWpDir),
+                                                                           function (dir) {
+                                                    root.apWpDir = root.shortenHome(dir);
+                                                    wpDirIn.text = root.apWpDir;
+                                                    root.saveAppearance();
+                                                    root.rescanWallpapers();
+                                                })
+                                            }
+                                        }
+                                    }
+                                }
+                                ToggleCard {
+                                    icon: "account_tree"
+                                    title: "include subfolders"
+                                    desc: "each subfolder becomes a collection you can filter the picker by"
+                                    on: root.apWpRecursive
+                                    onToggled: { root.apWpRecursive = !root.apWpRecursive
+                                                 root.saveAppearance(); root.rescanWallpapers() }
+                                }
+                                RowLayout {
+                                    Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14
+                                    spacing: 10
+                                    Text {
+                                        Layout.fillWidth: true
+                                        color: theme.sub; font.pixelSize: 11; font.family: Tok.mono
+                                        text: root.wpIndexBusy ? "scanning…"
+                                              : !root.wpScanned ? "not scanned yet — press re-scan"
+                                              : root.wpIndex.length + " wallpaper" + (root.wpIndex.length === 1 ? "" : "s")
+                                                + (root.wpCollCount ? "  ·  " + root.wpCollCount + " collection"
+                                                                       + (root.wpCollCount === 1 ? "" : "s") : "")
+                                    }
+                                    Chip {
+                                        label: root.wpIndexBusy ? "scanning" : "re-scan"
+                                        icon: "refresh"
+                                        onPicked: root.rescanWallpapers()
+                                    }
+                                }
 
                                 Section { title: "switch transition"; icon: "animation" }
                                 Text {
@@ -3498,10 +4171,12 @@ Scope {
                                 ToggleCard {
                                     icon: "autorenew"
                                     title: "rotate wallpaper automatically"
-                                    desc: root.apMatugen
-                                          ? "on — heads up: “match colours” is enabled, so every rotation re-themes the shell"
-                                          : "cycles ~/Pictures/wallpapers on a timer"
-                                    on: root.apWpRotate
+                                    desc: root.apWpDayNight
+                                          ? "held — the day/night pair below outranks the timer"
+                                          : (root.apMatugen
+                                             ? "on — heads up: “match colours” is enabled, so every rotation re-themes the shell"
+                                             : "cycles the wallpaper folder on a timer")
+                                    on: root.apWpRotate && !root.apWpDayNight
                                     onToggled: {
                                         root.apWpRotate = !root.apWpRotate;
                                         root.saveAppearance();
@@ -3537,7 +4212,344 @@ Scope {
                                     }
                                     Item { Layout.fillWidth: true }
                                 }
+                                ToggleCard {
+                                    icon: "image"
+                                    title: "stills only"
+                                    desc: "skip moving wallpapers — rotating into one restarts a video decoder every interval"
+                                    on: root.apWpRotateStills
+                                    onToggled: { root.apWpRotateStills = !root.apWpRotateStills; root.saveAppearance() }
+                                }
+
+                                // ---------------- the pair ----------------
+                                Section { title: "day & night"; icon: "routine" }
+                                ToggleCard {
+                                    icon: "bedtime"
+                                    title: "pin a day and a night wallpaper"
+                                    desc: "swaps at " + root.apDarkStart + " and " + root.apDarkEnd
+                                          + " — the same times as auto dark mode, in Theme"
+                                    on: root.apWpDayNight
+                                    onToggled: {
+                                        root.apWpDayNight = !root.apWpDayNight;
+                                        root.saveAppearance();
+                                        run("sh '" + root.wpRotateScript + "' --restart >/dev/null 2>&1 &");
+                                    }
+                                }
+                                RowLayout {
+                                    Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14
+                                    spacing: 12
+                                    opacity: root.apWpDayNight ? 1 : 0.4
+                                    Behavior on opacity { NumberAnimation { duration: Tok.mFast } }
+                                    CartTile {
+                                        slot: "day"; path: root.apWpDay
+                                        armed: wpTab.armed === "day"
+                                        onPicked: wpTab.armed = (wpTab.armed === "day") ? "" : "day"
+                                        onCleared: { root.apWpDay = ""; root.saveAppearance() }
+                                    }
+                                    CartTile {
+                                        slot: "night"; path: root.apWpNight
+                                        armed: wpTab.armed === "night"
+                                        onPicked: wpTab.armed = (wpTab.armed === "night") ? "" : "night"
+                                        onCleared: { root.apWpNight = ""; root.saveAppearance() }
+                                    }
+                                    Item { Layout.fillWidth: true }
+                                }
+
+                                WallShelf {
+                                    open: wpTab.armed === "day" || wpTab.armed === "night"
+                                    chosen: wpTab.armed === "day" ? root.apWpDay
+                                          : wpTab.armed === "night" ? root.apWpNight : ""
+                                    onPicked: (path) => {
+                                        if (wpTab.armed === "day")        root.apWpDay = path;
+                                        else if (wpTab.armed === "night") root.apWpNight = path;
+                                        root.saveAppearance();
+                                        wpTab.armed = "";
+                                        run("sh '" + root.wpRotateScript + "' --restart >/dev/null 2>&1 &");
+                                    }
+                                }
+
+                                // ---------------- the lock screen ----------------
+                                Section { title: "lock screen"; icon: "lock" }
+                                ToggleCard {
+                                    icon: "photo_library"
+                                    title: "lock screen keeps its own picture"
+                                    desc: "off — hyprlock follows the desktop, re-synced on every switch"
+                                    on: root.apWpLockOwn
+                                    onToggled: {
+                                        root.apWpLockOwn = !root.apWpLockOwn;
+                                        root.saveAppearance();
+                                        // Re-run the sync so the change is on the lock screen now
+                                        // rather than at the next wallpaper switch — which, if you
+                                        // never switch, is never.
+                                        run("sh '" + root.lockwallScript + "' >/dev/null 2>&1 &");
+                                    }
+                                }
+                                RowLayout {
+                                    Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14
+                                    spacing: 12
+                                    opacity: root.apWpLockOwn ? 1 : 0.4
+                                    Behavior on opacity { NumberAnimation { duration: Tok.mFast } }
+                                    CartTile {
+                                        slot: "lock"; path: root.apWpLock
+                                        armed: wpTab.armed === "lock"
+                                        onPicked: wpTab.armed = (wpTab.armed === "lock") ? "" : "lock"
+                                        onCleared: {
+                                            root.apWpLock = ""; root.saveAppearance();
+                                            run("sh '" + root.lockwallScript + "' >/dev/null 2>&1 &");
+                                        }
+                                    }
+                                    Item { Layout.fillWidth: true }
+                                }
+                                WallShelf {
+                                    open: wpTab.armed === "lock"
+                                    chosen: root.apWpLock
+                                    onPicked: (path) => {
+                                        root.apWpLock = path;
+                                        root.saveAppearance();
+                                        wpTab.armed = "";
+                                        run("sh '" + root.lockwallScript + "' >/dev/null 2>&1 &");
+                                    }
+                                }
+
+                                // ---------------- moving wallpapers ----------------
+                                Section { title: "moving wallpapers"; icon: "movie" }
+                                Text {
+                                    text: "mp4 · webm · gif play through mpvpaper, which holds a decoder for as long as it runs"
+                                    color: theme.faint; font.pixelSize: 10; font.family: Tok.mono
+                                    Layout.leftMargin: 14; Layout.rightMargin: 14
+                                    Layout.fillWidth: true; wrapMode: Text.WordWrap
+                                }
+                                ToggleCard {
+                                    icon: "memory"
+                                    title: "free it while it's covered"
+                                    desc: "a fullscreen window swaps the video for its own still frame — pausing keeps the VRAM, this hands it back"
+                                    on: root.apWpCoverStill
+                                    onToggled: { root.apWpCoverStill = !root.apWpCoverStill; root.saveAppearance() }
+                                }
+                                ToggleCard {
+                                    icon: "battery_saver"
+                                    title: "still frame on battery"
+                                    desc: "hold the poster frame until it's plugged back in"
+                                    on: root.apWpBatteryStill
+                                    onToggled: { root.apWpBatteryStill = !root.apWpBatteryStill; root.saveAppearance() }
+                                }
+                                RowLayout {
+                                    Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; spacing: 8
+                                    Text { text: "frame cap"; color: theme.sub; font.pixelSize: 12
+                                           font.family: Tok.mono; Layout.minimumWidth: 76 }
+                                    Repeater {
+                                        model: root.wpVidFpsOptions
+                                        delegate: Chip {
+                                            required property var modelData
+                                            label: modelData === 0 ? "as filmed" : modelData + " fps"
+                                            on: root.apWpVidFps === modelData
+                                            onPicked: {
+                                                root.apWpVidFps = modelData; root.saveAppearance();
+                                                // mpvpaper reads its options once, at start
+                                                run("sh '" + root.wpApplyScript + "' >/dev/null 2>&1 &");
+                                            }
+                                        }
+                                    }
+                                    Item { Layout.fillWidth: true }
+                                }
+                                Text {
+                                    text: "capping halves the full-screen blits the compositor does for a clip · it does not reduce decoding"
+                                    color: theme.faint; font.pixelSize: 10; font.family: Tok.mono
+                                    Layout.leftMargin: 14; Layout.rightMargin: 14
+                                    Layout.fillWidth: true; wrapMode: Text.WordWrap
+                                }
                             }
+                        }
+
+                        // ================= BAR =================
+                        // Its own tab, because it was sharing "Appearance → bar theme" with the
+                        // shell-wide dark/light switch and the GTK/Qt app preference — neither of
+                        // which is about the bar. What is here IS the bar: its shape, how it draws
+                        // workspaces, and the mark at its left end.
+                        ColumnLayout {
+                            visible: root.tab === 20; Layout.fillWidth: true; spacing: 12
+
+                            Section { title: "shape"; icon: "view_agenda" }
+                            Text {
+                                text: "one strip, or the three clusters as separate floating pills"
+                                color: theme.faint; font.pixelSize: 10; font.family: Tok.mono
+                                Layout.leftMargin: 14
+                            }
+                            RowLayout {
+                                Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; spacing: 10
+                                Repeater {
+                                    model: [{ k: "bar", l: "one bar", i: "rectangle" },
+                                            { k: "pills", l: "pills", i: "view_week" }]
+                                    delegate: Chip {
+                                        required property var modelData
+                                        label: modelData.l; icon: modelData.i
+                                        on: root.apBarShape === modelData.k
+                                        onPicked: { root.apBarShape = modelData.k; root.saveAppearance() }
+                                    }
+                                }
+                                Item { Layout.fillWidth: true }
+                            }
+
+                            Section { title: "workspaces"; icon: "grid_view" }
+                            RowLayout {
+                                Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; spacing: 10
+                                Repeater {
+                                    model: [{ k: "grow",   l: "grow",    i: "unfold_more" },
+                                            { k: "pill",   l: "pills",   i: "more_horiz" },
+                                            { k: "circle", l: "circles", i: "circle" }]
+                                    delegate: Chip {
+                                        required property var modelData
+                                        label: modelData.l; icon: modelData.i
+                                        on: root.apWsStyle === modelData.k
+                                        onPicked: { root.apWsStyle = modelData.k; root.saveAppearance() }
+                                    }
+                                }
+                                Item { Layout.fillWidth: true }
+                            }
+                            Text {
+                                text: root.apWsStyle === "grow"
+                                      ? "a chip each · the one you are on stretches along the bar"
+                                      : root.apWsStyle === "circle"
+                                      ? "true circles that stretch into a pill on the one you are on \u00b7 round at any roundness setting, unlike grow"
+                                      : "every workspace the same chip · the one you are on is filled, and nothing moves"
+                                color: theme.faint; font.pixelSize: 10; font.family: Tok.mono
+                                Layout.leftMargin: 14; Layout.rightMargin: 14
+                                Layout.fillWidth: true; wrapMode: Text.WordWrap
+                            }
+
+                            Section { title: "numbering"; icon: "format_list_numbered" }
+                            Flow {
+                                Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; spacing: 7
+                                Repeater {
+                                    model: root.wsLabelChoices
+                                    delegate: Chip {
+                                        required property var modelData
+                                        label: modelData.l
+                                        labelFont: modelData.k === "dice" ? root.symbolFamily : Tok.mono
+                                        visible: modelData.k !== "dice" || root.symbolFamily !== ""
+                                        on: root.apWsLabel === modelData.k
+                                        onPicked: { root.apWsLabel = modelData.k; root.saveAppearance() }
+                                    }
+                                }
+                            }
+                            Text {
+                                text: "each scheme falls back to the plain number once it runs out of symbols — "
+                                      + "\u2685 is the last die and \u2473 the last circled numeral"
+                                color: theme.faint; font.pixelSize: 10; font.family: Tok.mono
+                                Layout.leftMargin: 14; Layout.rightMargin: 14
+                                Layout.fillWidth: true; wrapMode: Text.WordWrap
+                            }
+
+                            Section { title: "the mark"; icon: "stars" }
+                            Text {
+                                text: "auto reads /etc/os-release · cachyos and sea-shell are drawn and recolour with the "
+                                      + "theme, the rest are Nerd Font glyphs"
+                                color: theme.faint; font.pixelSize: 10; font.family: Tok.mono
+                                Layout.leftMargin: 14; Layout.rightMargin: 14
+                                Layout.fillWidth: true; wrapMode: Text.WordWrap
+                            }
+                            Flow {
+                                Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; spacing: 7
+                                Repeater {
+                                    model: root.barLogoChoices
+                                    delegate: Rectangle {
+                                        required property var modelData
+                                        readonly property bool sel: root.apBarLogo === modelData.k
+                                        implicitWidth: lgRow.implicitWidth + 20; implicitHeight: 36; radius: Tok.r
+                                        color: sel ? theme.iris : (lgMa.containsMouse ? theme.a(theme.iris, 0.16) : theme.a(theme.line, 0.4))
+                                        border.width: 1; border.color: sel ? theme.iris : theme.a(theme.iris, 0.16)
+                                        Behavior on color { ColorAnimation { duration: 100 } }
+                                        Row {
+                                            id: lgRow; anchors.centerIn: parent; spacing: 7
+                                            // The choice IS the picture. A list of distro names with
+                                            // no logos beside them is the same mistake the theme
+                                            // presets used to make with `accent: #dbc0c8`.
+                                            BarLogo {
+                                                anchors.verticalCenter: parent.verticalCenter
+                                                visible: modelData.k !== "auto" && modelData.k !== "custom"
+                                                kind: modelData.k; size: 18
+                                                card: sel ? Tok.accentInk : theme.panel
+                                                accent: sel ? Tok.accentInk : theme.iris
+                                                highlight: sel ? Tok.accentInk : theme.frost
+                                                rim: sel ? Tok.accentInk : theme.iris
+                                            }
+                                            Sym {
+                                                anchors.verticalCenter: parent.verticalCenter
+                                                visible: modelData.k === "auto" || modelData.k === "custom"
+                                                text: modelData.k === "auto" ? "auto_awesome" : "image"
+                                                sz: 16; color: sel ? Tok.accentInk : theme.frost
+                                            }
+                                            Text {
+                                                anchors.verticalCenter: parent.verticalCenter
+                                                text: modelData.l
+                                                color: sel ? Tok.accentInk : Tok.ink
+                                                font.pixelSize: 11; font.family: Tok.mono; font.bold: sel
+                                            }
+                                        }
+                                        MouseArea {
+                                            id: lgMa; anchors.fill: parent; hoverEnabled: true
+                                            cursorShape: Qt.PointingHandCursor
+                                            onClicked: {
+                                                root.apBarLogo = modelData.k;
+                                                root.saveAppearance();
+                                                if (modelData.k === "custom" && !root.apBarLogoPath.length)
+                                                    root.pickFile("bar logo image", "*.png", function (f) {
+                                                        root.apBarLogoPath = f; root.saveAppearance();
+                                                    });
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            RowLayout {
+                                visible: root.apBarLogo === "custom"
+                                Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; spacing: 10
+                                Rectangle {
+                                    Layout.fillWidth: true; implicitHeight: 34; radius: Tok.r
+                                    color: theme.a(theme.line, 0.4)
+                                    border.width: 1; border.color: theme.a(theme.iris, 0.16)
+                                    Text {
+                                        anchors { fill: parent; leftMargin: 12; rightMargin: 12 }
+                                        verticalAlignment: Text.AlignVCenter
+                                        text: root.apBarLogoPath.length ? root.apBarLogoPath : "no image chosen"
+                                        color: root.apBarLogoPath.length ? theme.text : theme.faint
+                                        font.pixelSize: 11; font.family: Tok.mono; elide: Text.ElideLeft
+                                    }
+                                }
+                                Chip {
+                                    label: "choose…"; icon: "folder_open"
+                                    onPicked: root.pickFile("bar logo image", "*.png", function (f) {
+                                        root.apBarLogoPath = f; root.saveAppearance();
+                                    })
+                                }
+                            }
+
+                                Section { title: "bar shape"; icon: "tune" }
+                                SliderRow { icon: "rounded_corner"; label: "roundness"; value: root.apRadius/26; readout: Math.round(root.apRadius)+"px"
+                                    onMoved: (v)=>{ root.apRadius = v*26; root.saveAppearance() } }
+                                RowLayout { Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; spacing: 12
+                                    Sym { text: "dock_to_right"; sz: 18; color: theme.sub; Layout.alignment: Qt.AlignVCenter }
+                                    Text { text: "position"; color: theme.sub; font.pixelSize: 12; font.family: Tok.mono; Layout.minimumWidth: 76 }
+                                    Flow { Layout.fillWidth: true; spacing: 6
+                                        Repeater { model: root.edges
+                                            delegate: Chip { required property var modelData; label: modelData; on: root.apEdge===modelData
+                                                onPicked: { root.apEdge=modelData; root.saveAppearance() } } } } }
+                                SliderRow { icon: "opacity"; label: "opacity"; tint: theme.frost; value: root.apOpacity; readout: Math.round(root.apOpacity*100)+"%"
+                                    onMoved: (v)=>{ root.apOpacity = v; root.saveAppearance() } }
+                                Text { visible: root.apOpacity < 0.06; text: "↑ 0% hides the bar background — only the buttons show"; color: theme.faint; font.pixelSize: 10; font.family: Tok.mono; Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14 }
+                                RowLayout { Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; spacing: 12
+                                    Sym { text: "format_color_fill"; sz: 18; color: theme.sub; Layout.alignment: Qt.AlignVCenter }
+                                    Text { text: "bar fill"; color: theme.sub; font.pixelSize: 12; font.family: Tok.mono; Layout.minimumWidth: 76 }
+                                    Flow { Layout.fillWidth: true; spacing: 6
+                                        Repeater { model: [{k:"matugen",l:"matugen"},{k:"black",l:"black"},{k:"white",l:"white"}]
+                                            delegate: Chip { required property var modelData; label: modelData.l; on: root.apBarFill===modelData.k
+                                                onPicked: { root.apBarFill=modelData.k; root.saveAppearance() } } } } }
+                                Text { visible: root.apBarFill!=="matugen" && root.apOpacity<0.99; text: "↑ set opacity to 100% for a solid " + root.apBarFill + " bar"; color: theme.faint; font.pixelSize: 10; font.family: Tok.mono; Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14 }
+                                SliderRow { icon: "height"; label: "bar height"; tint: theme.good; value: (root.apHeight-34)/20; readout: Math.round(root.apHeight)+"px"
+                                    onMoved: (v)=>{ root.apHeight = 34 + v*20; root.saveAppearance() } }
+                                ToggleCard { icon: "swipe_up"; title: "auto-hide bar"; desc: "tucks the bar away · push the cursor to the edge to reveal it"
+                                    on: root.apAutoHide; onToggled: { root.apAutoHide=!root.apAutoHide; root.saveAppearance() } }
+                                ToggleCard { visible: !root.apAutoHide; icon: "fullscreen"; title: "hide when fullscreen"; desc: "only auto-hides while a window is fullscreen (e.g. video, games)"
+                                    on: root.apHideFullscreen; onToggled: { root.apHideFullscreen=!root.apHideFullscreen; root.saveAppearance() } }
                         }
 
                         // ================= BAR WIDGETS =================
@@ -3825,61 +4837,45 @@ Scope {
                                 }
                             }
                             
-                            // Saved Profiles List
+                            // ---- the rack ----
+                            // Cartridges, not a list of rows with a Load button. A preset
+                            // has a palette and no words for it, and the row this replaces
+                            // spent its width on "font: Adwaita Sans · radius: 14px ·
+                            // accent: #dbc0c8" — a description of a colour scheme in the
+                            // one format that cannot show you a colour scheme.
                             ColumnLayout {
                                 Layout.fillWidth: true; spacing: 8
                                 visible: root.profilesList.length > 0
-                                Text { text: "SAVED PRESETS"; color: theme.faint; font.pixelSize: 9; font.bold: true; font.letterSpacing: 1; Layout.topMargin: 10 }
-                                
-                                Repeater {
-                                    model: root.profilesList
-                                    delegate: Rectangle {
-                                        required property var modelData
-                                        required property int index
-                                        Layout.fillWidth: true; implicitHeight: 52; radius: Tok.r
-                                        color: theme.a(theme.line, 0.4); border.width: 1; border.color: theme.a(theme.iris, 0.16)
-                                        RowLayout {
-                                            anchors.fill: parent; anchors.leftMargin: 14; anchors.rightMargin: 14; spacing: 12
-                                            Sym { text: "palette"; sz: 19; color: theme.frost }
-                                            ColumnLayout {
-                                                spacing: 1; Layout.fillWidth: true
-                                                Text { text: modelData.name; color: theme.text; font.pixelSize: 13; font.bold: true; font.family: root.apFont }
-                                                Text {
-                                                    text: "font: " + modelData.font + " · radius: " + modelData.radius + "px · accent: " + modelData.accent
-                                                    color: theme.faint; font.pixelSize: 10; font.family: root.apFont
-                                                }
-                                            }
-                                            
-                                            // Apply Preset
-                                            Rectangle {
-                                                implicitWidth: 80; implicitHeight: 28; radius: Tok.r
-                                                color: applyMa.containsMouse ? theme.iris : theme.a(theme.line, 0.6)
-                                                Text { anchors.centerIn: parent; text: "Load"; color: applyMa.containsMouse ? theme.bg : theme.text; font.pixelSize: 11; font.family: root.apFont }
-                                                MouseArea {
-                                                    id: applyMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
-                                                    onClicked: root.loadProfile(modelData)
-                                                }
-                                            }
-                                            
-                                            // Delete Preset
-                                            Rectangle {
-                                                implicitWidth: 32; implicitHeight: 28; radius: Tok.r
-                                                color: delPrMa.containsMouse ? theme.bad : theme.a(theme.line, 0.6)
-                                                Sym { anchors.centerIn: parent; text: "delete"; sz: 15; color: delPrMa.containsMouse ? theme.bg : theme.faint }
-                                                MouseArea {
-                                                    id: delPrMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.deleteProfile(index)
-                                                }
-                                            }
+                                Section { title: "saved presets"; icon: "inventory_2" }
+                                Text {
+                                    text: "click a cartridge to load it · the lit lamp is the one you are on"
+                                    color: theme.faint; font.pixelSize: 10; font.family: Tok.mono
+                                    Layout.leftMargin: 14; Layout.bottomMargin: 4
+                                }
+                                Flow {
+                                    Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14
+                                    spacing: 10
+                                    Repeater {
+                                        model: root.profilesList
+                                        delegate: ProfileCart {
+                                            required property var modelData
+                                            required property int index
+                                            profile: modelData
+                                            loaded: root.profLoaded(modelData)
+                                            onLoad: root.loadProfile(modelData)   // it persists itself
+                                            onEject: root.deleteProfile(index)
                                         }
                                     }
                                 }
                             }
-                            
+
                             // Placeholder
                             Text {
-                                text: "no presets saved yet."
+                                text: "no presets saved yet — set the shell up how you like it, name it above, and save."
                                 visible: root.profilesList.length === 0
-                                color: theme.faint; font.pixelSize: 11; font.family: root.apFont; Layout.topMargin: 20; horizontalAlignment: Text.AlignHCenter; Layout.fillWidth: true
+                                color: theme.faint; font.pixelSize: 11; font.family: Tok.mono
+                                Layout.topMargin: 20; horizontalAlignment: Text.AlignHCenter
+                                Layout.fillWidth: true
                             }
                         }
 
@@ -3893,6 +4889,11 @@ Scope {
                                 Row2 { icon: "restart_alt"; label: "Restart bar"; cmd: "sh ~/.config/quickshell/sea-shell/sea-bar-supervisor.sh --restart"; quitAfter: true }
                                 Row2 { icon: "terminal"; label: "Terminal"; cmd: "kitty & disown"; quitAfter: true }
                                 Row2 { icon: "wallpaper"; label: "Wallpapers"; cmd: "qs -p " + root.repo + "/wallpaper.qml & disown"; quitAfter: true }
+                                // The first-run tour, on demand. It shows itself once on a
+                                // fresh install and is otherwise unreachable — which for a
+                                // screen that explains where things are is the wrong way round.
+                                Row2 { icon: "auto_awesome"; label: "Show the welcome tour again"
+                                       cmd: "qs -c sea-shell ipc call welcome open"; quitAfter: true }
                                 Row2 { icon: "content_paste"; label: "Clipboard history"; cmd: "qs -c sea-shell ipc call launcher clipboard"; quitAfter: true }
                                 Row2 { icon: "photo_camera"; label: "Screenshot region"; cmd: "sleep 0.2; grim -g \"$(slurp)\" - | wl-copy"; quitAfter: true }
                                 Row2 { icon: "keyboard"; label: "Keybinds editor"; cmd: "qs -p " + root.repo + "/keybinds.qml & disown"; quitAfter: true }
@@ -5807,6 +6808,28 @@ Scope {
                         Layout.fillWidth: true; spacing: 10
                         Sym { text: "folder_open"; sz: 22; color: theme.frost }
                         Text { text: root.fileBrowserTitle; color: theme.text; font.pixelSize: 15; font.family: Tok.mono; font.bold: true; Layout.fillWidth: true }
+                        // Confirm — folder mode only, where the answer is where you are
+                        Rectangle {
+                            visible: root.fileBrowserDirs
+                            implicitWidth: fbUseRow.implicitWidth + 22; implicitHeight: 32; radius: Tok.r
+                            color: fbUseMa.containsMouse ? theme.iris : theme.a(theme.iris, 0.22)
+                            border.width: 1; border.color: theme.iris
+                            Behavior on color { ColorAnimation { duration: 110 } }
+                            RowLayout {
+                                id: fbUseRow; anchors.centerIn: parent; spacing: 7
+                                Sym { text: "check"; sz: 16; color: fbUseMa.containsMouse ? Tok.accentInk : Tok.ink }
+                                Text { text: "use this folder"; color: fbUseMa.containsMouse ? Tok.accentInk : Tok.ink
+                                       font.pixelSize: 12; font.family: Tok.mono; font.bold: true }
+                            }
+                            MouseArea {
+                                id: fbUseMa; anchors.fill: parent; hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: {
+                                    root.fileBrowserOpen = false;
+                                    if (root.fileBrowserCallback) root.fileBrowserCallback(root.fileBrowserPath);
+                                }
+                            }
+                        }
                         // Cancel button
                         Rectangle {
                             implicitWidth: 32; implicitHeight: 32; radius: Tok.r
@@ -5859,7 +6882,8 @@ Scope {
                                 delegate: Rectangle {
                                     required property var modelData
                                     readonly property bool isDir: modelData.type === "d"
-                                    readonly property bool matchesFilter: !root.fileBrowserFilter || modelData.name.endsWith(root.fileBrowserFilter)
+                                    readonly property bool matchesFilter: root.fileBrowserDirs ? false
+                                        : (!root.fileBrowserFilter || modelData.name.endsWith(root.fileBrowserFilter))
                                     visible: isDir || matchesFilter
                                     Layout.fillWidth: true
                                     implicitHeight: (isDir || matchesFilter) ? 38 : 0

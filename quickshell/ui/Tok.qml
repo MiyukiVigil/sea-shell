@@ -35,25 +35,50 @@ Singleton {
 
     signal changed()
 
-    Process {
-        id: apRead; running: true
-        command: ["sh","-c","cat \"$HOME/.config/sea-shell/appearance.json\" 2>/dev/null"]
-        stdout: StdioCollector { id: apOut; onStreamFinished: {
-            try {
-                var j = JSON.parse(apOut.text);
-                if (j.accent) tok.accentRaw = j.accent;
-                if (j.mode !== undefined) tok.light = (""+j.mode === "light");
-                if (j.scale !== undefined) tok.cfgScale = j.scale;
-                // A display face (the old `font` key) is fine for prose but destroys data
-                // legibility, so it is accepted as the SANS role only — mono is ours.
-                if (j.font !== undefined && (""+j.font).length) tok.sans = j.font;
-                if (j.radius !== undefined) tok.radiusCfg = Math.max(0, j.radius);
-            } catch(e) {}
-            tok.loaded = true;
-            tok.changed();
-        } }
+    // WHY THIS BLOCKS, AND WHY IT IS NOT A `cat`.
+    //
+    // This used to be a Process running `cat` and parsing its stdout — which is
+    // asynchronous by construction: fork a shell, wait for it to exit, then parse. Every
+    // surface in the shell reads its colours from here, so for the whole of that round trip
+    // they rendered against the DEFAULTS above, and the default accent is sea cyan. That is
+    // the blue flash on every bar start: not a transition, just the shell drawing itself
+    // once before it knew what colour it was.
+    //
+    // `blockLoading` reads the file synchronously during construction, so the singleton is
+    // already correct before the first frame is composed and there is nothing to flash
+    // from. It is the one place in this shell where blocking is right: it is a single small
+    // file, read once, and every pixel drawn afterwards depends on it.
+    FileView {
+        id: apFile
+        path: Quickshell.env("HOME") + "/.config/sea-shell/appearance.json"
+        blockLoading: true
+        watchChanges: true
+        // Component.onCompleted, not just onLoaded: with blockLoading the bytes are already
+        // there when construction finishes and no load SIGNAL is emitted at all, so hooking
+        // onLoaded alone left the parse to never run and the flash exactly where it was.
+        Component.onCompleted: tok.parse(apFile.text())
+        onLoaded: tok.parse(apFile.text())
+        onFileChanged: { apFile.reload(); tok.parse(apFile.text()) }
+        // No file yet (a first run, before install.sh has seeded one) is not an error —
+        // the defaults above ARE the answer, and surfaces gated on `loaded` must not hang.
+        onLoadFailed: { tok.loaded = true; tok.changed() }
     }
-    function reload() { apRead.running = true }
+
+    function parse(t) {
+        try {
+            var j = JSON.parse(t);
+            if (j.accent) tok.accentRaw = j.accent;
+            if (j.mode !== undefined) tok.light = (""+j.mode === "light");
+            if (j.scale !== undefined) tok.cfgScale = j.scale;
+            // A display face (the old `font` key) is fine for prose but destroys data
+            // legibility, so it is accepted as the SANS role only — mono is ours.
+            if (j.font !== undefined && (""+j.font).length) tok.sans = j.font;
+            if (j.radius !== undefined) tok.radiusCfg = Math.max(0, j.radius);
+        } catch(e) {}
+        tok.loaded = true;
+        tok.changed();
+    }
+    function reload() { apFile.reload(); tok.parse(apFile.text()) }
 
     // ---------------- accent ----------------
     readonly property color _a: tok.accentRaw
@@ -123,6 +148,16 @@ Singleton {
     readonly property int tTitle: 20     // screen titles
     readonly property int tKpi:   28
     readonly property int tHero:  40     // the one number that matters
+
+    // ---------------- motion (pick from it, never interpolate) ----------------
+    // Three durations, one curve. Every surface had been hand-picking its own number —
+    // 130 here, 150 there, 200 somewhere else — which reads as three different products
+    // when two of them animate at once. Anything slower than mSlow is not a transition,
+    // it is a wait, and should show progress instead.
+    readonly property int mFast: 130     // hover, press, chip state — must feel instant
+    readonly property int mBase: 200     // focus moves, panels opening
+    readonly property int mSlow: 320     // a whole surface changing what it shows
+    readonly property int mEase: Easing.OutCubic
 
     function alpha(c, a) { return Qt.rgba(c.r, c.g, c.b, a) }
 

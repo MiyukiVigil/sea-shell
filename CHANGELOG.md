@@ -5,6 +5,308 @@ All notable changes to **sea-shell** are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.2.0] - 2026-08-19
+
+**The wallpaper update.** The picker learned to search, the folder stopped being a constant,
+"previous" started meaning previous, and a video wallpaper stopped costing you memory while
+nobody was looking at it.
+
+Around it: the bar can be pills or circles with the numbers written seven different ways and
+your distribution's mark on it, Mission Control became a map instead of a wall of tiles, and
+there is a first-run tour so none of that has to be found by accident. The DAC panel is gone —
+that work lives in [Hub Moon](https://hubmoon.miyukivigil.tech) now.
+
+### Removed
+
+- **The parametric EQ and the Moondrop DAC panel are gone.** `DacPanel.qml` (2 325 lines),
+  `moondrop_control.py`, `sea-eq.py`, the DAC bar pill, the `dac` IPC target and the
+  `SUPER+SHIFT+E` bind.
+
+  Two reasons, and the second is the honest one. **[Hub Moon](https://hubmoon.miyukivigil.tech)**
+  is where this work now happens — a whole application built for the device, moving faster than
+  a panel inside a desktop shell ever could, and keeping two implementations of the same
+  hardware protocol in step was work that improved neither. And a parametric equaliser for one
+  manufacturer's USB DACs is *niche*: it was the single largest file in the project, and most
+  people running a Wayland shell will never plug in the hardware it exists for.
+
+  What stays is what is genuinely a *bar's* job: output routing, per-app volume, media, lyrics,
+  and the bit-perfect badge. That last one survives because the ALSA scan behind it was never a
+  Moondrop fact — "something has taken the card and pipewire cannot see the audio" is what the
+  screen recorder needs to warn that system audio will record silence.
+
+  Nothing is lost by moving: Hub Moon reads the same curves off the same device, and it has the
+  Moondrop Hub library, per-slot management and firmware-level detail this panel never had. The
+  installer offers to fetch it for you.
+
+### Added
+
+- **A Bar tab.** Bar-specific settings were sharing "Appearance → bar theme" with the shell-wide
+  dark/light switch and the GTK/Qt app preference, neither of which is about the bar. They have
+  their own tab now, and Appearance's first sub-tab is honestly called "theme".
+
+- **The bar can be pills.** One continuous strip, or the clusters as separate floating grounds.
+  Two, not three: the centre cluster is the media pill, which already has its own ground.
+
+- **Workspaces three ways** — grow (a chip each, the active one stretching), pills (all the same,
+  the active one filled, nothing moving) or **circles** (true circles that stretch into a true
+  pill on the one you are on).
+
+  Circles are the shape the bar used to have, and the reason it stopped having it is that grow's
+  corner radius follows the roundness slider: at roundness 26 a 24px chip is a circle, and at 15
+  it is a rounded square. Circles take half the height instead, so they are round at any setting
+  rather than only at the top of the slider.
+
+- **Workspace numbering.** Arabic, Roman, Mandarin, letters, circled numerals, dice, or one dot
+  each. Every scheme falls back to the plain number once it runs out of symbols, and a scheme
+  whose glyphs nothing on the machine can draw is not offered at all — CookieRun has the circled
+  numerals and not the dice, which is exactly how three tofu boxes get onto somebody's bar.
+
+- **The bar's mark is yours.** It was the sea-shell logo, hardcoded. It now defaults to whatever
+  `/etc/os-release` says the machine is: CachyOS and sea-shell are drawn as QML shapes so they
+  recolour with the theme, fourteen more distros come from a Nerd Font, and anything else can be
+  a custom image. Read synchronously, so it is right on the first frame.
+
+- **A first-run tour.** Five screens, shown once, reopenable forever after from
+  Settings → System. Everything in it was already in the control center — and that is exactly
+  the problem it solves: twenty tabs, and a shell you installed four minutes ago gives you no
+  reason to believe any particular one of them holds the thing you are looking for. The tour
+  makes the four decisions that change how the desktop *looks* — light or dark, accent, bar
+  shape, workspace style — and then says where the other nineteen tabs are.
+
+  **It writes as you go, not on finish.** Every choice lands in `appearance.json` immediately
+  and the bar behind the card changes while you watch, which is the only honest way to choose
+  between "grow" and "circles". Quitting halfway keeps what you picked; there is no cancel,
+  because there is nothing to cancel.
+
+
+
+- **The wallpaper folder is a setting.** `~/Pictures/wallpapers` was hardcoded in the cycle
+  script, in the indexer, and by omission in the picker — three copies of a path that could
+  not be changed at all. Settings → Appearance → Wallpaper now has a folder field with a
+  folder browser behind it, and `sea-wallpaper-index.py` is the single place that answers
+  "where are the wallpapers and what counts as one". Everything else asks it.
+
+- **Collections.** The walk is recursive, so a wallpaper folder with any organisation in it
+  is no longer indexed as empty. Each subfolder becomes a collection you can filter the
+  picker by, beside the existing all / stills / motion chips. Four levels deep, hidden
+  directories skipped.
+
+- **Type to search.** Start typing in the picker and the rail filters live. The search
+  window is built out of the deck's own parts — a raised legend plate, a sunken well, a
+  raised counter — rather than a text field borrowed from somewhere else. Esc clears the
+  query; a second Esc closes. `m` for match-colours moves to **ctrl+m**, because a bare
+  letter is a search now.
+
+- **A recent filter.** Tab cycles to it. It is an order as well as a set: the wallpaper on
+  screen leads, then the ones you had before it.
+
+- **A day and a night wallpaper.** Pin two and they swap on schedule — the *same*
+  darkStart/darkEnd auto dark mode already uses, not a second pair of times. Chosen by
+  clicking a cartridge and picking off a shelf of your actual wallpapers. It outranks
+  auto-rotate: a pinned pair and a shuffle every thirty minutes are contradictory
+  instructions, and letting the timer quietly overwrite the night wallpaper would read as
+  the pair not working.
+
+- **`wallpaper set` over IPC.** `qs -c sea-shell ipc call wallpaper set /path/to/image`
+  runs the full sequence — path, daemon, lock screen, palette — behind the same travelling
+  panel a keybind gets. Setting a wallpaper was previously something only the picker and
+  the cycle script could do, because each carried its own copy of what it means.
+
+- **Stills-only rotation.** Rotating into a video restarts a decoder every interval; some
+  folders are mostly clips.
+
+- **ctrl+v imports.** Everything here could *choose* a wallpaper and nothing could add one —
+  the folder was filled by a file manager or it was not filled. ctrl+v in the picker takes
+  whatever is on the clipboard (raw image bytes, a path, a `file://` URI, or an http URL it
+  fetches), puts it in the wallpaper folder without ever overwriting, re-indexes, and lands
+  focus on it.
+
+- **Sort by newest.** The index hands rows over in name order, which is the one order that
+  cannot answer "what did I just put in here". ctrl+s, or the chip in the header. Not
+  persisted, like the filter and the collection — all three are ways of looking at the
+  folder for as long as the window is open.
+
+- **The lock screen can keep its own picture.** `sea-lockwall.sh` ran on every apply and
+  unconditionally overwrote the lock background with whatever the desktop had switched to,
+  so "a different picture on the lock screen" was not expressible. Pin one in Settings —
+  it outranks the argument the wallpaper switch passes in.
+
+- **A frame cap for moving wallpapers.** mpvpaper's options were hardcoded. Capping a 60fps
+  clip to 30 halves the full-screen blits the compositor does for it, which on a machine
+  whose iGPU composites while the dGPU renders is the cost that actually shows up. It does
+  not reduce decoding, and the setting says so.
+
+### Changed
+
+- **A video wallpaper is freed while a FULLSCREEN window covers it, not just paused.** A paused mpvpaper
+  keeps its decoder, its surface and its VRAM for as long as it lives, and the thing
+  covering the wallpaper is usually a game that wanted exactly that memory. swww is already
+  showing the same frame underneath, so the poster goes up *before* mpvpaper is killed and
+  the swap has no black frame in either direction. Optional, and on by default. There is a
+  matching "still frame on battery" for laptops, which the listener now notices within
+  thirty seconds — unplugging the mains emits no window event, and window events were the
+  only thing it used to listen to.
+
+  "Covered" means **fullscreen** and nothing looser. The occlusion test used to also count a
+  window sized to 95% of the monitor, and tiled windows adding up to 85% of it — both true of
+  a single maximised editor, so it fired during ordinary work rather than during the game it
+  was built for. It also pauses first and waits for a second opinion before killing anything,
+  because going fullscreen is often momentary.
+
+- **Random is a bag, not a die.** A fresh `shuf` every time repeats: over eleven wallpapers
+  you see one twice long before you have seen them all, and nothing stopped it dealing the
+  one already on screen. The bag deals without replacement and reshuffles when empty.
+
+- **Theme profiles are cartridges.** Each saved preset now shows its own palette — the
+  background steps, the accent as a band, its font and radius printed on the label — with a
+  lamp lit on the one you are currently on. The row this replaces described a colour scheme
+  as `accent: #dbc0c8`, which is the one format that cannot show you a colour scheme.
+
+- **The slot reacts now.** The cartridge used to descend into a static black bar, and the
+  only evidence the machine had taken it was the jolt. There is a **shutter** across the
+  opening — two leaves in the plane between the bezel and the darkness behind, so the slot
+  still reads as an opening when the picker is idle. It parts ahead of the falling card
+  (130 ms against a 210 ms drop, so the way is open before the card arrives and the machine
+  is never seen being hit by it) and snaps shut behind it, faster and with an overshoot,
+  against the jolt.
+
+- **The flying cartridge has a label.** It was an image with an accent border — anonymous,
+  and a different object from the cartridges on the shelves in Settings. It now carries the
+  same plate: filename, motion marker, keyed corner. The plate arrives during the
+  anticipation dip rather than being there from the start, so the seam between rail panel
+  and physical object stays invisible, and it is the only moment you can read what you are
+  loading without looking somewhere else.
+
+- **The mouth throws a shadow.** The clip boundary alone is a hard cut: the card was not
+  swallowed so much as erased a row of pixels at a time.
+
+- **The lamp reads the cartridge.** It used to go accent the instant you pressed enter and
+  stay there, which says "busy" and nothing else. It is dim while the card is in the air,
+  full at the moment of contact, and throws one ring at that instant. A lamp that lights
+  when the thing lands is the deck responding; a lamp that lights when you press a key is
+  the keyboard responding.
+
+- **Mission Control is a map of your monitor, not a wall of tiles.** Every workspace card was
+  a fixed 280x180 in a grid clamped to 1000x700 — so on a 1920x1080 screen three workspaces sat
+  marooned in the top-left eighth of a full-screen overlay — and the windows inside them were
+  fixed 122x60 chips in whatever order the compositor happened to list them.
+
+  Cards are the **monitor's aspect ratio** now, and they fill the screen. Windows are drawn at
+  their **real positions and real sizes**, scaled down from the actual geometry, so a workspace
+  with a wide editor beside a narrow terminal *looks* like that. Which is the point: you
+  recognise the workspace you want by its shape, in one glance, instead of reading four titles
+  to find out which card is which. Arrow keys move the selection, 1-9 jump straight to a
+  workspace, and an empty one says so rather than being a blank card.
+
+- The picker, the keybinds, the rotate daemon and the IPC verb all route through one
+  `sea-wallpaper-set.sh`. The picker used to write the config file, sync the lock screen,
+  run matugen and call the apply script itself — its own copy of a sequence the cycle
+  script also had a copy of, which is how the two drifted.
+
+### Fixed
+
+- **The wallpaper stayed frozen after the fullscreen window was gone.** Three separate bugs
+  stacked into one symptom, and each one alone was survivable.
+
+  The listener guards itself with `flock` so only one copy runs. It resumes the wallpaper by
+  spawning the apply script, which `exec`s **mpvpaper** — and a child inherits open file
+  descriptors, so mpvpaper held the lock for its entire life. Every listener started after that
+  point silently lost the flock and exited, leaving nobody watching for the window to close. It
+  closes fd 9 on every child now (`9<&-`), including the tick subshell.
+
+  Underneath that, the socket race above meant that even a live listener had no working IPC to
+  unpause through. And the freeze decision itself fired on any *covering* window, so ordinary
+  work looked like a game — see the fullscreen rule under Changed.
+
+- **The frozen wallpaper, and the picker's preview, were visibly soft.** Both showed the 1280px
+  poster full-screen — a cache entry sized for a thumbnail rail, stretched to 1920 and wider.
+  You saw it as a blur when a game let go of the screen, and as a half-second of mush before
+  each preview started playing. The indexer now also cuts a **native-resolution** still
+  (`--fullposter`, no scale filter, `-q:v 2`) and the freeze, the full-screen preview and the
+  flying cartridge all use that instead. Measured at 101% of the playing video's edge detail:
+  there is nothing left to see.
+
+- **A theme change could be lost, and then every surface drawn from the design tokens kept the
+  old palette for the rest of the session.** `sea-toggle-theme.sh`, `sea-toggle-night.sh`,
+  `sea-theme-schedule.sh` and `matugen-accent.sh` all wrote `appearance.json` as
+  `json.dump(d, open(cfg, "w"))` — which truncates the file to zero bytes before writing a
+  single one of them.
+
+  The shell *watches* that file. A watcher that wakes on the truncation reads an empty file,
+  fails to parse it, keeps what it had — and no second change event follows, because the write
+  that follows is part of the same change. The most visible casualty was the new first-run tour,
+  which is drawn entirely from `Tok.qml` and would sit there in light mode on a dark desktop.
+
+  All four write to a temp file and rename now, which is what `sea-set-appearance.py` already
+  did and the reason it never showed the bug.
+
+- **A stale mpv IPC socket left the wallpaper with nothing able to unpause it.** Restarting
+  mpvpaper removed the socket after a fixed 0.2s sleep rather than after the old process was
+  actually gone. Losing that race leaves the previous socket FILE on disk with nothing
+  listening: mpv will not bind an address that already exists, so the new wallpaper comes up
+  with no IPC, every pause/resume call fails silently, and a wallpaper paused before the
+  restart stays paused forever. It waits for the process now.
+
+- **`prev` could not undo `random`.** It found the current wallpaper's position in the
+  name-sorted list and stepped back one, so after a random jump "previous" went to whatever
+  sorted before where you had landed — somewhere you had never been. It now pops a back
+  stack, exactly like a browser, and only falls back to name order when there is nothing to
+  go back to.
+
+- **The bar started in the wrong palette on every launch.** It flashed sea cyan — and, on a
+  light-mode setup, the whole default *dark* theme — before settling into the real colours.
+  Both config reads were asynchronous by construction: `Tok.qml` forked a shell to `cat`
+  appearance.json and parsed its stdout, and shell.qml's own FileView started with an empty
+  path and waited for a second `sh` to tell it where the file was. Everything on screen is a
+  function of that file, so for the whole of those round trips the shell drew itself against
+  the defaults. Both now read it synchronously with `FileView { blockLoading: true }`, so
+  the first composed frame is already right.
+
+  The subtlety that made the first attempt useless: with `blockLoading` the bytes are
+  present when construction finishes and **no load signal is ever emitted**, so hooking
+  `onLoaded` alone left the parse to never run and the flash exactly where it was. The parse
+  is on `Component.onCompleted` as well.
+
+- **The scrolling media title was cut mid-glyph.** The marquee clipped dead straight at both
+  ends, so a long title showed half a character hanging at each edge — which reads as a
+  rendering fault rather than as text continuing. It fades now, and only while it is actually
+  scrolling.
+
+- **matugen re-decoded the video on every switch, and read the wrong frame.**
+  `matugen-accent.sh` ran `ffmpeg -vframes 1` on the raw clip each time the wallpaper
+  changed — 0.42 s per switch — while a 1280px poster of that exact file was already in the
+  cache. And it took frame **zero**, which is precisely the frame the indexer avoids by
+  seeking a second in: a great many wallpaper clips open on black, and a black frame hands
+  the whole desktop a palette derived from black. It asks the indexer for the poster now.
+  0.42 s → 0.26 s, and the accent comes from a frame that has the picture in it.
+
+- **The poster cache never pruned.** Twenty-two files for eleven wallpapers: eleven of them
+  written under a naming scheme that predates the width suffix and unreachable by any code
+  path, the rest belonging to wallpapers that had been deleted. `poster()` only ever
+  created. Dead-scheme files go on sight; true orphans get a fortnight's grace, because
+  that is also what every poster looks like the moment you point the folder somewhere else.
+
+- **The file browser started at a literal `/home/miyukivigil`** — one specific machine's
+  home directory, shipped inside the config.
+
+- A wallpaper path containing a quote was a shell injection into the picker's `printf`. It
+  is an argv element now.
+
+### Packaging
+
+- **The installer offers Hub Moon.** Since the EQ panel left, "how do I control my DAC now"
+  needs an answer at the one moment somebody is already installing things. It asks, defaults to
+  **no**, and takes `--hubmoon` / `--no-hubmoon` to decide in advance. A piped install never
+  prompts — silence is not consent, and there is no terminal to answer with.
+
+  It resolves the **latest** release from GitHub at install time rather than shipping a pinned
+  version that goes stale between sea-shell releases. `/releases/latest` excludes pre-releases,
+  so a beta does not become everybody's install. On Arch it takes the package and hands it to
+  `pacman -U`; anywhere else it drops the AppImage in `~/.local/bin` as `hub-moon`, and says
+  so if that directory is not on your PATH.
+
+- `install_moondrop_udev` and its rule are gone with the panel. Hub Moon ships its own.
+
 ## [6.1.1] - 2026-08-16
 
 Lyrics, four days of them in one afternoon. 6.1.0 shipped romanisation against a lyrics

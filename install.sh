@@ -6,6 +6,8 @@
 #   ./install.sh --deps       # only install the packages, touch no configs
 #   ./install.sh --no-deps    # skip packages, only lay down configs (works on any distro)
 #   ./install.sh --dev        # developer mode: symlink configs to this repo instead
+#   ./install.sh --hubmoon    # also install Hub Moon (EQ + DAC control) without asking
+#   ./install.sh --no-hubmoon # never ask about Hub Moon
 #   ./install.sh --wallpaper  # also generate + set a sea-gradient wallpaper
 #   ./install.sh -y|--yes     # non-interactive (pacman/makepkg --noconfirm)
 #   ./install.sh --uninstall  # remove everything this script added
@@ -241,24 +243,11 @@ install_deps() {
     warn "  ${AUR_PKGS[*]}"
   fi
   enable_services
-  install_moondrop_udev
   ok "packages done"
 }
 
 # Grant the logged-in user raw-HID access to Moondrop DACs so the EQ panel works
 # without root. Harmless if you don't own one. Idempotent.
-install_moondrop_udev() {
-  local src="$SCRIPT_DIR/moondrophub_reverse/99-moondrop.rules"
-  [ -f "$src" ] || return 0
-  info "installing Moondrop DAC udev rule (raw-HID access without root)…"
-  if sudo install -m 644 "$src" /etc/udev/rules.d/99-moondrop.rules 2>/dev/null; then
-    sudo udevadm control --reload-rules 2>/dev/null || true
-    sudo udevadm trigger 2>/dev/null || true
-    ok "Moondrop udev rule installed (replug the DAC if it's connected)"
-  else
-    warn "couldn't install the Moondrop udev rule — the EQ panel will need root until you add it"
-  fi
-}
 
 hypr_block() {
   # $1 = absolute dir the sea-shell .lua files live in. Emits the Lua block dofile'd from
@@ -405,9 +394,90 @@ do_install() {
     info "not inside a Hyprland session — everything starts on next login"
   fi
 
+  maybe_install_hubmoon
+
   title "done — log out/in (or reboot) and sea-shell comes up by itself"
   [ "${DEV:-0}" = "1" ] && warn "dev mode: configs point at this repo — don't move/delete it" \
                         || info "repo can be moved/deleted; re-run ./install.sh after pulling updates"
+}
+
+# ---- Hub Moon (optional) --------------------------------------------------------------
+# sea-shell used to carry a parametric EQ and a Moondrop DAC controller. It does not any
+# more: that is a whole application's worth of problem and Hub Moon is that application.
+# This offers to install it and is happy to be told no — nothing in the shell depends on it.
+#
+# LATEST, resolved at install time rather than pinned: /releases/latest is GitHub's own
+# answer and it excludes pre-releases, so a beta channel does not become everybody's install.
+HUBMOON_REPO="MiyukiVigil/Moon_Hub"
+
+hubmoon_asset() {
+  # $1 = a grep pattern for the asset name. Prints the first matching browser_download_url.
+  curl -fsSL --max-time 25 "https://api.github.com/repos/$HUBMOON_REPO/releases/latest" 2>/dev/null \
+    | python3 -c '
+import json, re, sys
+try:
+    rel = json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+pat = re.compile(sys.argv[1])
+for a in rel.get("assets") or []:
+    if pat.search(a.get("name") or ""):
+        print(a.get("browser_download_url") or "")
+        break
+' "$1" 2>/dev/null
+}
+
+install_hubmoon() {
+  command -v curl >/dev/null 2>&1 || { warn "hub moon needs curl to download — skipping"; return 0; }
+
+  info "asking github for the latest Hub Moon release…"
+  local url="" tmp=""
+  if command -v pacman >/dev/null 2>&1; then
+    url="$(hubmoon_asset '\.pkg\.tar\.zst$')"
+  fi
+  # Not Arch, or the release has no Arch package: the AppImage runs anywhere.
+  [ -n "$url" ] || url="$(hubmoon_asset '\.AppImage$')"
+  [ -n "$url" ] || { warn "no installable Hub Moon asset in the latest release — get it from https://hubmoon.miyukivigil.tech"; return 0; }
+
+  tmp="$(mktemp -d)" || return 0
+  local file="$tmp/$(basename "${url%%\?*}")"
+  info "downloading $(basename "$file")…"
+  if ! curl -fL --progress-bar --max-time 300 -o "$file" "$url"; then
+    warn "download failed — get it from https://hubmoon.miyukivigil.tech"
+    rm -rf "$tmp"; return 0
+  fi
+
+  case "$file" in
+    *.pkg.tar.zst)
+      # -U on a file, not -S: this is not in any repo, and pacman is the only thing that
+      # should be putting files under /usr on an Arch system.
+      if sudo pacman -U $NOCONFIRM "$file"; then ok "Hub Moon installed"
+      else warn "pacman refused it — install manually: sudo pacman -U $file"; rm -rf "$tmp"; return 0; fi
+      ;;
+    *.AppImage)
+      mkdir -p "$HOME/.local/bin"
+      install -m 755 "$file" "$HOME/.local/bin/hub-moon" \
+        && ok "Hub Moon installed to ~/.local/bin/hub-moon" \
+        || warn "could not install the AppImage"
+      case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) warn "add ~/.local/bin to your PATH to run it" ;; esac
+      ;;
+  esac
+  rm -rf "$tmp"
+}
+
+# Asked, never assumed. A desktop shell installer that pulls in an unrelated application
+# because it happens to share an author is the kind of thing people uninstall both over.
+maybe_install_hubmoon() {
+  [ "${HUBMOON:-0}" = "1" ] && { install_hubmoon; return 0; }
+  [ "${NO_HUBMOON:-0}" = "1" ] && return 0
+  # No terminal to ask on (piped install) means no: silence is not consent.
+  [ -t 0 ] || return 0
+  printf '\n%s🌙 Hub Moon — parametric EQ and Moondrop DAC control, by the same author.%s\n' \
+    "$(c '1;38;2;162;226;232')" "$(c 0)"
+  printf '   sea-shell dropped its own EQ in 6.2; this is the replacement, and it is optional.\n'
+  printf '   install it? [y/N] '
+  read -r _hm
+  case "$_hm" in [Yy]*) install_hubmoon ;; *) info "skipped — install it later from https://hubmoon.miyukivigil.tech" ;; esac
 }
 
 set_wallpaper() {
@@ -458,6 +528,8 @@ for arg in "$@"; do
     --no-deps)      NO_DEPS=1 ;;
     --dev)          DEV=1 ;;
     --wallpaper)    WALLPAPER=1 ;;
+    --hubmoon)      HUBMOON=1 ;;
+    --no-hubmoon)   NO_HUBMOON=1 ;;
     -y|--yes)       ASSUME_YES=1 ;;
     -h|--help)      ACTION=help ;;
     *) warn "unknown option: $arg"; ACTION=help ;;
