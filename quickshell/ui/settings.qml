@@ -22,7 +22,7 @@ Scope {
     // release apart — the badge read v5.0.0 on a 6.0.0 install. A version badge that lies is worse
     // than no badge. The literal survives only as the fallback for a `qs -p` run out of the repo
     // with nothing deployed; the second path covers that case too (quickshell/ui/ → repo root).
-    property string seaVersion: "6.3.0"
+    property string seaVersion: "6.3.1"
     Process {
         running: true
         command: ["sh","-c","cat \"$HOME/.config/quickshell/sea-shell/VERSION\" 2>/dev/null || cat \"" + root.repo + "/../../VERSION\" 2>/dev/null"]
@@ -2027,6 +2027,35 @@ Scope {
     // matugen AUTO toggle — persist the flag, then apply now (accent + kitty from the
     // wallpaper) or reset everything back to the default sea cyan.
     property string matugenScript: Qt.resolvedUrl("matugen-accent.sh").toString().replace("file://","")
+    property string modeScript:    Qt.resolvedUrl("sea-theme-from-wallpaper.sh").toString().replace("file://","")
+    // Picking "the wallpaper" has to decide something NOW. Otherwise the setting appears to do
+    // nothing at all until the next time you happen to change wallpaper, which is exactly how it
+    // was reported. The sleep is because saveAppearance() writes the config from its own detached
+    // process, and this script reads modeSource back out of that file — start it in the same
+    // instant and it reads the value you just replaced and no-ops.
+    function applyModeFromWallpaper() { run("sleep 0.4; sh '" + root.modeScript + "'") }
+
+    // CHOOSING A COLOUR BY HAND IS AN OVERRIDE, and an override the next wallpaper silently
+    // undoes is not one — the same rule the light/dark source follows. With match-colours left
+    // on, picking a swatch wrote your colour and then had matugen re-derive one from the
+    // wallpaper over the top of it a moment later, so the pick visibly did not take.
+    //
+    // The sleep is a second, separate hazard: saveAppearance() writes the config from its own
+    // detached process, and the script reads that file. Started in the same instant, it can read
+    // the accent you just replaced and write the old one straight back.
+    function pickAccent(c) {
+        root.apAccent = c;
+        root.apMatugen = false;                 // yours now, until you turn matching back on
+        root.saveAppearance();
+        run("sleep 0.4; sh '" + root.matugenScript + "'");
+    }
+    // The wallpaper's OWN colours are a different case: choosing one of these is choosing what
+    // matching would have given you, so matching stays on.
+    function pickPaletteAccent(c) {
+        root.apAccent = c;
+        root.saveAppearance();
+        run("sleep 0.4; sh '" + root.matugenScript + "'");
+    }
     property string wpCycleScript:  Qt.resolvedUrl("sea-wallpaper-cycle.sh").toString().replace("file://","")
     property string wpRotateScript: Qt.resolvedUrl("sea-wallpaper-rotate.sh").toString().replace("file://","")
     property string wpApplyScript:  Qt.resolvedUrl("sea-wallpaper-apply.sh").toString().replace("file://","")
@@ -2048,9 +2077,7 @@ Scope {
     }
     function applyPickedColor(col) {
         if (root.pickingTarget === "accent") {
-            root.apAccent = col;
-            root.saveAppearance();
-            run("sh '"+root.matugenScript+"'");
+            root.pickAccent(col);
         } else if (root.pickingTarget === "hyprActive") {
             root.ovrHyprActive = col;
             root.toggleOverride("hyprland");
@@ -2632,7 +2659,7 @@ Scope {
         Image {
             anchors { fill: parent; margins: ct.border.width; bottomMargin: 26 + ct.border.width }
             visible: ct.filled
-            source: ct.entry ? "file://" + root.wpStill(ct.entry) : ""
+            source: ct.entry ? Tok.fileUrl(root.wpStill(ct.entry)) : ""
             fillMode: Image.PreserveAspectCrop
             asynchronous: true; cache: true
             sourceSize.height: 240
@@ -2787,7 +2814,7 @@ Scope {
                 Image {
                     anchors.fill: parent; anchors.margins: shelfItem.border.width
                     source: root.wpStill(shelfItem.modelData).length
-                            ? "file://" + root.wpStill(shelfItem.modelData) : ""
+                            ? Tok.fileUrl(root.wpStill(shelfItem.modelData)) : ""
                     fillMode: Image.PreserveAspectCrop
                     asynchronous: true; cache: true
                     sourceSize.height: 160
@@ -3940,7 +3967,12 @@ Scope {
                                                 {k:"wallpaper",l:"the wallpaper", i:"wallpaper"}]
                                         delegate: Chip { required property var modelData; label: modelData.l; icon: modelData.i
                                             on: root.apModeSource === modelData.k
-                                            onPicked: { root.apModeSource = modelData.k; root.apAutoDark = (modelData.k === "clock"); root.saveAppearance() } } } }
+                                            onPicked: {
+                                                root.apModeSource = modelData.k;
+                                                root.apAutoDark = (modelData.k === "clock");
+                                                root.saveAppearance();
+                                                if (modelData.k === "wallpaper") root.applyModeFromWallpaper();
+                                            } } } }
                                 Text {
                                     Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14
                                     wrapMode: Text.WordWrap; color: theme.faint; font.pixelSize: 10; font.family: Tok.mono
@@ -3984,7 +4016,7 @@ Scope {
                                             width: 40; height: 40; radius: Tok.r; color: modelData
                                             border.width: sel?3:1; border.color: sel?theme.text:theme.a(theme.text,0.2)
                                             Sym { anchors.centerIn: parent; visible: parent.sel; text: "check"; sz: 20; color: "#0d1420" }
-                                            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { root.apAccent=modelData; root.saveAppearance(); run("sh '"+root.matugenScript+"'") } } } } }
+                                            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.pickAccent(modelData) } } } }
                                 ToggleCard { icon: "colorize"; title: "auto colours from wallpaper"
                                     desc: "recolours the shell + kitty on every wallpaper · off = sea cyan"
                                     on: root.apMatugen; onToggled: root.toggleMatugen() }
@@ -4007,7 +4039,7 @@ Scope {
                                             width: 36; height: 36; radius: Tok.r; color: modelData
                                             border.width: sel?3:1; border.color: sel?theme.text:theme.a(theme.text,0.2)
                                             Sym { anchors.centerIn: parent; visible: parent.sel; text: "check"; sz: 18; color: "#0d1420" }
-                                            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { root.apAccent=modelData; root.saveAppearance(); run("sh '"+root.matugenScript+"'") } } } } }
+                                            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.pickPaletteAccent(modelData) } } } }
                             }
 
                             // SUB-TAB 2: Custom Targets Overrides

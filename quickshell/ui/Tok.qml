@@ -72,6 +72,18 @@ Singleton {
     // close, and the file is the truth again.
     function resync() { apFile.reload(); tok.parse(apFile.text()) }
 
+    // A PATH IS NOT A URL. "file://" + path breaks the moment the path holds a percent sign,
+    // because that is where an escape sequence starts — Qt reads `%16` as one byte and opens a
+    // filename nobody has. It bit the wallpaper surfaces first: the indexer keys its thumbnail
+    // cache on `subfolder%name`, so the day you sort your wallpapers into folders, every still
+    // in the picker, the settings shelf and the first-run tour silently stops loading. Spaces
+    // and `#` have the same problem and had it all along. Each SEGMENT is encoded; the
+    // separators are not, which is what distinguishes this from encodeURIComponent on the lot.
+    function fileUrl(p) {
+        if (!p || !("" + p).length) return "";
+        return "file://" + ("" + p).split("/").map(encodeURIComponent).join("/");
+    }
+
     function parse(t) {
         try {
             var j = JSON.parse(t);
@@ -93,30 +105,45 @@ Singleton {
     readonly property real  _h: tok._a.hslHue >= 0 ? tok._a.hslHue : 0.55
     readonly property real  _s: tok._a.hslSaturation
 
+    // GREY IS A CHOICE. Two rules below used to conspire to overrule it: `hslHue` is **-1** for
+    // anything colourless, so the fallback above handed it 0.55, and the saturation floor then
+    // pulled it up from 0 to 0.35. Pick pure white as your accent and the shell drew #386375 —
+    // a muted blue, from an input with no blue in it. Every grey came out as the same blue.
+    //
+    // The floor is right for a WASHED-OUT colour, which is what it was written for: a pale pink
+    // at L≈0.80 has a hue worth keeping and just cannot carry text. It is wrong for a colour that
+    // has no hue at all, where it does not rescue an accent, it invents one. So: no chroma, no
+    // hue — the accent becomes a neutral of the same readable lightness, and `_sm` takes the
+    // tint out of the grounds and inks with it so the whole shell goes properly monochrome
+    // rather than accent-grey on faintly-blue panels. For any accent with real colour in it
+    // `_sm` is 1 and every value below is bit-identical to what it was.
+    readonly property bool _achromatic: tok._s < 0.06
+    readonly property real _sm: tok._achromatic ? 0 : 1
+
     // A user accent can be any lightness (the shipped default is a pale pink at L≈0.80), and a
     // pale accent on a pale ground is unreadable. Clamp it into a band that can carry text and
     // sit on the ground with real contrast, keeping the hue the user picked.
     readonly property color accent: tok.light
-        ? Qt.hsla(tok._h, Math.max(0.35, Math.min(0.95, tok._s)), 0.34, 1)
-        : Qt.hsla(tok._h, Math.max(0.42, Math.min(0.95, tok._s)), 0.62, 1)
-    readonly property color accentInk:  tok.light ? "#ffffff" : Qt.hsla(tok._h, 0.55, 0.07, 1)
-    readonly property color accentWash: tok.light ? Qt.hsla(tok._h, 0.34, 0.915, 1)
-                                                  : Qt.hsla(tok._h, 0.40, 0.155, 1)
+        ? Qt.hsla(tok._h, tok._achromatic ? 0 : Math.max(0.35, Math.min(0.95, tok._s)), 0.34, 1)
+        : Qt.hsla(tok._h, tok._achromatic ? 0 : Math.max(0.42, Math.min(0.95, tok._s)), 0.62, 1)
+    readonly property color accentInk:  tok.light ? "#ffffff" : Qt.hsla(tok._h, 0.55 * tok._sm, 0.07, 1)
+    readonly property color accentWash: tok.light ? Qt.hsla(tok._h, 0.34 * tok._sm, 0.915, 1)
+                                                  : Qt.hsla(tok._h, 0.40 * tok._sm, 0.155, 1)
 
     // ---------------- ground → raised (four steps, no more) ----------------
-    readonly property color bg:      tok.light ? Qt.hsla(tok._h, 0.07, 0.940, 1) : Qt.hsla(tok._h, 0.14, 0.072, 1)
-    readonly property color surface: tok.light ? Qt.hsla(tok._h, 0.09, 0.972, 1) : Qt.hsla(tok._h, 0.13, 0.104, 1)
-    readonly property color raised:  tok.light ? Qt.hsla(tok._h, 0.10, 1.000, 1) : Qt.hsla(tok._h, 0.12, 0.136, 1)
-    readonly property color sunken:  tok.light ? Qt.hsla(tok._h, 0.08, 0.898, 1) : Qt.hsla(tok._h, 0.16, 0.046, 1)
+    readonly property color bg:      tok.light ? Qt.hsla(tok._h, 0.07 * tok._sm, 0.940, 1) : Qt.hsla(tok._h, 0.14 * tok._sm, 0.072, 1)
+    readonly property color surface: tok.light ? Qt.hsla(tok._h, 0.09 * tok._sm, 0.972, 1) : Qt.hsla(tok._h, 0.13 * tok._sm, 0.104, 1)
+    readonly property color raised:  tok.light ? Qt.hsla(tok._h, 0.10 * tok._sm, 1.000, 1) : Qt.hsla(tok._h, 0.12 * tok._sm, 0.136, 1)
+    readonly property color sunken:  tok.light ? Qt.hsla(tok._h, 0.08 * tok._sm, 0.898, 1) : Qt.hsla(tok._h, 0.16 * tok._sm, 0.046, 1)
 
     // ---------------- ink (three steps) ----------------
-    readonly property color ink:  tok.light ? Qt.hsla(tok._h, 0.16, 0.090, 1) : Qt.hsla(tok._h, 0.08, 0.912, 1)
-    readonly property color ink2: tok.light ? Qt.hsla(tok._h, 0.12, 0.310, 1) : Qt.hsla(tok._h, 0.08, 0.680, 1)
-    readonly property color ink3: tok.light ? Qt.hsla(tok._h, 0.10, 0.520, 1) : Qt.hsla(tok._h, 0.08, 0.492, 1)
+    readonly property color ink:  tok.light ? Qt.hsla(tok._h, 0.16 * tok._sm, 0.090, 1) : Qt.hsla(tok._h, 0.08 * tok._sm, 0.912, 1)
+    readonly property color ink2: tok.light ? Qt.hsla(tok._h, 0.12 * tok._sm, 0.310, 1) : Qt.hsla(tok._h, 0.08 * tok._sm, 0.680, 1)
+    readonly property color ink3: tok.light ? Qt.hsla(tok._h, 0.10 * tok._sm, 0.520, 1) : Qt.hsla(tok._h, 0.08 * tok._sm, 0.492, 1)
 
     // ---------------- rules (two weights — these do the structural work) ----------------
-    readonly property color rule:     tok.light ? Qt.hsla(tok._h, 0.10, 0.845, 1) : Qt.hsla(tok._h, 0.12, 0.190, 1)
-    readonly property color ruleHard: tok.light ? Qt.hsla(tok._h, 0.11, 0.720, 1) : Qt.hsla(tok._h, 0.12, 0.282, 1)
+    readonly property color rule:     tok.light ? Qt.hsla(tok._h, 0.10 * tok._sm, 0.845, 1) : Qt.hsla(tok._h, 0.12 * tok._sm, 0.190, 1)
+    readonly property color ruleHard: tok.light ? Qt.hsla(tok._h, 0.11 * tok._sm, 0.720, 1) : Qt.hsla(tok._h, 0.12 * tok._sm, 0.282, 1)
 
     // ---------------- semantic (never decorative) ----------------
     readonly property color ok:    tok.light ? "#1b7a4b" : "#4fbf85"

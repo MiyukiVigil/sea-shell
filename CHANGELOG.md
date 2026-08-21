@@ -5,6 +5,87 @@ All notable changes to **sea-shell** are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.3.1] - 2026-08-21
+
+A wallpaper patch. Sorting your wallpapers into folders broke every image in the picker, a
+greyscale wallpaper handed the desktop an invented accent, and previewing motion cost more than
+it was worth.
+
+### Fixed
+
+- **Sorting your wallpapers into folders broke every image in the picker.** A path is not a URL,
+  and `"file://" + path` was how every wallpaper surface built one. The moment a path contains a
+  **percent sign** that breaks, because that is where an escape sequence starts — Qt reads `%16`
+  as a single byte and opens a filename nobody has. The indexer keys its thumbnail cache on
+  `subfolder%name`, so the day you put your wallpapers in subfolders, every still, every rail
+  thumbnail, the flying cartridge and the previews in Settings and the first-run tour all quietly
+  stopped loading and the picker came up as a row of empty boxes.
+
+  It is `Tok.fileUrl()` now, in the singleton every surface already imports, and it encodes each
+  path *segment* rather than the whole string so the separators survive. Seven call sites were
+  building URLs by hand; none are. Spaces and `#` in a wallpaper path had exactly the same
+  problem and had had it all along.
+
+- **A greyscale wallpaper got an invented accent.** Material's palette generation always returns
+  a hue, including from an image that has none: a monochrome wallpaper came back **green** and a
+  black-and-white manga page came back blue. Both arbitrary, and a green desktop under a
+  greyscale picture reads as a bug because it is one.
+
+  The image's chroma is measured first now — the distance of its mean a\*/b\* from neutral in
+  LAB, *not* HSL saturation, which reads 0.81 for a page made of near-white and near-black pixels
+  because S is ill-defined at both ends of lightness. Across a real twelve-wallpaper library the
+  ones with colour in them sit at 0.013–0.22 and the two genuinely monochrome ones at 0.004, so
+  the gate is 0.008. Below it your own accent stands, exactly as if match-colours were off. A
+  picture with no colour in it does not get to invent one.
+
+- **A white accent was drawn blue.** Pick pure white — or any grey — and the shell drew
+  `#386375`, a muted blue, from an input with no blue in it. Two rules conspired: `hslHue` is
+  **-1** for anything colourless, so the fallback handed it 0.55, and the saturation floor then
+  pulled it up from 0 to 0.35. Every grey came out as the same blue.
+
+  The floor is right for a *washed-out* colour, which is what it was written for — a pale pink at
+  L≈0.80 has a hue worth keeping and simply cannot carry text. It is wrong for a colour with no
+  hue at all, where it does not rescue an accent, it invents one. No chroma, no hue: the accent
+  becomes a neutral of the same readable lightness, and the tint comes out of the grounds, inks
+  and rules with it so the shell goes properly monochrome rather than accent-grey on faintly blue
+  panels. For any accent with real colour in it, every value is bit-identical to before.
+
+- **Picking an accent by hand did not stick.** With **auto colours from wallpaper** left on, the
+  swatch you chose was written and then had a colour re-derived from the wallpaper over the top
+  of it a moment later. Choosing a colour by hand now turns matching off — the same rule the
+  light/dark source already follows, for the same reason: an override the next wallpaper silently
+  undoes is not an override. Picking one of the **wallpaper's own** palette swatches leaves
+  matching on, because that is choosing what matching would have given you anyway.
+
+  There was a second hazard underneath it. `saveAppearance()` writes the config from its own
+  detached process and the theme script reads that same file; started in the same instant, the
+  script could read the accent you had just replaced and write the old one straight back.
+
+- **A `Row` in the lyrics panel had been disabled since 6.1.1.** Its right-hand controls set
+  `anchors.right`, and an item inside a `Row` may not set left, right, horizontalCenter, fill or
+  centerIn — Qt disables the entire Row when one does, and says so on stderr where nobody was
+  reading it.
+
+### Changed
+
+- **Motion in the picker is opt-in.** A moving wallpaper no longer starts playing because you
+  arrowed onto it. The still is the preview, and a **play key on the deck** — or `ctrl+p` —
+  starts the clip when you actually want to see whether the motion is a slow drift or a strobing
+  city. A key rather than a line of grey text reading "ctrl+p plays": the deck is covered in
+  text and this is the one part of it you can press, so it is built like the rest of the panel,
+  with a lamp that lights while it is running and the shortcut printed on it.
+
+  This is also what made the picker quick. 6.3.0 opened in 1178ms, and **~693ms of that was
+  constructing `MediaPlayer` and `VideoOutput`** — one-time QtMultimedia plugin initialisation,
+  paid per process, before a single line of the picker ran. It was paid whether or not you cared
+  about motion. Now nothing loads a codec until you ask, and the picker opens in **216ms**.
+
+  It briefly lived inside the bar instead, to keep a warm decoder between opens. That bought
+  25ms over 216 and cost three separate state-reuse bugs — a surface that stops being a process
+  stops getting its state reset by exiting, and the filter, the search and the commit animation
+  each had to be put back by hand. Opt-in motion removed the reason for it, so it is its own
+  process again and its state is reset the way it always was: by ending.
+
 ## [6.3.0] - 2026-08-21
 
 **The bar update.** Every widget can be styled on its own now — its colour, what it shows, and

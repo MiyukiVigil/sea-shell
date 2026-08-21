@@ -253,49 +253,39 @@ if [ "$matugen_enabled" = "True" ]; then
                 [ -f "$f" ] && wp="$f"
             fi ;;
     esac
-fi
 
-# ---------- the shell's light/dark can follow the PICTURE (modeSource = "wallpaper") ----------
-# $wp is a still by now — the indexer's cached poster for a clip, the file itself for an image —
-# so this costs one 1x1 resize of a JPEG that is already on disk, not a decode.
-#
-# WHY A DEAD ZONE AND NOT A THRESHOLD.  Measured across a real eleven-wallpaper library, the mean
-# luminances were .28 .31 .41 .45 .45 .49 .51 .51 .52 .74 .94 — six of the eleven sit inside a
-# tenth of 0.5. A plain midpoint would call .488 dark and .512 light, which is a coin toss between
-# two pictures nobody would describe differently, and auto-rotate through that folder would flip
-# the entire desktop every half hour on noise. So: commit only when the picture is not ambiguous,
-# and otherwise leave the mode exactly where it is. Most wallpapers change nothing, which is the
-# point — the ones that do are the ones you would have switched by hand anyway.
-if [ -n "$wp" ] && [ -f "$wp" ] && command -v magick >/dev/null 2>&1; then
-    src=$(python3 -c "import json,sys
-try: d=json.load(open(sys.argv[1]))
-except Exception: d={}
-print(d.get('modeSource') or ('clock' if d.get('autoDark') else 'manual'))" "$cfg" 2>/dev/null)
-    if [ "$src" = "wallpaper" ]; then
-        lum=$(magick "$wp" -colorspace gray -resize 1x1! -format "%[fx:mean]" info: 2>/dev/null)
-        case "$lum" in
-            ''|*[!0-9.]*) : ;;                      # unreadable — leave the mode alone
-            *) python3 - "$cfg" "$lum" <<'PY'
-import json, os, sys
-cfg = sys.argv[1]
-try: lum = float(sys.argv[2])
-except ValueError: raise SystemExit(0)
-try: d = json.load(open(cfg))
-except Exception: raise SystemExit(0)
-cur = d.get("mode", "dark")
-if   lum < 0.42: want = "dark"
-elif lum > 0.60: want = "light"
-else:            want = cur          # the dead zone: not bright enough or dark enough to say
-if want != cur:
-    d["mode"] = want
-    t = cfg + ".tmp"
-    with open(t, "w") as fh: json.dump(d, fh)
-    os.replace(t, cfg)               # the bar watches this and pushes the mode out to GTK + kitty
-PY
-            ;;
-        esac
+    # A PICTURE WITH NO COLOUR IN IT DOES NOT GET TO INVENT ONE. Material's palette generation
+    # always returns a hue, including from an image that has none — a black-and-white manga page
+    # came back blue, and a monochrome one came back GREEN. Both are arbitrary, and a green
+    # desktop under a greyscale wallpaper reads as a bug because it is one.
+    #
+    # Chroma is the distance of the image's mean a*/b* from neutral in LAB. NOT HSL saturation,
+    # which is useless here: it reads 0.81 for a page made of near-white and near-black pixels,
+    # because S is ill-defined at both ends of lightness. Measured across a real twelve-wallpaper
+    # library, the ones with colour in them sit at 0.013–0.22 and the two genuinely monochrome
+    # ones at 0.004. The gate is 0.008 — a little under twice either side.
+    #
+    # Below it, this behaves exactly as "match colours" being off: your chosen accent stands.
+    if [ -n "$wp" ] && [ -f "$wp" ] && command -v magick >/dev/null 2>&1; then
+        lab=$(magick "$wp" -colorspace LAB -channel GB -separate -format "%[fx:mean] " info: 2>/dev/null)
+        if printf '%s' "$lab" | python3 -c "
+import sys
+try:
+    a, b = [float(x) for x in sys.stdin.read().split()[:2]]
+    raise SystemExit(0 if ((a - 0.5) ** 2 + (b - 0.5) ** 2) ** 0.5 < 0.008 else 1)
+except (ValueError, IndexError):
+    raise SystemExit(1)          # unreadable — treat it as coloured and let matugen decide
+"; then
+            matugen_enabled="Greyscale"
+        fi
     fi
 fi
+
+# The shell's light/dark can also follow the picture — that lives in sea-theme-from-wallpaper.sh
+# now, and is called from sea-wallpaper-set.sh on every change. It used to be here, which meant
+# it only ran when "match colours" was on, and only had a wallpaper to look at inside that same
+# `if`. Wanting your theme to follow the wallpaper and wanting your accent recoloured are two
+# different wishes and no longer share a switch.
 
 # check if auto colours from wallpaper (matugen) is enabled globally
 jf=$(mktemp) || exit 1

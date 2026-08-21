@@ -4,7 +4,7 @@
 notification daemon and screen recorder are one Quickshell process — not six
 tools glued together. The whole palette follows your wallpaper.
 
-**`v6.3.0`** · [seashell.miyukivigil.tech](https://seashell.miyukivigil.tech) ·
+**`v6.3.1`** · [seashell.miyukivigil.tech](https://seashell.miyukivigil.tech) ·
 [changelog](https://seashell.miyukivigil.tech/changelog.html)
 
 ![The sea-shell desktop — translucent bar at the top, animated wallpaper, and the dock at the bottom](https://seashell.miyukivigil.tech/images/v6/hero.webp)
@@ -285,10 +285,16 @@ ambient wave — because PipeWire genuinely cannot see that stream.
 
 ## Wallpapers · `SUPER+SHIFT+W`
 
-The picker **is** the wallpaper: the focused one fills the screen at full size and **moving ones
-play**, so you are looking at the thing you are choosing at the size *and the speed* you will get
-it — a poster frame cannot tell you whether the motion is a slow drift or a strobing city, and
-that is most of what you are choosing between. It opens on whatever is already up.
+The picker **is** the wallpaper: the focused one fills the screen at full size, so you are looking
+at the thing you are choosing at the size you will get it. It opens on whatever is already up, in
+**216ms**.
+
+**Motion is asked for, never automatic** — a **play key** on the deck, or `ctrl+p`. A poster frame
+cannot tell you whether the motion is a slow drift or a strobing city, and that is most of what
+you are choosing between; but spinning a video decoder up and down for every wallpaper you arrow
+*past* costs far more than that answer is worth, and the first one in a process drags 642ms of
+ffmpeg initialisation behind it. That single change is what took the picker from 1178ms to 216:
+nothing here loads a codec until you ask it to.
 
 In front of that sits **a deck**, built the way rack gear is. A front panel does three things —
 it contains, labels and indicates — so: a *raised* bezel with the cartridge slot cut into it and
@@ -311,8 +317,8 @@ last moment, so the machine is the one fixed thing and everything else happens i
 go over. The wheel steps too. **Just start typing to search**: the rail filters live, and the query
 lands in a window built out of the deck's own parts — a raised legend plate, a sunken well, a raised
 counter — rather than a text field borrowed from somewhere else. `enter` applies, `tab` cycles the
-filter (all · stills · motion · **recent**), `ctrl+s` sorts by name or by newest, `ctrl+m` toggles
-match-colours, `esc` clears the search and then closes. Clicking a frame focuses it; clicking the
+filter (all · stills · motion · **recent**), `ctrl+p` plays or stops a moving wallpaper, `ctrl+s`
+sorts by name or by newest, `ctrl+m` toggles match-colours, `esc` clears the search and then closes. Clicking a frame focuses it; clicking the
 focused frame applies it.
 
 **`ctrl+v` imports.** Everything here could *choose* a wallpaper and nothing could add one — the
@@ -524,7 +530,8 @@ sea-shell/
 │   ├── Launcher.qml                  # resident launcher
 │   ├── settings.qml                  # control center (SUPER+S)
 │   ├── Dashboard.qml                 # dashboard (SUPER+D)
-│   ├── power.qml · keybinds.qml · wallpaper.qml · screenshot.qml
+│   ├── power.qml · keybinds.qml · screenshot.qml
+│   ├── WallpaperPicker.qml          # lives inside the bar; wallpaper.qml runs it standalone
 │   ├── RecorderPanel.qml             # recorder chooser + countdown (SUPER+R)
 │   ├── Tok.qml                       # design tokens — one singleton, read by every surface
 │   └── Ind*.qml                      # shared components (table, panel, kpi, chip, …)

@@ -509,7 +509,7 @@ ShellRoot {
                             Image {
                                 anchors.fill: parent
                                 anchors.margins: parent.border.width
-                                source: root.wallPanelThumb ? "file://" + root.wallPanelThumb : ""
+                                source: Tok.fileUrl(root.wallPanelThumb)
                                 fillMode: Image.PreserveAspectCrop
                                 asynchronous: true; cache: true
                                 sourceSize.width: 420
@@ -3781,7 +3781,11 @@ ShellRoot {
                                 Sym { anchors.verticalCenter: parent.verticalCenter; text: "lyrics"; sz: 15; color: theme.iris }
                                 Text { anchors.verticalCenter: parent.verticalCenter; text: "lyrics"; color: theme.text; font.pixelSize: 12; font.bold: true; font.family: root.cfgFont }
                                 Item { width: parent.width - 150; height: 1 }
-                                Row { anchors.verticalCenter: parent.verticalCenter; anchors.right: parent.right; spacing: 5
+                                // No anchors.right. An item inside a Row may not set left, right,
+                                // horizontalCenter, fill or centerIn — Qt disables the whole Row
+                                // when one does, which is what this was quietly doing since 6.1.1.
+                                // The spacer Item above already pushes this group to the right.
+                                Row { anchors.verticalCenter: parent.verticalCenter; spacing: 5
                                     Repeater { model: [{k:"r",l:"あ→a"},{k:"t",l:"EN"}]
                                         delegate: Rectangle { required property var modelData
                                             readonly property bool on: modelData.k==="r" ? root.cfgLyrRomaji : root.cfgLyrTrans

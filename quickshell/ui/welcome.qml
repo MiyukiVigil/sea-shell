@@ -352,7 +352,7 @@ Scope {
                                     Behavior on border.color { ColorAnimation { duration: Tok.mFast } }
                                     Image {
                                         anchors.fill: parent; anchors.margins: 1
-                                        source: root.still(parent.w).length ? "file://" + root.still(parent.w) : ""
+                                        source: Tok.fileUrl(root.still(parent.w))
                                         fillMode: Image.PreserveAspectCrop
                                         asynchronous: true; cache: true
                                         sourceSize.height: 170

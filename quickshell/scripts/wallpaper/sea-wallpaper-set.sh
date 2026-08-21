@@ -91,5 +91,11 @@ if [ "$match" = "1" ]; then
     mat="$(sibling matugen-accent.sh)" && sh "$mat" "$wp" >/dev/null 2>&1 &
 fi
 
+# Unconditional, and deliberately NOT inside the matugen branch above: light/dark following the
+# picture is its own setting, and gating it on "match colours" made it a feature that silently
+# did nothing for anyone who wanted one without the other. The script itself no-ops unless
+# modeSource is "wallpaper", so this costs a python startup when it is not in use.
+mode="$(sibling sea-theme-from-wallpaper.sh)" && sh "$mode" "$wp" >/dev/null 2>&1 &
+
 [ "$quiet" = "1" ] || notify-send 'sea-shell' "Wallpaper → $(basename "$wp")" 2>/dev/null
 exit 0

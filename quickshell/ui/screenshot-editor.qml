@@ -261,7 +261,7 @@ ShellRoot {
                         Image {
                             id: baseImage
                             anchors.fill: parent
-                            source: "file://" + root.capturePath
+                            source: Tok.fileUrl(root.capturePath)
                             fillMode: Image.Stretch
                             asynchronous: false
                             cache: false

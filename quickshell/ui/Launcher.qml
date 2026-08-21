@@ -519,7 +519,7 @@ Scope {
                             color: theme.a(theme.iris, 0.10); border.width: 1; border.color: theme.a(theme.iris, 0.35)
                             Image { id: thumbImg; anchors.fill: parent; anchors.margins: 1; asynchronous: true; cache: false
                                 fillMode: Image.PreserveAspectCrop; sourceSize.width: 60; sourceSize.height: 60
-                                source: modelData.clipImg ? ("file://" + root.clipThumbDir + "/" + modelData.exec + ".png?t=" + root.clipThumbTick) : "" }
+                                source: modelData.clipImg ? (Tok.fileUrl(root.clipThumbDir + "/" + modelData.exec + ".png") + "?t=" + root.clipThumbTick) : "" }
                             Text { anchors.centerIn: parent; visible: thumbImg.status !== Image.Ready
                                 text: "image"; font.family: "Material Symbols Outlined"; font.pixelSize: 18; color: theme.iris } }
                         // emoji glyph (from the . picker) rendered in the system emoji font

@@ -105,7 +105,11 @@ Item {
         id: img
         anchors.fill: parent
         visible: root.isImage
-        source: root.imagePath.length ? ("file://" + root.imagePath) : ""
+        // Inlined rather than Tok.fileUrl(), because this component is deliberately
+        // theme-agnostic — everything it draws with is passed in. Same rule though: a path
+        // containing a percent sign or a space is not a URL until each segment is encoded.
+        source: root.imagePath.length
+                ? "file://" + root.imagePath.split("/").map(encodeURIComponent).join("/") : ""
         fillMode: Image.PreserveAspectFit
         asynchronous: true; cache: true
         sourceSize.width: Math.round(root.size * 2)
