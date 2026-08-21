@@ -4,7 +4,7 @@
 notification daemon and screen recorder are one Quickshell process — not six
 tools glued together. The whole palette follows your wallpaper.
 
-**`v6.3.1`** · [seashell.miyukivigil.tech](https://seashell.miyukivigil.tech) ·
+**`v6.4.0`** · [seashell.miyukivigil.tech](https://seashell.miyukivigil.tech) ·
 [changelog](https://seashell.miyukivigil.tech/changelog.html)
 
 ![The sea-shell desktop — translucent bar at the top, animated wallpaper, and the dock at the bottom](https://seashell.miyukivigil.tech/images/v6/hero.webp)
@@ -23,7 +23,8 @@ Arch-based for the package install; the configs work anywhere with `--no-deps`.
 
 ## Contents
 
-- [What you get](#what-you-get) · [The desktop](#the-desktop) · [Theming](#theming)
+- [What you get](#what-you-get) · [The desktop](#the-desktop) · [The global menu](#the-global-menu)
+- [Theming](#theming)
 - [Control center](#control-center) · [Keeping it running](#keeping-it-running)
 - [Audio](#audio) · [Wallpapers](#wallpapers) · [Keys](#keys)
 - [Install](#install) · [Structure](#structure) · [Gotchas](#gotchas)
@@ -35,9 +36,11 @@ Arch-based for the package install; the configs work anywhere with `--no-deps`.
 | | |
 |---|---|
 | **Bar** | Workspaces, focused app, centred media, tray, and status pills for CPU/RAM/GPU, weather, network throughput, package updates, wi-fi + VPN, bluetooth, KDE Connect, volume, battery, calendar and power. Reorderable, individually toggleable. |
+| **Desktop** | Widgets and shortcuts on the wallpaper — and they are placed around what is *in* it, not on top of it. |
+| **Global menu** | The focused window's own menu bar, in the bar. Qt, GTK, KDE and LibreOffice. |
 | **Dock** | Pinned + running apps, any edge, per-monitor, cursor magnification. |
 | **Launcher** | Apps with frecency ranking, plus commands, maths, file search, web, clipboard history and system actions. |
-| **Control center** | 20 tabs — appearance, widgets, dock, window rules, input, audio, display, network, bluetooth, disks, weather, calendar, keybinds, screen time, idle, power. |
+| **Control center** | 21 tabs — appearance, widgets, desktop, dock, window rules, input, audio, display, network, bluetooth, disks, weather, calendar, keybinds, screen time, idle, power. |
 | **Notifications** | Its own daemon: popups, history, and action buttons. Don't run mako or dunst alongside. |
 | **Audio** | Output routing, per-app volume, synced lyrics, bit-perfect detection. (Parametric EQ and DAC control live in [Hub Moon](https://hubmoon.miyukivigil.tech) now.) |
 | **Capture** | Screenshots with an editor, region OCR to clipboard, and a screen recorder with mic + system audio mixing. |
@@ -52,6 +55,46 @@ dependency it does need.
 
 Everything below runs inside a **single Quickshell process**, so the launcher opens with no
 spawn delay and the dock already knows what the bar knows.
+
+### Widgets and shortcuts · `SUPER+SHIFT+A`
+
+The space between the bar and the dock, which the shell used to do nothing with. A clock,
+weather, now playing and a system read-out, plus shortcuts to any installed application.
+`SUPER+SHIFT+A` arranges: drag anything, right-click to remove, right-click empty space to
+finish. Everything is in **Control center → Desktop**, or from a script:
+
+```bash
+sea-desktop.py --add-clock | --add-weather | --add-media | --add-system
+sea-desktop.py --add-entry firefox --label Firefox
+sea-desktop.py --set clock1 --tone amber --align right --size large
+```
+
+**It knows what is in your wallpaper.** Every desktop with widgets has the same failure: you
+choose a wallpaper because you like what is in it, then cover that part with a clock. So the
+picture is measured — new widgets land in its calm parts, dragging shows the busy areas as
+keep-clear shading, and a widget dropped on the subject moves aside. Hold **shift** to place
+it exactly and pin it there. A widget on busy ground grows a backdrop; on calm ground it is
+bare text on your picture.
+
+When the wallpaper changes the desktop follows it: **rescue** moves only what the new picture
+covers, **arrange** re-places everything in its calmest space, **off** never moves anything.
+Pinned widgets are never touched. A moving wallpaper is read as a picture — the still already
+extracted for the picker — so no video is decoded for this.
+
+Widgets are read-outs, not cards: a tracked label, a hairline, a figure, built from the same
+parts as the bar. Each takes a colour, a ground, an alignment and a size.
+
+### The global menu
+
+The focused window's own menu bar, drawn in the bar where the window title goes, for as long
+as the focused window has one. **Qt, GTK, KDE and LibreOffice** hand over their whole menu
+tree, nested submenus included. It is invisible otherwise — most windows export no menu bar,
+and a global menu that answers those with an empty strip is worse than none, so the title
+comes back. The workspace pills stand down while a menu is showing.
+
+Needs `at-spi2-core` and `python-gobject`, both installed by `install.sh`. Firefox works but
+is read while it is off-screen, because opening one of its menus is visible. Electron apps
+export nothing without a launch flag and are not supported.
 
 ### The bar
 
@@ -453,6 +496,7 @@ and a "used by …" note.
 | `SUPER+Space` / `CTRL+Space` | Launcher |
 | `SUPER+S` | Control center |
 | `SUPER+D` | Dashboard |
+| `SUPER+SHIFT+A` | Arrange the desktop |
 | `SUPER+W` | Mission control |
 | `SUPER+V` | Clipboard history |
 | `SUPER+K` | Keybind cheat-sheet |
@@ -531,6 +575,8 @@ sea-shell/
 │   ├── settings.qml                  # control center (SUPER+S)
 │   ├── Dashboard.qml                 # dashboard (SUPER+D)
 │   ├── power.qml · keybinds.qml · screenshot.qml
+│   ├── Desktop.qml · DesktopItem.qml # the desktop surface and one thing on it
+│   ├── GlobalMenu.qml                # the focused window's menu bar, in the bar
 │   ├── WallpaperPicker.qml          # lives inside the bar; wallpaper.qml runs it standalone
 │   ├── RecorderPanel.qml             # recorder chooser + countdown (SUPER+R)
 │   ├── Tok.qml                       # design tokens — one singleton, read by every surface
@@ -541,12 +587,15 @@ sea-shell/
 │   ├── system/sea-doctor.sh          # read-only health check
 │   ├── system/sea-backup.sh          # back up / restore everything the shell owns
 │   ├── system/sea-gamemode.sh        # game mode, with real restore
+│   ├── system/sea-desktop.py         # what is on the desktop — the ONE writer of it
+│   ├── menu/sea-appmenu.py           # focused window's menu bar, over accessibility
 │   ├── system/sea-window-rules.sh    # window-rules.json → rules.lua
 │   ├── system/sea-gestures.sh        # gestures.json → gestures.lua
 │   ├── wallpaper/sea-wallpaper-set.sh     # what a wallpaper change CONSISTS of
 │   ├── wallpaper/sea-wallpaper-import.sh  # clipboard → a file in the wallpaper folder
 │   ├── wallpaper/sea-wallpaper-apply.sh   # the one place a daemon is talked to
 │   ├── wallpaper/sea-wallpaper-index.py   # the one definition of where wallpapers are
+│   ├── wallpaper/sea-wallpaper-quiet.py   # where the wallpaper has room for something
 │   ├── theme/matugen-accent.sh       # recolour the shell from the wallpaper
 │   └── … (lock, media, calendar, keybind and clipboard helpers)
 ├── hypr/sea.lua                      # borders, blur, shadow, animations, layer + window rules

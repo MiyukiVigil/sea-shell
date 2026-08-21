@@ -44,7 +44,7 @@ DEFAULTS = {
     "clock":   {"w": 0.17,  "h": 0.11},
     "weather": {"w": 0.15,  "h": 0.10},
     "media":   {"w": 0.22,  "h": 0.105},   # room for the visualiser under the track
-    "system":  {"w": 0.175, "h": 0.175},   # room for the trace and the secondary row
+    "system":  {"w": 0.205, "h": 0.19},    # room for three traces and five readings
     "launch":  {"w": 0.055, "h": 0.085},
 }
 # Which pre-solved zone list in wallquiet.json best matches each footprint.

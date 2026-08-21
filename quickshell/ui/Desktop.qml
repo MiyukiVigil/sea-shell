@@ -42,16 +42,23 @@ PanelWindow {
     // Sampled here rather than in each widget: one buffer, one cadence, and every system
     // widget on every monitor shows the same line.
     property var cpuHistory: []
+    property var memHistory: []
+    property var gpuHistory: []
     Timer {
         interval: 2000
         running: true
         repeat: true
         triggeredOnStart: true
         onTriggered: {
-            var v = (root.readings && root.readings.cpu !== undefined) ? root.readings.cpu : 0;
-            var h = root.cpuHistory.slice(-39);
-            h.push(Math.max(0, Math.min(100, v)));
-            root.cpuHistory = h;
+            var r = root.readings || {};
+            function push(buf, v) {
+                var h = buf.slice(-39);
+                h.push(Math.max(0, Math.min(100, v || 0)));
+                return h;
+            }
+            root.cpuHistory = push(root.cpuHistory, r.cpu);
+            root.memHistory = push(root.memHistory, r.memPct);
+            root.gpuHistory = push(root.gpuHistory, r.gpu);
         }
     }
     // Kept clear at the top and bottom so nothing is ever parked under the bar or the dock.
@@ -263,6 +270,8 @@ PanelWindow {
                 // needs a ground at all. Same map, same threshold as the placement nudge.
                 busy: root.busyAt(modelData.x, modelData.y, modelData.w, modelData.h)
                 history: root.cpuHistory
+                memHistory: root.memHistory
+                gpuHistory: root.gpuHistory
                 fieldW: root.sw
                 fieldH: root.sh - root.insetTop - root.insetBottom
                 fieldY: root.insetTop

@@ -5,6 +5,117 @@ All notable changes to **sea-shell** are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.4.0] - 2026-08-21
+
+**The desktop update.** The shell has never done anything with the largest part of your
+screen: the bar is at one edge, the dock at another, and between them was a wallpaper and
+nothing else. Now there are widgets and shortcuts there — and they know what is in the
+picture behind them.
+
+Alongside it, something that was supposed to be impossible: the focused window's own menu
+bar, in the bar.
+
+### Added
+
+- **The desktop.** One surface per monitor, above the wallpaper and below every window, so
+  nothing on it can cover something you are working in. Four widgets — a clock, weather, now
+  playing and a system read-out — plus shortcuts to any installed application. `SUPER+SHIFT+A`
+  arranges; drag anything, right-click to remove, right-click empty space to finish.
+
+  Its input region is **exactly the widgets and nothing else**. A full-screen layer surface
+  that accepts input swallows every pointer event that would have reached the desktop —
+  scroll-to-switch-workspace, any mouse bind you have — and it does so silently, because
+  there is nothing visible there to blame. Only while arranging does the whole surface
+  listen.
+
+  Positions are fractions of the screen, not pixels, so an arrangement survives a resolution
+  change and a widget parked against an edge stays against that edge.
+
+- **The desktop knows what is in your wallpaper.** Every desktop that has ever had widgets on
+  it has the same failure: you choose a wallpaper because you like what is in it, and then
+  you cover that part of it with a clock. Snapping to a grid does not help, because a grid
+  does not know where the subject is.
+
+  So the wallpaper is measured. New widgets are placed in the calm parts of the picture,
+  dragging shows the busy areas as keep-clear shading, and a widget dropped on the subject
+  moves aside — unless you hold **shift**, which places it exactly and pins it there for
+  good. And a widget that lands on busy ground grows a backdrop; on calm ground it is bare
+  text on your picture, which is the entire point of putting it on a wallpaper you chose.
+
+  **A moving wallpaper is read as a picture** — the still the index already extracts for the
+  picker. No video is ever decoded for this.
+
+  Getting there took four attempts, and the failures are the interesting part. Measuring
+  detail alone put the widget **on the character's face** on two wallpapers in twelve,
+  because cel-shaded skin is the *smoothest* region in the frame and a detail map reads it as
+  empty. Adding skin-tone detection made it worse — anime skin hue matches every warm
+  background. What fixed it was morphology: a smooth face is a **hole inside a busy object**,
+  not open space. Eleven of twelve now, and the twelfth is a solid black silhouette on white,
+  which genuinely has nothing to measure. It is advice, never a rule, which is why anything
+  it decides you can overrule with one drag.
+
+- **When the wallpaper changes, the desktop follows it.** Three settings: **rescue** moves
+  only what a new picture actually covers and only as far as it must — often nothing, which
+  is correct; **arrange** re-places everything in the calmest space of every new wallpaper;
+  **off**. Pinned widgets never move under any of them.
+
+- **The global menu.** The focused window's own menu bar, drawn in the bar in place of the
+  window title, for as long as the focused window has one.
+
+  This was researched once before and called impossible, and half of that was right. The
+  usual plumbing — DBusMenu plus the AppMenu registrar — keys every menu by an **X11 window
+  id**, which does not exist under Wayland; KDE's protocol for it is not implemented by
+  Hyprland and neither is the GTK equivalent. That road really is closed. But accessibility
+  publishes the same menus addressed by **process**, and a process is something Hyprland will
+  happily tell us about. **Qt, GTK, KDE and LibreOffice hand over their entire menu tree**,
+  nested submenus included, for free.
+
+  It is invisible unless it has something to say. Most windows export no menu bar — a
+  terminal has none, GTK4 apps put everything behind a hamburger — and a global menu that
+  answers those with an empty strip is worse than none at all, so the title simply comes
+  back. The workspace pills stand down while a menu is showing, because a menu bar is long
+  and it is the thing you are using right now.
+
+  **Firefox is a special case handled specially.** It reports its menu labels but builds each
+  menu only when it is first opened, and opening it is visible — the browser's own menu
+  appears on screen. So it is opened **where nobody is looking**: a window on a workspace you
+  are not on is still mapped and still answers, so its menus are read out of sight and are
+  simply there by the time you click. Nothing is ever opened on a window you can see.
+
+  Electron is not supported, and that is a decision rather than a gap: it builds no
+  accessibility tree unless started with a flag, and VS Code draws its own menu bar two
+  pixels from where ours would go.
+
+### Changed
+
+- **Widgets are instrument read-outs, not cards.** Every desktop-widget convention — a
+  rounded translucent tile with a shadow — is the thing this shell's own components already
+  refuse: depth here comes from rules and background steps, never shadow, never translucency.
+  So a widget is a tracked label, a hairline, and a figure, built from the same `IndKpi`,
+  `IndLabel` and `IndSpark` the bar and the panels are made of. On the clock the accent
+  segment of that hairline is not decoration — it is the minute, filling as it passes.
+
+  Each one takes a colour, a ground, an alignment and a size, in the same vocabulary the Bar
+  Widgets tab already uses. The **figure's** colour still states a fact rather than a
+  preference: a load that has gone critical says so even if you asked for green.
+
+### Fixed
+
+- **The desktop arrangement could silently lose everything on it.** The surface serialised
+  its own copy of the arrangement — a copy made whenever it last read the file — so any
+  moment that copy was stale, the next drag wrote the stale version over the real one. Five
+  widgets became one, with no error anywhere.
+
+  The surface no longer writes the file at all. Every change is a request to the one program
+  that owns it, which reads, edits and writes back. Emptying the arrangement now has to be
+  asked for, and every write leaves the previous one in `desktop.json.bak`.
+
+### Notes
+
+- One arrangement is shared across monitors. Correct on a single screen, wrong on two; it is
+  the first thing to fix.
+- `at-spi2-core` and `python-gobject` are new dependencies, for the global menu.
+
 ## [6.3.1] - 2026-08-21
 
 A wallpaper patch. Sorting your wallpapers into folders broke every image in the picker, a

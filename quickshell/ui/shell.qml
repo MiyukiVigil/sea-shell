@@ -1145,6 +1145,30 @@ ShellRoot {
     // focused window's menu bar; GlobalMenu.qml watches that file. Kept as a daemon rather
     // than run per focus change because starting python and connecting to the accessibility
     // bus costs more than the walk it then performs.
+    // Does the desktop currently carry a media widget? cava is expensive enough that it is
+    // not left running for a visualiser nobody has put on screen, and cheap enough that it
+    // is worth running when they have.
+    property bool desktopHasMedia: false
+    FileView {
+        id: desktopPeek
+        path: Quickshell.env("HOME") + "/.config/sea-shell/desktop.json"
+        watchChanges: true
+        function apply() {
+            try {
+                reload();
+                var t = text();
+                var j = (t && t.trim()) ? JSON.parse(t) : null;
+                var its = (j && j.items) ? j.items : [];
+                var hit = false;
+                for (var i = 0; i < its.length; i++) if (its[i].kind === "media") hit = true;
+                root.desktopHasMedia = hit;
+            } catch (e) { root.desktopHasMedia = false }
+        }
+        onFileChanged: apply()
+        onLoaded: apply()
+        Component.onCompleted: apply()
+    }
+
     readonly property string appmenuScript: Qt.resolvedUrl("sea-appmenu.py").toString().replace("file://","")
     Process {
         id: appmenuDaemon
@@ -2242,7 +2266,11 @@ ShellRoot {
     property var cavaValues: []
     Process {
         id: cavaProc
-        running: root.openPop === "mpris" && root.hqInfo === ""   // no point capturing silence in bit-perfect mode
+        // Also while a media widget is on the desktop and something is actually playing —
+        // that widget draws these same bars, and until 6.4 cava only ever ran for the
+        // dropdown, so the desktop visualiser was reading silence and drawing a flat line.
+        running: (root.openPop === "mpris" || (root.desktopHasMedia && root.player !== null))
+                 && root.hqInfo === ""   // no point capturing silence in bit-perfect mode
         // bash process substitution + exec → quickshell owns cava directly and can
         // actually kill it (piping into `cava -p /dev/stdin` leaked a cava per open)
         command: ["bash","-c","exec cava -p <(printf '[general]\\nframerate=60\\nbars=22\\nsleep_timer=1\\n[input]\\nmethod=pipewire\\nsource=auto\\n[output]\\nchannels=mono\\nmethod=raw\\nraw_target=/dev/stdout\\ndata_format=ascii\\nascii_max_range=100\\n[smoothing]\\nnoise_reduction=0.45')"]

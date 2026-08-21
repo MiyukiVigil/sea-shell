@@ -47,6 +47,8 @@ Item {
     // 0 = the wallpaper is empty here, 1 = there is something under this widget.
     property real busy: 0
     property var history: []
+    property var memHistory: []
+    property var gpuHistory: []
     property var viz: []
     property real fieldW: 1920
     property real fieldH: 1000
@@ -185,14 +187,35 @@ Item {
             size: Math.max(15, Math.round(item.height * item.figureScale))
         }
 
-        // A load figure with no history is a number; with one it is an instrument.
-        IndSpark {
+        // A load figure with no history is a number; with one it is an instrument — and
+        // three traces on ONE axis say something a stack of separate charts cannot: whether
+        // the machine is busy because of the processor, the memory or the card. They share
+        // a 0-100 scale, so they are directly comparable, and the readings row below is the
+        // legend: each label is tinted to match its trace, which costs no extra chrome.
+        Item {
             visible: item.kind === "system" && item.history.length > 1
             Layout.fillWidth: true
-            implicitHeight: Math.max(12, item.height * 0.20)
-            values: item.history
-            stroke: item.accent
-            ground: "transparent"
+            implicitHeight: Math.max(14, item.height * 0.22)
+            IndSpark {
+                anchors.fill: parent
+                values: item.history
+                stroke: item.accent
+                ground: "transparent"
+            }
+            IndSpark {
+                anchors.fill: parent
+                visible: item.memHistory.length > 1
+                values: item.memHistory
+                stroke: Tok.ink3
+                ground: "transparent"
+            }
+            IndSpark {
+                anchors.fill: parent
+                visible: item.gpuHistory.length > 1 && item.hasGpu
+                values: item.gpuHistory
+                stroke: Tok.warn
+                ground: "transparent"
+            }
         }
 
         // The rest of the machine. IndKpi's own note says to lay figures "on a row
@@ -222,7 +245,7 @@ Item {
                     }
                     ColumnLayout {
                         spacing: 0
-                        IndLabel { text: modelData.l }
+                        IndLabel { text: modelData.l; color: modelData.c }
                         IndText {
                             mono: true
                             sz: Tok.tData
@@ -302,17 +325,27 @@ Item {
     // Memory, temperature and whichever of the GPU or the network is worth a column. A
     // machine with no discrete GPU should not be shown an empty GPU reading, so the last
     // column is whatever this machine actually has.
+    readonly property bool hasGpu:
+        !!(item.readings && item.readings.gpuName && ("" + item.readings.gpuName).length > 0)
     readonly property var stats: {
         var r = item.readings || {};
         var out = [];
+        // cpu leads above; these are the rest, each tinted to its trace so the chart needs
+        // no separate key.
         if (r.memPct !== undefined)
-            out.push({ l: "mem", v: Math.round(r.memPct) + "%", hot: r.memPct >= 85 });
+            out.push({ l: "mem", v: Math.round(r.memPct) + "%", hot: r.memPct >= 85,
+                       c: Tok.ink3 });
+        if (item.hasGpu)
+            out.push({ l: "gpu", v: Math.round(r.gpu || 0) + "%", hot: (r.gpu || 0) >= 90,
+                       c: Tok.warn });
         if (r.cpuTemp)
-            out.push({ l: "temp", v: Math.round(r.cpuTemp) + "\u00b0", hot: r.cpuTemp >= 80 });
-        if (r.gpuName && r.gpuName.length > 0)
-            out.push({ l: "gpu", v: Math.round(r.gpu || 0) + "%", hot: (r.gpu || 0) >= 90 });
-        else if (r.netRx !== undefined)
-            out.push({ l: "net", v: item.rate(r.netRx), hot: false });
+            out.push({ l: "cpu\u00b0", v: Math.round(r.cpuTemp) + "\u00b0", hot: r.cpuTemp >= 80,
+                       c: Tok.ink2 });
+        if (item.hasGpu && r.gpuTemp)
+            out.push({ l: "gpu\u00b0", v: Math.round(r.gpuTemp) + "\u00b0",
+                       hot: r.gpuTemp >= 85, c: Tok.ink2 });
+        if (r.netRx !== undefined)
+            out.push({ l: "net", v: item.rate(r.netRx), hot: false, c: Tok.ink2 });
         return out;
     }
     function rate(bytes) {
