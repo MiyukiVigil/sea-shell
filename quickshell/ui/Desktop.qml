@@ -33,6 +33,9 @@ PanelWindow {
     property string uiFont: "sans"
     property real ui: 1.0
     property bool editing: false
+    // Readings for the widgets, supplied by the bar (see shell.qml).
+    property var readings: ({})
+    property var player: null
     // Kept clear at the top and bottom so nothing is ever parked under the bar or the dock.
     property int insetTop: 0
     property int insetBottom: 0
@@ -242,6 +245,11 @@ PanelWindow {
                 uiFont: root.uiFont
                 spec: modelData
                 editing: root.editing
+                readings: root.readings
+                player: root.player
+                // What the wallpaper is doing under this item, so it can decide whether it
+                // needs a ground at all. Same map, same threshold as the placement nudge.
+                busy: root.busyAt(modelData.x, modelData.y, modelData.w, modelData.h)
                 fieldW: root.sw
                 fieldH: root.sh - root.insetTop - root.insetBottom
                 fieldY: root.insetTop

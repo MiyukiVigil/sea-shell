@@ -4,6 +4,26 @@
 // is placed. Position arrives as fractions of the usable field and is handed back the same
 // way, so this never learns what a monitor is.
 //
+// THE DESIGN IS THE SHELL'S OWN, NOT A CARD. Every desktop-widget convention — a rounded
+// translucent tile with a shadow under it — is the thing this shell's components already
+// refuse in as many words: IndRule says "depth in this language comes from rules and
+// background steps, never shadow, never translucency", and IndLabel exists so a screen
+// reads as "a stack of labelled regions instead of a scatter of floating cards". A desktop
+// full of glass tiles would be a different product wearing this one's accent colour.
+//
+// So a widget here is an INSTRUMENT READ-OUT: a tracked uppercase mono label, a hairline
+// under it, the figure below. The hairline is the only chrome, and it is what keeps the
+// text from reading as litter dropped on a photograph. Figures are tabular — a clock whose
+// minute shifts sideways every time it ticks is the amateur tell IndText warns about.
+//
+// AND IT KNOWS WHAT IS BEHIND IT. `busy` is how much the wallpaper has going on under this
+// item, from the same map that decides where things are placed. On calm ground the widget
+// is bare text on a picture, which is the entire point of putting it on a wallpaper you
+// chose. Only where the ground is genuinely busy does a backdrop fade in — a background
+// STEP rather than a glow, because that is the house device for depth. This is the part no
+// other desktop does, and it is only possible because the shell measured the wallpaper
+// first: the same threshold that says "move this widget" says "this one needs a ground".
+//
 // IT IS ONLY DRAGGABLE WHILE ARRANGING. A desktop where a stray click can move your clock
 // is a desktop you cannot trust, and the whole point of putting things somewhere is that
 // they stay there.
@@ -19,6 +39,12 @@ Item {
     property string uiFont: "sans"
     property var spec: ({})
     property bool editing: false
+    // NOT called `data`: that is Item's default property — the list of an item's children —
+    // and shadowing it with a plain var quietly breaks every child this component declares.
+    property var readings: ({})
+    property var player: null
+    // 0 = the wallpaper is empty here, 1 = there is something under this widget.
+    property real busy: 0
     property real fieldW: 1920
     property real fieldH: 1000
     property real fieldY: 0
@@ -28,53 +54,132 @@ Item {
     signal removed()
 
     readonly property string kind: (item.spec && item.spec.kind) ? item.spec.kind : "clock"
+    readonly property color ink: item.pal ? item.pal.text : "#eeeeee"
+    readonly property color ink2: item.pal ? item.pal.sub : "#bbbbbb"
+    readonly property color hair: item.pal ? item.pal.a(item.pal.text, 0.32) : "#55ffffff"
 
     x: (item.spec ? item.spec.x : 0) * item.fieldW
     y: (item.spec ? item.spec.y : 0) * item.fieldH + item.fieldY
     width: Math.max(40, (item.spec ? item.spec.w : 0.1) * item.fieldW)
     height: Math.max(30, (item.spec ? item.spec.h : 0.08) * item.fieldH)
 
-    // ---------- ground ----------
+    // Nothing playing means nothing drawn. A widget reading "—" for most of the day is a
+    // permanent hole in a picture you chose.
+    visible: item.editing || !(item.kind === "media" && !item.player)
+
+    // ---------- the ground, only where the picture needs one ----------
     Rectangle {
         anchors.fill: parent
-        radius: Tok.r + 4
-        // Off by default: a desktop widget sits on a picture the user chose, and a panel
-        // behind it is one more thing covering that picture. It appears while arranging so
-        // there is something to aim at, and stays if the item asks for it.
-        visible: item.editing || (item.spec && item.spec.ground === true)
-        color: item.pal ? item.pal.a(item.pal.bg, item.editing ? 0.55 : 0.35) : "#40000000"
-        border.width: item.editing ? 1 : 0
-        border.color: item.pal ? item.pal.a(item.pal.iris, dragArea.drag.active ? 0.9 : 0.45)
+        anchors.margins: -10
+        radius: Tok.r + 2
+        color: item.pal ? item.pal.a(item.pal.bg, 0.62) : "#a0101010"
+        opacity: item.editing ? 0.0 : Math.max(0, Math.min(1, (item.busy - 0.30) * 4))
+        visible: opacity > 0.01
+        Behavior on opacity { NumberAnimation { duration: 220; easing.type: Tok.mEase } }
+    }
+
+    // ---------- the arranging frame ----------
+    Rectangle {
+        anchors.fill: parent
+        anchors.margins: -10
+        radius: Tok.r + 2
+        visible: item.editing
+        color: item.pal ? item.pal.a(item.pal.bg, 0.45) : "#40000000"
+        border.width: 1
+        border.color: item.pal ? item.pal.a(item.pal.iris, dragArea.drag.active ? 0.95 : 0.4)
                                : "#7788ccff"
     }
 
-    // ---------- clock ----------
+    // ---------- the read-out ----------
+    // One shape for every widget — label, hairline, figure, detail — so adding a kind is
+    // three strings and never a new layout. That is also what keeps four widgets looking
+    // like one instrument instead of four applications.
     Column {
-        anchors.centerIn: parent
-        visible: item.kind === "clock"
-        spacing: 2
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.verticalCenter: parent.verticalCenter
+        spacing: 3
+        visible: item.kind !== "launch"
+
         Text {
-            anchors.horizontalCenter: parent.horizontalCenter
-            text: clk.hhmm
-            color: item.pal ? item.pal.text : "#eee"
-            font.pixelSize: Math.max(18, item.height * 0.42)
-            font.family: item.uiFont
-            // A widget on a wallpaper has no ground to sit on, so it needs to survive
-            // landing on a pale one. A soft dark halo costs nothing and is the difference
-            // between readable everywhere and readable on dark pictures.
-            style: Text.Outline
-            styleColor: Qt.rgba(0, 0, 0, 0.45)
+            id: capText
+            width: parent.width
+            text: item.caption
+            visible: text.length > 0
+            color: item.ink2
+            font.family: Tok.mono
+            font.pixelSize: Math.max(8, Math.min(11, item.height * 0.13))
+            font.weight: 600
+            font.letterSpacing: 1.15
+            font.capitalization: Font.AllUppercase
+            renderType: Text.NativeRendering
+        }
+        Rectangle {
+            width: parent.width
+            height: 1
+            color: item.hair
+            visible: capText.visible
         }
         Text {
-            anchors.horizontalCenter: parent.horizontalCenter
-            text: clk.date
-            color: item.pal ? item.pal.sub : "#bbb"
-            font.pixelSize: Math.max(9, item.height * 0.14)
-            font.family: item.uiFont
-            style: Text.Outline
-            styleColor: Qt.rgba(0, 0, 0, 0.4)
+            width: parent.width
+            text: item.figure
+            color: item.ink
+            font.family: Tok.mono
+            font.pixelSize: Math.max(15, item.height * item.figureScale)
+            font.weight: 500
+            // Tabular figures: a value that changes width as it counts makes the whole
+            // desktop twitch once a second.
+            font.features: ({ "tnum": 1 })
+            renderType: Text.NativeRendering
+            elide: Text.ElideRight
+        }
+        Text {
+            width: parent.width
+            text: item.detail
+            visible: text.length > 0
+            color: item.ink2
+            font.family: Tok.mono
+            font.pixelSize: Math.max(8, Math.min(12, item.height * 0.12))
+            font.features: ({ "tnum": 1 })
+            renderType: Text.NativeRendering
+            elide: Text.ElideRight
         }
     }
+
+    readonly property real figureScale: item.kind === "clock" ? 0.44 : 0.30
+    readonly property string caption: {
+        switch (item.kind) {
+        case "clock":   return "";              // the time needs no label
+        case "weather": return "weather";
+        case "media":   return "playing";
+        case "system":  return "system";
+        }
+        return "";
+    }
+    readonly property string figure: {
+        switch (item.kind) {
+        case "clock":   return clk.hhmm;
+        case "weather": return (item.readings && item.readings.wxTemp) ? item.readings.wxTemp : "—";
+        case "media":   return item.player ? ("" + (item.player.trackTitle || "")) : "";
+        case "system":  return (item.readings && item.readings.cpu !== undefined)
+                               ? (Math.round(item.readings.cpu) + "%") : "—";
+        }
+        return "";
+    }
+    readonly property string detail: {
+        switch (item.kind) {
+        case "clock":   return clk.date;
+        case "weather": return (item.readings && item.readings.wxCond) ? item.readings.wxCond : "";
+        case "media":   return item.player ? ("" + (item.player.trackArtist || "")) : "";
+        case "system": {
+            if (!item.readings || item.readings.memPct === undefined) return "";
+            var t = item.readings.cpuTemp ? ("   " + Math.round(item.readings.cpuTemp) + "°") : "";
+            return "mem " + Math.round(item.readings.memPct) + "%" + t;
+        }
+        }
+        return "";
+    }
+
     QtObject {
         id: clk
         property string hhmm: ""
@@ -88,7 +193,7 @@ Item {
         onTriggered: {
             var d = new Date();
             clk.hhmm = Qt.formatDateTime(d, "HH:mm");
-            clk.date = Qt.formatDateTime(d, "ddd d MMM");
+            clk.date = Qt.formatDateTime(d, "ddd d MMM").toLowerCase();
         }
     }
 
@@ -96,35 +201,35 @@ Item {
     Column {
         anchors.centerIn: parent
         visible: item.kind === "launch"
-        spacing: 4
+        spacing: 5
         IconImage {
             anchors.horizontalCenter: parent.horizontalCenter
-            implicitSize: Math.max(24, Math.min(item.width, item.height) * 0.55)
+            implicitSize: Math.max(24, Math.min(item.width, item.height) * 0.52)
             source: (item.spec && item.spec.icon)
                     ? Quickshell.iconPath(item.spec.icon, true) : ""
             visible: source !== ""
         }
         Text {
             anchors.horizontalCenter: parent.horizontalCenter
-            width: item.width - 8
+            width: item.width
             horizontalAlignment: Text.AlignHCenter
             elide: Text.ElideRight
             text: (item.spec && item.spec.label) ? item.spec.label : ""
-            color: item.pal ? item.pal.text : "#eee"
-            font.pixelSize: 11
-            font.family: item.uiFont
-            style: Text.Outline
-            styleColor: Qt.rgba(0, 0, 0, 0.5)
+            color: item.ink
+            font.family: Tok.mono
+            font.pixelSize: 10
+            font.letterSpacing: 0.6
+            renderType: Text.NativeRendering
         }
     }
 
     Process { id: launcher }
     function launch() {
         if (!item.spec) return;
-        // A .desktop id is the better handle: the entry knows its own Exec field codes,
-        // its working directory and whether it wants a terminal, none of which survive
-        // being flattened into a string. A raw command still works for anything without
-        // an entry — a script, a one-liner — which is most of what a shortcut is for.
+        // A .desktop id is the better handle: the entry knows its own Exec field codes, its
+        // working directory and whether it wants a terminal, none of which survive being
+        // flattened into a string. A raw command still works for anything without an entry —
+        // a script, a one-liner — which is most of what a shortcut is for.
         if (item.spec.entry) {
             try {
                 var e = DesktopEntries.byId("" + item.spec.entry);

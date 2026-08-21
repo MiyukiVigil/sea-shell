@@ -9,13 +9,15 @@ arrange with a mouse.
 
     --list                          print the arrangement
     --ensure                        create an empty arrangement if absent
-    --add-clock                     add a clock
+    --add-clock | --add-weather | --add-media | --add-system
+                                    add a widget
     --add-entry ID [--label L] [--icon I]
                                     add a shortcut to an installed application
     --add-app EXEC [--label L] [--icon I]
                                     add a shortcut
     --remove ID                     remove one item
-    --clear                         remove everything
+    --clear                         remove everything (kept in desktop.json.bak)
+    --restore                       put desktop.json.bak back
 
 New items are placed in the calmest spot the wallpaper has left — sea-wallpaper-quiet.py
 has already worked that out and cached it — and failing that, top-left. Positions are
@@ -33,11 +35,16 @@ QUIET = os.path.join(os.environ.get("XDG_CACHE_HOME", os.path.join(HOME, ".cache
                      "sea-shell", "wallquiet.json")
 
 DEFAULTS = {
-    "clock":  {"w": 0.17, "h": 0.11},
-    "launch": {"w": 0.055, "h": 0.085},
+    "clock":   {"w": 0.17,  "h": 0.11},
+    "weather": {"w": 0.15,  "h": 0.10},
+    "media":   {"w": 0.22,  "h": 0.075},
+    "system":  {"w": 0.13,  "h": 0.12},
+    "launch":  {"w": 0.055, "h": 0.085},
 }
 # Which pre-solved zone list in wallquiet.json best matches each footprint.
-ZONE_FOR = {"clock": "16x9", "launch": "10x10"}
+ZONE_FOR = {"clock": "16x9", "weather": "16x9", "media": "24x6",
+            "system": "10x10", "launch": "10x10"}
+KINDS = ("clock", "weather", "media", "system")
 
 
 def load():
@@ -50,12 +57,30 @@ def load():
         return []
 
 
-def save(items):
+def save(items, allow_empty=False):
+    """Write the arrangement, keeping the previous one alongside it.
+
+    EMPTYING IS A DELIBERATE ACT. An arrangement went to zero items once during
+    development and nothing in the logs could say which caller did it — which is the point:
+    whatever the cause, the result was a desktop that silently forgot everything on it. So
+    writing an empty list now requires asking (--clear), and every write leaves the previous
+    arrangement in desktop.json.bak, so even a wipe is one `mv` away from undone.
+    """
+    if not items and not allow_empty and os.path.exists(CONF) and load():
+        sys.stderr.write("sea-desktop: refusing to empty the arrangement; use --clear\n")
+        return False
     os.makedirs(os.path.dirname(CONF), exist_ok=True)
+    if os.path.exists(CONF):
+        try:
+            with open(CONF) as src, open(CONF + ".bak", "w") as dst:
+                dst.write(src.read())
+        except Exception:
+            pass
     fd, tmp = tempfile.mkstemp(dir=os.path.dirname(CONF), prefix=".desktop-")
     with os.fdopen(fd, "w") as fh:
         json.dump({"v": 1, "items": items}, fh, indent=2)
     os.replace(tmp, CONF)
+    return True
 
 
 def overlaps(a, b, pad=0.01):
@@ -129,14 +154,24 @@ def main(argv):
         # needs a file. Without it the surface reads "no arrangement" once at startup and
         # never notices the first thing you add.
         if not os.path.exists(CONF):
-            save([])
+            save([], allow_empty=True)
             print("created %s" % CONF)
         else:
             print("exists")
         return 0
     if "--clear" in argv:
-        save([])
-        print("cleared")
+        save([], allow_empty=True)
+        print("cleared (previous arrangement kept in %s.bak)" % os.path.basename(CONF))
+        return 0
+    if "--restore" in argv:
+        try:
+            with open(CONF + ".bak") as fh:
+                items = (json.load(fh) or {}).get("items") or []
+            save(items, allow_empty=True)
+            print("restored %d items" % len(items))
+        except Exception as e:
+            sys.stderr.write("sea-desktop: nothing to restore (%s)\n" % e)
+            return 1
         return 0
     if "--remove" in argv:
         want = arg(argv, "--remove")
@@ -144,9 +179,10 @@ def main(argv):
         save(items)
         print("removed %s" % want)
         return 0
-    if "--add-clock" in argv:
-        print(json.dumps(add("clock")))
-        return 0
+    for k in KINDS:
+        if "--add-" + k in argv:
+            print(json.dumps(add(k)))
+            return 0
     if "--add-entry" in argv:
         eid = arg(argv, "--add-entry")
         if not eid:

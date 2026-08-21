@@ -125,6 +125,15 @@ ShellRoot {
             uiFont: root.cfgFont
             ui: root.uiFor(modelData)
             editing: root.desktopEditing
+            // One bound object rather than a property per reading: the desktop is a viewer,
+            // and every widget that lands here later should be a change to Desktop.qml, not
+            // another wire through the bar.
+            readings: ({
+                "wxTemp": root.wxTemp, "wxCond": root.wxCond,
+                "cpu": root.cpuUsage, "cpuTemp": root.cpuTemp,
+                "memPct": root.memPct, "memUsed": root.memUsed, "memTotal": root.memTotal
+            })
+            player: root.player
             // Nothing is ever parked under the bar, or under where the dock appears.
             insetTop: root.cfgEdge === "top" ? root.cfgHeight + 6 : 6
             insetBottom: root.cfgEdge === "bottom" ? root.cfgHeight + 6 : (root.cfgDock ? 78 : 6)

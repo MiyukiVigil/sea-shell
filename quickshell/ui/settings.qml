@@ -4694,13 +4694,15 @@ Scope {
                                     Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14
                                     spacing: 10
                                     Text {
-                                        text: modelData.kind === "clock" ? "schedule" : "apps"
+                                        text: ({ "clock": "schedule", "weather": "cloud",
+                                                 "media": "music_note", "system": "monitor_heart",
+                                                 "launch": "apps" })[modelData.kind] || "widgets"
                                         font.family: "Material Symbols Rounded"; font.pixelSize: 16
                                         color: theme.sub
                                     }
                                     Text {
-                                        text: modelData.kind === "clock"
-                                              ? "clock" : (modelData.label || "shortcut")
+                                        text: modelData.kind === "launch"
+                                              ? (modelData.label || "shortcut") : modelData.kind
                                         color: theme.text; font.pixelSize: 12; font.family: root.apFont
                                     }
                                     Text {
@@ -4718,7 +4720,17 @@ Scope {
                             Section { title: "add"; icon: "add_circle" }
                             RowLayout {
                                 Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; spacing: 10
-                                Chip { label: "clock"; icon: "schedule"; onPicked: root.dtRun(["--add-clock"]) }
+                                Repeater {
+                                    model: [{ k: "clock",   l: "clock",   i: "schedule" },
+                                            { k: "weather", l: "weather", i: "cloud" },
+                                            { k: "media",   l: "playing", i: "music_note" },
+                                            { k: "system",  l: "system",  i: "monitor_heart" }]
+                                    delegate: Chip {
+                                        required property var modelData
+                                        label: modelData.l; icon: modelData.i
+                                        onPicked: root.dtRun(["--add-" + modelData.k])
+                                    }
+                                }
                                 Item { Layout.fillWidth: true }
                             }
                             Rectangle {
