@@ -56,7 +56,30 @@ Item {
     readonly property string kind: (item.spec && item.spec.kind) ? item.spec.kind : "clock"
     readonly property color ink: item.pal ? item.pal.text : "#eeeeee"
     readonly property color ink2: item.pal ? item.pal.sub : "#bbbbbb"
-    readonly property color hair: item.pal ? item.pal.a(item.pal.text, 0.32) : "#55ffffff"
+    readonly property color hair: item.pal ? item.pal.a(item.pal.text, 0.30) : "#55ffffff"
+
+    // ---------- how it is dressed ----------
+    // The same three axes the Bar Widgets tab already uses — colour, ground, and how much
+    // room it takes — because a shell where the desktop and the bar are configured in two
+    // different vocabularies is two shells. `tone` is deliberately ONE accent used sparingly
+    // rather than a palette per widget: the research and the house style agree that a
+    // near-monochrome surface with a single accent is what reads as designed.
+    readonly property string ground: (item.spec && item.spec.ground) ? item.spec.ground : "rule"
+    readonly property string tone: (item.spec && item.spec.tone) ? item.spec.tone : "accent"
+    readonly property string align: (item.spec && item.spec.align) ? item.spec.align : "left"
+    readonly property color accent: {
+        if (!item.pal) return "#63c7dd";
+        switch (item.tone) {
+        case "plain": return item.pal.a(item.pal.text, 0.55);
+        case "green": return item.pal.good;
+        case "amber": return item.pal.warn;
+        case "red":   return item.pal.bad;
+        case "frost": return item.pal.frost;
+        }
+        return item.pal.iris;
+    }
+    readonly property int hAlign: item.align === "centre" ? Text.AlignHCenter
+                                : item.align === "right"  ? Text.AlignRight : Text.AlignLeft
 
     x: (item.spec ? item.spec.x : 0) * item.fieldW
     y: (item.spec ? item.spec.y : 0) * item.fieldH + item.fieldY
@@ -67,13 +90,17 @@ Item {
     // permanent hole in a picture you chose.
     visible: item.editing || !(item.kind === "media" && !item.player)
 
-    // ---------- the ground, only where the picture needs one ----------
+    // ---------- the ground ----------
+    // "panel" always has one. "rule" and "bare" ask for one only where the wallpaper is
+    // busy enough to need it — the adaptive behaviour is the point, so it stays the default.
     Rectangle {
         anchors.fill: parent
         anchors.margins: -10
         radius: Tok.r + 2
         color: item.pal ? item.pal.a(item.pal.bg, 0.62) : "#a0101010"
-        opacity: item.editing ? 0.0 : Math.max(0, Math.min(1, (item.busy - 0.30) * 4))
+        opacity: item.editing ? 0.0
+               : item.ground === "panel" ? 0.92
+               : Math.max(0, Math.min(1, (item.busy - 0.30) * 4))
         visible: opacity > 0.01
         Behavior on opacity { NumberAnimation { duration: 220; easing.type: Tok.mEase } }
     }
@@ -91,9 +118,9 @@ Item {
     }
 
     // ---------- the read-out ----------
-    // One shape for every widget — label, hairline, figure, detail — so adding a kind is
-    // three strings and never a new layout. That is also what keeps four widgets looking
-    // like one instrument instead of four applications.
+    // One shape for every widget — label, rule, figure, detail — so adding a kind is three
+    // strings and never a new layout. That is also what keeps four widgets looking like one
+    // instrument instead of four applications.
     Column {
         anchors.left: parent.left
         anchors.right: parent.right
@@ -104,8 +131,9 @@ Item {
         Text {
             id: capText
             width: parent.width
+            horizontalAlignment: item.hAlign
             text: item.caption
-            visible: text.length > 0
+            visible: text.length > 0 && item.ground !== "bare"
             color: item.ink2
             font.family: Tok.mono
             font.pixelSize: Math.max(8, Math.min(11, item.height * 0.13))
@@ -114,14 +142,33 @@ Item {
             font.capitalization: Font.AllUppercase
             renderType: Text.NativeRendering
         }
-        Rectangle {
+
+        // The rule, and the one piece of colour in the whole widget. A hairline on its own
+        // is a divider; a hairline that starts with a short accent segment is a mark, and
+        // that is the difference between text lying on a picture and text placed on one.
+        //
+        // On the CLOCK the accent segment is not decoration — it is the minute, filling
+        // left to right as it passes. An instrument's rule should be doing something.
+        Item {
             width: parent.width
             height: 1
-            color: item.hair
-            visible: capText.visible
+            visible: item.ground !== "bare"
+            Rectangle { anchors.fill: parent; color: item.hair }
+            Rectangle {
+                height: 1
+                width: item.kind === "clock"
+                       ? Math.max(2, parent.width * clk.minuteFrac)
+                       : Math.min(parent.width, Math.max(12, parent.width * 0.18))
+                x: item.align === "right" ? parent.width - width
+                 : item.align === "centre" ? (parent.width - width) / 2 : 0
+                color: item.accent
+                Behavior on width { NumberAnimation { duration: 420; easing.type: Tok.mEase } }
+            }
         }
+
         Text {
             width: parent.width
+            horizontalAlignment: item.hAlign
             text: item.figure
             color: item.ink
             font.family: Tok.mono
@@ -135,6 +182,7 @@ Item {
         }
         Text {
             width: parent.width
+            horizontalAlignment: item.hAlign
             text: item.detail
             visible: text.length > 0
             color: item.ink2
@@ -184,6 +232,7 @@ Item {
         id: clk
         property string hhmm: ""
         property string date: ""
+        property real minuteFrac: 0
     }
     Timer {
         running: item.kind === "clock"
@@ -194,6 +243,7 @@ Item {
             var d = new Date();
             clk.hhmm = Qt.formatDateTime(d, "HH:mm");
             clk.date = Qt.formatDateTime(d, "ddd d MMM").toLowerCase();
+            clk.minuteFrac = d.getSeconds() / 60;
         }
     }
 

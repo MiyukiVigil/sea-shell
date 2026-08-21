@@ -74,7 +74,7 @@ printf '%s' "$wp" > "$CFG/wallpaper"
 # theme/, and this has to run from either — the rotate daemon and the picker are both
 # tested straight out of the checkout.
 sibling() {
-    for c in "$here/$1" "$here/../lock/$1" "$here/../theme/$1"; do
+    for c in "$here/$1" "$here/../lock/$1" "$here/../theme/$1" "$here/../system/$1"; do
         [ -f "$c" ] && { printf '%s' "$c"; return 0; }
     done
     return 1
@@ -101,7 +101,13 @@ mode="$(sibling sea-theme-from-wallpaper.sh)" && sh "$mode" "$wp" >/dev/null 2>&
 # Backgrounded like the rest: the wallpaper is already on screen by now, and nothing on the
 # desktop needs the map until the next time something is dragged. For a clip this measures
 # the still the indexer already extracted — no video is decoded here.
-quiet_map="$(sibling sea-wallpaper-quiet.py)" && python3 "$quiet_map" "$wp" >/dev/null 2>&1 &
+# CHAINED, not parallel: the desktop can only be rearranged against a map of the wallpaper
+# it is now sitting on, so resettle has to wait for the measurement rather than race it.
+# Anything pinned, and anything still on quiet ground, is left exactly where it is.
+{
+    quiet_map="$(sibling sea-wallpaper-quiet.py)" && python3 "$quiet_map" "$wp" >/dev/null 2>&1
+    desk="$(sibling sea-desktop.py)" && python3 "$desk" --resettle >/dev/null 2>&1
+} &
 
 [ "$quiet" = "1" ] || notify-send 'sea-shell' "Wallpaper → $(basename "$wp")" 2>/dev/null
 exit 0

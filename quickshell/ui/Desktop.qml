@@ -75,33 +75,26 @@ PanelWindow {
         Component.onCompleted: apply()
     }
 
-    Process { id: writer }
-    function save() {
-        // Written through a shell rather than FileView because the config is the record and
-        // a half-written record is worse than a stale one: printf to a temp file and rename,
-        // so a reader either sees the old arrangement or the new one.
-        var body = JSON.stringify({ "v": 1, "items": root.items });
-        writer.command = ["sh", "-c",
-            "mkdir -p \"$(dirname \"$1\")\"; printf '%s' \"$2\" > \"$1.tmp\" && mv \"$1.tmp\" \"$1\"",
-            "sh", root.confPath, body];
-        writer.running = true;
+    // ONE WRITER, AND IT IS NOT THIS FILE.
+    //
+    // This used to write the arrangement itself, and twice it destroyed one: it serialised
+    // `root.items`, which is a COPY of the file made when the FileView last parsed it, so
+    // any moment that copy was stale or partial the next drag wrote the stale version over
+    // the real one — five widgets became one, with no error anywhere. A surface that also
+    // owns the record will eventually overwrite the record with what it happens to be
+    // showing. So every change is a request to sea-desktop.py, which reads the file, edits
+    // it and writes it back; this file only ever reads.
+    Process { id: helperProc }
+    readonly property string helper:
+        Quickshell.env("HOME") + "/.config/quickshell/sea-shell/sea-desktop.py"
+    function ask(args) {
+        helperProc.command = ["python3", root.helper].concat(args);
+        helperProc.running = true;
     }
-
-    // Removal goes through the script for the same reason adding does: one writer.
-    Process { id: remover }
-    property string helper: Quickshell.env("HOME") + "/.config/quickshell/sea-shell/sea-desktop.py"
-    function removeItem(id) {
+    function removeItem(id) { if (id) root.ask(["--remove", "" + id]) }
+    function moveItem(id, x, y, pin) {
         if (!id) return;
-        remover.command = ["python3", root.helper, "--remove", "" + id];
-        remover.running = true;
-    }
-
-    function setItem(i, changes) {
-        var next = [];
-        for (var k = 0; k < root.items.length; k++)
-            next.push(k === i ? Object.assign({}, root.items[k], changes) : root.items[k]);
-        root.items = next;
-        root.save();
+        root.ask(["--move", "" + id, "--x", "" + x, "--y", "" + y, pin ? "--pin" : "--unpin"]);
     }
 
     // ---------- the quiet map ----------
@@ -255,9 +248,12 @@ PanelWindow {
                 fieldY: root.insetTop
                 onRemoved: root.removeItem(modelData.id)
                 onMoved: (fx, fy, exact) => {
+                    // SHIFT is one statement, not two: "put it exactly here" and "stop
+                    // moving it when the wallpaper changes" are the same intent — you have
+                    // overruled the map, and it would be rude to overrule you back tomorrow.
                     var p = exact ? Qt.point(fx, fy)
                                   : root.settle(fx, fy, modelData.w, modelData.h);
-                    root.setItem(index, { "x": p.x, "y": p.y });
+                    root.moveItem(modelData.id, p.x, p.y, exact);
                 }
             }
         }

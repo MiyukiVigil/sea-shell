@@ -71,6 +71,7 @@ Scope {
     readonly property string dtScript: Qt.resolvedUrl("sea-desktop.py").toString().replace("file://","")
     property var dtItems: []
     property bool dtEditing: false
+    property bool dtAuto: true
     property string dtQuery: ""
     function dtRun(args) { Quickshell.execDetached(["python3", root.dtScript].concat(args)) }
     function dtIpc(fn) { Quickshell.execDetached(["qs", "-c", "sea-shell", "ipc", "call", "desktop", fn]) }
@@ -84,6 +85,7 @@ Scope {
                 var t = text();
                 var j = (t && t.trim()) ? JSON.parse(t) : null;
                 root.dtItems = (j && j.items) ? j.items : [];
+                root.dtAuto = !(j && j.autoArrange === false);
             } catch (e) { root.dtItems = [] }
         }
         onFileChanged: apply()
@@ -4661,7 +4663,7 @@ Scope {
 
                             Section { title: "arranging"; icon: "drag_pan" }
                             Text {
-                                text: "while arranging, drag anything on the desktop. shaded areas are where the shell thinks your wallpaper has something in it — a widget dropped there moves aside unless you hold shift"
+                                text: "while arranging, drag anything on the desktop. shaded areas are where the shell thinks your wallpaper has something in it — a widget dropped there moves aside unless you hold shift, which also pins it. with follow-wallpaper on, anything a NEW wallpaper covers moves itself out of the way; pinned widgets never move."
                                 color: theme.faint; font.pixelSize: 10; font.family: Tok.mono
                                 wrapMode: Text.WordWrap
                                 Layout.leftMargin: 14; Layout.rightMargin: 14; Layout.fillWidth: true
@@ -4676,6 +4678,12 @@ Scope {
                                         root.dtEditing = !root.dtEditing;
                                         root.dtIpc(root.dtEditing ? "start" : "done");
                                     }
+                                }
+                                Chip {
+                                    label: "follow wallpaper"
+                                    icon: "auto_awesome_motion"
+                                    on: root.dtAuto
+                                    onPicked: root.dtRun(["--auto", root.dtAuto ? "off" : "on"])
                                 }
                                 Item { Layout.fillWidth: true }
                             }
@@ -4710,6 +4718,60 @@ Scope {
                                         color: theme.faint; font.pixelSize: 9; font.family: Tok.mono
                                     }
                                     Item { Layout.fillWidth: true }
+                                    // Cycling chips rather than a row of radio groups per
+                                    // widget: five widgets times four axes is twenty
+                                    // controls, and a settings page you have to scroll past
+                                    // is how a customisable thing stops being customised.
+                                    Chip {
+                                        visible: modelData.kind !== "launch"
+                                        label: modelData.ground || "rule"
+                                        icon: "layers"
+                                        onPicked: {
+                                            var o = ["rule", "panel", "bare"];
+                                            var i = o.indexOf(modelData.ground || "rule");
+                                            root.dtRun(["--set", "" + modelData.id,
+                                                        "--ground", o[(i + 1) % o.length]]);
+                                        }
+                                    }
+                                    Chip {
+                                        visible: modelData.kind !== "launch"
+                                        label: modelData.tone || "accent"
+                                        icon: "palette"
+                                        onPicked: {
+                                            var o = ["accent", "frost", "green", "amber", "red", "plain"];
+                                            var i = o.indexOf(modelData.tone || "accent");
+                                            root.dtRun(["--set", "" + modelData.id,
+                                                        "--tone", o[(i + 1) % o.length]]);
+                                        }
+                                    }
+                                    Chip {
+                                        visible: modelData.kind !== "launch"
+                                        label: modelData.align || "left"
+                                        icon: "format_align_left"
+                                        onPicked: {
+                                            var o = ["left", "centre", "right"];
+                                            var i = o.indexOf(modelData.align || "left");
+                                            root.dtRun(["--set", "" + modelData.id,
+                                                        "--align", o[(i + 1) % o.length]]);
+                                        }
+                                    }
+                                    Chip {
+                                        label: modelData.size || "medium"
+                                        icon: "photo_size_select_small"
+                                        onPicked: {
+                                            var o = ["small", "medium", "large"];
+                                            var i = o.indexOf(modelData.size || "medium");
+                                            root.dtRun(["--set", "" + modelData.id,
+                                                        "--size", o[(i + 1) % o.length]]);
+                                        }
+                                    }
+                                    Chip {
+                                        label: modelData.pinned ? "pinned" : "free"
+                                        icon: modelData.pinned ? "push_pin" : "open_in_full"
+                                        on: !!modelData.pinned
+                                        onPicked: root.dtRun([modelData.pinned ? "--unpin" : "--pin",
+                                                              "" + modelData.id])
+                                    }
                                     Chip {
                                         label: "remove"; icon: "close"
                                         onPicked: root.dtRun(["--remove", "" + modelData.id])
