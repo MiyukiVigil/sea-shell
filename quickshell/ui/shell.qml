@@ -91,6 +91,8 @@ ShellRoot {
         showRunning: root.cfgDockRunning
         showLabels: root.cfgDockLabels
         surfaceOpacity: root.dropOpacity
+        attnKey: root.attnKey
+        attnNonce: root.attnNonce
         cfgMonitors: root.cfgMonitors
         cfgScale: root.cfgScale
     }
@@ -856,7 +858,58 @@ ShellRoot {
     readonly property string wsFontFamily: root.wsNeedsSymbol && root.symbolFamily !== ""
                                            ? root.symbolFamily : root.cfgFont
 
+    // ---------- the scratchpad ----------
+    // Hyprland builds a special workspace when the first window is thrown into it and tears
+    // it down the moment the last one leaves. So there is no such thing as an empty stash to
+    // have to test for: its EXISTENCE is the whole signal.
+    readonly property var scratchWs: {
+        var all = (Hyprland && Hyprland.workspaces) ? Hyprland.workspaces.values : [];
+        var any = null;
+        for (var i = 0; i < all.length; i++) {
+            if (!all[i] || all[i].id >= 0) continue;
+            if (("" + all[i].name) === "special:scratch") return all[i];   // the one the keybind uses
+            if (!any) any = all[i];
+        }
+        return any;
+    }
+    // Counted off the wayland toplevels, the same rule the switcher settled on: hyprctl's
+    // per-workspace window count goes stale on a long-lived shell, and a stash that says 3
+    // when it holds 1 is worse than no mark at all.
+    readonly property int scratchCount: {
+        if (!root.scratchWs) return 0;
+        var m = (Hyprland && Hyprland.toplevels) ? Hyprland.toplevels.values : [];
+        var n = 0;
+        for (var i = 0; i < m.length; i++)
+            if (m[i] && m[i].workspace && m[i].workspace.id === root.scratchWs.id) n++;
+        return n;
+    }
+    // Whether the stash is currently ON SCREEN. Holding windows and showing them are two
+    // different states — that separation is the entire point of a scratchpad — so this is
+    // not derivable from scratchWs.
+    property bool scratchOpen: false
+    // The event stream says when it opens and closes but says nothing about the state the bar
+    // STARTED in: restart the shell with the stash pulled down and the mark would draw dim.
+    // Asked once, from whichever monitor is holding it.
+    function scratchSync() {
+        try {
+            var ms = (Hyprland && Hyprland.monitors) ? Hyprland.monitors.values : [];
+            for (var i = 0; i < ms.length; i++) {
+                var o = ms[i] && ms[i].lastIpcObject;
+                if (o && o.specialWorkspace && ("" + (o.specialWorkspace.name || "")).length > 0) {
+                    root.scratchOpen = true; return;
+                }
+            }
+        } catch (e) {}
+        root.scratchOpen = false;
+    }
+    Timer { interval: 900; running: true; repeat: false
+        onTriggered: { try { if (Hyprland.refreshMonitors) Hyprland.refreshMonitors(); } catch (e) {} root.scratchSync(); } }
+    // Emptying the stash puts it away whether or not anything said so.
+    onScratchCountChanged: if (root.scratchCount === 0) root.scratchOpen = false
+
     function wsLabelFor(n) {
+        // The stash has no number to write in any of these systems, and "-98" is not a label.
+        if (n < 0) return "\u2022";
         switch (root.cfgWsLabel) {
         case "roman":    return root.wsRoman(n);
         case "mandarin": return root.wsMandarin(n);
@@ -880,7 +933,7 @@ ShellRoot {
     readonly property var defaultWidgetOrder: ["wgMpris","wgTray","wgQuick","wgUpdates","wgNet","wgWeather","wgClipboard","wgNotif","wgWifi","wgBluetooth","wgKdeconnect","wgCaffeine","wgNight","wgSystem","wgMic","wgVolume","wgBattery","wgRec","wgClock","wgPower"]
     property var cfgWidgetOrder: root.defaultWidgetOrder
     // left cluster order (logo · workspaces · window-title) — drag-reorder in Settings → Bar widgets
-    readonly property var defaultLeftOrder: ["lgLogo","lgWork","lgTitle"]
+    readonly property var defaultLeftOrder: ["lgLogo","lgWork","lgScratch","lgTitle"]
     property var cfgLeftOrder: root.defaultLeftOrder
     // append any ids missing from a saved order (e.g. new ones added in an update)
     // Merge widgets added by an update into a saved order. They land where the
@@ -1008,6 +1061,9 @@ ShellRoot {
             if (j.nightTemp !== undefined) root.cfgNightTemp = j.nightTemp;
             if (j.nightAuto !== undefined) root.cfgNightAuto = !!j.nightAuto;
             if (j.sysShow !== undefined && Array.isArray(j.sysShow) && j.sysShow.length > 0) root.cfgSysShow = j.sysShow;
+            if (j.wgStyle !== undefined && j.wgStyle !== null && typeof j.wgStyle === "object") root.cfgWgStyle = j.wgStyle;
+            if (j.attnFlash !== undefined) root.cfgAttnFlash = !!j.attnFlash;
+            if (j.attnFocus !== undefined) root.cfgAttnFocus = !!j.attnFocus;
             if (j.widgetOrder !== undefined && Array.isArray(j.widgetOrder) && j.widgetOrder.length > 0) root.cfgWidgetOrder = root.reconcileOrder(j.widgetOrder, root.defaultWidgetOrder);
             if (j.leftOrder !== undefined && Array.isArray(j.leftOrder) && j.leftOrder.length > 0) root.cfgLeftOrder = root.reconcileOrder(j.leftOrder, root.defaultLeftOrder);
             if (j.monitors !== undefined && j.monitors && typeof j.monitors === "object") root.cfgMonitors = j.monitors;
@@ -1675,6 +1731,13 @@ ShellRoot {
     // the pill rendered exactly one of them — so a machine with a 6GB dGPU had its VRAM measured
     // on every tick and displayed nowhere. The metric list is a setting because there is no right
     // answer: a laptop wants battery-cheap CPU, a gaming box wants VRAM, and both are one line.
+    // Per-widget pill appearance, written by Settings → Bar Widgets. Sparse: a widget with no
+    // entry here draws exactly as it always did, so this is inert until somebody touches it.
+    //   { wgWifi: { a: "iris", c: "icon", g: "outline" }, … }
+    //   a = accent role (frost | iris | good | warn | bad | text) or a #hex
+    //   c = content    (both | icon | value)
+    //   g = ground     (filled | outline | bare)
+    property var cfgWgStyle: ({})
     property var cfgSysShow: ["cpu"]
     readonly property var sysMetrics: ({
         cpu:  { l: "CPU",  v: function(){ return Math.round(root.cpuUsage) + "%" },
@@ -2271,6 +2334,65 @@ ShellRoot {
         root.usageAll = all;
     }
     function usageSwitch(cls) { root.usageFlush(); root.usageCur = cls; root.usageSince = Date.now(); }
+    // ---------- an application asking for your attention ----------
+    // Clicking a link in one app and having the browser come up BEHIND it is the case this
+    // exists for. Wayland's xdg-activation is how the launching app hands over the right to
+    // take focus; Hyprland turns that into an `urgent` event and, with misc:focus_on_activate
+    // off (its default, and what this machine had), does nothing else with it. So the window
+    // is raised on some other workspace and you go looking for it.
+    //
+    // Hyprland emits urgent TWICE for a single link open, so the nonce is what the dock
+    // animates on and the key is deliberately allowed to be re-set to the same value.
+    property bool cfgAttnFlash: true      // pulse the app's dock icon
+    property bool cfgAttnFocus: true      // and go to it
+    property string attnKey: ""           // lowercase window class currently asking
+    property int attnNonce: 0
+    property real _attnLast: 0
+    Timer { id: attnClear; interval: 2600; onTriggered: root.attnKey = "" }
+
+    function attnRaise(addr) {
+        if (!addr) return;
+        var want = ("" + addr).replace(/^0x/, "").toLowerCase();
+        var list = Hyprland.toplevels ? Hyprland.toplevels.values : [];
+        for (var i = 0; i < list.length; i++) {
+            var t = list[i], o = t ? t.lastIpcObject : null;
+            if (!o || !o.address) continue;
+            if (("" + o.address).replace(/^0x/, "").toLowerCase() !== want) continue;
+
+            var cls = ("" + (o.class || (t.wayland ? t.wayland.appId : "") || "")).trim().toLowerCase();
+            if (root.cfgAttnFlash && cls !== "") { root.attnKey = cls; root.attnNonce++; attnClear.restart(); }
+            // Same path the dock uses to focus a window, for the same reason: the address is
+            // exact, and activate() is the fallback for a window hyprctl has not listed yet.
+            if (root.cfgAttnFocus) {
+                if (o.address) Hyprland.dispatch("hl.dsp.focus({ window = 'address:" + o.address + "' })");
+                else if (t.wayland) t.wayland.activate();
+            }
+            return;
+        }
+        // Not in the model yet — a window that opened this instant. Ask once, then give up
+        // rather than spinning: a miss here costs a flash, not correctness.
+        Hyprland.refreshToplevels();
+    }
+
+    Connections { target: Hyprland; ignoreUnknownSignals: true
+        function onRawEvent(event) {
+            if (!event) return;
+            if (event.name === "activespecial") {
+                // "name,monitor" — an empty name is the stash being put away. Taken from the
+                // event rather than read back off the monitor, because this has to be right the
+                // instant the key is pressed and lastIpcObject is not.
+                root.scratchOpen = ("" + (event.data || "")).split(",")[0].length > 0;
+                return;
+            }
+            if (event.name !== "urgent") return;
+            if (!root.cfgAttnFlash && !root.cfgAttnFocus) return;
+            var now = Date.now();
+            if (now - root._attnLast < 400) return;      // the duplicate event for one open
+            root._attnLast = now;
+            root.attnRaise(event.data);
+        }
+    }
+
     Connections { target: Hyprland; ignoreUnknownSignals: true
         function onActiveToplevelChanged() {
             var t = Hyprland.activeToplevel;
@@ -2845,6 +2967,15 @@ ShellRoot {
     // a clickable bar pill that toggles a dropdown identified by `key`
     component Pill: Rectangle {
         id: pill
+        // The widget id — keys BOTH the bar ordering (rightGroup.xFor) and the per-widget
+        // appearance below. It used to be re-declared on all eighteen call sites; a pill's
+        // identity is part of what a pill is, so it lives here.
+        property string wid: ""
+        // Pushed off the bar by the group because there was no room for it. NOT unloaded and not
+        // `visible: false`: its bindings stay live so it returns the instant space does, and the
+        // call sites keep `visible` for what the user asked for, which is a different question
+        // from whether it fits.
+        property bool overflowed: false
         property string icon: ""
         property string value: ""
         property string vertValue: ""    // compact value used on a vertical bar (falls back to value)
@@ -2857,14 +2988,48 @@ ShellRoot {
         signal scrolled(real dy)
         property var owner: null
         readonly property bool open: root.openPop === key && key !== ""
+        readonly property bool hot: pill.open || pm.containsMouse
+
+        // ---- per-widget appearance (Settings → Bar Widgets) ----
+        // Absent entry = absent styling: every default here is what the pill drew before any
+        // of this existed, so a config that has never been touched renders identically.
+        readonly property var wgs: (pill.wid !== "" && root.cfgWgStyle) ? (root.cfgWgStyle[pill.wid] || null) : null
+        readonly property string sGround:  (pill.wgs && pill.wgs.g) ? "" + pill.wgs.g : "filled"
+        readonly property string sContent: (pill.wgs && pill.wgs.c) ? "" + pill.wgs.c : "both"
+
+        // A CHOSEN COLOUR REPLACES THE RESTING COLOUR ONLY.  Nearly every pill on this bar
+        // already says something with its tint when it matters — wi-fi off is red, pending
+        // updates are amber, a muted microphone is red, a battery under 20% is red. A
+        // preference that painted over those would be switching the signal off rather than
+        // restyling it. So the choice applies while the pill sits at theme.frost, its idle
+        // tint, and stands aside the instant the widget has something to report.
+        readonly property color inkAccent: {
+            var a = (pill.wgs && pill.wgs.a) ? "" + pill.wgs.a : "";
+            if (a === "" || !Qt.colorEqual(pill.accent, theme.frost)) return pill.accent;
+            switch (a) {
+            case "iris":  return theme.iris;
+            case "good":  return theme.good;
+            case "warn":  return theme.warn;
+            case "bad":   return theme.bad;
+            case "text":  return theme.text;
+            case "frost": return theme.frost;
+            // A raw #hex is allowed but does NOT follow the wallpaper, which the settings
+            // panel says out loud next to the field.
+            default: return a.charAt(0) === "#" ? a : pill.accent;
+            }
+        }
         readonly property bool vert: false
         // On a vertical bar the pill becomes a capsule with the icon stacked over the value.
         // The value only shows when short enough to fit the narrow bar (a long string like the
         // full date would overflow) — so pills like battery/volume keep their readout while the
         // clock (given a compact HH:mm vertValue) stays legible and others fall back to icon-only.
         readonly property string vtext: pill.vertValue !== "" ? pill.vertValue : pill.value
-        readonly property bool showVal: pill.vert ? (pill.vtext.length > 0 && pill.vtext.length <= 6)
-                                                  : (pill.value !== "")
+        readonly property bool showVal: (pill.vert ? (pill.vtext.length > 0 && pill.vtext.length <= 6)
+                                                   : (pill.value !== "")) && pill.sContent !== "icon"
+        // "value" hides the icon — but a pill whose value is empty right now (the clipboard, the
+        // control centre, a battery still reading) would then draw nothing at all: an invisible
+        // pill that still takes width and still answers clicks. The icon stays in that case.
+        readonly property bool showIcon: pill.icon !== "" && (pill.sContent !== "value" || pill.value === "")
         implicitHeight: pill.vert ? (pr.implicitHeight + 12) : 26
         // vertical pills share ONE width (derived from bar thickness) so they stack into a
         // clean column with flush edges instead of a ragged centre-aligned zigzag
@@ -2872,8 +3037,15 @@ ShellRoot {
         // uniform rounded-rectangle corners on a vertical bar (not a per-pill capsule, which
         // would make short pills horizontal ovals and tall ones vertical ovals)
         radius: pill.vert ? Math.min(13, height/2) : height/2
-        color: (open || pm.containsMouse) ? theme.a(theme.iris,0.18) : theme.a(theme.line,0.42)
-        border.width: 1; border.color: (open || pm.containsMouse) ? theme.a(theme.iris,0.55) : theme.a(theme.iris,0.16)
+        opacity: pill.overflowed ? 0 : 1
+        enabled: !pill.overflowed
+        // Hover and open still read on all three grounds — a bare pill that gave no feedback
+        // would look like a label rather than a control.
+        color: pill.sGround === "filled" ? (pill.hot ? theme.a(theme.iris,0.18) : theme.a(theme.line,0.42))
+             : pill.hot                  ? theme.a(theme.iris, pill.sGround === "bare" ? 0.13 : 0.18)
+             : "transparent"
+        border.width: pill.sGround === "bare" ? 0 : 1
+        border.color: pill.hot ? theme.a(theme.iris,0.55) : theme.a(theme.iris,0.16)
         Behavior on color { ColorAnimation { duration: 120 } }
 
 
@@ -2886,7 +3058,7 @@ ShellRoot {
             // Material Symbols glyphs sit ~0.16em left of their advance box, so a centred
             // icon-only pill looks left-shifted. A Translate nudges the paint right to centre
             // the ink WITHOUT changing layout width (so icon+value spacing is untouched).
-            Sym { text: pill.icon; color: pill.accent; visible: text!==""; sz: pill.vert ? 15 : 16
+            Sym { text: pill.icon; color: pill.inkAccent; visible: pill.showIcon; sz: pill.vert ? 15 : 16
                 transform: Translate { x: Math.round((pill.vert ? 15 : 16) * 0.16) } }
             // Use Marquee only when scrollText is enabled (e.g. mprisPill), plain Text otherwise.
             // Marquee with maxW:9999 creates an implicit-width loop that causes flickering.
@@ -3282,6 +3454,49 @@ ShellRoot {
                                 MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: Hyprland.dispatch("hl.dsp.focus({ workspace = "+modelData.id+" })") }
                             }
                         }
+                    }
+                    // THE STASH. Not the special workspace put back into the strip — read the
+                    // note above, it is still not a place you travel to. This is a different
+                    // fact: how many windows you are currently holding out of sight. Nothing
+                    // in the bar used to say so, which made SUPER+SHIFT+` a way to lose a
+                    // window until you remembered the other half of the binding.
+                    //
+                    // It exists only while it has something to report. Stash the last window
+                    // and it removes itself — xFor skips invisible children, so the cluster
+                    // closes up behind it and no dead chrome is left holding a zero.
+                    Rectangle {
+                        id: scratchMark
+                        property string lid: "lgScratch"
+                        x: leftGroup.xFor(lid); anchors.verticalCenter: parent.verticalCenter
+                        visible: root.scratchCount > 0
+                        width: scratchRow.implicitWidth + 14
+                        height: 24
+                        radius: root.cfgWsStyle === "circle" ? height / 2 : Tok.r
+                        // Filled when the stash is DOWN, exactly as the workspace you are on is
+                        // filled: one grammar for "this is the thing you are looking at".
+                        color: root.scratchOpen ? theme.iris : theme.a(theme.line, 0.55)
+                        border.width: 1
+                        border.color: root.scratchOpen ? theme.frost : theme.a(theme.iris, 0.18)
+                        Behavior on color { ColorAnimation { duration: 160 } }
+                        Row {
+                            id: scratchRow
+                            anchors.centerIn: parent
+                            spacing: 3
+                            Text { anchors.verticalCenter: parent.verticalCenter
+                                text: "inventory_2"
+                                font.family: "Material Symbols Outlined"; font.pixelSize: 13
+                                color: root.scratchOpen ? theme.bg : theme.sub }
+                            Text { anchors.verticalCenter: parent.verticalCenter
+                                text: "" + root.scratchCount
+                                color: root.scratchOpen ? theme.bg : theme.sub
+                                font.pixelSize: 12; font.family: root.wsFontFamily
+                                font.bold: root.scratchOpen }
+                        }
+                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                            // Pulled over the workspace you are standing on, never focused —
+                            // focus({ workspace = -98 }) is a no-op, which is what made the
+                            // old chip useless as well as unreadable.
+                            onClicked: Hyprland.dispatch("hl.dsp.workspace.toggle_special('scratch')") }
                     }
                     Text {
                         // the window title. Capped short so a long app class (e.g. electron apps)
@@ -3738,21 +3953,88 @@ ShellRoot {
                     implicitWidth: rightGroup.spanW()
                     width: implicitWidth
                     // position of a widget id in the saved order (unknown → far end)
-                    function oidx(w) { var i = rightGroup.order ? rightGroup.order.indexOf(w) : -1; return i < 0 ? 999 : i; }
+                    function oidx(w) {
+                        if (w === "wgOverflow") return -1;          // always the centre-most item
+                        var i = rightGroup.order ? rightGroup.order.indexOf(w) : -1; return i < 0 ? 999 : i;
+                    }
                     // x of a child = summed widths of visible siblings ordered before it (left→right)
                     function xFor(w) {
                         var kids = rightGroup.children, myi = rightGroup.oidx(w), sum = 0;
                         for (var k = 0; k < kids.length; k++) { var c = kids[k];
-                            if (!c || c.wid === undefined || !c.visible || c.width <= 0) continue;
+                            if (!c || c.wid === undefined || !c.visible || c.overflowed || c.width <= 0) continue;
                             if (rightGroup.oidx(c.wid) < myi) sum += c.width + rightGroup.gap;
                         }
                         return sum;
                     }
+
+                    // ---------- OVERFLOW ----------
+                    // This cluster was right-anchored with implicitWidth = spanW() and no ceiling,
+                    // so it simply grew leftward: enough pills carrying values — weather, network
+                    // throughput, an update count, a multi-reading system monitor, the full date —
+                    // and it reached the centre pill, then kept going into the left cluster. The
+                    // media pill already yields (it measures the gap and hides under 26px of text),
+                    // but nothing stopped the cluster after that.
+                    //
+                    // The reserve for the centre is a CONSTANT rather than the media pill's measured
+                    // width, and that is deliberate: the pill sizes itself FROM the gap between the
+                    // clusters, so reading its width here would be a binding loop.
+                    readonly property real centreReserve: (root.cfgMpris && root.player !== null) ? 120 : 0
+                    readonly property real budget: {
+                        var barW = barBg.width;
+                        if (barW <= 0) return 9999;
+                        var rightEdge = barW - rightGroup.anchors.rightMargin;
+                        var lim = rightEdge - (leftGroup.x + leftGroup.width) - 12;      // never reach the left cluster
+                        if (rightGroup.centreReserve > 0)                                 // nor the centre pill's zone
+                            lim = Math.min(lim, rightEdge - (barW / 2 + rightGroup.centreReserve / 2 + 10));
+                        return Math.max(80, lim);
+                    }
+                    // Width the cluster would want with nothing pushed out. Safe to feed the
+                    // decision below because a pill's own width does not change when it is pushed
+                    // out — only its opacity does — so this measurement cannot chase its own tail.
+                    function natW() {
+                        var kids = rightGroup.children, tot = 0;
+                        for (var k = 0; k < kids.length; k++) { var c = kids[k];
+                            // The indicator is excluded, or it flaps: it appearing makes the cluster
+                            // wider, which is the very condition that made it appear.
+                            if (!c || c.wid === undefined || c.wid === "wgOverflow") continue;
+                            if (!c.visible || c.width <= 0) continue;
+                            tot += c.width + rightGroup.gap;
+                        }
+                        return Math.max(0, tot - rightGroup.gap);
+                    }
+                    property int pushedCount: 0
+                    // Pushes from the CENTRE-MOST end outward. The far-right end is where the
+                    // anchors live — clock, power, battery — and the pills nearest the centre are
+                    // the ones actually colliding, so they are the ones that give way.
+                    function reflow() {
+                        var kids = rightGroup.children, list = [];
+                        for (var k = 0; k < kids.length; k++) { var c = kids[k];
+                            if (c && c.wid !== undefined && c.wid !== "wgOverflow" && c.visible && c.width > 0) list.push(c);
+                        }
+                        list.sort(function (a, b) { return rightGroup.oidx(a.wid) - rightGroup.oidx(b.wid) });
+                        var over = rightGroup.natW() - rightGroup.budget, n = 0;
+                        if (over > 0) over += 40;      // the ⋯ chip has to fit somewhere too
+                        for (var i = 0; i < list.length; i++) {
+                            var push = over > 0;
+                            if (push) { over -= (list[i].width + rightGroup.gap); n++; }
+                            if (list[i].overflowed !== push) list[i].overflowed = push;
+                        }
+                        rightGroup.pushedCount = n;
+                    }
+                    // Re-evaluates whenever any child's width or visibility changes, or the bar
+                    // resizes — every one of those is a property read inside natW()/budget.
+                    readonly property real reflowTrigger: rightGroup.natW() + rightGroup.budget
+                    onReflowTriggerChanged: Qt.callLater(rightGroup.reflow)
+                    Component.onCompleted: Qt.callLater(rightGroup.reflow)
                     // total laid-out width → drives the right anchor and the centre pill's free-space calc
                     function spanW() {
                         var kids = rightGroup.children, tot = 0;
                         for (var k = 0; k < kids.length; k++) { var c = kids[k];
-                            if (!c || c.wid === undefined || !c.visible || c.width <= 0) continue;
+                            // Pushed-out pills must not be counted here either: this drives the
+                            // group's own width, and the group is anchored to the right — so
+                            // counting them made the cluster wider than its contents and left the
+                            // surviving pills floating in from the edge.
+                            if (!c || c.wid === undefined || !c.visible || c.overflowed || c.width <= 0) continue;
                             tot += c.width + rightGroup.gap;
                         }
                         return Math.max(0, tot - rightGroup.gap);
@@ -3763,6 +4045,12 @@ ShellRoot {
 
                     // ---- SYSTEM TRAY (after weather) — collapsible, right-click = app menu ----
                     Grid { columns: 99; rowSpacing: 2; columnSpacing: 2
+                        // The tray is the one cluster member that is not a Pill, and it is also the
+                        // one whose width the shell does not control — it is however many icons other
+                        // applications decided to put there. It carries the same overflow contract.
+                        property bool overflowed: false
+                        opacity: overflowed ? 0 : 1
+                        enabled: !overflowed
                         property string wid: "wgTray"; x: rightGroup.xFor(wid); anchors.verticalCenter: parent.verticalCenter
                         horizontalItemAlignment: Grid.AlignHCenter; verticalItemAlignment: Grid.AlignVCenter
                         visible: root.cfgTray && SystemTray.items.values.length > 0
@@ -3794,26 +4082,38 @@ ShellRoot {
                     // part of the openPop single-dropdown system so the focus grab dismisses it ----
                     
 
+                    // ---- OVERFLOW ----
+                    // Sits at the centre-most end, which is where the pills that could not fit
+                    // used to run into the media pill. Nothing disappears silently: the count is
+                    // how many the bar had to push out, and it goes straight to the tab where you
+                    // can switch some off or reorder them.
+                    Pill { owner: bar
+                        wid: "wgOverflow"; x: rightGroup.xFor(wid); anchors.verticalCenter: parent.verticalCenter
+                        visible: rightGroup.pushedCount > 0
+                        icon: "more_horiz"; value: "" + rightGroup.pushedCount
+                        accent: theme.warn
+                        onClicked: root.openSettings(12) }
+
                     // ---- CONTROL CENTER (quick toggles + power profile) ----
                     Pill { owner: bar; id: ccPill; key: "cc"
-                        property string wid: "wgQuick"; x: rightGroup.xFor(wid); anchors.verticalCenter: parent.verticalCenter
+                        wid: "wgQuick"; x: rightGroup.xFor(wid); anchors.verticalCenter: parent.verticalCenter
                         visible: root.cfgQuick
                         icon: "tune"; accent: theme.frost }
 
                     // ---- WEATHER pill (placed after the tray) ----
                     Pill { owner: bar; id: wxPill; key: "wx"
-                        property string wid: "wgWeather"; x: rightGroup.xFor(wid); anchors.verticalCenter: parent.verticalCenter
+                        wid: "wgWeather"; x: rightGroup.xFor(wid); anchors.verticalCenter: parent.verticalCenter
                         visible: root.cfgWeather && root.wxTemp!==""; icon: root.wxIcon(root.wxCond); value: root.wxTemp; accent: theme.frost }
 
                     // ---- CLIPBOARD (opens the launcher in clipboard mode) ----
                     Pill { owner: bar; icon: "content_paste"; accent: theme.frost
-                        property string wid: "wgClipboard"; x: rightGroup.xFor(wid); anchors.verticalCenter: parent.verticalCenter
+                        wid: "wgClipboard"; x: rightGroup.xFor(wid); anchors.verticalCenter: parent.verticalCenter
                         visible: root.cfgClipboard
                         onClicked: { root.openPop = ""; launcher.open(";") } }
 
                     // ---- PENDING UPDATES ----
                     Pill { owner: bar; id: updPill; key: "upd"
-                        property string wid: "wgUpdates"; x: rightGroup.xFor(wid); anchors.verticalCenter: parent.verticalCenter
+                        wid: "wgUpdates"; x: rightGroup.xFor(wid); anchors.verticalCenter: parent.verticalCenter
                         visible: root.cfgUpdates
                         icon: root.updTotal > 0 ? "system_update_alt" : "task_alt"
                         accent: root.updTotal > 0 ? theme.warn : theme.frost
@@ -3823,7 +4123,7 @@ ShellRoot {
                     // No dropdown: the pill IS the readout, and the per-interface detail lives in
                     // the Dashboard where there is room for it. Clicking opens Network settings.
                     Pill { owner: bar; id: netPill; key: ""
-                        property string wid: "wgNet"; x: rightGroup.xFor(wid); anchors.verticalCenter: parent.verticalCenter
+                        wid: "wgNet"; x: rightGroup.xFor(wid); anchors.verticalCenter: parent.verticalCenter
                         visible: root.cfgNet
                         icon: "swap_vert"
                         accent: (root.netRx + root.netTx) > 262144 ? theme.iris : theme.frost
@@ -3834,7 +4134,7 @@ ShellRoot {
 
                     // ---- NOTIFICATION CENTER (bell + badge) ----
                     Pill { owner: bar; id: bellPill; key: "notif"
-                        property string wid: "wgNotif"; x: rightGroup.xFor(wid); anchors.verticalCenter: parent.verticalCenter
+                        wid: "wgNotif"; x: rightGroup.xFor(wid); anchors.verticalCenter: parent.verticalCenter
                         visible: root.cfgNotif
                         icon: root.dnd ? "notifications_off" : (root.notes.length>0 ? "notifications" : "notifications_none")
                         accent: root.dnd ? theme.warn : (root.notes.length>0 ? theme.iris : theme.frost)
@@ -3843,7 +4143,7 @@ ShellRoot {
 
                     // ---- WIFI ----
                     Pill { owner: bar; id: wifiPill; key: "wifi"
-                        property string wid: "wgWifi"; x: rightGroup.xFor(wid); anchors.verticalCenter: parent.verticalCenter
+                        wid: "wgWifi"; x: rightGroup.xFor(wid); anchors.verticalCenter: parent.verticalCenter
                         visible: root.cfgWifi
                         icon: root.wifiOn ? "wifi" : "wifi_off"; accent: root.wifiOn ? theme.frost : theme.bad
                         }   // icon-only: SSID lives in the dropdown
@@ -3851,7 +4151,7 @@ ShellRoot {
 
                     // ---- BLUETOOTH ----
                     Pill { owner: bar; id: btPill
-                        property string wid: "wgBluetooth"; x: rightGroup.xFor(wid); anchors.verticalCenter: parent.verticalCenter
+                        wid: "wgBluetooth"; x: rightGroup.xFor(wid); anchors.verticalCenter: parent.verticalCenter
                         visible: root.cfgBluetooth && root.btAdapter !== null
                         key: root.btAdapter ? "bt" : ""
                         icon: (!root.btAdapter || !root.btAdapter.enabled) ? "bluetooth_disabled" : (root.btActive ? "bluetooth_connected" : (root.btAdapter.discovering ? "bluetooth_searching" : "bluetooth"))
@@ -3863,7 +4163,7 @@ ShellRoot {
                     // Muted is the state worth shouting about, so it takes the crit colour: an open
                     // mic you think is muted is the failure that matters, and the reverse is worse.
                     Pill { owner: bar; id: micPill; key: "mic"
-                        property string wid: "wgMic"; x: rightGroup.xFor(wid); anchors.verticalCenter: parent.verticalCenter
+                        wid: "wgMic"; x: rightGroup.xFor(wid); anchors.verticalCenter: parent.verticalCenter
                         visible: root.cfgMic
                         icon: root.micMuted ? "mic_off" : "mic"
                         accent: root.micMuted ? theme.bad : theme.good
@@ -3875,7 +4175,7 @@ ShellRoot {
                     // number worth bar space (the name would eat 150px and is in the dropdown).
                     // Colour follows the battery the same way the laptop pill does.
                     Pill { owner: bar; id: kdePill; key: "kde"
-                        property string wid: "wgKdeconnect"; x: rightGroup.xFor(wid); anchors.verticalCenter: parent.verticalCenter
+                        wid: "wgKdeconnect"; x: rightGroup.xFor(wid); anchors.verticalCenter: parent.verticalCenter
                         visible: root.cfgKdeconnect
                         icon: root.kdeActive ? root.kdeIcon(root.kdeDev) : "phonelink_off"
                         accent: !root.kdeActive ? theme.faint
@@ -3886,7 +4186,7 @@ ShellRoot {
 
                     // ---- CAFFEINE ---- (mug icon; lit yellow when keeping the screen awake)
                     Pill { owner: bar
-                        property string wid: "wgCaffeine"; x: rightGroup.xFor(wid); anchors.verticalCenter: parent.verticalCenter
+                        wid: "wgCaffeine"; x: rightGroup.xFor(wid); anchors.verticalCenter: parent.verticalCenter
                         visible: root.cfgCaffeine
                         icon: "coffee"
                         // yellow while caffeine is active (screen kept awake → hypridle killed → idleOn false)
@@ -3896,7 +4196,7 @@ ShellRoot {
 
                     // ---- NIGHT LIGHT ---- (warm-screen toggle; lit warm when active)
                     Pill { owner: bar
-                        property string wid: "wgNight"; x: rightGroup.xFor(wid); anchors.verticalCenter: parent.verticalCenter
+                        wid: "wgNight"; x: rightGroup.xFor(wid); anchors.verticalCenter: parent.verticalCenter
                         visible: root.cfgNightWidget
                         icon: "nightlight"
                         accent: root.nightActive ? theme.warn : theme.sub
@@ -3905,7 +4205,7 @@ ShellRoot {
 
                     // ---- SYSTEM MONITOR (cpu · ram · gpu) ----
                     Pill { owner: bar; id: sysPill; key: "sys"
-                        property string wid: "wgSystem"; x: rightGroup.xFor(wid); anchors.verticalCenter: parent.verticalCenter
+                        wid: "wgSystem"; x: rightGroup.xFor(wid); anchors.verticalCenter: parent.verticalCenter
                         visible: root.cfgSystem
                         icon: "speed"; value: root.sysPillText
                         accent: root.sysMetrics[root.sysShown[0]].c() }
@@ -3913,7 +4213,7 @@ ShellRoot {
 
                     // ---- VOLUME ----
                     Pill { owner: bar; id: volPill; key: "vol"
-                        property string wid: "wgVolume"; x: rightGroup.xFor(wid); anchors.verticalCenter: parent.verticalCenter
+                        wid: "wgVolume"; x: rightGroup.xFor(wid); anchors.verticalCenter: parent.verticalCenter
                         visible: root.cfgVolume
                         readonly property var au: Pipewire.defaultAudioSink ? Pipewire.defaultAudioSink.audio : null
                         readonly property int vol: au ? Math.round(au.volume*100) : 0
@@ -3926,7 +4226,7 @@ ShellRoot {
 
                     // ---- BATTERY ----
                     Pill { owner: bar; id: batPill
-                        property string wid: "wgBattery"; x: rightGroup.xFor(wid); anchors.verticalCenter: parent.verticalCenter
+                        wid: "wgBattery"; x: rightGroup.xFor(wid); anchors.verticalCenter: parent.verticalCenter
                         readonly property var dev: UPower.displayDevice
                         readonly property bool charging: !UPower.onBattery
                         readonly property int pct: dev ? Math.round(dev.percentage*100) : 0
@@ -3941,7 +4241,7 @@ ShellRoot {
                     // Left-click stops and keeps. Right-click arms a discard, and a second
                     // right-click throws the take away — while armed the pill says so.
                     Pill { owner: bar; id: recPill
-                        property string wid: "wgRec"; x: rightGroup.xFor(wid); anchors.verticalCenter: parent.verticalCenter
+                        wid: "wgRec"; x: rightGroup.xFor(wid); anchors.verticalCenter: parent.verticalCenter
                         visible: root.recordingActive
                         icon: root.recDiscardArmed ? "delete" : "fiber_manual_record"
                         accent: root.recDiscardArmed ? theme.warn : theme.a(theme.bad, root.recPulse)
@@ -3960,7 +4260,7 @@ ShellRoot {
 
                     // ---- CLOCK ----
                     Pill { owner: bar; id: clockPill; key: "cal"
-                        property string wid: "wgClock"; x: rightGroup.xFor(wid); anchors.verticalCenter: parent.verticalCenter
+                        wid: "wgClock"; x: rightGroup.xFor(wid); anchors.verticalCenter: parent.verticalCenter
                         visible: root.cfgClock
                         // when a timer/pomodoro is live the pill becomes a countdown; otherwise it's the clock
                         icon: root.tmrRunning ? (root.pomoActive ? (root.pomoPhase==="focus" ? "local_fire_department" : "coffee") : "timer") : "schedule"
@@ -3971,7 +4271,7 @@ ShellRoot {
 
                     // ---- POWER (very end) ----
                     Pill { owner: bar; id: pwrPill; key: "pwr"; icon: "power_settings_new"; accent: theme.bad
-                        property string wid: "wgPower"; x: rightGroup.xFor(wid); anchors.verticalCenter: parent.verticalCenter
+                        wid: "wgPower"; x: rightGroup.xFor(wid); anchors.verticalCenter: parent.verticalCenter
                         visible: root.cfgPower }
                     
                 }
@@ -4998,6 +5298,11 @@ ShellRoot {
                                 delegate: Rectangle {
                                     required property var modelData
                                     readonly property bool foc: Hyprland.focusedWorkspace && Hyprland.focusedWorkspace.id === modelData.id
+                                    // Special workspaces are not places here either. The
+                                    // horizontal strip has excluded them since 6.0 and this
+                                    // one never got the same line, so a vertical bar drew a
+                                    // 24px circle reading "-98" the moment you used SUPER+`.
+                                    visible: modelData.id > 0
                                     width: 24
                                     height: foc ? 36 : 24
                                     radius: Tok.r
@@ -5012,6 +5317,22 @@ ShellRoot {
                                     }
                                     MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: Hyprland.dispatch("hl.dsp.focus({ workspace = "+modelData.id+" })") }
                                 }
+                            }
+                            // the stash — see the horizontal bar's note
+                            Rectangle {
+                                visible: root.scratchCount > 0
+                                width: 24; height: 24; radius: Tok.r
+                                color: root.scratchOpen ? theme.iris : theme.a(theme.line, 0.55)
+                                border.width: 1
+                                border.color: root.scratchOpen ? theme.frost : theme.a(theme.iris, 0.18)
+                                Behavior on color { ColorAnimation { duration: 160 } }
+                                Text { anchors.centerIn: parent
+                                    text: "" + root.scratchCount
+                                    color: root.scratchOpen ? theme.bg : theme.sub
+                                    font.pixelSize: 11; font.family: root.wsFontFamily
+                                    font.bold: root.scratchOpen }
+                                MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                                    onClicked: Hyprland.dispatch("hl.dsp.workspace.toggle_special('scratch')") }
                             }
                         }
                     }
@@ -5415,13 +5736,19 @@ ShellRoot {
         WlrLayershell.keyboardFocus: WlrKeyboardFocus.Exclusive
         exclusionMode: ExclusionMode.Ignore
 
-        // Real workspaces only, in order. Hyprland numbers special workspaces from -98 down;
-        // the scratchpad is an overlay on wherever you already are, not a place to go.
+        // Real workspaces first, in order. Hyprland numbers special workspaces from -98 down;
+        // the scratchpad is an overlay on wherever you already are, not a place to go — so it
+        // is not sorted in among them.
+        //
+        // But it goes on the END when it holds something, because this surface answers "where
+        // are my windows", and the windows in the stash are precisely the ones no other card
+        // can show you. Choosing it pulls it down rather than travelling to it; see go().
         readonly property var wsList: {
             var out = [];
             var all = Hyprland.workspaces ? Hyprland.workspaces.values : [];
             for (var i = 0; i < all.length; i++) if (all[i] && all[i].id > 0) out.push(all[i]);
             out.sort(function (a, b) { return a.id - b.id });
+            if (root.scratchCount > 0) out.push(root.scratchWs);
             return out;
         }
         // The monitor's shape, which is the shape every card takes.
@@ -5437,7 +5764,11 @@ ShellRoot {
         }
         function go(i) {
             if (i < 0 || i >= exposeWin.wsList.length) return;
-            Hyprland.dispatch("hl.dsp.focus({ workspace = " + exposeWin.wsList[i].id + " })");
+            var w = exposeWin.wsList[i];
+            // A special workspace cannot be focused — focus({ workspace = -98 }) does nothing
+            // at all. It is toggled over whichever workspace you are already standing on.
+            if (w.id < 0) Hyprland.dispatch("hl.dsp.workspace.toggle_special('scratch')");
+            else Hyprland.dispatch("hl.dsp.focus({ workspace = " + w.id + " })");
             root.exposeActive = false;
         }
 
@@ -5549,8 +5880,12 @@ ShellRoot {
                                 id: wsCard
                                 required property var modelData
                                 required property int index
-                                readonly property bool focused: Hyprland.focusedWorkspace
-                                                                && Hyprland.focusedWorkspace.id === modelData.id
+                                // The stash is never the "focused" workspace — it is drawn
+                                // over one. What reads as current for it is being pulled down.
+                                readonly property bool focused: modelData.id < 0
+                                                                ? root.scratchOpen
+                                                                : (Hyprland.focusedWorkspace
+                                                                   && Hyprland.focusedWorkspace.id === modelData.id)
                                 readonly property bool picked: exposeWin.sel === index
                                 width: grid.cardW; height: grid.cardH
                                 radius: Tok.rSmall
@@ -5695,15 +6030,20 @@ ShellRoot {
                                         }
                                         IndText {
                                             anchors.verticalCenter: parent.verticalCenter
-                                            text: root.wsLabelFor(wsCard.modelData.id)
+                                            text: wsCard.modelData.id < 0 ? "stash"
+                                                                          : root.wsLabelFor(wsCard.modelData.id)
                                             mono: true; sz: Math.round(Tok.tData * exposeWin.ui)
                                             font.weight: 700
                                             color: wsCard.focused ? Tok.accent : Tok.ink
                                         }
                                         IndText {
                                             anchors.verticalCenter: parent.verticalCenter
-                                            text: wsCard.modelData.name && ("" + wsCard.modelData.name) !== ("" + wsCard.modelData.id)
-                                                  ? ("" + wsCard.modelData.name) : ""
+                                            // "special:scratch" is the internal name; the card
+                                            // already says stash, so only which one is left.
+                                            text: wsCard.modelData.id < 0
+                                                  ? ("" + wsCard.modelData.name).replace("special:", "")
+                                                  : (wsCard.modelData.name && ("" + wsCard.modelData.name) !== ("" + wsCard.modelData.id)
+                                                     ? ("" + wsCard.modelData.name) : "")
                                             mono: true; sz: Math.round(Tok.tLabel * exposeWin.ui); color: Tok.ink3
                                         }
                                     }

@@ -139,10 +139,17 @@ ColumnLayout {
                 anchors.fill: parent
                 hoverEnabled: true
                 cursorShape: t.selectable ? Qt.PointingHandCursor : Qt.ArrowCursor
-                onClicked: {
-                    if (t.selectable) t.selectedIndex = rowRect.index;
-                    t.activated(rowRect.index, rowRect.rowData);
-                }
+                // CONTROLLED, not self-driving — the same rule IndToggle had to learn.
+                // Assigning t.selectedIndex here DESTROYS the caller's binding: the audio tables
+                // bind it to `sinkSel`/`sourceSel`, which are derived from the real PipeWire
+                // default, and after one click the highlight stopped tracking that and showed the
+                // last row clicked instead. A device switch that failed, or a default something
+                // else changed, then looked like it had worked for the life of the panel.
+                //
+                // Report the row and let the owner's state come back. Tables that genuinely own
+                // their selection (monitors, disk usage, window rules, gestures) already write
+                // the index back from onActivated, so they are unaffected.
+                onClicked: t.activated(rowRect.index, rowRect.rowData)
             }
         }
     }

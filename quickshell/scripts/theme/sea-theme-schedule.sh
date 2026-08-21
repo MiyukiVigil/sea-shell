@@ -10,7 +10,11 @@ import json, os, sys, datetime
 cfg = sys.argv[1]
 try: d = json.load(open(cfg))
 except Exception: sys.exit(0)
-if not d.get("autoDark"): sys.exit(0)
+# modeSource is the authority; autoDark is what a config written before it existed has.
+# Without this a saved "follow the wallpaper" plus a stale autoDark=true would have the two
+# sources overwriting each other once a minute.
+src = d.get("modeSource") or ("clock" if d.get("autoDark") else "manual")
+if src != "clock": sys.exit(0)
 def mins(t, dv):
     try:
         h, m = str(t).split(":"); return (int(h) % 24) * 60 + (int(m) % 60)

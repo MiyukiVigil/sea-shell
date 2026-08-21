@@ -5,6 +5,128 @@ All notable changes to **sea-shell** are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.3.0] - 2026-08-21
+
+**The bar update.** Every widget can be styled on its own now — its colour, what it shows, and
+whether it has a ground at all — the right cluster stops running into the media pill when it
+grows too long, and the bar finally says what the scratchpad is holding.
+
+Around it: the theme can follow your wallpaper, clicking a link raises the browser it opened in
+and marks it in the dock, the settings panel stopped flashing white on the way in, and the
+wallpaper picker got its speed back.
+
+### Added
+
+- **Every widget can look how you want it.** The Bar Widgets tab could move a pill and turn it
+  off; it could not change one. Each now opens onto three choices — **colour** (the accent, or
+  iris/green/amber/red/plain), **shows** (icon and value, icon only, value only) and **ground**
+  (filled, outline, or bare). A widget you have touched carries a dot, and anything left at its
+  default is not written to disk at all, so a config file still says only what you actually
+  decided.
+
+  The colour choice deliberately does nothing while an accent is already meaningful on that
+  pill — a widget that turns amber to warn you is not overruled by a preference, because the
+  colour is carrying a fact at that moment and the preference is not.
+
+- **The bar stops overflowing.** With enough widgets on, the right cluster grew until it sat
+  against the media pill and then under it. It now measures what it has room for — the gap to
+  the centre, less the media pill's reservation — and pushes the widgets furthest from the edge
+  out of the row, newest-out-first, until what remains fits. A **`⋯`** mark takes their place
+  with the count on it; clicking it opens the Bar Widgets tab, because the fix is a decision
+  about which ones you want, not something the bar should quietly make for you.
+
+  The pushed widgets leave no gap, and the cluster's own width excludes them — the first version
+  of this measured them anyway, so the survivors floated in from the right edge of a cluster
+  wider than its own contents.
+
+- **The theme can follow the wallpaper.** Auto-dark used to be one switch tied to the clock.
+  There are three sources now — **you**, **the clock**, or **the wallpaper** — and picking the
+  wallpaper reads the mean luminance of the still and sets light or dark from it.
+
+  With a dead zone: under 0.42 goes dark, over 0.60 goes light, and anything between changes
+  nothing. Measured against a real folder rather than guessed — eleven wallpapers landing at
+  .28 .31 .41 .45 .45 .49 .51 .51 .52 .74 .94 — because the mid-forties is where a wallpaper is
+  genuinely neither, and a naive midpoint makes the whole desktop flip on a wallpaper that is
+  only slightly darker than the last one.
+
+  Toggling the theme by hand sets the source back to **you**. A manual override that the next
+  wallpaper silently undoes is not an override.
+
+- **Where the link went.** Click a link in your editor and the browser opens somewhere you
+  cannot see. The dock icon of whatever was raised now pulses three times, and the shell can
+  follow you to it — Hyprland's `focus_on_activate` is off by default, which is the whole reason
+  a link never brought you anywhere. Both halves toggle separately in Settings → Dock, because
+  wanting to be *told* is not the same as wanting to be *moved*.
+
+  Built on xdg-activation, which Hyprland surfaces as `urgent`. It fires twice for one link, so
+  a 400ms guard collapses the pair into the single event it actually was.
+
+- **The bar says what the scratchpad holds.** `SUPER+SHIFT+\`` sent a window somewhere with
+  nothing on screen to say so, which made it a way to lose a window until you remembered the
+  other half of the binding. A mark in the left cluster now carries the count, fills in when the
+  stash is pulled down, and exists only while it is holding something — stash the last window
+  and it removes itself rather than sitting there reading zero.
+
+  It is **not** the special workspace put back into the workspace strip. That exclusion was
+  right: the scratchpad is an overlay on the workspace you are already standing on, not a place
+  you travel to, and `focus({ workspace = -98 })` does nothing at all. The mark toggles it; it
+  does not go to it. It reorders and hides like any other left-cluster widget.
+
+- **Mission Control shows the stash.** A **stash** card at the end of the grid, with the windows
+  inside it, whenever it holds any. Mission Control answers "where are my windows", and the ones
+  in the scratchpad are precisely the ones no other card can show you. Choosing it pulls it down
+  over where you are instead of travelling to it.
+
+### Fixed
+
+- **The settings panel flashed.** Two separate mechanisms, both of them `Binding`:
+
+  The panel previews your theme edits by binding over the live tokens. `Binding`'s default
+  `restoreMode` restores *the value it captured when the binding activated* — so closing the
+  panel wrote a stale theme back over the shell. Switch to dark globally, open Settings, close
+  it, and the bar was light again while the config on disk still said dark.
+
+  The flash you actually saw was the other one. The panel reads `appearance.json` through an
+  async `cat`, and the preview bindings were gated only on the panel being open — so for the
+  frame or two before that read landed, the panel pushed its *default* mirror (light) onto the
+  live tokens and the whole surface went white before snapping back. They are now gated on the
+  mirror being fresh as well, and the tokens are re-synced from disk on the way out.
+
+- **The wallpaper picker took a second to open.** 1178ms, measured. Not the QML — compiling all
+  1845 lines of it costs about 50ms, and the folder index costs 37 — but **~693ms of it was
+  constructing `MediaPlayer` and `VideoOutput`**, which spins up the whole ffmpeg backend before
+  a single line of the picker runs. Importing `QtMultimedia` costs 20ms; building the objects is
+  what pays.
+
+  The player is no longer part of the window. It is built once the picker is already on screen,
+  and in a folder that holds nothing moving it is never built at all. **1178ms → 299ms.**
+
+  Warmed after the surface is up rather than on demand, because reaching a moving wallpaper and
+  waiting most of a second for the backend would only have moved the stall from opening to
+  scrolling.
+
+- **The audio device lists lied about which device was in use.** Picking a row in any of the
+  output/input tables set the table's own selection as well as acting on it — and the caller
+  binds that same property to the real system default. Assigning over a bound property destroys
+  the binding, so from the first click the table showed your last click forever, whatever
+  PipeWire actually did afterwards. The tables now only report; what is selected is what the
+  system says is selected. (Same class of bug as the 6.1.0 toggle fix — a controlled component
+  writing to its own controlled property.)
+
+- **A vertical bar drew a workspace chip reading `-98`.** The horizontal strip has excluded
+  special workspaces since 6.0; the vertical one never got the same line, so the first press of
+  `SUPER+\`` put a 24px circle around a four-character label in it.
+
+- **`appearance.json` could be written torn.** Four theme scripts wrote the config in place while
+  the bar was watching the file, so a read landing mid-write lost a theme change. All of them
+  write a temp file and rename now, which is atomic.
+
+- **The settings panel wrote its own config by hand.** Eighty-odd keys concatenated into a JSON
+  string and shell-quoted into a `printf`, where a mistyped property name produced `undefined`
+  and `JSON.stringify` silently dropped the setting entirely. It is one object now, base64'd
+  past the shell so no value can break out of its own quoting, and written atomically like
+  everything else.
+
 ## [6.2.0] - 2026-08-19
 
 **The wallpaper update.** The picker learned to search, the folder stopped being a constant,

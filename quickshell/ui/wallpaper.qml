@@ -84,6 +84,8 @@ ShellRoot {
     // used to say "~/Pictures/wallpapers" as a literal — so once the folder was
     // configurable they would have been confidently telling you about the wrong one.
     property string wpDir: "~/Pictures/wallpapers"
+    // Set from the index. Gates whether the video backend is ever constructed.
+    property bool anyVideo: false
 
     Process {
         running: true
@@ -149,6 +151,11 @@ ShellRoot {
                 });
             }
             root.papers = out;
+
+            // Whether the ffmpeg backend is worth building at all — see vidWarm.
+            var anyv = false;
+            for (var v = 0; v < out.length; v++) if (out[v].vid) { anyv = true; break }
+            root.anyVideo = anyv;
 
             var seen = {}, colls = [];
             for (var k = 0; k < out.length; k++) {
@@ -479,6 +486,19 @@ ShellRoot {
             anchors.fill: parent
             property bool useA: true
 
+            // The player does not exist until vidLoad has built it, so every reference goes
+            // through these and every one of them can be null.
+            readonly property var vid:  vidLoad.item ? vidLoad.item.player : null
+            readonly property var vout: vidLoad.item ? vidLoad.item.out    : null
+            // What to play once there is something to play it with. Held rather than acted
+            // on, because the request can arrive before the backend is finished loading.
+            property string wantPath: ""
+            function startWanted() {
+                if (!preview.wantPath || !preview.vid) return;
+                preview.vid.source = "file://" + preview.wantPath;
+                preview.vid.play();
+            }
+
             // Holding an arrow key walks the folder faster than a 4K JPEG decodes. Without
             // the debounce every intermediate wallpaper is decoded and thrown away, and the
             // preview lands a second behind the rail.
@@ -502,15 +522,18 @@ ShellRoot {
                 id: vidHop; interval: 420; repeat: false
                 onTriggered: {
                     if (!root.item || !root.item.vid || root.committing) return;
-                    vid.source = "file://" + root.item.path;
-                    vid.play();
+                    preview.wantPath = root.item.path;
+                    if (preview.vid) preview.startWanted();
+                    else vidLoad.active = true;      // onLoaded picks wantPath up
                 }
             }
             function stopVideo() {
+                preview.wantPath = "";
                 vidFade.stop();
-                vout.opacity = 0;
-                vid.stop();
-                vid.source = "";
+                if (!preview.vid) return;
+                preview.vout.opacity = 0;
+                preview.vid.stop();
+                preview.vid.source = "";
             }
 
             // Cover the screen without distorting: decode against whichever edge is
@@ -550,30 +573,57 @@ ShellRoot {
                 onStatusChanged: if (status === Image.Ready) preview.useA = false
             }
 
-            MediaPlayer {
-                id: vid
-                videoOutput: vout
-                loops: MediaPlayer.Infinite
-                // No audioOutput at all — a wallpaper has no business making a sound, and
-                // leaving it unset is how Qt is told not to open an audio device for this.
-                onPlaybackStateChanged: if (playbackState === MediaPlayer.PlayingState) firstFrame.restart()
-                onErrorOccurred: preview.stopVideo()
-            }
-            VideoOutput {
-                id: vout
+            // THE BACKEND IS NOT FREE. Constructing MediaPlayer and VideoOutput spins Qt
+            // Multimedia up, and that pair alone measured ~700ms of a ~1200ms open — which
+            // is the whole of why this surface stopped feeling instant when it grew in 6.2.
+            // Importing QtMultimedia costs ~20ms; it is only building the objects that pays.
+            // So the player is not part of the window. It is built once the picker is already
+            // on screen, and in a folder of stills it is never built at all.
+            Loader {
+                id: vidLoad
                 anchors.fill: parent
-                fillMode: VideoOutput.PreserveAspectCrop
-                opacity: 0
+                active: false
+                asynchronous: true
+                onLoaded: preview.startWanted()
+                sourceComponent: Item {
+                    property alias player: mp
+                    property alias out: vo
+                    MediaPlayer {
+                        id: mp
+                        videoOutput: vo
+                        loops: MediaPlayer.Infinite
+                        // No audioOutput at all — a wallpaper has no business making a sound, and
+                        // leaving it unset is how Qt is told not to open an audio device for this.
+                        onPlaybackStateChanged: if (playbackState === MediaPlayer.PlayingState) firstFrame.restart()
+                        onErrorOccurred: preview.stopVideo()
+                    }
+                    VideoOutput {
+                        id: vo
+                        anchors.fill: parent
+                        fillMode: VideoOutput.PreserveAspectCrop
+                        opacity: 0
+                    }
+                }
+            }
+
+            // Warmed once the surface is up, not on demand: reaching a moving wallpaper and
+            // waiting most of a second for the backend would only move the stall from opening
+            // to scrolling. `win.entered` is 30ms after the window, so this lands well clear
+            // of the entry — and never fires for a folder that holds nothing moving.
+            Timer {
+                id: vidWarm; interval: 700; repeat: false
+                running: win.entered && root.anyVideo && !vidLoad.active
+                onTriggered: vidLoad.active = true
             }
             // Fading in the instant playback starts can cross-fade to a frame the decoder
             // has not produced yet, which on a clip that opens dark reads as the preview
             // dimming for no reason. Give it a beat, then reveal over the poster.
             Timer {
                 id: firstFrame; interval: 260; repeat: false
-                onTriggered: if (vid.hasVideo && !root.committing) vidFade.start()
+                onTriggered: if (preview.vid && preview.vid.hasVideo && !root.committing) vidFade.start()
             }
             NumberAnimation {
-                id: vidFade; target: vout; property: "opacity"
+                id: vidFade; target: preview.vout; property: "opacity"
                 to: 1; duration: Tok.mSlow; easing.type: Tok.mEase
             }
 
@@ -1400,7 +1450,7 @@ ShellRoot {
                                 font.letterSpacing: 1.1 * win.ui
                                 font.capitalization: Font.AllUppercase
                                 visible: root.item !== null && root.item.vid
-                                text: vout.opacity > 0.5 ? "playing" : "motion"
+                                text: (preview.vout && preview.vout.opacity > 0.5) ? "playing" : "motion"
                             }
                         }
                     }

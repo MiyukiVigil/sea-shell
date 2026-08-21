@@ -9,6 +9,9 @@ cfg = sys.argv[1]
 try: d = json.load(open(cfg))
 except Exception: d = {}
 d["mode"] = "light" if d.get("mode", "dark") == "dark" else "dark"
+# Taking the wheel: without this the next wallpaper change (or the next minute of the clock
+# schedule) would quietly undo the flip you just asked for, which reads as the key not working.
+d["modeSource"] = "manual"
 d["autoDark"] = False
 _t = cfg + ".tmp"
 with open(_t, "w") as _fh: json.dump(d, _fh)

@@ -64,6 +64,14 @@ Singleton {
         onLoadFailed: { tok.loaded = true; tok.changed() }
     }
 
+    // The settings panel drives `light` and `accentRaw` directly while it is open, so the colour
+    // picker previews across the whole shell. Those bindings SUPPRESS whatever the file says for
+    // as long as the panel is up — including a change written during that time — so when the panel
+    // lets go the two can disagree with no event left to correct them: the config read dark and the
+    // bar drew light until something unrelated happened to touch the file. The panel calls this on
+    // close, and the file is the truth again.
+    function resync() { apFile.reload(); tok.parse(apFile.text()) }
+
     function parse(t) {
         try {
             var j = JSON.parse(t);

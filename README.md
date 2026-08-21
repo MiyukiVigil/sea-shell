@@ -4,7 +4,7 @@
 notification daemon and screen recorder are one Quickshell process — not six
 tools glued together. The whole palette follows your wallpaper.
 
-**`v6.2.0`** · [seashell.miyukivigil.tech](https://seashell.miyukivigil.tech) ·
+**`v6.3.0`** · [seashell.miyukivigil.tech](https://seashell.miyukivigil.tech) ·
 [changelog](https://seashell.miyukivigil.tech/changelog.html)
 
 ![The sea-shell desktop — translucent bar at the top, animated wallpaper, and the dock at the bottom](https://seashell.miyukivigil.tech/images/v6/hero.webp)
@@ -63,7 +63,19 @@ paired bluetooth devices; your phone's battery and signal over **KDE Connect**, 
 send-file, clipboard push and file browsing; an output-device picker; a month calendar with
 event dots; and a power menu that asks for a second click before it kills your session.
 
-**Bar Widgets** in the control center toggles each pill and drags them into the order you want.
+**Bar Widgets** in the control center toggles each pill, drags them into the order you want, and
+styles them one at a time: colour, whether the pill shows its icon, its value or both, and
+whether it has a filled ground, an outline or none at all. A pill already using its colour to
+say something — amber for an update, red for a warning — keeps saying it; a preference does not
+overrule a fact.
+
+When the row runs out of room the widgets furthest from the edge are pushed out of it rather
+than sliding under the media pill, and a **`⋯`** mark takes their place with the count on it.
+Clicking it opens Bar Widgets, because which ones you want is your decision and not the bar's.
+
+The left cluster also carries a **scratchpad** mark: how many windows ``SUPER+SHIFT+` `` is
+currently holding out of sight, filled while the stash is pulled down, and gone entirely while
+it holds nothing. Mission Control shows the same stash as a card, with the windows in it.
 
 ### The dock
 
@@ -79,6 +91,12 @@ you pick, with cursor magnification, a dot under anything running, and hover lab
   **when free** — visible until a window would overlap it
 
 Pins live in `~/.config/sea-shell/dock.json`, so they survive a reinstall.
+
+**When something asks for you** — you click a link and it opens in a browser on another
+workspace — that app's dock icon pulses, and the shell can take you there. Hyprland's
+`focus_on_activate` is off by default, which is the whole reason a link never brought you
+anywhere. Both halves toggle separately: wanting to be *told* is not the same as wanting to be
+*moved*.
 
 ### Launcher · `SUPER+Space`
 
@@ -131,8 +149,13 @@ The same build, four wallpapers — only the image changed:
 
 Both modes are first-class — not a dark theme with an inverted afterthought. Every neutral is
 re-picked per mode so contrast holds, and the accent is re-derived rather than reused, because a
-pastel that reads well on near-black is far too pale on white. `SUPER+SHIFT+D` toggles, and an
-auto-schedule can follow sunrise and sunset.
+pastel that reads well on near-black is far too pale on white. `SUPER+SHIFT+D` toggles.
+
+Which mode you are in can be decided three ways: by **you**, by **the clock** on a schedule that
+follows sunrise and sunset, or by **the wallpaper** — the mean luminance of the image you are
+looking at, with a dead zone in the middle so a wallpaper that is genuinely neither light nor
+dark leaves the desktop alone. Toggling by hand hands control back to you; an override the next
+wallpaper undoes is not an override.
 
 | Dark | Light |
 |:---:|:---:|
@@ -438,7 +461,7 @@ and a "used by …" note.
 | `SUPER+Return` · `Q` · `E` · `B` · `F` · `P` · `C` | Terminal · close · files · browser · maximise · float · centre |
 | `SUPER+hjkl` | Focus — `SHIFT` moves, `CTRL` resizes |
 | `SUPER+1–0` | Workspaces — `SHIFT` sends there |
-| ``SUPER+` `` | Scratchpad |
+| ``SUPER+` `` · ``SUPER+SHIFT+` `` | Scratchpad — show it · send the window to it |
 | `SUPER+SHIFT+R` · `SUPER+SHIFT+B` | Reload Hyprland · restart the bar |
 
 ---

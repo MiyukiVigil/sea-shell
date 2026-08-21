@@ -255,6 +255,48 @@ if [ "$matugen_enabled" = "True" ]; then
     esac
 fi
 
+# ---------- the shell's light/dark can follow the PICTURE (modeSource = "wallpaper") ----------
+# $wp is a still by now — the indexer's cached poster for a clip, the file itself for an image —
+# so this costs one 1x1 resize of a JPEG that is already on disk, not a decode.
+#
+# WHY A DEAD ZONE AND NOT A THRESHOLD.  Measured across a real eleven-wallpaper library, the mean
+# luminances were .28 .31 .41 .45 .45 .49 .51 .51 .52 .74 .94 — six of the eleven sit inside a
+# tenth of 0.5. A plain midpoint would call .488 dark and .512 light, which is a coin toss between
+# two pictures nobody would describe differently, and auto-rotate through that folder would flip
+# the entire desktop every half hour on noise. So: commit only when the picture is not ambiguous,
+# and otherwise leave the mode exactly where it is. Most wallpapers change nothing, which is the
+# point — the ones that do are the ones you would have switched by hand anyway.
+if [ -n "$wp" ] && [ -f "$wp" ] && command -v magick >/dev/null 2>&1; then
+    src=$(python3 -c "import json,sys
+try: d=json.load(open(sys.argv[1]))
+except Exception: d={}
+print(d.get('modeSource') or ('clock' if d.get('autoDark') else 'manual'))" "$cfg" 2>/dev/null)
+    if [ "$src" = "wallpaper" ]; then
+        lum=$(magick "$wp" -colorspace gray -resize 1x1! -format "%[fx:mean]" info: 2>/dev/null)
+        case "$lum" in
+            ''|*[!0-9.]*) : ;;                      # unreadable — leave the mode alone
+            *) python3 - "$cfg" "$lum" <<'PY'
+import json, os, sys
+cfg = sys.argv[1]
+try: lum = float(sys.argv[2])
+except ValueError: raise SystemExit(0)
+try: d = json.load(open(cfg))
+except Exception: raise SystemExit(0)
+cur = d.get("mode", "dark")
+if   lum < 0.42: want = "dark"
+elif lum > 0.60: want = "light"
+else:            want = cur          # the dead zone: not bright enough or dark enough to say
+if want != cur:
+    d["mode"] = want
+    t = cfg + ".tmp"
+    with open(t, "w") as fh: json.dump(d, fh)
+    os.replace(t, cfg)               # the bar watches this and pushes the mode out to GTK + kitty
+PY
+            ;;
+        esac
+    fi
+fi
+
 # check if auto colours from wallpaper (matugen) is enabled globally
 jf=$(mktemp) || exit 1
 

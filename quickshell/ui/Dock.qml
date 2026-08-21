@@ -49,6 +49,11 @@ Item {
     property bool   showRunning: true       // append running apps that are not pinned
     property bool   showLabels: true        // name tooltip on hover
     property real   surfaceOpacity: 0.8
+    // Set by the shell when an application asks for attention (xdg-activation → Hyprland's
+    // `urgent`). The KEY says which app; the NONCE is what the animation restarts on, because
+    // the same app asking twice in a row is two events with the same key.
+    property string attnKey: ""
+    property int    attnNonce: 0
     property var    cfgMonitors: ({})       // shared per-monitor map with the bar
     property real   cfgScale: 0
 
@@ -464,6 +469,34 @@ Item {
                                     return d === 0 ? 1.45 : d === 1 ? 1.20 : d === 2 ? 1.07 : 1;
                                 }
                                 Behavior on mag { NumberAnimation { duration: 140; easing.type: Easing.OutCubic } }
+
+                                // ---- attention pulse ----
+                                // Behind the icon, so it reads as the app glowing rather than
+                                // something being drawn on top of it. Three beats and done: a
+                                // ring that keeps going once you have already been taken to the
+                                // window is noise, not information.
+                                readonly property bool asking: dock.attnKey !== "" && dock.attnKey === ("" + cellRoot.modelData.key)
+                                Rectangle {
+                                    id: attnRing
+                                    anchors.centerIn: parent
+                                    width: dock.iconSize + 10; height: dock.iconSize + 10
+                                    radius: Tok.r + 3
+                                    color: "transparent"
+                                    border.width: 2; border.color: Tok.accent
+                                    opacity: 0
+                                    visible: opacity > 0
+                                    SequentialAnimation {
+                                        id: attnAnim
+                                        running: false
+                                        loops: 3
+                                        NumberAnimation { target: attnRing; property: "opacity"; from: 0; to: 0.9; duration: 180; easing.type: Easing.OutCubic }
+                                        NumberAnimation { target: attnRing; property: "opacity"; from: 0.9; to: 0; duration: 320; easing.type: Easing.InCubic }
+                                    }
+                                }
+                                Connections {
+                                    target: dock
+                                    function onAttnNonceChanged() { if (cellRoot.asking) attnAnim.restart(); }
+                                }
 
                                 Item {
                                     id: iconWrap

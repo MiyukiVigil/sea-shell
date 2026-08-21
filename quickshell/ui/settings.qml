@@ -22,7 +22,7 @@ Scope {
     // release apart — the badge read v5.0.0 on a 6.0.0 install. A version badge that lies is worse
     // than no badge. The literal survives only as the fallback for a `qs -p` run out of the repo
     // with nothing deployed; the second path covers that case too (quickshell/ui/ → repo root).
-    property string seaVersion: "6.2.0"
+    property string seaVersion: "6.3.0"
     Process {
         running: true
         command: ["sh","-c","cat \"$HOME/.config/quickshell/sea-shell/VERSION\" 2>/dev/null || cat \"" + root.repo + "/../../VERSION\" 2>/dev/null"]
@@ -40,6 +40,9 @@ Scope {
     function closePanel() { root.shown = false }
     function togglePanel() { if (root.shown) root.closePanel(); else root.openPanel() }
     function showTab(t) {
+        // Not fresh until the read below lands. Everything this panel mirrors is stale between
+        // here and there, and one of those mirrors drives the WHOLE SHELL's palette.
+        root.apFresh = false;
         apReadProc.running = true;                  // pick up appearance changes made while closed
         if (root.tab === t) root.refreshTab(t); else root.tab = t;   // else onTabChanged refreshes
         root.shown = true;
@@ -534,9 +537,29 @@ Scope {
         function a(c, al) { return Qt.rgba(c.r, c.g, c.b, al) }
     }
     // While the panel is open THIS surface owns the accent, so dragging the colour picker
-    // live-previews across the whole shell; on close, shell.qml's binding takes back over.
-    Binding { target: Tok; property: "accentRaw"; value: root.apAccent; when: root.shown }
-    Binding { target: Tok; property: "light";     value: root.apLight;  when: root.shown }
+    // live-previews across the whole shell; on close, the config file takes back over.
+    //
+    // RestoreNone MATTERS.  A Binding with `when` defaults to putting back whatever the target
+    // held at the moment it activated — so opening settings took a snapshot of the theme,
+    // changing the theme wrote the new one to disk, and CLOSING settings restored the snapshot
+    // and flipped the entire shell back to the mode you had just left. The config said dark and
+    // the bar drew light, until the next unrelated write to appearance.json happened to correct
+    // it. Nothing to restore is the right answer: the file is the source of truth, saveAppearance
+    // has already written it, and Tok re-reads it on change.
+    // GATED ON apFresh, not just on being open. This panel's copy of the config is filled by an
+    // async `cat` that only runs when the panel opens, so between opening and that read landing
+    // the mirror still holds whatever was true when the bar started. Binding on `shown` alone
+    // pushed THAT onto Tok the instant the panel appeared: switch to dark globally, open
+    // settings, and the whole shell flashed back to light for as long as the read took, then
+    // snapped to dark when it arrived. Until the copy is known current, the file stays in charge.
+    Binding { target: Tok; property: "accentRaw"; value: root.apAccent; when: root.shown && root.apFresh
+              restoreMode: Binding.RestoreNone }
+    Binding { target: Tok; property: "light";     value: root.apLight;  when: root.shown && root.apFresh
+              restoreMode: Binding.RestoreNone }
+    // Handing control back. RestoreNone stops the Binding putting a stale snapshot back, but on
+    // its own it leaves Tok holding the preview value with nothing left to correct it — so the
+    // panel says explicitly when it has let go, and Tok re-reads the file.
+    onShownChanged: if (!root.shown) Tok.resync()
 
     // ---------- audio state ----------
     property var sinks: (Pipewire.nodes ? Pipewire.nodes.values : []).filter(function (n) { return n && n.isSink && !n.isStream && n.audio })
@@ -874,11 +897,12 @@ Scope {
     readonly property var defaultWidgetOrder: ["wgMpris","wgTray","wgQuick","wgUpdates","wgNet","wgWeather","wgClipboard","wgNotif","wgWifi","wgBluetooth","wgKdeconnect","wgCaffeine","wgNight","wgSystem","wgMic","wgVolume","wgBattery","wgRec","wgClock","wgPower"]
     property var apWidgetOrder: root.defaultWidgetOrder
     // left cluster order (mirrors shell.qml cfgLeftOrder)
-    readonly property var defaultLeftOrder: ["lgLogo","lgWork","lgTitle"]
+    readonly property var defaultLeftOrder: ["lgLogo","lgWork","lgScratch","lgTitle"]
     property var apLeftOrder: root.defaultLeftOrder
     readonly property var lgMeta: ({
         lgLogo:  { i: "sailing",  l: "Logo",         d: "The sea-shell mark — click opens the launcher" },
         lgWork:  { i: "apps",     l: "Workspaces",   d: "Hyprland workspace indicators" },
+        lgScratch: { i: "inventory_2", l: "Scratchpad", d: "How many windows are stashed — hidden while it holds none" },
         lgTitle: { i: "title",    l: "Window Title", d: "Class of the focused window" }
     })
     // append any ids missing from a saved order (e.g. new ones added in an update)
@@ -912,6 +936,59 @@ Scope {
         wgClock:     { i: "schedule",              l: "Clock & Calendar",  d: "Date/time with upcoming events",                        prop: "wgClock" },
         wgPower:     { i: "power_settings_new",    l: "Power",             d: "Lock, log out, reboot, or shut down",                   prop: "wgPower" }
     })
+    // ---------- per-widget pill appearance ----------
+    // Which row (if any) has its style panel open. One at a time: the list is a reorderable
+    // stack, and several rows expanded at once turns a drag into a guess about where you are.
+    property string wgOpenId: ""
+    readonly property var wgAccentChoices: [
+        { k: "",      l: "default" },
+        { k: "iris",  l: "accent"  },
+        { k: "good",  l: "good"    },
+        { k: "warn",  l: "warn"    },
+        { k: "bad",   l: "alert"   },
+        { k: "text",  l: "ink"     }
+    ]
+    readonly property var wgContentChoices: [
+        { k: "both",  l: "icon + value" },
+        { k: "icon",  l: "icon"         },
+        { k: "value", l: "value"        }
+    ]
+    readonly property var wgGroundChoices: [
+        { k: "filled",  l: "filled"  },
+        { k: "outline", l: "outline" },
+        { k: "bare",    l: "bare"    }
+    ]
+    // Named roles resolve through the theme, so a pill coloured "accent" re-tints with the
+    // wallpaper like everything else. A raw #hex is honoured and does not.
+    function wgTone(n) {
+        switch (n) {
+        case "iris": return theme.iris;  case "good": return theme.good;
+        case "warn": return theme.warn;  case "bad":  return theme.bad;
+        case "text": return theme.text;  case "frost": return theme.frost;
+        default: return (n && n.charAt(0) === "#") ? n : theme.faint;
+        }
+    }
+    readonly property var wgStyleDefaults: ({ a: "", c: "both", g: "filled" })
+    function wgStyleGet(wid, k) {
+        var e = root.apWgStyle ? root.apWgStyle[wid] : null;
+        return (e && e[k] !== undefined && e[k] !== "") ? "" + e[k] : root.wgStyleDefaults[k];
+    }
+    // Stored SPARSELY: a value put back to its default deletes the key, and a widget left with
+    // no keys deletes the whole entry. Without that the file accumulates one object per widget
+    // full of values that only say "unchanged", and a default we improve later can never reach
+    // anyone who once opened this panel.
+    function wgStyleSet(wid, k, v) {
+        var m = {};
+        for (var w in root.apWgStyle) { m[w] = {}; for (var kk in root.apWgStyle[w]) m[w][kk] = root.apWgStyle[w][kk]; }
+        var e = m[wid] || {};
+        if (v === root.wgStyleDefaults[k] || v === "") delete e[k]; else e[k] = v;
+        var n = 0; for (var q in e) n++;
+        if (n === 0) delete m[wid]; else m[wid] = e;
+        root.apWgStyle = m;
+        root.saveAppearance();
+    }
+    function wgStyleTouched(wid) { var e = root.apWgStyle ? root.apWgStyle[wid] : null; if (!e) return false; for (var k in e) return true; return false; }
+
     // reorder helpers for the drag list (ListModel move → commit back to apWidgetOrder + save)
     function wgCommitOrder() {
         var a = []; for (var i = 0; i < wgOrderModel.count; i++) a.push(wgOrderModel.get(i).wid);
@@ -1501,7 +1578,11 @@ Scope {
     // renders is the cost that actually shows up.
     property int    apWpVidFps: 0
     readonly property var wpVidFpsOptions: [0, 60, 30, 24]
-    property bool apAutoDark: false         // auto-switch dark/light by time of day
+    // WHAT DECIDES LIGHT/DARK.  "manual" = whatever you last set, "clock" = the
+    // darkStart..darkEnd window, "wallpaper" = the picture's own luminance. One source, chosen —
+    // rather than two booleans that can both be on and disagree every minute.
+    property string apModeSource: "manual"   // manual | clock | wallpaper
+    property bool apAutoDark: false         // auto-switch dark/light by time of day (mirrors modeSource==="clock")
     property string apDarkStart: "19:00"    // dark begins
     property string apDarkEnd: "07:00"      // dark ends (light begins)
     property var apCustomFonts: []      // fonts the user typed, persisted as chips
@@ -1530,6 +1611,13 @@ Scope {
     property bool wgMic: false
     // Which readings the System Monitor pill shows. sea-sysmon.sh has always sampled all of them;
     // this only decides which ones reach the bar.
+    // Per-widget pill appearance: { wgWifi: { a: "iris", c: "icon", g: "outline" }, … }.
+    // SPARSE ON PURPOSE — a widget left at its defaults has no entry at all, so the file does not
+    // grow twenty objects of nulls and a widget added later inherits the new default rather than
+    // a stale copy of the old one written before it existed.
+    property bool apAttnFlash: true    // pulse the dock icon of an app asking for attention
+    property bool apAttnFocus: true    // and switch to it
+    property var apWgStyle: ({})
     property var apSysShow: ["cpu"]
     function sysShowToggle(k) {
         var a = root.apSysShow.slice(); var i = a.indexOf(k);
@@ -1607,6 +1695,13 @@ Scope {
             if(j.wpLock!==undefined) root.apWpLock=""+j.wpLock;
             if(j.wpVidFps!==undefined) root.apWpVidFps=parseInt(j.wpVidFps)||0;
             if(j.edge==="top"||j.edge==="bottom"||j.edge==="left"||j.edge==="right") root.apEdge=j.edge;
+            // modeSource is the newer key; a config written before it existed only has autoDark,
+            // so derive from that rather than silently dropping someone's schedule back to manual.
+            if(j.modeSource==="manual"||j.modeSource==="clock"||j.modeSource==="wallpaper") root.apModeSource=j.modeSource;
+            else if(j.autoDark!==undefined) root.apModeSource = j.autoDark ? "clock" : "manual";
+            if(j.wgStyle && typeof j.wgStyle === "object") root.apWgStyle = j.wgStyle;
+            if(j.attnFlash!==undefined) root.apAttnFlash=!!j.attnFlash;
+            if(j.attnFocus!==undefined) root.apAttnFocus=!!j.attnFocus;
             if(j.autoDark!==undefined) root.apAutoDark=!!j.autoDark; if(j.darkStart!==undefined) root.apDarkStart=j.darkStart; if(j.darkEnd!==undefined) root.apDarkEnd=j.darkEnd;
             if(j.appMode!==undefined && (j.appMode==="auto"||j.appMode==="dark"||j.appMode==="light")) root.apAppMode=j.appMode;
             if(j.wgMpris!==undefined) root.wgMpris=!!j.wgMpris;
@@ -1644,13 +1739,14 @@ Scope {
             if(j.leftOrder!==undefined && Array.isArray(j.leftOrder) && j.leftOrder.length>0) root.apLeftOrder=root.wgReconcile(j.leftOrder, root.defaultLeftOrder);
             if(j.monitors!==undefined && j.monitors && typeof j.monitors==="object") root.apMonitors=j.monitors;
             root.apLoaded = true;          // parsed cleanly — ap* now mirror the file, saving is safe
+            root.apFresh  = true;          // …and the live-preview bindings may take over now
         } catch(e) {
             // An EMPTY read means there is genuinely no config yet: the declared defaults are
             // correct and writing them is right. A NON-EMPTY read that will not parse means we
             // caught the file mid-write (two installs in quick succession, or matugen rewriting
             // it) — marking loaded there would let the next save persist defaults OVER a real
             // config, silently resetting every appearance setting. Retry instead.
-            if ((apOut.text || "").trim() === "") root.apLoaded = true;
+            if ((apOut.text || "").trim() === "") { root.apLoaded = true; root.apFresh = true; }
             else apReRead.restart();
         } } } }
     Timer { id: apReRead; interval: 400; repeat: false; onTriggered: apReadProc.running = true }
@@ -1660,6 +1756,7 @@ Scope {
     // declared defaults over a real config if anything triggered a save during startup. That is
     // what kept switching the dock back off.
     property bool apLoaded: false
+    property bool apFresh: false            // this panel's mirror is known to match the file
 
     // ---------- theme profiles ----------
     property var profilesList: []
@@ -1813,11 +1910,107 @@ Scope {
         var b64 = Qt.btoa(JSON.stringify(list));
         run("mkdir -p \"$HOME/.config/sea-shell\" && echo '" + b64 + "' | base64 -d > \"$HOME/.config/sea-shell/bar-layouts.json\"");
     }
+    // Built as an OBJECT and stringified, not concatenated. The previous version was one
+    // ~90-key string glued together by hand, and it broke twice in a single release: a quote
+    // landing one character off truncated the file mid-key. It was also written with
+    // `printf '%s' '<json>' > file` — single-quoted, so one apostrophe in a font name or a
+    // wallpaper path escaped the quoting entirely, and truncating, so the bar's own watcher
+    // could read a half-written config. Base64 through argv and a rename has neither failure:
+    // nothing is re-parsed by a shell, and no reader ever sees a partial file.
     function saveAppearance() {
         if (!root.apLoaded) return;      // see apLoaded — never write defaults over a real config
-        var cf = '['; for(var i=0;i<root.apCustomFonts.length;i++){ cf += (i?',':'') + '\"'+root.apCustomFonts[i]+'\"'; } cf += ']';
-        var j = '{\"radius\":'+Math.round(root.apRadius)+',\"opacity\":'+root.apOpacity.toFixed(2)+',\"height\":'+Math.round(root.apHeight)+',\"scale\":'+root.apScale.toFixed(2)+',\"accent\":\"'+root.apAccent+'\",\"font\":\"'+root.apFont+'\",\"customFonts\":'+cf+',\"mode\":\"'+(root.apLight?'light':'dark')+'\",\"matugen\":'+(root.apMatugen?'true':'false')+',\"scheme\":\"'+root.apScheme+'\",\"barFill\":\"'+root.apBarFill+'\",\"edge\":\"'+root.apEdge+'\",\"dock\":'+(root.apDock?'true':'false')+',\"dockEdge\":\"'+root.apDockEdge+'\",\"dockIcon\":'+Math.round(root.apDockIcon)+',\"dockMode\":\"'+root.apDockMode+'\",\"dockZoom\":'+(root.apDockZoom?'true':'false')+',\"dockRunning\":'+(root.apDockRunning?'true':'false')+',\"dockLabels\":'+(root.apDockLabels?'true':'false')+',\"autoDark\":'+(root.apAutoDark?'true':'false')+',\"darkStart\":\"'+root.apDarkStart+'\",\"darkEnd\":\"'+root.apDarkEnd+'\",\"appMode\":\"'+root.apAppMode+'\",\"wgMpris\":'+(root.wgMpris?'true':'false')+',\"wgTray\":'+(root.wgTray?'true':'false')+',\"wgWeather\":'+(root.wgWeather?'true':'false')+',\"wgClipboard\":'+(root.wgClipboard?'true':'false')+',\"wgNotif\":'+(root.wgNotif?'true':'false')+',\"wgWifi\":'+(root.wgWifi?'true':'false')+',\"wgBluetooth\":'+(root.wgBluetooth?'true':'false')+',\"wgKdeconnect\":'+(root.wgKdeconnect?'true':'false')+',\"wgCaffeine\":'+(root.wgCaffeine?'true':'false')+',\"wgNet\":'+(root.wgNet?'true':'false')+',\"wgUpdates\":'+(root.wgUpdates?'true':'false')+',\"wgSystem\":'+(root.wgSystem?'true':'false')+',\"wgVolume\":'+(root.wgVolume?'true':'false')+',\"wgBattery\":'+(root.wgBattery?'true':'false')+',\"wgClock\":'+(root.wgClock?'true':'false')+',\"wgPower\":'+(root.wgPower?'true':'false')+',\"wgQuick\":'+(root.wgQuick?'true':'false')+',\"wgNight\":'+(root.wgNight?'true':'false')+',\"wgMic\":'+(root.wgMic?'true':'false')+',\"barShape\":\"'+root.apBarShape+'\",\"wsStyle\":\"'+root.apWsStyle+'\",\"wsLabel\":\"'+root.apWsLabel+'\",\"barLogo\":\"'+root.apBarLogo+'\",\"barLogoPath\":'+JSON.stringify(root.apBarLogoPath)+',\"welcomed\":'+(root.apWelcomed?'true':'false')+',\"autoHide\":'+(root.apAutoHide?'true':'false')+',\"hideFullscreen\":'+(root.apHideFullscreen?'true':'false')+',\"night\":'+(root.apNight?'true':'false')+',\"nightTemp\":'+Math.round(root.apNightTemp)+',\"nightAuto\":'+(root.apNightAuto?'true':'false')+',\"mouseSens\":'+root.apMouseSens.toFixed(2)+',\"accelProfile\":\"'+root.apAccelProfile+'\",\"mouseNatural\":'+(root.apMouseNatural?'true':'false')+',\"tpNatural\":'+(root.apTpNatural?'true':'false')+',\"tpScroll\":'+root.apTpScroll.toFixed(2)+',\"tpTap\":'+(root.apTpTap?'true':'false')+',\"tpDwt\":'+(root.apTpDwt?'true':'false')+',\"vrr\":'+Math.round(root.apVrr)+',\"wpTransition\":\"'+root.apWpTransition+'\",\"wpTransitionFps\":'+Math.round(root.apWpTransitionFps)+',\"wpTransitionDur\":'+root.apWpTransitionDur.toFixed(2)+',\"wpRotate\":'+(root.apWpRotate?'true':'false')+',\"wpRotateMins\":'+Math.round(root.apWpRotateMins)+',\"wpRotateMode\":\"'+root.apWpRotateMode+'\",\"wpDir\":'+JSON.stringify(root.apWpDir)+',\"wpRecursive\":'+(root.apWpRecursive?'true':'false')+',\"wpRotateStills\":'+(root.apWpRotateStills?'true':'false')+',\"wpCoverStill\":'+(root.apWpCoverStill?'true':'false')+',\"wpBatteryStill\":'+(root.apWpBatteryStill?'true':'false')+',\"wpDayNight\":'+(root.apWpDayNight?'true':'false')+',\"wpDay\":'+JSON.stringify(root.apWpDay)+',\"wpNight\":'+JSON.stringify(root.apWpNight)+',\"wpLockOwn\":'+(root.apWpLockOwn?'true':'false')+',\"wpLock\":'+JSON.stringify(root.apWpLock)+',\"wpVidFps\":'+Math.round(root.apWpVidFps)+',\"sysShow\":'+JSON.stringify(root.apSysShow)+',\"widgetOrder\":'+JSON.stringify(root.apWidgetOrder)+',\"leftOrder\":'+JSON.stringify(root.apLeftOrder)+',\"monitors\":'+JSON.stringify(root.apMonitors)+'}';
-        run("mkdir -p \"$HOME/.config/sea-shell\" && printf '%s' '"+j+"' > \"$HOME/.config/sea-shell/appearance.json\"");
+        var j = JSON.stringify({
+            radius:          Math.round(root.apRadius),
+            opacity:         Number(root.apOpacity.toFixed(2)),
+            height:          Math.round(root.apHeight),
+            scale:           Number(root.apScale.toFixed(2)),
+            accent:          root.apAccent,
+            font:            root.apFont,
+            customFonts:     root.apCustomFonts,
+            mode:            (root.apLight?'light':'dark'),
+            matugen:         root.apMatugen,
+            scheme:          root.apScheme,
+            barFill:         root.apBarFill,
+            edge:            root.apEdge,
+            dock:            root.apDock,
+            dockEdge:        root.apDockEdge,
+            dockIcon:        Math.round(root.apDockIcon),
+            dockMode:        root.apDockMode,
+            dockZoom:        root.apDockZoom,
+            dockRunning:     root.apDockRunning,
+            dockLabels:      root.apDockLabels,
+            modeSource:      root.apModeSource,
+            autoDark:        root.apModeSource === "clock",
+            wgStyle:         root.apWgStyle,
+            attnFlash:       root.apAttnFlash,
+            attnFocus:       root.apAttnFocus,
+            darkStart:       root.apDarkStart,
+            darkEnd:         root.apDarkEnd,
+            appMode:         root.apAppMode,
+            wgMpris:         root.wgMpris,
+            wgTray:          root.wgTray,
+            wgWeather:       root.wgWeather,
+            wgClipboard:     root.wgClipboard,
+            wgNotif:         root.wgNotif,
+            wgWifi:          root.wgWifi,
+            wgBluetooth:     root.wgBluetooth,
+            wgKdeconnect:    root.wgKdeconnect,
+            wgCaffeine:      root.wgCaffeine,
+            wgNet:           root.wgNet,
+            wgUpdates:       root.wgUpdates,
+            wgSystem:        root.wgSystem,
+            wgVolume:        root.wgVolume,
+            wgBattery:       root.wgBattery,
+            wgClock:         root.wgClock,
+            wgPower:         root.wgPower,
+            wgQuick:         root.wgQuick,
+            wgNight:         root.wgNight,
+            wgMic:           root.wgMic,
+            barShape:        root.apBarShape,
+            wsStyle:         root.apWsStyle,
+            wsLabel:         root.apWsLabel,
+            barLogo:         root.apBarLogo,
+            barLogoPath:     root.apBarLogoPath,
+            welcomed:        root.apWelcomed,
+            autoHide:        root.apAutoHide,
+            hideFullscreen:  root.apHideFullscreen,
+            night:           root.apNight,
+            nightTemp:       Math.round(root.apNightTemp),
+            nightAuto:       root.apNightAuto,
+            mouseSens:       Number(root.apMouseSens.toFixed(2)),
+            accelProfile:    root.apAccelProfile,
+            mouseNatural:    root.apMouseNatural,
+            tpNatural:       root.apTpNatural,
+            tpScroll:        Number(root.apTpScroll.toFixed(2)),
+            tpTap:           root.apTpTap,
+            tpDwt:           root.apTpDwt,
+            vrr:             Math.round(root.apVrr),
+            wpTransition:    root.apWpTransition,
+            wpTransitionFps: Math.round(root.apWpTransitionFps),
+            wpTransitionDur: Number(root.apWpTransitionDur.toFixed(2)),
+            wpRotate:        root.apWpRotate,
+            wpRotateMins:    Math.round(root.apWpRotateMins),
+            wpRotateMode:    root.apWpRotateMode,
+            wpDir:           root.apWpDir,
+            wpRecursive:     root.apWpRecursive,
+            wpRotateStills:  root.apWpRotateStills,
+            wpCoverStill:    root.apWpCoverStill,
+            wpBatteryStill:  root.apWpBatteryStill,
+            wpDayNight:      root.apWpDayNight,
+            wpDay:           root.apWpDay,
+            wpNight:         root.apWpNight,
+            wpLockOwn:       root.apWpLockOwn,
+            wpLock:          root.apWpLock,
+            wpVidFps:        Math.round(root.apWpVidFps),
+            sysShow:         root.apSysShow,
+            widgetOrder:     root.apWidgetOrder,
+            leftOrder:       root.apLeftOrder,
+            monitors:        root.apMonitors
+        });
+        var d = "\"$HOME/.config/sea-shell\"";
+        run("mkdir -p " + d + " && printf %s " + JSON.stringify(Qt.btoa(j))
+            + " | base64 -d > " + d + "/appearance.json.tmp && "
+            + "mv -f " + d + "/appearance.json.tmp " + d + "/appearance.json");
     }
     // apply the system app dark/light preference independently from the shell theme
     function applyAppMode() {
@@ -3734,10 +3927,30 @@ Scope {
                                     Repeater { model: [{k:false,l:"dark",i:"dark_mode"},{k:true,l:"light",i:"light_mode"}]
                                         delegate: Chip { required property var modelData; label: modelData.l; icon: modelData.i; on: root.apLight===modelData.k
                                             onPicked: { root.apLight=modelData.k; root.saveAppearance() } } } }
-                                ToggleCard { icon: "bedtime"; title: "auto dark by time"
-                                    desc: "dark inside the window · overrides the manual pick + the SUPER+⇧+D key"
-                                    on: root.apAutoDark; onToggled: { root.apAutoDark=!root.apAutoDark; root.saveAppearance() } }
-                                RowLayout { visible: root.apAutoDark; Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; spacing: 10
+                                // WHAT DECIDES IT.  This was a boolean — "auto dark by time", on or off —
+                                // which had no room for a third answer, and two booleans that can both be on
+                                // is how a schedule and a wallpaper end up overwriting each other once a
+                                // minute. One source, chosen.
+                                Text { text: "what decides light or dark"; color: theme.faint; font.pixelSize: 10
+                                       font.family: Tok.mono; Layout.leftMargin: 14; Layout.topMargin: 6 }
+                                Flow { Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; spacing: 7
+                                    Repeater {
+                                        model: [{k:"manual",   l:"you",       i:"touch_app"},
+                                                {k:"clock",    l:"the clock", i:"schedule"},
+                                                {k:"wallpaper",l:"the wallpaper", i:"wallpaper"}]
+                                        delegate: Chip { required property var modelData; label: modelData.l; icon: modelData.i
+                                            on: root.apModeSource === modelData.k
+                                            onPicked: { root.apModeSource = modelData.k; root.apAutoDark = (modelData.k === "clock"); root.saveAppearance() } } } }
+                                Text {
+                                    Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14
+                                    wrapMode: Text.WordWrap; color: theme.faint; font.pixelSize: 10; font.family: Tok.mono
+                                    text: root.apModeSource === "clock"
+                                          ? "dark inside the window below · overrides the manual pick and the SUPER+⇧+D key"
+                                          : root.apModeSource === "wallpaper"
+                                          ? "each wallpaper's own brightness picks the mode. a picture that is neither clearly dark nor clearly light leaves it alone, so most switches change nothing — pressing SUPER+⇧+D hands control back to you"
+                                          : "whatever you last set, by the chip above or SUPER+⇧+D. nothing changes it behind your back"
+                                }
+                                RowLayout { visible: root.apModeSource === "clock"; Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; spacing: 10
                                     Sym { text: "schedule"; sz: 18; color: theme.sub }
                                     Text { text: "dark from"; color: theme.sub; font.pixelSize: 12; font.family: Tok.mono }
                                     Rectangle { implicitWidth: 68; implicitHeight: 32; radius: Tok.r; color: theme.a(theme.line,0.5); border.width: 1; border.color: dstart.activeFocus?theme.iris:theme.a(theme.iris,0.2)
@@ -4557,7 +4770,7 @@ Scope {
                             visible: root.tab === 12; Layout.fillWidth: true; spacing: 14
                             Section { title: "bar widgets"; icon: "widgets" }
                             Text {
-                                text: "toggle widgets on/off, and drag the ⠿ handle to reorder where they sit on the bar. Media Player always stays centred."
+                                text: "toggle widgets on/off, drag the ⠿ handle to reorder where they sit on the bar, and open ⚙ on any row to set how that pill looks. Media Player always stays centred."
                                 color: theme.faint; font.pixelSize: 11; font.family: root.apFont; Layout.bottomMargin: 6
                                 Layout.fillWidth: true; wrapMode: Text.WordWrap
                             }
@@ -4581,7 +4794,9 @@ Scope {
                                     readonly property bool hasToggle: (wrap.meta.prop || "") !== ""
                                     readonly property bool enabledVal: wrap.hasToggle ? root[wrap.meta.prop] : true
                                     property bool held: false
-                                    width: wgList.width; height: 52
+                                    readonly property bool styleOpen: root.wgOpenId === wrap.wid
+                                    width: wgList.width; height: 52 + (wrap.styleOpen ? 116 : 0)
+                                    Behavior on height { NumberAnimation { duration: Tok.mBase; easing.type: Tok.mEase } }
                                     z: held ? 2 : 1
 
                                     Rectangle {
@@ -4600,14 +4815,17 @@ Scope {
                                             AnchorChanges { target: card; anchors.horizontalCenter: undefined; anchors.verticalCenter: undefined }
                                         }
                                         RowLayout {
-                                            anchors.fill: parent; anchors.leftMargin: 8; anchors.rightMargin: 14; spacing: 10
+                                            id: hdr
+                                            anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top
+                                            height: 52
+                                            anchors.leftMargin: 8; anchors.rightMargin: 14; spacing: 10
                                             // drag handle — grabbing this reorders the row
                                             MouseArea {
                                                 id: handle
                                                 Layout.preferredWidth: 24; Layout.fillHeight: true
                                                 cursorShape: Qt.SizeVerCursor
                                                 drag.target: card; drag.axis: Drag.YAxis
-                                                onPressed: { root.wgDragging = true; wrap.held = true }
+                                                onPressed: { root.wgOpenId = ""; root.wgDragging = true; wrap.held = true }
                                                 onReleased: { wrap.held = false; root.wgCommitOrder(); root.wgDragging = false }
                                                 Sym { anchors.centerIn: parent; text: "drag_indicator"; sz: 18; color: wrap.held ? theme.iris : theme.faint }
                                             }
@@ -4618,6 +4836,21 @@ Scope {
                                                     Layout.fillWidth: true; elide: Text.ElideRight }
                                                 Text { text: wrap.meta.d || ""; color: theme.faint; font.pixelSize: 10; font.family: root.apFont
                                                     Layout.fillWidth: true; elide: Text.ElideRight }
+                                            }
+                                            // Opens the appearance controls for THIS widget. A dot marks one that
+                                            // has been styled, so a bar that no longer looks like the defaults can
+                                            // be traced to the rows responsible without opening all twenty.
+                                            MouseArea {
+                                                Layout.preferredWidth: 26; Layout.fillHeight: true
+                                                cursorShape: Qt.PointingHandCursor
+                                                onClicked: root.wgOpenId = wrap.styleOpen ? "" : wrap.wid
+                                                Sym { anchors.centerIn: parent; text: "tune"; sz: 17
+                                                      color: wrap.styleOpen ? theme.iris : theme.faint }
+                                                Rectangle {
+                                                    visible: root.wgStyleTouched(wrap.wid) && !wrap.styleOpen
+                                                    width: 5; height: 5; radius: 2.5; color: theme.iris
+                                                    anchors.right: parent.right; anchors.top: parent.top; anchors.topMargin: 13
+                                                }
                                             }
                                             // toggle (hidden for no-toggle widgets like the recorder)
                                             Rectangle {
@@ -4633,6 +4866,80 @@ Scope {
                                                     anchors.fill: parent; cursorShape: Qt.PointingHandCursor
                                                     onClicked: { if (wrap.hasToggle) { root[wrap.meta.prop] = !wrap.enabledVal; root.saveAppearance() } }
                                                 }
+                                            }
+                                        }
+
+                                        // ---- per-widget appearance ----
+                                        // Colour, what the pill draws, and what it draws it on. Chosen per
+                                        // widget because the reasons differ per widget: the clock wants to be
+                                        // read, the recorder wants to be noticed, and a pill you only keep for
+                                        // its dropdown wants to take as little of the bar as it can.
+                                        ColumnLayout {
+                                            id: styleBox
+                                            visible: wrap.styleOpen
+                                            anchors.top: hdr.bottom
+                                            anchors.left: parent.left; anchors.right: parent.right
+                                            anchors.leftMargin: 44; anchors.rightMargin: 14; anchors.topMargin: 1
+                                            spacing: 6
+
+                                            Rectangle { Layout.fillWidth: true; height: 1; color: theme.a(theme.iris, 0.14) }
+
+                                            RowLayout {
+                                                Layout.fillWidth: true; spacing: 8
+                                                Text { text: "COLOUR"; color: theme.faint; font.pixelSize: 10
+                                                       font.family: Tok.mono; font.letterSpacing: 0.7
+                                                       Layout.preferredWidth: 52 }
+                                                Repeater {
+                                                    model: root.wgAccentChoices
+                                                    delegate: Rectangle {
+                                                        required property var modelData
+                                                        readonly property bool sel: root.wgStyleGet(wrap.wid, "a") === modelData.k
+                                                        implicitWidth: 22; implicitHeight: 22; radius: 11
+                                                        color: modelData.k === "" ? "transparent" : root.wgTone(modelData.k)
+                                                        border.width: sel ? 2 : 1
+                                                        border.color: sel ? theme.text : theme.a(theme.iris, 0.35)
+                                                        // "default" has no colour of its own to show — it means the
+                                                        // widget keeps whatever it already decides for itself.
+                                                        Sym { visible: modelData.k === ""; anchors.centerIn: parent
+                                                              text: "block"; sz: 12; color: theme.faint }
+                                                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                                                            onClicked: root.wgStyleSet(wrap.wid, "a", modelData.k) }
+                                                    }
+                                                }
+                                            }
+
+                                            RowLayout {
+                                                Layout.fillWidth: true; spacing: 8
+                                                Text { text: "SHOWS"; color: theme.faint; font.pixelSize: 10
+                                                       font.family: Tok.mono; font.letterSpacing: 0.7
+                                                       Layout.preferredWidth: 52 }
+                                                Repeater {
+                                                    model: root.wgContentChoices
+                                                    delegate: Chip {
+                                                        required property var modelData
+                                                        label: modelData.l
+                                                        on: root.wgStyleGet(wrap.wid, "c") === modelData.k
+                                                        onPicked: root.wgStyleSet(wrap.wid, "c", modelData.k)
+                                                    }
+                                                }
+                                                Item { Layout.fillWidth: true }
+                                            }
+
+                                            RowLayout {
+                                                Layout.fillWidth: true; spacing: 8
+                                                Text { text: "GROUND"; color: theme.faint; font.pixelSize: 10
+                                                       font.family: Tok.mono; font.letterSpacing: 0.7
+                                                       Layout.preferredWidth: 52 }
+                                                Repeater {
+                                                    model: root.wgGroundChoices
+                                                    delegate: Chip {
+                                                        required property var modelData
+                                                        label: modelData.l
+                                                        on: root.wgStyleGet(wrap.wid, "g") === modelData.k
+                                                        onPicked: root.wgStyleSet(wrap.wid, "g", modelData.k)
+                                                    }
+                                                }
+                                                Item { Layout.fillWidth: true }
                                             }
                                         }
                                     }
@@ -5635,6 +5942,25 @@ Scope {
                                 icon: "label"; title: "Show names on hover"
                                 desc: "app name above the icon, with the window count when more than one is open."
                                 on: root.apDockLabels; onToggled: { root.apDockLabels = !root.apDockLabels; root.saveAppearance() }
+                            }
+
+                            // ---- attention ----
+                            Section { title: "attention"; icon: "notifications_active" }
+                            Text {
+                                Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; Layout.bottomMargin: 4
+                                wrapMode: Text.WordWrap
+                                text: "clicking a link somewhere else asks the browser to come forward — Wayland calls it activation, and Hyprland leaves it to the shell to decide what that means. with both of these off the window is raised where it is and you go looking for it."
+                                color: theme.faint; font.pixelSize: 10; font.family: Tok.mono
+                            }
+                            ToggleCard {
+                                icon: "notifications_active"; title: "Flash the dock icon"
+                                desc: "three beats on the app that is asking, so you can see which one it was."
+                                on: root.apAttnFlash; onToggled: { root.apAttnFlash = !root.apAttnFlash; root.saveAppearance() }
+                            }
+                            ToggleCard {
+                                icon: "arrow_forward"; title: "Switch to it"
+                                desc: "go to the window, changing workspace if it is on another one. works whether or not the dock is on."
+                                on: root.apAttnFocus; onToggled: { root.apAttnFocus = !root.apAttnFocus; root.saveAppearance() }
                             }
 
                             Text {
