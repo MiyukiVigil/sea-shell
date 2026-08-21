@@ -121,6 +121,7 @@ hl.bind(mod .. " + V", hl.dsp.exec_cmd("qs -c sea-shell ipc call launcher clipbo
 -- ---------------- sea-shell 2.0 ----------------
 hl.bind(mod .. " + W", hl.dsp.exec_cmd("qs -c sea-shell ipc call shell toggleExpose"),           { description = "Mission Control" })
 hl.bind(mod .. " + D", hl.dsp.exec_cmd("~/.config/quickshell/sea-shell/sea-toggle.sh Dashboard"), { description = "Dashboard" })
+hl.bind(mod .. " + SHIFT + A", hl.dsp.exec_cmd("qs -c sea-shell ipc call desktop arrange"), { description = "Arrange the desktop" })
 
 -- Game mode: strips blur/shadows/animations, kills the video wallpaper, performance profile,
 -- silences notifications — and restores every one of them to its previous value on the way out.

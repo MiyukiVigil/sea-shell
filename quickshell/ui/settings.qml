@@ -63,6 +63,53 @@ Scope {
         if (t === 11) { reloadEventsProc.running = true; calCfgLoad.running = true }  // calendar
     }
     function run(cmd) { Quickshell.execDetached(["sh", "-c", cmd]) }
+
+    // ---------- the desktop ----------
+    // The arrangement is owned by sea-desktop.py, not by this panel: there is one desktop
+    // but a surface per monitor, and a settings page that wrote the file directly would be
+    // a third writer racing the other two. This page asks; the script decides.
+    readonly property string dtScript: Qt.resolvedUrl("sea-desktop.py").toString().replace("file://","")
+    property var dtItems: []
+    property bool dtEditing: false
+    property string dtQuery: ""
+    function dtRun(args) { Quickshell.execDetached(["python3", root.dtScript].concat(args)) }
+    function dtIpc(fn) { Quickshell.execDetached(["qs", "-c", "sea-shell", "ipc", "call", "desktop", fn]) }
+    FileView {
+        id: dtFile
+        path: Quickshell.env("HOME") + "/.config/sea-shell/desktop.json"
+        watchChanges: true
+        function apply() {
+            try {
+                reload();
+                var t = text();
+                var j = (t && t.trim()) ? JSON.parse(t) : null;
+                root.dtItems = (j && j.items) ? j.items : [];
+            } catch (e) { root.dtItems = [] }
+        }
+        onFileChanged: apply()
+        onLoaded: apply()
+        Component.onCompleted: apply()
+    }
+    // Installed applications, filtered by what has been typed. Capped: this is a picker,
+    // and a list you have to scroll is a list you should have searched.
+    readonly property var dtApps: {
+        var q = root.dtQuery.toLowerCase().trim();
+        var out = [];
+        try {
+            var all = DesktopEntries.applications.values;
+            for (var i = 0; i < all.length; i++) {
+                var e = all[i];
+                if (!e || !e.name) continue;
+                if (q.length && ("" + e.name).toLowerCase().indexOf(q) < 0) continue;
+                out.push(e);
+            }
+        } catch (err) {}
+        // Sorted, then cut. DesktopEntries hands them back in scan order, which is neither
+        // alphabetical nor stable — a picker whose first seven entries change between
+        // openings is one you cannot learn, only search.
+        out.sort(function (a, b) { return ("" + a.name).localeCompare("" + b.name) });
+        return out.slice(0, 7);
+    }
     onTabChanged: refreshTab(tab)
 
     // SUPER+S and other external triggers toggle the resident panel through this handler
@@ -3168,6 +3215,7 @@ Scope {
                             TabBtn { icon: "view_agenda";          label: "Bar";         idx: 20 }
                             TabBtn { icon: "widgets";              label: "Bar Widgets"; idx: 12 }
                             TabBtn { icon: "dock_to_bottom";       label: "Dock";        idx: 16 }
+                            TabBtn { icon: "wallpaper";            label: "Desktop";     idx: 21 }
                             TabBtn { icon: "picture_in_picture";   label: "Window rules"; idx: 17 }
                             TabBtn { icon: "auto_awesome";         label: "Theme Profiles"; idx: 13 }
                             GroupLabel { text: "DEVICES" }
@@ -4601,6 +4649,120 @@ Scope {
                                     color: theme.faint; font.pixelSize: 10; font.family: Tok.mono
                                     Layout.leftMargin: 14; Layout.rightMargin: 14
                                     Layout.fillWidth: true; wrapMode: Text.WordWrap
+                                }
+                            }
+                        }
+
+                        // ================= DESKTOP =================
+                        // The space between the bar and the dock. Everything here is a
+                        // request to sea-desktop.py; see the note by dtScript above.
+                        ColumnLayout {
+                            visible: root.tab === 21; Layout.fillWidth: true; spacing: 12
+
+                            Section { title: "arranging"; icon: "drag_pan" }
+                            Text {
+                                text: "while arranging, drag anything on the desktop. shaded areas are where the shell thinks your wallpaper has something in it — a widget dropped there moves aside unless you hold shift"
+                                color: theme.faint; font.pixelSize: 10; font.family: Tok.mono
+                                wrapMode: Text.WordWrap
+                                Layout.leftMargin: 14; Layout.rightMargin: 14; Layout.fillWidth: true
+                            }
+                            RowLayout {
+                                Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; spacing: 10
+                                Chip {
+                                    label: root.dtEditing ? "arranging" : "arrange"
+                                    icon: "drag_pan"
+                                    on: root.dtEditing
+                                    onPicked: {
+                                        root.dtEditing = !root.dtEditing;
+                                        root.dtIpc(root.dtEditing ? "start" : "done");
+                                    }
+                                }
+                                Item { Layout.fillWidth: true }
+                            }
+
+                            Section { title: "on the desktop"; icon: "widgets" }
+                            Text {
+                                visible: root.dtItems.length === 0
+                                text: "nothing yet"
+                                color: theme.faint; font.pixelSize: 10; font.family: Tok.mono
+                                Layout.leftMargin: 14
+                            }
+                            Repeater {
+                                model: root.dtItems
+                                delegate: RowLayout {
+                                    required property var modelData
+                                    Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14
+                                    spacing: 10
+                                    Text {
+                                        text: modelData.kind === "clock" ? "schedule" : "apps"
+                                        font.family: "Material Symbols Rounded"; font.pixelSize: 16
+                                        color: theme.sub
+                                    }
+                                    Text {
+                                        text: modelData.kind === "clock"
+                                              ? "clock" : (modelData.label || "shortcut")
+                                        color: theme.text; font.pixelSize: 12; font.family: root.apFont
+                                    }
+                                    Text {
+                                        text: modelData.id || ""
+                                        color: theme.faint; font.pixelSize: 9; font.family: Tok.mono
+                                    }
+                                    Item { Layout.fillWidth: true }
+                                    Chip {
+                                        label: "remove"; icon: "close"
+                                        onPicked: root.dtRun(["--remove", "" + modelData.id])
+                                    }
+                                }
+                            }
+
+                            Section { title: "add"; icon: "add_circle" }
+                            RowLayout {
+                                Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; spacing: 10
+                                Chip { label: "clock"; icon: "schedule"; onPicked: root.dtRun(["--add-clock"]) }
+                                Item { Layout.fillWidth: true }
+                            }
+                            Rectangle {
+                                Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14
+                                height: 30; radius: Tok.r
+                                color: theme.a(theme.line, 0.45)
+                                border.width: 1; border.color: theme.a(theme.line, 0.9)
+                                TextInput {
+                                    id: dtIn
+                                    anchors.fill: parent; anchors.leftMargin: 10; anchors.rightMargin: 10
+                                    verticalAlignment: TextInput.AlignVCenter
+                                    color: theme.text; font.pixelSize: 12; font.family: root.apFont
+                                    selectByMouse: true
+                                    onTextChanged: root.dtQuery = text
+                                }
+                                Text {
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    anchors.left: parent.left; anchors.leftMargin: 10
+                                    visible: dtIn.text.length === 0
+                                    text: "search installed applications"
+                                    color: theme.faint; font.pixelSize: 11; font.family: Tok.mono
+                                }
+                            }
+                            Repeater {
+                                model: root.dtApps
+                                delegate: RowLayout {
+                                    required property var modelData
+                                    Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14
+                                    spacing: 10
+                                    IconImage {
+                                        implicitSize: 18
+                                        source: Quickshell.iconPath(modelData.icon, true)
+                                    }
+                                    Text {
+                                        text: modelData.name || ""
+                                        color: theme.text; font.pixelSize: 12; font.family: root.apFont
+                                    }
+                                    Item { Layout.fillWidth: true }
+                                    Chip {
+                                        label: "add"; icon: "add"
+                                        onPicked: root.dtRun(["--add-entry", "" + modelData.id,
+                                                              "--label", "" + modelData.name,
+                                                              "--icon", "" + (modelData.icon || modelData.id)])
+                                    }
                                 }
                             }
                         }

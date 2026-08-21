@@ -84,6 +84,15 @@ PanelWindow {
         writer.running = true;
     }
 
+    // Removal goes through the script for the same reason adding does: one writer.
+    Process { id: remover }
+    property string helper: Quickshell.env("HOME") + "/.config/quickshell/sea-shell/sea-desktop.py"
+    function removeItem(id) {
+        if (!id) return;
+        remover.command = ["python3", root.helper, "--remove", "" + id];
+        remover.running = true;
+    }
+
     function setItem(i, changes) {
         var next = [];
         for (var k = 0; k < root.items.length; k++)
@@ -192,6 +201,16 @@ PanelWindow {
         width: root.sw
         height: root.sh
 
+        // While arranging, the whole surface takes input (see the mask above), which is the
+        // one moment a click on empty desktop can be heard at all. Right-click ends the
+        // mode — the same gesture that dismisses every other transient state in this shell.
+        MouseArea {
+            anchors.fill: parent
+            enabled: root.editing
+            acceptedButtons: Qt.RightButton
+            onClicked: root.editing = false
+        }
+
         // keep-clear shading, only while arranging. The point is that you can SEE what the
         // shell thinks is in the picture, and disagree with it.
         Item {
@@ -226,6 +245,7 @@ PanelWindow {
                 fieldW: root.sw
                 fieldH: root.sh - root.insetTop - root.insetBottom
                 fieldY: root.insetTop
+                onRemoved: root.removeItem(modelData.id)
                 onMoved: (fx, fy, exact) => {
                     var p = exact ? Qt.point(fx, fy)
                                   : root.settle(fx, fy, modelData.w, modelData.h);

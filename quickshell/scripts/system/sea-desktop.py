@@ -10,6 +10,8 @@ arrange with a mouse.
     --list                          print the arrangement
     --ensure                        create an empty arrangement if absent
     --add-clock                     add a clock
+    --add-entry ID [--label L] [--icon I]
+                                    add a shortcut to an installed application
     --add-app EXEC [--label L] [--icon I]
                                     add a shortcut
     --remove ID                     remove one item
@@ -144,6 +146,17 @@ def main(argv):
         return 0
     if "--add-clock" in argv:
         print(json.dumps(add("clock")))
+        return 0
+    if "--add-entry" in argv:
+        eid = arg(argv, "--add-entry")
+        if not eid:
+            sys.stderr.write("sea-desktop: --add-entry needs a .desktop id\n")
+            return 2
+        print(json.dumps(add("launch", {
+            "entry": eid,
+            "label": arg(argv, "--label") or eid,
+            "icon": arg(argv, "--icon") or eid,
+        })))
         return 0
     if "--add-app" in argv:
         ex = arg(argv, "--add-app")

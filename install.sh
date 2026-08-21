@@ -186,6 +186,7 @@ REPO_PKGS=(
   ttf-nerd-fonts-symbols                              # brand/distro logo glyphs on the System page
   python-hidapi                                       # Moondrop DAC EQ panel (USB-HID control)
   python-pykakasi pypinyin                            # lyrics pronunciation — kana/kanji→romaji, hanzi→pinyin (both offline)
+  at-spi2-core python-gobject                         # global menu — the focused window's menu bar, read over accessibility
   translate-shell                                     # lyrics translation (Google's unofficial endpoint; optional, degrades quietly)
 )
 # AUR packages — need an AUR helper (paru/yay); bootstrapped below if absent.

@@ -133,6 +133,9 @@ ShellRoot {
     IpcHandler {
         target: "desktop"
         function arrange(): void { root.desktopEditing = !root.desktopEditing }
+        // Explicit on/off as well as the toggle: a checkbox in Settings that only knows how
+        // to flip goes out of step the first time the mode is changed from anywhere else.
+        function start(): void { root.desktopEditing = true }
         function done(): void { root.desktopEditing = false }
         function addClock(): void { root.desktopRun(["--add-clock"]) }
         function addApp(exec: string, label: string): void {

@@ -25,6 +25,7 @@ Item {
 
     // fx, fy are fractions; `exact` means the user asked for no nudging (shift held).
     signal moved(real fx, real fy, bool exact)
+    signal removed()
 
     readonly property string kind: (item.spec && item.spec.kind) ? item.spec.kind : "clock"
 
@@ -119,7 +120,18 @@ Item {
 
     Process { id: launcher }
     function launch() {
-        if (!item.spec || !item.spec.exec) return;
+        if (!item.spec) return;
+        // A .desktop id is the better handle: the entry knows its own Exec field codes,
+        // its working directory and whether it wants a terminal, none of which survive
+        // being flattened into a string. A raw command still works for anything without
+        // an entry — a script, a one-liner — which is most of what a shortcut is for.
+        if (item.spec.entry) {
+            try {
+                var e = DesktopEntries.byId("" + item.spec.entry);
+                if (e) { e.execute(); return }
+            } catch (err) {}
+        }
+        if (!item.spec.exec) return;
         launcher.command = ["sh", "-c", "" + item.spec.exec];
         launcher.running = true;
     }
@@ -134,6 +146,9 @@ Item {
                                                             : Qt.ArrowCursor)
         drag.target: item.editing ? item : null
         drag.threshold: 4
+        // Right-click removes, but only while arranging: on a desktop you are using, the
+        // gesture that deletes your shortcut must not be one click away from launching it.
+        acceptedButtons: item.editing ? (Qt.LeftButton | Qt.RightButton) : Qt.LeftButton
         // Holding shift means "exactly here" — the nudge is help, not a rule.
         property bool exact: false
         onPressed: mouse => { dragArea.exact = (mouse.modifiers & Qt.ShiftModifier) !== 0 }
@@ -143,8 +158,11 @@ Item {
             var fy = Math.max(0, Math.min(1, (item.y - item.fieldY) / item.fieldH));
             item.moved(fx, fy, dragArea.exact);
         }
-        onClicked: {
-            if (item.editing) return;
+        onClicked: mouse => {
+            if (item.editing) {
+                if (mouse.button === Qt.RightButton) item.removed();
+                return;
+            }
             if (item.kind === "launch") item.launch();
         }
     }
