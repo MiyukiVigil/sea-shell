@@ -43,8 +43,8 @@ QUIET = os.path.join(os.environ.get("XDG_CACHE_HOME", os.path.join(HOME, ".cache
 DEFAULTS = {
     "clock":   {"w": 0.17,  "h": 0.11},
     "weather": {"w": 0.15,  "h": 0.10},
-    "media":   {"w": 0.22,  "h": 0.075},
-    "system":  {"w": 0.13,  "h": 0.12},
+    "media":   {"w": 0.22,  "h": 0.105},   # room for the visualiser under the track
+    "system":  {"w": 0.175, "h": 0.175},   # room for the trace and the secondary row
     "launch":  {"w": 0.055, "h": 0.085},
 }
 # Which pre-solved zone list in wallquiet.json best matches each footprint.

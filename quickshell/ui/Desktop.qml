@@ -36,6 +36,7 @@ PanelWindow {
     // Readings for the widgets, supplied by the bar (see shell.qml).
     property var readings: ({})
     property var player: null
+    property var viz: []
 
     // A short history of load, so the system widget can draw a trace rather than a number.
     // Sampled here rather than in each widget: one buffer, one cadence, and every system
@@ -257,6 +258,7 @@ PanelWindow {
                 editing: root.editing
                 readings: root.readings
                 player: root.player
+                viz: root.viz
                 // What the wallpaper is doing under this item, so it can decide whether it
                 // needs a ground at all. Same map, same threshold as the placement nudge.
                 busy: root.busyAt(modelData.x, modelData.y, modelData.w, modelData.h)

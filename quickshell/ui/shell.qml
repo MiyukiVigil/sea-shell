@@ -131,9 +131,15 @@ ShellRoot {
             readings: ({
                 "wxTemp": root.wxTemp, "wxCond": root.wxCond,
                 "cpu": root.cpuUsage, "cpuTemp": root.cpuTemp,
-                "memPct": root.memPct, "memUsed": root.memUsed, "memTotal": root.memTotal
+                "memPct": root.memPct, "memUsed": root.memUsed, "memTotal": root.memTotal,
+                "gpuName": root.gpuName, "gpu": root.gpuUsage, "gpuTemp": root.gpuTemp,
+                "netRx": root.netRx, "netTx": root.netTx
             })
             player: root.player
+            // The same bars the media pill draws — real cava, or the ambient wave in
+            // bit-perfect mode. One source, so the desktop and the bar never disagree
+            // about what the music is doing.
+            viz: root.vizBars
             // Nothing is ever parked under the bar, or under where the dock appears.
             insetTop: root.cfgEdge === "top" ? root.cfgHeight + 6 : 6
             insetBottom: root.cfgEdge === "bottom" ? root.cfgHeight + 6 : (root.cfgDock ? 78 : 6)

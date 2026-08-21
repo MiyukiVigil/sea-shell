@@ -47,6 +47,7 @@ Item {
     // 0 = the wallpaper is empty here, 1 = there is something under this widget.
     property real busy: 0
     property var history: []
+    property var viz: []
     property real fieldW: 1920
     property real fieldH: 1000
     property real fieldY: 0
@@ -188,10 +189,79 @@ Item {
         IndSpark {
             visible: item.kind === "system" && item.history.length > 1
             Layout.fillWidth: true
-            implicitHeight: Math.max(12, item.height * 0.22)
+            implicitHeight: Math.max(12, item.height * 0.20)
             values: item.history
             stroke: item.accent
             ground: "transparent"
+        }
+
+        // The rest of the machine. IndKpi's own note says to lay figures "on a row
+        // separated by hairline verticals so one figure clearly leads" — which is exactly
+        // this: CPU leads above, and memory, temperature and the GPU sit under it as
+        // secondary readings rather than four equal tiles.
+        RowLayout {
+            visible: item.kind === "system"
+            Layout.fillWidth: true
+            Layout.topMargin: 2
+            spacing: 0
+            Repeater {
+                model: item.stats
+                delegate: RowLayout {
+                    required property var modelData
+                    required property int index
+                    spacing: 0
+                    Rectangle {
+                        visible: index > 0
+                        implicitWidth: 1
+                        Layout.fillHeight: true
+                        Layout.leftMargin: 7
+                        Layout.rightMargin: 7
+                        Layout.topMargin: 1
+                        Layout.bottomMargin: 1
+                        color: item.hair
+                    }
+                    ColumnLayout {
+                        spacing: 0
+                        IndLabel { text: modelData.l }
+                        IndText {
+                            mono: true
+                            sz: Tok.tData
+                            text: modelData.v
+                            color: modelData.hot ? Tok.warn : Tok.ink
+                        }
+                    }
+                }
+            }
+            Item { Layout.fillWidth: true }
+        }
+
+        // The music, as the bar draws it. Same source, same construction — a desktop
+        // visualiser that disagreed with the one in the media pill would be a second
+        // opinion about the same sound.
+        Item {
+            visible: item.kind === "media" && item.viz.length > 0 && item.player !== null
+            Layout.fillWidth: true
+            Layout.topMargin: 3
+            implicitHeight: Math.max(10, item.height * 0.26)
+            Row {
+                id: vizRow
+                anchors.fill: parent
+                spacing: 2
+                Repeater {
+                    model: item.viz.length
+                    delegate: Rectangle {
+                        required property int index
+                        readonly property real v: (item.viz[index] || 0) / 100
+                        width: Math.max(1, (vizRow.width - (item.viz.length - 1) * 2)
+                                           / Math.max(1, item.viz.length))
+                        height: Math.max(1.5, v * vizRow.height)
+                        anchors.bottom: parent.bottom
+                        radius: 0
+                        color: Qt.rgba(item.accent.r, item.accent.g, item.accent.b,
+                                       0.45 + 0.5 * v)
+                    }
+                }
+            }
         }
 
         // Long values (a track title) cannot use IndKpi — its figure has no width to elide
@@ -229,6 +299,29 @@ Item {
         }
         return "";
     }
+    // Memory, temperature and whichever of the GPU or the network is worth a column. A
+    // machine with no discrete GPU should not be shown an empty GPU reading, so the last
+    // column is whatever this machine actually has.
+    readonly property var stats: {
+        var r = item.readings || {};
+        var out = [];
+        if (r.memPct !== undefined)
+            out.push({ l: "mem", v: Math.round(r.memPct) + "%", hot: r.memPct >= 85 });
+        if (r.cpuTemp)
+            out.push({ l: "temp", v: Math.round(r.cpuTemp) + "\u00b0", hot: r.cpuTemp >= 80 });
+        if (r.gpuName && r.gpuName.length > 0)
+            out.push({ l: "gpu", v: Math.round(r.gpu || 0) + "%", hot: (r.gpu || 0) >= 90 });
+        else if (r.netRx !== undefined)
+            out.push({ l: "net", v: item.rate(r.netRx), hot: false });
+        return out;
+    }
+    function rate(bytes) {
+        var b = bytes || 0;
+        if (b >= 1048576) return (b / 1048576).toFixed(1) + "M";
+        if (b >= 1024) return Math.round(b / 1024) + "K";
+        return Math.round(b) + "B";
+    }
+
     readonly property string unit: {
         switch (item.kind) {
         case "system":  return "cpu";
@@ -251,11 +344,7 @@ Item {
         case "clock":   return clk.date;
         case "weather": return (item.readings && item.readings.wxCond) ? item.readings.wxCond : "";
         case "media":   return item.player ? ("" + (item.player.trackArtist || "")) : "";
-        case "system": {
-            if (!item.readings || item.readings.memPct === undefined) return "";
-            var t = item.readings.cpuTemp ? ("   " + Math.round(item.readings.cpuTemp) + "°") : "";
-            return "mem " + Math.round(item.readings.memPct) + "%" + t;
-        }
+        case "system": return "";       // the readings row below carries the rest
         }
         return "";
     }
