@@ -97,5 +97,11 @@ fi
 # modeSource is "wallpaper", so this costs a python startup when it is not in use.
 mode="$(sibling sea-theme-from-wallpaper.sh)" && sh "$mode" "$wp" >/dev/null 2>&1 &
 
+# Where the desktop may put things without covering what you chose the wallpaper FOR.
+# Backgrounded like the rest: the wallpaper is already on screen by now, and nothing on the
+# desktop needs the map until the next time something is dragged. For a clip this measures
+# the still the indexer already extracted — no video is decoded here.
+quiet_map="$(sibling sea-wallpaper-quiet.py)" && python3 "$quiet_map" "$wp" >/dev/null 2>&1 &
+
 [ "$quiet" = "1" ] || notify-send 'sea-shell' "Wallpaper → $(basename "$wp")" 2>/dev/null
 exit 0

@@ -99,6 +99,48 @@ ShellRoot {
 
     // resident launcher — no process-spawn delay; open via `qs -c sea-shell ipc call launcher …`
     Launcher { id: launcher }
+    // ---------- the desktop ----------
+    // Bottom layer, one per monitor, above the wallpaper and below every window. Empty
+    // until something is put on it, which is why it can simply be on: an empty desktop
+    // draws nothing and — because its input region is its widgets — takes no clicks either.
+    property bool desktopEditing: false
+    readonly property string desktopScript: Qt.resolvedUrl("sea-desktop.py").toString().replace("file://","")
+    Process { id: desktopProc }
+    // The arrangement file must exist before anything can watch it changing.
+    Process {
+        id: desktopEnsure
+        command: ["python3", root.desktopScript, "--ensure"]
+        running: true
+    }
+    function desktopRun(args) {
+        desktopProc.command = ["python3", root.desktopScript].concat(args);
+        desktopProc.running = true;
+    }
+    Variants {
+        model: Quickshell.screens
+        Desktop {
+            required property var modelData
+            screen: modelData
+            pal: theme
+            uiFont: root.cfgFont
+            ui: root.uiFor(modelData)
+            editing: root.desktopEditing
+            // Nothing is ever parked under the bar, or under where the dock appears.
+            insetTop: root.cfgEdge === "top" ? root.cfgHeight + 6 : 6
+            insetBottom: root.cfgEdge === "bottom" ? root.cfgHeight + 6 : (root.cfgDock ? 78 : 6)
+        }
+    }
+    IpcHandler {
+        target: "desktop"
+        function arrange(): void { root.desktopEditing = !root.desktopEditing }
+        function done(): void { root.desktopEditing = false }
+        function addClock(): void { root.desktopRun(["--add-clock"]) }
+        function addApp(exec: string, label: string): void {
+            root.desktopRun(["--add-app", exec, "--label", label]);
+        }
+        function remove(id: string): void { root.desktopRun(["--remove", id]) }
+        function clear(): void { root.desktopRun(["--clear"]) }
+    }
     IpcHandler {
         target: "launcher"
         function toggle(): void { launcher.toggle() }
@@ -1079,6 +1121,23 @@ ShellRoot {
     // auto dark-mode schedule — sea-theme-schedule.sh flips `mode` in appearance.json
     // when the clock crosses the configured window; the FileView above then applies it.
     Process { id: themeSched; command: ["sh", Qt.resolvedUrl("sea-theme-schedule.sh").toString().replace("file://","")] }
+
+    // ---------- the global menu's supply ----------
+    // sea-appmenu.py follows Hyprland's focus events and rewrites a JSON snapshot of the
+    // focused window's menu bar; GlobalMenu.qml watches that file. Kept as a daemon rather
+    // than run per focus change because starting python and connecting to the accessibility
+    // bus costs more than the walk it then performs.
+    readonly property string appmenuScript: Qt.resolvedUrl("sea-appmenu.py").toString().replace("file://","")
+    Process {
+        id: appmenuDaemon
+        command: ["python3", root.appmenuScript, "--daemon"]
+        running: true
+        // It exits on its own if there is no accessibility bus to talk to, and a dead
+        // daemon simply means the snapshot stops changing — the bar falls back to the
+        // title, which is what it drew before any of this existed.
+        onExited: appmenuRevive.restart()
+    }
+    Timer { id: appmenuRevive; interval: 5000; onTriggered: appmenuDaemon.running = true }
     Timer { interval: 60000; running: true; repeat: true; triggeredOnStart: true; onTriggered: themeSched.running = true }
     // ---------- calendar events database ----------
     property var calEvents: []
@@ -3393,6 +3452,13 @@ ShellRoot {
                         card: theme.panel; accent: theme.iris; highlight: theme.frost; rim: theme.iris
                         MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: launcher.toggle() } }
                     Grid { property string lid: "lgWork"; x: leftGroup.xFor(lid); anchors.verticalCenter: parent.verticalCenter
+                        // A menu bar is long, and the left cluster is the only place it can go
+                        // without running into the media pill. So the workspaces stand down for
+                        // it: they are a glance, and the menu is something you are using right
+                        // now. They come straight back the moment the focused window has no menu
+                        // — which is most windows — and the left group measures only visible
+                        // children, so the menu simply starts where they were.
+                        visible: !gmenu.available
                         columns: 99
                         rowSpacing: 6; columnSpacing: 6
                         verticalItemAlignment: Grid.AlignVCenter
@@ -3498,10 +3564,26 @@ ShellRoot {
                             // old chip useless as well as unreadable.
                             onClicked: Hyprland.dispatch("hl.dsp.workspace.toggle_special('scratch')") }
                     }
+                    // The focused window's menu bar, when it has one. It shares lgTitle's slot
+                    // with the title below and the two are mutually exclusive, so the bar's
+                    // layout needs no new widget id and no settings migration: whichever of
+                    // the pair is visible is the one the left group measures.
+                    GlobalMenu {
+                        id: gmenu
+                        property string lid: "lgTitle"; x: leftGroup.xFor(lid); anchors.verticalCenter: parent.verticalCenter
+                        pal: theme
+                        uiFont: root.cfgFont
+                        script: root.appmenuScript
+                        screenName: bar.modelData ? bar.modelData.name : ""
+                        focusedMonitor: Hyprland.focusedMonitor ? Hyprland.focusedMonitor.name : ""
+                        ui: root.uiFor(bar.screen)
+                        barEdgeY: root.cfgHeight
+                    }
                     Text {
                         // the window title. Capped short so a long app class (e.g. electron apps)
                         // can't grow into the centre and push the media pill out — it's only a hint.
                         property string lid: "lgTitle"; x: leftGroup.xFor(lid); anchors.verticalCenter: parent.verticalCenter
+                        visible: !gmenu.available
                         width: Math.min(implicitWidth, 130); elide: Text.ElideRight
                         color: theme.faint; font.pixelSize: 12; font.family: root.cfgFont
                         text: {
