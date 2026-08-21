@@ -71,7 +71,7 @@ Scope {
     readonly property string dtScript: Qt.resolvedUrl("sea-desktop.py").toString().replace("file://","")
     property var dtItems: []
     property bool dtEditing: false
-    property bool dtAuto: true
+    property string dtAuto: "rescue"
     property string dtQuery: ""
     function dtRun(args) { Quickshell.execDetached(["python3", root.dtScript].concat(args)) }
     function dtIpc(fn) { Quickshell.execDetached(["qs", "-c", "sea-shell", "ipc", "call", "desktop", fn]) }
@@ -85,7 +85,8 @@ Scope {
                 var t = text();
                 var j = (t && t.trim()) ? JSON.parse(t) : null;
                 root.dtItems = (j && j.items) ? j.items : [];
-                root.dtAuto = !(j && j.autoArrange === false);
+                var a = (j && j.autoArrange !== undefined) ? j.autoArrange : "rescue";
+                root.dtAuto = (a === true) ? "rescue" : (a === false) ? "off" : ("" + a);
             } catch (e) { root.dtItems = [] }
         }
         onFileChanged: apply()
@@ -4663,7 +4664,7 @@ Scope {
 
                             Section { title: "arranging"; icon: "drag_pan" }
                             Text {
-                                text: "while arranging, drag anything on the desktop. shaded areas are where the shell thinks your wallpaper has something in it — a widget dropped there moves aside unless you hold shift, which also pins it. with follow-wallpaper on, anything a NEW wallpaper covers moves itself out of the way; pinned widgets never move."
+                                text: "while arranging, drag anything on the desktop. shaded areas are where the shell thinks your wallpaper has something in it — a widget dropped there moves aside unless you hold shift, which also pins it. follow-wallpaper: RESCUE moves only what a new wallpaper actually covers, and only as far as it must — often nothing, which is correct. ARRANGE re-places everything in the calmest space of every new picture. pinned widgets never move."
                                 color: theme.faint; font.pixelSize: 10; font.family: Tok.mono
                                 wrapMode: Text.WordWrap
                                 Layout.leftMargin: 14; Layout.rightMargin: 14; Layout.fillWidth: true
@@ -4680,10 +4681,14 @@ Scope {
                                     }
                                 }
                                 Chip {
-                                    label: "follow wallpaper"
+                                    label: "follow wallpaper: " + root.dtAuto
                                     icon: "auto_awesome_motion"
-                                    on: root.dtAuto
-                                    onPicked: root.dtRun(["--auto", root.dtAuto ? "off" : "on"])
+                                    on: root.dtAuto !== "off"
+                                    onPicked: {
+                                        var o = ["rescue", "arrange", "off"];
+                                        var i = o.indexOf(root.dtAuto);
+                                        root.dtRun(["--auto", o[(i + 1) % o.length]]);
+                                    }
                                 }
                                 Item { Layout.fillWidth: true }
                             }

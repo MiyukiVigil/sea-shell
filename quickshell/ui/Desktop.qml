@@ -36,6 +36,23 @@ PanelWindow {
     // Readings for the widgets, supplied by the bar (see shell.qml).
     property var readings: ({})
     property var player: null
+
+    // A short history of load, so the system widget can draw a trace rather than a number.
+    // Sampled here rather than in each widget: one buffer, one cadence, and every system
+    // widget on every monitor shows the same line.
+    property var cpuHistory: []
+    Timer {
+        interval: 2000
+        running: true
+        repeat: true
+        triggeredOnStart: true
+        onTriggered: {
+            var v = (root.readings && root.readings.cpu !== undefined) ? root.readings.cpu : 0;
+            var h = root.cpuHistory.slice(-39);
+            h.push(Math.max(0, Math.min(100, v)));
+            root.cpuHistory = h;
+        }
+    }
     // Kept clear at the top and bottom so nothing is ever parked under the bar or the dock.
     property int insetTop: 0
     property int insetBottom: 0
@@ -243,6 +260,7 @@ PanelWindow {
                 // What the wallpaper is doing under this item, so it can decide whether it
                 // needs a ground at all. Same map, same threshold as the placement nudge.
                 busy: root.busyAt(modelData.x, modelData.y, modelData.w, modelData.h)
+                history: root.cpuHistory
                 fieldW: root.sw
                 fieldH: root.sh - root.insetTop - root.insetBottom
                 fieldY: root.insetTop

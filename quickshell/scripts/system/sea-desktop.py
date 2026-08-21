@@ -22,7 +22,7 @@ arrange with a mouse.
     --set ID [--ground bare|rule|panel] [--tone accent|frost|green|amber|red|plain]
             [--align left|centre|right] [--size small|medium|large]
     --resettle                      move whatever the new wallpaper covers
-    --auto on|off                   whether the desktop follows the wallpaper
+    --auto off|rescue|arrange       how hard the desktop follows the wallpaper
     --pin ID | --unpin ID           keep one widget where it is, or release it
 
 New items are placed in the calmest spot the wallpaper has left — sea-wallpaper-quiet.py
@@ -54,13 +54,31 @@ KINDS = ("clock", "weather", "media", "system")
 SIZES = {"small": 0.75, "medium": 1.0, "large": 1.4}
 
 
+AUTO_MODES = ("off", "rescue", "arrange")
+
+
 def auto_arrange():
-    """Whether the desktop follows the wallpaper. On unless explicitly turned off."""
+    """How hard the desktop follows the wallpaper.
+
+    off      never move anything.
+    rescue   move only what the new wallpaper has put something under, and only to the
+             NEAREST clear spot. The default, and usually invisible — which is correct and
+             also why it can look like nothing happened: if your widgets live in corners,
+             most wallpapers never cover them.
+    arrange  re-place every unpinned widget in the calmest space the new picture has. Visibly
+             rearranges on every change. Some people want that; it is not the default because
+             an arrangement that moves when it did not have to is not an arrangement.
+    """
     try:
         with open(CONF) as fh:
-            return (json.load(fh) or {}).get("autoArrange", True) is not False
+            v = (json.load(fh) or {}).get("autoArrange", "rescue")
     except Exception:
-        return True
+        return "rescue"
+    if v is True:
+        return "rescue"
+    if v is False:
+        return "off"
+    return v if v in AUTO_MODES else "rescue"
 
 
 def load():
@@ -183,11 +201,33 @@ def busy_at(q, x, y, w, h):
     return (tot / n) / 255.0 if n else 0.0
 
 
-def resettle():
-    """Move anything the new wallpaper has put something under. Returns what moved."""
+def zone_for(q, it, others):
+    """A pre-solved quiet rectangle for this widget, if one is free.
+
+    sea-wallpaper-quiet.py already searched every position for a few common footprints and
+    kept the calmest NON-OVERLAPPING handful. Reusing that is what makes arrange mode look
+    composed rather than random: the widgets land in the spaces the picture actually has.
+    """
+    gw, gh, _ = q
+    try:
+        with open(QUIET) as fh:
+            zones = (json.load(fh) or {}).get("zones") or {}
+    except Exception:
+        return None
+    w, h = it.get("w", 0.1), it.get("h", 0.08)
+    for z in zones.get(ZONE_FOR.get(it.get("kind"), "16x9"), []):
+        nx, ny = clamp(z["x"] / gw, w), clamp(z["y"] / gh, h)
+        if any(overlaps({"x": nx, "y": ny, "w": w, "h": h}, o) for o in others):
+            continue
+        return nx, ny
+    return None
+
+
+def resettle(mode="rescue"):
+    """Move what the new wallpaper covers. Returns what moved."""
     q = quiet_map()
     items = load()
-    if q is None or not items:
+    if q is None or not items or mode == "off":
         return []
     gw, gh, _ = q
     moved = []
@@ -195,7 +235,8 @@ def resettle():
         if it.get("pinned"):
             continue
         w, h = it.get("w", 0.1), it.get("h", 0.08)
-        if busy_at(q, it["x"], it["y"], w, h) <= BUSY_LIMIT:
+        here = busy_at(q, it["x"], it["y"], w, h)
+        if mode == "rescue" and here <= BUSY_LIMIT:
             continue
         others = [o for k, o in enumerate(items) if k != i]
         # Every position on the grid, nearest first. 5184 candidates is nothing, and
@@ -206,12 +247,32 @@ def resettle():
                 nx, ny = clamp(gx / gw, w), clamp(gy / gh, h)
                 d = (nx - it["x"]) ** 2 + (ny - it["y"]) ** 2
                 cands.append((d, nx, ny))
-        cands.sort()
+        if mode == "arrange":
+            # Sorting every cell by calmness does NOT work here, and it is worth saying why:
+            # on a typical wallpaper thousands of cells tie at the same rounded score, the
+            # distance tie-break then wins, and the widget stays exactly where it was — an
+            # "arrange" mode that provably never moves anything. So arrange uses the composed
+            # zones the map already solved: a handful of genuinely separated quiet rectangles
+            # per footprint, which is a LAYOUT rather than an argmin.
+            placed = zone_for(q, it, others)
+            if placed is None:
+                cands.sort()
+            else:
+                nx, ny = placed
+                if abs(nx - it["x"]) > 1e-4 or abs(ny - it["y"]) > 1e-4:
+                    moved.append({"id": it.get("id"), "from": [it["x"], it["y"]],
+                                  "to": [nx, ny]})
+                    it["x"], it["y"] = round(nx, 4), round(ny, 4)
+                continue
+        else:
+            cands.sort()
         for _, nx, ny in cands:
             if busy_at(q, nx, ny, w, h) > BUSY_LIMIT:
                 continue
             if any(overlaps({"x": nx, "y": ny, "w": w, "h": h}, o) for o in others):
                 continue
+            if abs(nx - it["x"]) < 1e-4 and abs(ny - it["y"]) < 1e-4:
+                break                                    # already the right place
             moved.append({"id": it.get("id"), "from": [it["x"], it["y"]], "to": [nx, ny]})
             it["x"], it["y"] = round(nx, 4), round(ny, 4)
             break
@@ -304,15 +365,17 @@ def main(argv):
         return 0
     if "--auto" in argv:
         want = (arg(argv, "--auto") or "").lower()
-        if want not in ("on", "off"):
-            sys.stderr.write("sea-desktop: --auto takes on or off\n")
+        if want == "on":
+            want = "rescue"
+        if want not in AUTO_MODES:
+            sys.stderr.write("sea-desktop: --auto takes %s\n" % " | ".join(AUTO_MODES))
             return 2
         try:
             with open(CONF) as fh:
                 j = json.load(fh) or {}
         except Exception:
             j = {"v": 1, "items": []}
-        j["autoArrange"] = (want == "on")
+        j["autoArrange"] = want
         os.makedirs(os.path.dirname(CONF), exist_ok=True)
         fd, tmp = tempfile.mkstemp(dir=os.path.dirname(CONF), prefix=".desktop-")
         with os.fdopen(fd, "w") as fh:
@@ -331,10 +394,8 @@ def main(argv):
         print("%s %s" % ("pinned" if want else "unpinned", wid))
         return 0
     if "--resettle" in argv:
-        if not auto_arrange():
-            print(json.dumps({"moved": [], "why": "auto-arrange is off"}))
-            return 0
-        print(json.dumps({"moved": resettle()}))
+        mode = arg(argv, "--mode") or auto_arrange()
+        print(json.dumps({"mode": mode, "moved": resettle(mode)}))
         return 0
     if "--clear" in argv:
         save([], allow_empty=True)

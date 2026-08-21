@@ -31,6 +31,7 @@ import Quickshell
 import Quickshell.Io
 import Quickshell.Widgets
 import QtQuick
+import QtQuick.Layouts
 
 Item {
     id: item
@@ -45,6 +46,7 @@ Item {
     property var player: null
     // 0 = the wallpaper is empty here, 1 = there is something under this widget.
     property real busy: 0
+    property var history: []
     property real fieldW: 1920
     property real fieldH: 1000
     property real fieldY: 0
@@ -77,6 +79,16 @@ Item {
         case "frost": return item.pal.frost;
         }
         return item.pal.iris;
+    }
+    // The figure's colour states a FACT and is not a preference: a load that has gone
+    // critical says so even if you asked for green. `tone` colours the accent furniture —
+    // the mark on the rule, the trace — which is where taste belongs.
+    readonly property string severity: {
+        if (item.kind !== "system" || !item.readings || item.readings.cpu === undefined)
+            return "neutral";
+        if (item.readings.cpu >= 85) return "crit";
+        if (item.readings.cpu >= 60) return "warn";
+        return "neutral";
     }
     readonly property int hAlign: item.align === "centre" ? Text.AlignHCenter
                                 : item.align === "right"  ? Text.AlignRight : Text.AlignLeft
@@ -118,40 +130,33 @@ Item {
     }
 
     // ---------- the read-out ----------
-    // One shape for every widget — label, rule, figure, detail — so adding a kind is three
-    // strings and never a new layout. That is also what keeps four widgets looking like one
-    // instrument instead of four applications.
-    Column {
+    //
+    // BUILT FROM THE SHELL'S OWN PARTS. The first version of this hand-rolled Text elements
+    // that happened to look tidy, and it read as generic — because it was. IndKpi, IndLabel,
+    // IndRule and IndSpark are what every other surface in sea-shell is made of, so using
+    // them is not reuse for its own sake: it is the only way the desktop belongs to the same
+    // instrument as the bar and the panels.
+    ColumnLayout {
         anchors.left: parent.left
         anchors.right: parent.right
         anchors.verticalCenter: parent.verticalCenter
         spacing: 3
         visible: item.kind !== "launch"
 
-        Text {
-            id: capText
-            width: parent.width
-            horizontalAlignment: item.hAlign
+        IndLabel {
             text: item.caption
             visible: text.length > 0 && item.ground !== "bare"
-            color: item.ink2
-            font.family: Tok.mono
-            font.pixelSize: Math.max(8, Math.min(11, item.height * 0.13))
-            font.weight: 600
-            font.letterSpacing: 1.15
-            font.capitalization: Font.AllUppercase
-            renderType: Text.NativeRendering
+            Layout.fillWidth: true
+            horizontalAlignment: item.hAlign
         }
 
-        // The rule, and the one piece of colour in the whole widget. A hairline on its own
-        // is a divider; a hairline that starts with a short accent segment is a mark, and
-        // that is the difference between text lying on a picture and text placed on one.
-        //
-        // On the CLOCK the accent segment is not decoration — it is the minute, filling
-        // left to right as it passes. An instrument's rule should be doing something.
+        // The rule, and the one piece of colour in the widget. A hairline alone is a
+        // divider; a hairline that begins with a short accent segment is a mark. On the
+        // CLOCK that segment is the minute, filling as it passes — an instrument's rule
+        // should be doing something.
         Item {
-            width: parent.width
-            height: 1
+            Layout.fillWidth: true
+            implicitHeight: 1
             visible: item.ground !== "bare"
             Rectangle { anchors.fill: parent; color: item.hair }
             Rectangle {
@@ -166,31 +171,51 @@ Item {
             }
         }
 
-        Text {
-            width: parent.width
-            horizontalAlignment: item.hAlign
-            text: item.figure
-            color: item.ink
-            font.family: Tok.mono
-            font.pixelSize: Math.max(15, item.height * item.figureScale)
-            font.weight: 500
-            // Tabular figures: a value that changes width as it counts makes the whole
-            // desktop twitch once a second.
-            font.features: ({ "tnum": 1 })
-            renderType: Text.NativeRendering
-            elide: Text.ElideRight
+        // Short values get the house KPI: label, figure, unit, detail, already tabular and
+        // already tone-aware.
+        IndKpi {
+            visible: item.kind === "system" || item.kind === "weather"
+            Layout.fillWidth: true
+            label: ""                                   // the rule above already carries it
+            value: item.figure
+            unit: item.unit
+            sub: item.detail
+            tone: item.severity
+            size: Math.max(15, Math.round(item.height * item.figureScale))
         }
-        Text {
-            width: parent.width
-            horizontalAlignment: item.hAlign
-            text: item.detail
-            visible: text.length > 0
-            color: item.ink2
-            font.family: Tok.mono
-            font.pixelSize: Math.max(8, Math.min(12, item.height * 0.12))
-            font.features: ({ "tnum": 1 })
-            renderType: Text.NativeRendering
+
+        // A load figure with no history is a number; with one it is an instrument.
+        IndSpark {
+            visible: item.kind === "system" && item.history.length > 1
+            Layout.fillWidth: true
+            implicitHeight: Math.max(12, item.height * 0.22)
+            values: item.history
+            stroke: item.accent
+            ground: "transparent"
+        }
+
+        // Long values (a track title) cannot use IndKpi — its figure has no width to elide
+        // against, and a title is exactly the thing that will be too long.
+        IndText {
+            visible: item.kind === "clock" || item.kind === "media"
+            Layout.fillWidth: true
+            mono: true
+            sz: Math.max(15, Math.round(item.height * item.figureScale))
+            text: item.figure
+            font.weight: 500
+            color: Tok.ink
             elide: Text.ElideRight
+            horizontalAlignment: item.hAlign
+        }
+        IndText {
+            visible: (item.kind === "clock" || item.kind === "media") && item.detail.length > 0
+            Layout.fillWidth: true
+            mono: true
+            sz: Tok.tData
+            text: item.detail
+            color: Tok.ink3
+            elide: Text.ElideRight
+            horizontalAlignment: item.hAlign
         }
     }
 
@@ -201,6 +226,13 @@ Item {
         case "weather": return "weather";
         case "media":   return "playing";
         case "system":  return "system";
+        }
+        return "";
+    }
+    readonly property string unit: {
+        switch (item.kind) {
+        case "system":  return "cpu";
+        case "weather": return "";
         }
         return "";
     }

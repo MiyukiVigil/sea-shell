@@ -8,8 +8,12 @@ Item {
     property var values: []
     property color stroke: Tok.accent
     property real max: 100
+    // The trace normally sits in a sunken well, which is right inside a panel and wrong on
+    // a wallpaper — there it reads as a black bar someone left on the picture. Callers on
+    // the desktop pass "transparent" and keep only the baseline and the trace.
+    property color ground: Tok.sunken
 
-    Rectangle { anchors.fill: parent; color: Tok.sunken }
+    Rectangle { anchors.fill: parent; color: sp.ground }
 
     // 50% reference line — without it a sparkline has no scale at all
     Rectangle {
