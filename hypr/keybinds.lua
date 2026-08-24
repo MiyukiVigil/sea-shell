@@ -44,6 +44,13 @@ hl.bind("ALT + SHIFT + Tab", hl.dsp.exec_cmd("qs -c sea-shell ipc call switcher 
 hl.bind("ALT + Escape",      hl.dsp.exec_cmd("qs -c sea-shell ipc call switcher cancel"))
 hl.bind("ALT + Alt_L",       hl.dsp.exec_cmd("qs -c sea-shell ipc call switcher commit"), { release = true })
 
+-- ---------------- global menu ----------------
+-- The focused window's own menu bar, drawn in the bar. Opens at the first menu; arrows walk
+-- it, "/" searches it, Escape backs out one level at a time. Shows nothing for a window that
+-- exports no menu bar, which is most terminals and any Electron app with an HTML titlebar.
+hl.bind(mod .. " + M",         hl.dsp.exec_cmd("qs -c sea-shell ipc call menu open"),   { description = "Global menu" })
+hl.bind(mod .. " + SHIFT + M", hl.dsp.exec_cmd("qs -c sea-shell ipc call menu search"), { description = "Search the window's menus" })
+
 -- ---------------- window management ----------------
 hl.bind(mod .. " + F",         hl.dsp.window.fullscreen({ mode = "maximized",  action = "toggle" }), { description = "Maximize" })
 hl.bind(mod .. " + SHIFT + F", hl.dsp.window.fullscreen({ mode = "fullscreen", action = "toggle" }), { description = "True fullscreen" })

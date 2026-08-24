@@ -165,6 +165,80 @@ ShellRoot {
         function clipboard(): void { launcher.open(";") }
     }
 
+    // ---------- the sea menu (the logo) ----------
+    //
+    // The mark used to be a second way to open the launcher, which SUPER+Space and
+    // CTRL+Space already do. In a bar that now draws the focused window's menus, the
+    // leftmost item is where the SYSTEM's menu belongs — the same place, and the same job,
+    // as the apple on a mac: who am I, my settings, and the ways this session ends. The
+    // launcher stays on the list because taking a click away from someone is rude.
+    readonly property string seaScripts: Quickshell.env("HOME") + "/.config/quickshell/sea-shell/"
+    // EVERY ROW SAYS HOW ELSE TO GET THERE. A system menu that only works with the pointer
+    // teaches nothing; one that prints the keybind beside each entry is how people stop
+    // needing it. The shortcuts are the real ones from keybinds.lua, not a wish list.
+    //
+    // NO TRAILING DOTS AT ALL. The convention is real — an ellipsis means "this one asks you
+    // something first" — but here it distinguished almost nothing (nearly every row opens
+    // something) while the bar font rendered it as three dots hovering at mid-height, well
+    // clear of the word they belong to. It was noise that read as a rendering fault, so the
+    // shortcut column carries the information instead.
+    readonly property var seaMenuItems: [
+        { id: "about",    label: "About sea-shell",  icon: "sailing" },
+        { id: "settings", label: "Settings",      icon: "tune",             key: "Super+S" },
+        { sep: true },
+        { id: "dash",     label: "Dashboard",        icon: "space_dashboard",  key: "Super+D" },
+        { id: "wall",     label: "Wallpaper",     icon: "wallpaper",        key: "Super+Shift+W" },
+        { id: "keys",     label: "Keybinds",      icon: "keyboard",         key: "Super+K" },
+        { sep: true },
+        { id: "launcher", label: "Applications",  icon: "apps",             key: "Super+Space" },
+        { sep: true },
+        { id: "lock",     label: "Lock Screen",      icon: "lock",             key: "Super+Alt+L" },
+        { id: "sleep",    label: "Sleep",            icon: "bedtime" },
+        { id: "power",    label: "Power",         icon: "power_settings_new", key: "Super+Esc" }
+    ]
+    function seaMenuRun(id) {
+        root.openPop = "";
+        // openTab, not open(): settings.qml's root exposes openPanel/openTab/closePanel and has
+        // never had an open() — calling it threw a TypeError and the item simply did nothing.
+        // The two land on different tabs on purpose. System (8) IS the about page — it carries
+        // the version badge — so pointing "Settings…" there as well would give the menu two
+        // items that do exactly the same thing; it opens Appearance instead, and the nav down
+        // the side of the panel is right there for everything else.
+        if (id === "about")    { settingsLoader.item && settingsLoader.item.openTab(8); return }
+        if (id === "settings") { settingsLoader.item && settingsLoader.item.openTab(4); return }
+        if (id === "launcher") { launcher.toggle(); return }
+        var sh = function (c) { Quickshell.execDetached(["sh", "-c", c]) };
+        if (id === "dash")  sh(root.seaScripts + "sea-toggle.sh Dashboard");
+        if (id === "wall")  sh(root.seaScripts + "sea-toggle.sh wallpaper");
+        if (id === "keys")  sh(root.seaScripts + "sea-toggle.sh keybinds");
+        if (id === "lock")  sh(root.seaScripts + "sea-lock.sh");
+        if (id === "sleep") sh("systemctl suspend");
+        // Restart / shut down / log out live behind the power menu, which asks first.
+        // A shut-down that fires straight off a menu click is how you lose work.
+        if (id === "power") sh(root.seaScripts + "sea-toggle.sh power");
+    }
+
+    // ---------- the global menu, from the keyboard ----------
+    // A menu bar that can only be reached with the pointer is half a menu bar, and the strip
+    // lives on whichever monitor has focus — which is not something an IpcHandler out here
+    // can address directly, because each bar builds its own GlobalMenu inside a per-screen
+    // delegate. So the request is a counter that every strip watches; the one that is on the
+    // focused screen acts on it and the rest ignore it. A counter rather than a bool because
+    // two presses in a row have to be two events.
+    property int gmenuOpenPing: 0
+    property int gmenuSearchPing: 0
+    IpcHandler {
+        target: "menu"
+        // open the focused window's menu bar at its first menu (SUPER+M)
+        function open(): void { root.gmenuOpenPing++ }
+        // go straight to the command search over it (SUPER+SHIFT+M)
+        function search(): void { root.gmenuSearchPing++ }
+        // the system menu under the mark, the way ctrl-F2 reaches the apple menu
+        function sea(): void {
+            root.openPop = (root.openPop === "sea") ? "" : "sea";
+        }
+    }
+
     // resident settings (control center) — preloaded in the background so opening is instant
     // instead of spawning a ~0.5s `qs -p settings.qml`. Toggle via its own "settings" IPC
     // (SUPER+S) or, in-process, settingsLoader.item.openTab(n). asynchronous → never blocks
@@ -1170,16 +1244,81 @@ ShellRoot {
     }
 
     readonly property string appmenuScript: Qt.resolvedUrl("sea-appmenu.py").toString().replace("file://","")
+    // The global menu's own settings, shared with the sidecar — it re-reads this file on
+    // every pass, so the background-reading switch takes effect without a restart. Kept out
+    // of appearance.json for exactly that reason: python should not have to parse the bar's
+    // theme to find out whether it may open a menu.
+    property bool gmenuEnabled: true
+    property bool gmenuAccel: true
+    property bool gmenuPrime: false
+    // Flip the strip on or off and remember it. Writes the same file Settings owns, whole,
+    // so a right-click never silently drops the other two switches.
+    property double gmenuLastToggle: 0
+    function gmenuToggle() {
+        // SPAMMING THIS USED TO WEDGE IT. Two toggles in the same instant meant two shell
+        // writes in flight over one file, and `> file` truncates before it writes — so the
+        // watcher below could read the empty middle of one of them, fail to parse, and fall
+        // back to defaults that no longer matched what was on disk. After that every further
+        // toggle flipped from the wrong value. The write is now atomic (temp file, then
+        // rename, which is what the sidecar has always done) and a second toggle inside
+        // 250ms is ignored, because nobody means two.
+        var now = Date.now();
+        if (now - root.gmenuLastToggle < 250) return;
+        root.gmenuLastToggle = now;
+        root.gmenuEnabled = !root.gmenuEnabled;
+        var j = JSON.stringify({ enabled: root.gmenuEnabled,
+                                 accelerators: root.gmenuAccel,
+                                 prime: root.gmenuPrime });
+        Quickshell.execDetached(["sh", "-c",
+            "d=\"$HOME/.config/sea-shell\"; mkdir -p \"$d\"; "
+            + "printf %s " + JSON.stringify(Qt.btoa(j))
+            + " | base64 -d > \"$d/.appmenu.tmp\" && mv -f \"$d/.appmenu.tmp\" \"$d/appmenu.json\""]);
+    }
+    FileView {
+        id: appmenuCfg
+        path: Quickshell.env("HOME") + "/.config/sea-shell/appmenu.json"
+        watchChanges: true
+        function apply() {
+            try {
+                reload();
+                var t = text();
+                var j = (t && t.trim()) ? JSON.parse(t) : {};
+                root.gmenuEnabled = (j.enabled === undefined) ? true : !!j.enabled;
+                root.gmenuAccel   = (j.accelerators === undefined) ? true : !!j.accelerators;
+                root.gmenuPrime   = (j.prime === undefined) ? false : !!j.prime;
+            } catch (e) {
+                // KEEP WHAT WE HAVE. An unreadable file here is almost always a write caught
+                // half-done, not a request to go back to defaults — and resetting on it is
+                // what made a burst of toggles end up disagreeing with the file on disk.
+            }
+        }
+        onFileChanged: apply()
+        onLoaded: apply()
+        Component.onCompleted: apply()
+    }
     Process {
         id: appmenuDaemon
         command: ["python3", root.appmenuScript, "--daemon"]
+        // Switched off means OFF, not merely hidden: the sidecar walks an accessibility tree
+        // on every focus change, and there is no reason to pay for that when nothing draws
+        // the result.
+        // NOT `running: root.gmenuEnabled`. The revive timer below assigns `running` by
+        // hand, and in QML an imperative assignment DESTROYS the binding on that property —
+        // so after the first revive the daemon stopped following the setting entirely and
+        // could never be switched off again. Driving both from one handler keeps the single
+        // source of truth without a binding for anything to clobber.
         running: true
         // It exits on its own if there is no accessibility bus to talk to, and a dead
         // daemon simply means the snapshot stops changing — the bar falls back to the
         // title, which is what it drew before any of this existed.
-        onExited: appmenuRevive.restart()
+        onExited: if (root.gmenuEnabled) appmenuRevive.restart()
     }
-    Timer { id: appmenuRevive; interval: 5000; onTriggered: appmenuDaemon.running = true }
+    onGmenuEnabledChanged: {
+        appmenuDaemon.running = root.gmenuEnabled;
+        if (!root.gmenuEnabled) appmenuRevive.stop();
+    }
+    Timer { id: appmenuRevive; interval: 5000
+        onTriggered: if (root.gmenuEnabled) appmenuDaemon.running = true }
     Timer { interval: 60000; running: true; repeat: true; triggeredOnStart: true; onTriggered: themeSched.running = true }
     // ---------- calendar events database ----------
     property var calEvents: []
@@ -3123,7 +3262,11 @@ ShellRoot {
             default: return a.charAt(0) === "#" ? a : pill.accent;
             }
         }
-        readonly property bool vert: false
+        // SETTABLE. This was `readonly ... : false`, which meant the vertical branches below
+        // — the stacked layout, the shared column width, the compact value — could never be
+        // reached by anything. A side bar therefore had to hand-write its own pills, and did,
+        // fourteen times over. See the note on verticalBarLayout for what that cost.
+        property bool vert: false
         // On a vertical bar the pill becomes a capsule with the icon stacked over the value.
         // The value only shows when short enough to fit the narrow bar (a long string like the
         // full date would overflow) — so pills like battery/volume keep their readout while the
@@ -3144,6 +3287,20 @@ ShellRoot {
         radius: pill.vert ? Math.min(13, height/2) : height/2
         opacity: pill.overflowed ? 0 : 1
         enabled: !pill.overflowed
+        // ---- micro-motion ----
+        // A pill that changes width (the clock crossing 9:59→10:00, the update count, the
+        // menu strip changing window) used to jump, and because the left/right groups lay
+        // themselves out by summing their children's widths, every widget after it jumped
+        // with it. Animating the width makes the whole cluster slide over to make room,
+        // which is the single change that stops the bar reading as a redrawn image.
+        Behavior on width { NumberAnimation { duration: Tok.mFast
+                                              easing.type: Easing.Bezier
+                                              easing.bezierCurve: Tok.mMove } }
+        Behavior on opacity { NumberAnimation { duration: Tok.mFast } }
+        // Presses answer. 6% for 90ms — under the threshold where you would call it an
+        // animation, over the one where the button feels dead.
+        scale: pm.pressed ? 0.94 : 1.0
+        Behavior on scale { NumberAnimation { duration: Tok.mMicro; easing.type: Easing.OutCubic } }
         // Hover and open still read on all three grounds — a bare pill that gave no feedback
         // would look like a label rather than a control.
         color: pill.sGround === "filled" ? (pill.hot ? theme.a(theme.iris,0.18) : theme.a(theme.line,0.42))
@@ -3151,7 +3308,8 @@ ShellRoot {
              : "transparent"
         border.width: pill.sGround === "bare" ? 0 : 1
         border.color: pill.hot ? theme.a(theme.iris,0.55) : theme.a(theme.iris,0.16)
-        Behavior on color { ColorAnimation { duration: 120 } }
+        Behavior on color { ColorAnimation { duration: Tok.mFast } }
+        Behavior on border.color { ColorAnimation { duration: Tok.mFast } }
 
 
         // Grid (not Row) so the icon + value sit side-by-side (horizontal bar) or stacked
@@ -3272,7 +3430,12 @@ ShellRoot {
         }
         Timer { id: holdTimer; interval: 90; onTriggered: dw.held = false }
         Component.onCompleted: dw.held = dw.shown
-        NumberAnimation { id: openAnim; target: cardBg; property: "openAnimFactor"; to: 1.0; duration: 165; easing.type: Easing.OutCubic }
+        // Emphasized-decelerate: it leaves the bar quickly and settles, which is what makes a
+        // card read as having been THROWN from the pill rather than faded up in place. Same
+        // curve everything else in the shell now enters on.
+        NumberAnimation { id: openAnim; target: cardBg; property: "openAnimFactor"; to: 1.0
+                          duration: Tok.mBase
+                          easing.type: Easing.Bezier; easing.bezierCurve: Tok.mEnter }
 
         // Fade the WHOLE window content (card gradient AND the text columns, which are
         // siblings of cardBg) as one. Fading only cardBg.opacity left the text at full
@@ -3306,6 +3469,13 @@ ShellRoot {
                 return dw.hostGY + dw.hostNH + 8 - slide;   // top bar
             }
             radius: Tok.rCard
+            // A hair of growth on the way in, anchored to the edge the card came from, so the
+            // slide has some weight behind it. 1.5% — enough to feel, small enough that the
+            // text never visibly resamples.
+            scale: 0.985 + 0.015 * cardBg.openAnimFactor
+            transformOrigin: root.cfgEdge === "bottom" ? Item.Bottom
+                           : root.cfgEdge === "left"   ? Item.Left
+                           : root.cfgEdge === "right"  ? Item.Right : Item.Top
             // Flat, and translucent in step with the bar: dropOpacity tracks cfgOpacity so the
             // cards and the bar read as one material. What was removed is the DECORATION that
             // used to ride on top — a two-stop gradient, a "matte-glass" rim and a white
@@ -3475,28 +3645,116 @@ ShellRoot {
                     implicitWidth: leftGroup.spanW()
                     width: implicitWidth
                     function oidx(w) { var i = leftGroup.order ? leftGroup.order.indexOf(w) : -1; return i < 0 ? 999 : i; }
+                    // BOTH `visible` AND `width` ARE READ FOR EVERY CHILD, EVERY TIME, and the
+                    // short-circuit only happens after. A QML binding re-runs when a property
+                    // it actually READ during its last evaluation changes, and the old
+                    // `!c.visible || c.width <= 0` never reached the width of a hidden child —
+                    // so once a child had been skipped while hidden, its later width was
+                    // invisible to this sum and every widget after it stayed at a stale x.
+                    // It survived because the left cluster rarely changes shape mid-session;
+                    // the global menu changes it on every focus change, which is enough to
+                    // hit it.
                     function xFor(w) {
                         var kids = leftGroup.children, myi = leftGroup.oidx(w), sum = 0;
                         for (var k = 0; k < kids.length; k++) { var c = kids[k];
-                            if (!c || c.lid === undefined || !c.visible || c.width <= 0) continue;
-                            if (leftGroup.oidx(c.lid) < myi) sum += c.width + leftGroup.gap;
+                            if (!c || c.lid === undefined) continue;
+                            var vis = c.visible, cw = c.width;
+                            if (!vis || cw <= 0) continue;
+                            if (leftGroup.oidx(c.lid) < myi) sum += cw + leftGroup.gap;
                         }
                         return sum;
                     }
                     function spanW() {
                         var kids = leftGroup.children, tot = 0;
                         for (var k = 0; k < kids.length; k++) { var c = kids[k];
-                            if (!c || c.lid === undefined || !c.visible || c.width <= 0) continue;
-                            tot += c.width + leftGroup.gap;
+                            if (!c || c.lid === undefined) continue;
+                            var vis = c.visible, cw = c.width;
+                            if (!vis || cw <= 0) continue;
+                            tot += cw + leftGroup.gap;
                         }
                         return Math.max(0, tot - leftGroup.gap);
                     }
-                    BarLogo { property string lid: "lgLogo"; x: leftGroup.xFor(lid); anchors.verticalCenter: parent.verticalCenter
+                    BarLogo { id: seaMark
+                        property string lid: "lgLogo"; x: leftGroup.xFor(lid); anchors.verticalCenter: parent.verticalCenter
                         size: 24
                         kind: root.logoKind
                         imagePath: root.cfgBarLogoPath
                         card: theme.panel; accent: theme.iris; highlight: theme.frost; rim: theme.iris
-                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: launcher.toggle() } }
+                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                            acceptedButtons: Qt.LeftButton | Qt.RightButton
+                            // Right-click still goes straight to the launcher, so the old
+                            // one-click habit has somewhere to land.
+                            onClicked: (e)=> {
+                                if (e.button === Qt.RightButton) { launcher.toggle(); return }
+                                root.openPop = (root.openPop === "sea") ? "" : "sea";
+                            } } }
+                    Drop { screen: bar.screen
+                        id: seaDrop; host: root.barVertical ? logoVert : seaMark
+                        // NOT `root.openBar === bar`. That is the right test for a pill,
+                        // because a pill click can say which bar it belongs to — but the
+                        // sea menu also opens from an IPC call and a keybind, where there
+                        // is no pill and nothing to compare against. Each bar deciding for
+                        // itself whether it owns the focused monitor needs no such handoff.
+                        shown: root.openPop === "sea" && bar.modelData
+                               && Hyprland.focusedMonitor
+                               && bar.modelData.name === Hyprland.focusedMonitor.name
+                        cardW: 300
+                        cardH: seaCol.implicitHeight + 12
+                        // Drawn to the same rules as the window menus next to it: rows inset
+                        // from the card so the highlight is a pill rather than a band, a
+                        // FILLED accent for the row under the pointer with Tok.accentInk on
+                        // top, separators inset to the text, and the shortcut flush right in
+                        // mono so the column lines up. The system menu sitting beside the
+                        // application menus and looking like a different program was the
+                        // thing to fix.
+                        Column { id: seaCol; anchors.fill: seaDrop.card; anchors.margins: 6; spacing: 0
+                            Repeater {
+                                model: root.seaMenuItems
+                                delegate: Item {
+                                    id: smRow
+                                    required property var modelData
+                                    readonly property bool isSep: !!modelData.sep
+                                    readonly property bool lit: !smRow.isSep && smMa.containsMouse
+                                    width: seaCol.width
+                                    height: isSep ? 9 : 26
+                                    Rectangle { anchors.verticalCenter: parent.verticalCenter
+                                        visible: smRow.isSep
+                                        x: 10; width: Math.max(0, parent.width - 20); height: 1
+                                        color: theme.a(theme.line, 0.55) }
+                                    Rectangle { anchors.fill: parent; anchors.topMargin: 1; anchors.bottomMargin: 1
+                                        visible: smRow.lit
+                                        radius: Math.min(7, Tok.r); color: theme.iris }
+                                    Sym { visible: !smRow.isSep
+                                        anchors.left: parent.left; anchors.leftMargin: 10
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        text: modelData.icon || ""; sz: 15
+                                        color: smRow.lit ? Tok.accentInk : theme.sub
+                                        Behavior on color { ColorAnimation { duration: Tok.mFast } } }
+                                    Text { visible: !smRow.isSep
+                                        anchors.left: parent.left; anchors.leftMargin: 34
+                                        anchors.right: smKey.left; anchors.rightMargin: 12
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        elide: Text.ElideRight
+                                        text: modelData.label || ""
+                                        color: smRow.lit ? Tok.accentInk : theme.text
+                                        font.pixelSize: 12; font.family: root.cfgFont
+                                        Behavior on color { ColorAnimation { duration: Tok.mFast } } }
+                                    Text { id: smKey
+                                        visible: !smRow.isSep && !!modelData.key
+                                        anchors.right: parent.right; anchors.rightMargin: 10
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        text: modelData.key || ""
+                                        color: smRow.lit ? Tok.alpha(Tok.accentInk, 0.75) : theme.faint
+                                        font.pixelSize: 11; font.family: Tok.mono
+                                        Behavior on color { ColorAnimation { duration: Tok.mFast } } }
+                                    MouseArea { id: smMa; anchors.fill: parent; hoverEnabled: true
+                                        enabled: !smRow.isSep
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: root.seaMenuRun(modelData.id) }
+                                }
+                            }
+                        }
+                    }
                     Grid { property string lid: "lgWork"; x: leftGroup.xFor(lid); anchors.verticalCenter: parent.verticalCenter
                         // A menu bar is long, and the left cluster is the only place it can go
                         // without running into the media pill. So the workspaces stand down for
@@ -3563,7 +3821,19 @@ ShellRoot {
                                     text: root.wsLabelFor(modelData.id)
                                     color: foc ? theme.bg : theme.sub
                                     font.pixelSize: 12; font.family: root.wsFontFamily; font.bold: foc }
-                                MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: Hyprland.dispatch("hl.dsp.focus({ workspace = "+modelData.id+" })") }
+                                // Left switches workspace; right swaps the workspaces for the
+                                // focused window's menu bar and back. The gesture is on the
+                                // two things it swaps — this and the menu strip — rather than
+                                // on the whole bar: bar-wide, it fired in the gaps BESIDE the
+                                // volume and clock pills but not on them, because those keep
+                                // their own right-click, and a gesture that works in the gaps
+                                // and not on the buttons just reads as broken.
+                                MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                                    acceptedButtons: Qt.LeftButton | Qt.RightButton
+                                    onClicked: (e)=> {
+                                        if (e.button === Qt.RightButton) { root.gmenuToggle(); return }
+                                        Hyprland.dispatch("hl.dsp.focus({ workspace = "+modelData.id+" })");
+                                    } }
                             }
                         }
                     }
@@ -3624,6 +3894,35 @@ ShellRoot {
                         focusedMonitor: Hyprland.focusedMonitor ? Hyprland.focusedMonitor.name : ""
                         ui: root.uiFor(bar.screen)
                         barEdgeY: root.cfgHeight
+                        barEdge: root.cfgEdge
+                        // How far the strip may run before it folds the rest behind a
+                        // chevron. The left cluster shares the bar with a centred media
+                        // pill, and an app with a dozen top-level menus (LibreOffice has
+                        // twelve) would otherwise push that pill out of the centre.
+                        maxWidth: Math.max(140, barBg.width * 0.38)
+                        openPing: root.gmenuOpenPing
+                        searchPing: root.gmenuSearchPing
+                        // one opacity slider moves the bar and everything that drops out of it
+                        dropOpacity: root.dropOpacity
+                        // Never on a side bar. A vertical bar is 42px WIDE — there is no room for
+                        // "File Edit View" in it, and the left cluster it lives in is only
+                        // held at opacity 0 there rather than removed, so without this the
+                        // strip was still reading menus and still opening its drop off an
+                        // invisible pill.
+                        featureOn: root.gmenuEnabled && !root.barVertical
+                        showKeys: root.gmenuAccel
+                        // any change here means the focused window changed — see the note
+                        // on focusHint in GlobalMenu.qml
+                        focusHint: {
+                            try {
+                                var t = Hyprland.activeToplevel;
+                                if (!t) return "";
+                                var o = t.lastIpcObject;
+                                if (o) return "" + (o.pid || "") + ":" + (o.class || "") + ":" + (o.title || "");
+                                return "" + (t.address || "");
+                            } catch (e) { return "" }
+                        }
+                        onToggleRequested: root.gmenuToggle()
                     }
                     Text {
                         // the window title. Capped short so a long app class (e.g. electron apps)
@@ -4415,7 +4714,7 @@ ShellRoot {
                 Item { id: rightGroupDrops
                     // ---- UPDATES dropdown: what is pending, and one button to install it ----
                     Drop { screen: bar.screen
-                        id: updDrop; host: updPill; shown: root.openPop === "upd" && root.openBar === bar
+                        id: updDrop; host: root.barVertical ? updPillVert : updPill; shown: root.openPop === "upd" && root.openBar === bar
                         cardW: 340; cardH: updCol.implicitHeight + 30
                         Column { id: updCol; anchors.fill: updDrop.card; anchors.margins: 15; spacing: 10
                             Row { width: parent.width
@@ -5398,6 +5697,27 @@ ShellRoot {
                 } // closes horizontalBarLayout
 
                 // ---------- START: verticalBarLayout ----------
+                //
+                // ONE PILL DEFINITION, BOTH ORIENTATIONS.
+                //
+                // `Pill` was written to serve a vertical bar. It has the stacked icon-over-
+                // value layout, the shared column width derived from the bar thickness, the
+                // compact `vertValue` that falls back to `value` — and then `vert` was
+                // declared `readonly property bool vert: false`, which locked every one of
+                // those branches off permanently. Nothing could ever set it.
+                //
+                // So a second, hand-written set of pills grew here instead: fourteen
+                // near-identical Rectangles, each repeating the hover colour, the border, the
+                // click-to-open-a-dropdown wiring. That duplication is the whole reason this
+                // bar has been broken — the weather pill was simply MISSING, so its dropdown
+                // named a host that had never been written and every reload of a side bar
+                // threw "ReferenceError: wxPillVert is not defined"; the updates pill had no
+                // vertical form at all and opened its card off a hidden horizontal one; and
+                // none of them ever got the press feedback, the width animation, or the
+                // per-widget styling from Settings that the horizontal pills have.
+                //
+                // They are all `Pill { vert: true }` now. Everything the horizontal bar has
+                // or gains, the side bar gets with it, and there is one place to fix.
                 ColumnLayout {
                     id: verticalBarLayout
                     anchors.fill: parent
@@ -5407,21 +5727,49 @@ ShellRoot {
                     opacity: root.barVertical ? 1 : 0
                     enabled: root.barVertical
                     z: root.barVertical ? 1 : 0
-                    spacing: 12
-                    
-                    // --- TOP: Logo & Workspaces ---
+                    spacing: 10
+
+                    // A hairline between clusters. The old side bar was one undifferentiated
+                    // column of identical squares from top to bottom, which is why nothing on
+                    // it read as belonging to anything else.
+                    component VRule: Rectangle {
+                        Layout.alignment: Qt.AlignHCenter
+                        Layout.topMargin: 2; Layout.bottomMargin: 2
+                        implicitWidth: 16; implicitHeight: 1
+                        color: theme.a(theme.line, 0.9)
+                    }
+
+                    // --- TOP: the mark, then where you are ---
                     ColumnLayout {
                         Layout.alignment: Qt.AlignHCenter
                         spacing: 8
-                        
-                        SeaLogo {
+
+                        // BarLogo, not SeaLogo: the side bar drew the sea wave no matter what
+                        // the user had chosen, because SeaLogo is one mark and BarLogo is the
+                        // one that reads `logoKind` — so a CachyOS machine with the mark set to
+                        // "auto" got the right logo on a top bar and the wrong one on a side bar.
+                        // Same click behaviour as the horizontal mark: left opens the system
+                        // menu, right still goes straight to the launcher.
+                        BarLogo {
                             id: logoVert
                             size: 24
+                            kind: root.logoKind
+                            imagePath: root.cfgBarLogoPath
                             card: theme.panel; accent: theme.iris; highlight: theme.frost; rim: theme.iris
-                            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: launcher.toggle() }
+                            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                                acceptedButtons: Qt.LeftButton | Qt.RightButton
+                                onClicked: (e)=> {
+                                    if (e.button === Qt.RightButton) { launcher.toggle(); return }
+                                    root.openPop = (root.openPop === "sea") ? "" : "sea";
+                                } }
                         }
-                        
-                        // Workspace list (vertical switcher)
+
+                        VRule {}
+
+                        // Workspaces. FOLLOWS THE NUMBERING AND THE STYLE THE USER PICKED, which
+                        // the old vertical switcher did not: it hardcoded one look, so choosing
+                        // "circles" or "pills" in Settings changed the top bar and left the side
+                        // bar drawing something else entirely.
                         Column {
                             spacing: 6
                             Layout.alignment: Qt.AlignHCenter
@@ -5435,16 +5783,18 @@ ShellRoot {
                                     // one never got the same line, so a vertical bar drew a
                                     // 24px circle reading "-98" the moment you used SUPER+`.
                                     visible: modelData.id > 0
-                                    width: 24
-                                    height: foc ? 36 : 24
-                                    radius: Tok.r
+                                    width: root.cfgWsStyle === "circle" ? 26 : 24
+                                    height: root.cfgWsStyle === "grow" ? (foc ? 36 : 24)
+                                          : (root.cfgWsStyle === "circle" ? 26 : 24)
+                                    radius: root.cfgWsStyle === "circle" ? width / 2 : Tok.r
                                     color: foc ? theme.iris : theme.a(theme.line, 0.55)
                                     border.width: 1; border.color: foc ? theme.frost : theme.a(theme.iris, 0.18)
                                     Behavior on height { NumberAnimation { duration: 180; easing.type: Easing.OutBack } }
+                                    Behavior on color { ColorAnimation { duration: Tok.mFast } }
                                     Text {
                                         anchors.centerIn: parent
                                         text: root.wsLabelFor(modelData.id)
-                                        color: foc ? theme.bg : theme.sub
+                                        color: foc ? Tok.accentInk : theme.sub
                                         font.pixelSize: 12; font.family: root.wsFontFamily; font.bold: foc
                                     }
                                     MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: Hyprland.dispatch("hl.dsp.focus({ workspace = "+modelData.id+" })") }
@@ -5457,10 +5807,10 @@ ShellRoot {
                                 color: root.scratchOpen ? theme.iris : theme.a(theme.line, 0.55)
                                 border.width: 1
                                 border.color: root.scratchOpen ? theme.frost : theme.a(theme.iris, 0.18)
-                                Behavior on color { ColorAnimation { duration: 160 } }
+                                Behavior on color { ColorAnimation { duration: Tok.mFast } }
                                 Text { anchors.centerIn: parent
                                     text: "" + root.scratchCount
-                                    color: root.scratchOpen ? theme.bg : theme.sub
+                                    color: root.scratchOpen ? Tok.accentInk : theme.sub
                                     font.pixelSize: 11; font.family: root.wsFontFamily
                                     font.bold: root.scratchOpen }
                                 MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
@@ -5468,74 +5818,80 @@ ShellRoot {
                             }
                         }
                     }
-                    
-                    // --- MIDDLE: Media & Resource Indicators ---
-                    ColumnLayout {
-                        Layout.fillHeight: true; Layout.alignment: Qt.AlignHCenter
-                        spacing: 10
-                        Item { Layout.fillHeight: true } // spacer
-                        
-                        // Media pill (Vertical variant)
-                        Rectangle {
-                            id: mprisPillVert
-                            width: 32; height: 32; radius: Tok.r
-                            color: theme.a(theme.line, 0.45); border.width: 1; border.color: theme.a(theme.iris, 0.22)
-                            visible: root.cfgMpris && root.player !== null
-                            Sym { anchors.centerIn: parent; text: "music_note"; sz: 16; color: theme.frost }
-                            MouseArea {
-                                anchors.fill: parent; cursorShape: Qt.PointingHandCursor
-                                onClicked: { root.openBar = bar; root.openPop = (root.openPop === "mpris") ? "" : "mpris" }
-                                onDoubleClicked: if(root.player) root.player.togglePlaying()
-                            }
-                        }
-                        
-                        // System monitor pill (Vertical variant)
-                        Rectangle {
-                            id: sysPillVert
-                            width: 32; height: 32; radius: Tok.r
-                            color: theme.a(theme.line, 0.45); border.width: 1; border.color: theme.a(theme.iris, 0.22)
-                            visible: root.cfgSystem
-                            Sym { anchors.centerIn: parent; text: "speed"; sz: 16; color: theme.frost }
-                            MouseArea {
-                                anchors.fill: parent; cursorShape: Qt.PointingHandCursor
-                                onClicked: { root.openBar = bar; root.openPop = (root.openPop === "sys") ? "" : "sys" }
-                            }
-                        }
-                        
-                        Item { Layout.fillHeight: true } // spacer
-                    }
-                    
-                    // --- BOTTOM: SysTray, Quick Actions, Clock & Power ---
+
+                    // ONE flexible gap, not two. The old layout put a fillHeight spacer on
+                    // either side of the media/system pair, which pinned them to the exact
+                    // middle of the screen and left two large empty runs — a bar that looked
+                    // half-empty however many widgets were switched on.
+                    Item { Layout.fillHeight: true }
+
+                    // --- what is playing, and how hard the machine is working ---
                     ColumnLayout {
                         Layout.alignment: Qt.AlignHCenter
                         spacing: 8
-                        
+                        visible: mprisPillVert.visible || sysPillVert.visible
+
+                        Pill { owner: bar; vert: true; id: mprisPillVert; key: "mpris"
+                            wid: "wgMpris"
+                            Layout.alignment: Qt.AlignHCenter
+                            visible: root.cfgMpris && root.player !== null
+                            icon: "music_note"; accent: theme.frost
+                            onRightClicked: if (root.player) root.player.togglePlaying()
+                            onScrolled: (dy)=>{ if (!root.player) return; if (dy > 0) root.player.next(); else root.player.previous() } }
+
+                        Pill { owner: bar; vert: true; id: sysPillVert; key: "sys"
+                            wid: "wgSystem"
+                            Layout.alignment: Qt.AlignHCenter
+                            visible: root.cfgSystem
+                            // Same source as the horizontal one, and the same accent that
+                            // follows whichever metric is on show — a side bar reporting a
+                            // different number from the top bar would be its own bug.
+                            icon: "speed"
+                            accent: root.sysMetrics[root.sysShown[0]].c()
+                            vertValue: Math.round(root.cpuUsage) + "%" }
+
+                        VRule { visible: true }
+                    }
+
+                    // --- BOTTOM: tray, status, the clock, the way out ---
+                    ColumnLayout {
+                        Layout.alignment: Qt.AlignHCenter
+                        spacing: 7
+
                         // System tray (vertical stack)
                         ColumnLayout {
-                            spacing: 4
+                            spacing: 5
                             Layout.alignment: Qt.AlignHCenter
+                            visible: SystemTray.items && SystemTray.items.values.length > 0
                             Rectangle {
-                                width: 22; height: 22; radius: Tok.r
-                                color: theme.a(theme.line, 0.4)
+                                Layout.alignment: Qt.AlignHCenter
+                                width: 22; height: 18; radius: Tok.r
+                                color: trayMa.containsMouse ? theme.a(theme.iris, 0.18) : theme.a(theme.line, 0.4)
+                                Behavior on color { ColorAnimation { duration: Tok.mFast } }
                                 Sym { anchors.centerIn: parent; text: root.trayCollapsed ? "expand_less" : "expand_more"; sz: 12; color: theme.sub }
-                                MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.trayCollapsed = !root.trayCollapsed }
+                                MouseArea { id: trayMa; anchors.fill: parent; hoverEnabled: true
+                                    cursorShape: Qt.PointingHandCursor; onClicked: root.trayCollapsed = !root.trayCollapsed }
                             }
                             ColumnLayout {
-                                spacing: 4
+                                spacing: 5
                                 visible: !root.trayCollapsed
                                 Repeater {
                                     model: SystemTray.items
                                     delegate: Item {
                                         id: trayItemVert
                                         required property SystemTrayItem modelData
-                                        width: 18; height: 18
+                                        Layout.alignment: Qt.AlignHCenter
+                                        implicitWidth: 20; implicitHeight: 20
+                                        scale: trayVMa.pressed ? 0.9 : 1.0
+                                        Behavior on scale { NumberAnimation { duration: Tok.mMicro } }
                                         Image {
-                                            width: 36; height: 36; anchors.centerIn: parent; scale: 0.5
+                                            width: 40; height: 40; anchors.centerIn: parent; scale: 0.5
                                             asynchronous: true; source: { try { return (trayItemVert.modelData && trayItemVert.modelData.icon) ? trayItemVert.modelData.icon : "" } catch(e) { return "" } }
                                             sourceSize.width: 96; sourceSize.height: 96; smooth: true; mipmap: true
                                             fillMode: Image.PreserveAspectFit
                                         }
                                         MouseArea {
+                                            id: trayVMa
                                             anchors.fill: parent; cursorShape: Qt.PointingHandCursor; acceptedButtons: Qt.LeftButton|Qt.RightButton
                                             onClicked: (e)=>{
                                                 try {
@@ -5550,115 +5906,98 @@ ShellRoot {
                                 }
                             }
                         }
-                        
-                        // Quick Settings shortcut (Vertical variant)
-                        Rectangle {
-                            id: ccPillVert
-                            width: 32; height: 32; radius: Tok.r
-                            color: theme.a(theme.line, 0.45); border.width: 1; border.color: theme.a(theme.iris, 0.22)
-                            visible: root.cfgQuick
-                            Sym { anchors.centerIn: parent; text: "tune"; sz: 16; color: theme.frost }
-                            MouseArea {
-                                anchors.fill: parent; cursorShape: Qt.PointingHandCursor
-                                onClicked: { root.openBar = bar; root.openPop = (root.openPop === "cc") ? "" : "cc" }
-                            }
-                        }
-                        
-                        // Network status pill (Vertical variant)
-                        Rectangle {
-                            id: wifiPillVert
-                            width: 32; height: 32; radius: Tok.r
-                            color: theme.a(theme.line, 0.45); border.width: 1; border.color: theme.a(theme.iris, 0.22)
-                            visible: root.cfgWifi
-                            Sym { anchors.centerIn: parent; text: root.wifiOn ? "wifi" : "wifi_off"; sz: 16; color: root.wifiOn ? theme.frost : theme.bad }
-                            MouseArea {
-                                anchors.fill: parent; cursorShape: Qt.PointingHandCursor
-                                onClicked: { root.openBar = bar; root.openPop = (root.openPop === "wifi") ? "" : "wifi" }
-                            }
-                        }
-                        
-                        // Bluetooth status pill (Vertical variant)
-                        Rectangle {
-                            id: btPillVert
-                            width: 32; height: 32; radius: Tok.r
-                            color: theme.a(theme.line, 0.45); border.width: 1; border.color: theme.a(theme.iris, 0.22)
-                            visible: root.cfgBluetooth && root.btAdapter !== null
-                            Sym { anchors.centerIn: parent; text: "bluetooth"; sz: 16; color: root.btActive ? theme.iris : theme.frost }
-                            MouseArea {
-                                anchors.fill: parent; cursorShape: Qt.PointingHandCursor
-                                onClicked: { root.openBar = bar; root.openPop = (root.openPop === "bt") ? "" : "bt" }
-                            }
-                        }
-                        
-                        // KDE Connect pill (Vertical variant)
-                        Rectangle {
-                            id: kdePillVert
-                            width: 32; height: 32; radius: Tok.r
-                            color: theme.a(theme.line, 0.45); border.width: 1; border.color: theme.a(theme.iris, 0.22)
-                            visible: root.cfgKdeconnect
-                            Sym { anchors.centerIn: parent; text: root.kdeActive ? root.kdeIcon(root.kdeDev) : "phonelink_off"; sz: 16
-                                color: root.kdeActive ? theme.iris : theme.frost }
-                            MouseArea {
-                                anchors.fill: parent; cursorShape: Qt.PointingHandCursor
-                                onClicked: { root.openBar = bar; root.openPop = (root.openPop === "kde") ? "" : "kde" }
-                            }
-                        }
 
-                        // Volume control (Vertical variant)
-                        Rectangle {
-                            id: volPillVert
-                            width: 32; height: 32; radius: Tok.r
-                            color: theme.a(theme.line, 0.45); border.width: 1; border.color: theme.a(theme.iris, 0.22)
+                        VRule { visible: SystemTray.items && SystemTray.items.values.length > 0 }
+
+                        Pill { owner: bar; vert: true; id: ccPillVert; key: "cc"
+                            wid: "wgQuick"; Layout.alignment: Qt.AlignHCenter
+                            visible: root.cfgQuick; icon: "tune"; accent: theme.frost }
+
+                        Pill { owner: bar; vert: true; id: wxPillVert; key: "wx"
+                            wid: "wgWeather"; Layout.alignment: Qt.AlignHCenter
+                            visible: root.cfgWeather && root.wxTemp !== ""
+                            icon: root.wxIcon(root.wxCond); accent: theme.frost
+                            vertValue: root.wxTemp }
+
+                        Pill { owner: bar; vert: true; id: updPillVert; key: "upd"
+                            wid: "wgUpdates"; Layout.alignment: Qt.AlignHCenter
+                            visible: root.cfgUpdates
+                            icon: root.updTotal > 0 ? "system_update_alt" : "task_alt"
+                            accent: root.updTotal > 0 ? theme.warn : theme.frost
+                            vertValue: root.updTotal > 0 ? String(root.updTotal) : "" }
+
+                        Pill { owner: bar; vert: true; id: wifiPillVert; key: "wifi"
+                            wid: "wgWifi"; Layout.alignment: Qt.AlignHCenter
+                            visible: root.cfgWifi
+                            icon: root.wifiOn ? "wifi" : "wifi_off"
+                            accent: root.wifiOn ? theme.frost : theme.bad }
+
+                        Pill { owner: bar; vert: true; id: btPillVert; key: "bt"
+                            wid: "wgBluetooth"; Layout.alignment: Qt.AlignHCenter
+                            visible: root.cfgBluetooth && root.btAdapter !== null
+                            icon: "bluetooth"
+                            accent: root.btActive ? theme.iris : theme.frost }
+
+                        Pill { owner: bar; vert: true; id: kdePillVert; key: "kde"
+                            wid: "wgKdeconnect"; Layout.alignment: Qt.AlignHCenter
+                            visible: root.cfgKdeconnect
+                            icon: root.kdeActive ? root.kdeIcon(root.kdeDev) : "phonelink_off"
+                            accent: root.kdeActive ? theme.iris : theme.frost }
+
+                        Pill { owner: bar; vert: true; id: volPillVert; key: "vol"
+                            wid: "wgVolume"; Layout.alignment: Qt.AlignHCenter
                             visible: root.cfgVolume
                             readonly property var au: Pipewire.defaultAudioSink ? Pipewire.defaultAudioSink.audio : null
                             readonly property int vol: au ? Math.round(au.volume*100) : 0
-                            Sym { anchors.centerIn: parent; text: !volPillVert.au||volPillVert.au.muted ? "volume_off" : volPillVert.vol<34?"volume_mute":volPillVert.vol<67?"volume_down":"volume_up"; sz: 16; color: theme.frost }
-                            MouseArea {
-                                anchors.fill: parent; cursorShape: Qt.PointingHandCursor
-                                onClicked: { root.openBar = bar; root.openPop = (root.openPop === "vol") ? "" : "vol" }
-                            }
-                        }
-                        
-                        // Battery status pill (Vertical variant)
-                        Rectangle {
-                            id: batPillVert
-                            width: 32; height: 32; radius: Tok.r
-                            color: theme.a(theme.line, 0.45); border.width: 1; border.color: theme.a(theme.iris, 0.22)
+                            icon: !volPillVert.au || volPillVert.au.muted ? "volume_off"
+                                  : volPillVert.vol < 34 ? "volume_mute"
+                                  : volPillVert.vol < 67 ? "volume_down" : "volume_up"
+                            accent: (volPillVert.au && volPillVert.au.muted) ? theme.bad : theme.frost
+                            vertValue: (volPillVert.au && !volPillVert.au.muted) ? (volPillVert.vol + "%") : ""
+                            onScrolled: (dy)=>{ if (!volPillVert.au) return
+                                volPillVert.au.volume = Math.max(0, Math.min(1, volPillVert.au.volume + (dy > 0 ? 0.05 : -0.05))) } }
+
+                        Pill { owner: bar; vert: true; id: batPillVert; key: "bat"
+                            wid: "wgBattery"; Layout.alignment: Qt.AlignHCenter
                             readonly property var dev: UPower.displayDevice
                             readonly property bool charging: !UPower.onBattery
                             readonly property int pct: dev ? Math.round(dev.percentage*100) : 0
                             visible: root.cfgBattery && dev && dev.isLaptopBattery
-                            Sym { anchors.centerIn: parent; text: batPillVert.charging?"battery_charging_full":batPillVert.pct>=90?"battery_full":"battery_5_bar"; sz: 16; color: theme.frost }
-                            MouseArea {
-                                anchors.fill: parent; cursorShape: Qt.PointingHandCursor
-                                onClicked: { root.openBar = bar; root.openPop = (root.openPop === "bat") ? "" : "bat" }
-                            }
-                        }
+                            icon: batPillVert.charging ? "battery_charging_full"
+                                  : batPillVert.pct >= 90 ? "battery_full" : "battery_5_bar"
+                            accent: (!batPillVert.charging && batPillVert.pct <= 20) ? theme.bad : theme.frost
+                            vertValue: batPillVert.pct + "%" }
 
-                        // Notification pill (Vertical variant)
-                        Rectangle {
-                            id: bellPillVert
-                            width: 32; height: 32; radius: Tok.r
-                            color: theme.a(theme.line, 0.45); border.width: 1; border.color: theme.a(theme.iris, 0.22)
+                        Pill { owner: bar; vert: true; id: bellPillVert; key: "notif"
+                            wid: "wgNotif"; Layout.alignment: Qt.AlignHCenter
                             visible: root.cfgNotif
-                            Sym { anchors.centerIn: parent; text: root.dnd ? "notifications_off" : (root.notes.length>0 ? "notifications" : "notifications_none"); sz: 16; color: theme.frost }
-                            MouseArea {
-                                anchors.fill: parent; cursorShape: Qt.PointingHandCursor
-                                onClicked: { root.openBar = bar; root.openPop = (root.openPop === "notif") ? "" : "notif" }
-                            }
-                        }
-                        
-                        // Vertical Stacked Clock
+                            icon: root.dnd ? "notifications_off"
+                                  : (root.notes.length > 0 ? "notifications" : "notifications_none")
+                            accent: root.notes.length > 0 ? theme.iris : theme.frost
+                            vertValue: root.notes.length > 0 ? String(root.notes.length) : "" }
+
+                        VRule {}
+
+                        // The clock stays hand-built: it is the one thing here that is two
+                        // lines of type rather than an icon with a readout, and squeezing
+                        // "20:14" through the pill's single compact value would lose the
+                        // hour/minute stacking that makes it legible in a 42px column.
                         Item {
                             id: clockPillVert
                             Layout.alignment: Qt.AlignHCenter
                             visible: root.cfgClock
-                            implicitWidth: clockColVert.implicitWidth
-                            implicitHeight: clockColVert.implicitHeight
+                            implicitWidth: Math.max(30, root.cfgHeight - 12)
+                            implicitHeight: clockColVert.implicitHeight + 8
+                            Rectangle {
+                                anchors.fill: parent; radius: Tok.r
+                                color: (root.openPop === "cal" || clockVMa.containsMouse)
+                                       ? theme.a(theme.iris, 0.18) : "transparent"
+                                Behavior on color { ColorAnimation { duration: Tok.mFast } }
+                            }
                             ColumnLayout {
                                 id: clockColVert
                                 anchors.centerIn: parent
-                                spacing: 1
+                                spacing: 0
                                 Text {
                                     text: Qt.formatDateTime(clock.date, "HH")
                                     color: theme.text; font.pixelSize: 13; font.bold: true; font.family: root.cfgFont
@@ -5671,23 +6010,18 @@ ShellRoot {
                                 }
                             }
                             MouseArea {
-                                anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { root.openBar = bar; root.openPop = (root.openPop === "cal") ? "" : "cal" }
+                                id: clockVMa
+                                anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                onClicked: { root.openBar = bar; root.openPop = (root.openPop === "cal") ? "" : "cal" }
                             }
                         }
-                        
-                        // Power Control (Vertical variant)
-                        Rectangle {
-                            id: pwrPillVert
-                            width: 32; height: 32; radius: Tok.r
-                            color: theme.a(theme.bad, 0.22); border.width: 1; border.color: theme.bad
+
+                        Pill { owner: bar; vert: true; id: pwrPillVert; key: "pwr"
+                            wid: "wgPower"; Layout.alignment: Qt.AlignHCenter
                             visible: root.cfgPower
-                            Sym { anchors.centerIn: parent; text: "power_settings_new"; sz: 16; color: theme.bad }
-                            MouseArea {
-                                anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { root.openBar = bar; root.openPop = (root.openPop === "pwr") ? "" : "pwr" }
-                            }
-                        }
-                        
-                        Item { height: 4; width: 1 }
+                            icon: "power_settings_new"; accent: theme.bad }
+
+                        Item { Layout.preferredHeight: 2; Layout.preferredWidth: 1 }
                     }
                 }
             }
@@ -5699,7 +6033,7 @@ ShellRoot {
                 // EVERY dropdown must be in this list. One left out is not "unregistered", it is
                 // treated as outside the grab — so it opens and is dismissed in the same frame,
                 // which looks exactly like a dead pill. (updDrop was missing and did precisely that.)
-                readonly property var myWins: [bar, ccDrop, wxDrop, wifiDrop, btDrop, kdeDrop, volDrop, batDrop, calDrop, pwrDrop, notifDrop, mprisDrop, trayDrop, sysDrop, updDrop]
+                readonly property var myWins: [bar, ccDrop, wxDrop, wifiDrop, btDrop, kdeDrop, volDrop, batDrop, calDrop, pwrDrop, notifDrop, mprisDrop, trayDrop, sysDrop, updDrop, seaDrop]
                 Component.onCompleted: {
                     try { root.grabWins = root.grabWins.concat(myWins); } catch(e) {}
                 }
@@ -5754,6 +6088,21 @@ ShellRoot {
             spacing: 8
             transformOrigin: Item.TopRight
             scale: notifWin.ui
+            // Notifications are the most dynamic thing the shell draws and they were the
+            // least animated: a card blinked into existence, and when one was dismissed the
+            // ones under it teleported up. A Column is a positioner, so it can transition its
+            // own children — `add` for arrivals, `move` for everyone shuffling afterwards.
+            // (There is no `remove` transition to write: by then the delegate is already gone.)
+            add: Transition {
+                NumberAnimation { property: "opacity"; from: 0; to: 1; duration: Tok.mFast }
+                NumberAnimation { property: "x"; from: popCol.width * 0.3
+                                  duration: Tok.mBase
+                                  easing.type: Easing.Bezier; easing.bezierCurve: Tok.mEnter }
+            }
+            move: Transition {
+                NumberAnimation { properties: "x,y"; duration: Tok.mBase
+                                  easing.type: Easing.Bezier; easing.bezierCurve: Tok.mMove }
+            }
             Repeater {
                 model: popupModel
                 delegate: Rectangle {
@@ -5784,6 +6133,9 @@ ShellRoot {
                                     width: alab.implicitWidth + 18
                                     color: am.containsMouse ? theme.a(theme.iris, 0.25) : theme.a(theme.line, 0.5)
                                     border.width: 1; border.color: theme.a(theme.iris, 0.3)
+                                    Behavior on color { ColorAnimation { duration: Tok.mFast } }
+                                    scale: am.pressed ? 0.94 : 1.0
+                                    Behavior on scale { NumberAnimation { duration: Tok.mMicro } }
                                     Text { id: alab; anchors.centerIn: parent; text: modelData.t
                                         color: theme.text; font.pixelSize: 11; font.family: root.cfgFont }
                                     MouseArea { id: am; anchors.fill: parent; hoverEnabled: true
@@ -5795,6 +6147,7 @@ ShellRoot {
                     }
                     Rectangle { anchors.top: parent.top; anchors.right: parent.right; anchors.margins: 6; width: 22; height: 22; radius: Tok.r
                         color: xm.containsMouse ? theme.a(theme.iris,0.2) : "transparent"
+                        Behavior on color { ColorAnimation { duration: Tok.mFast } }
                         Sym { anchors.centerIn: parent; text: "close"; sz: 14; color: theme.sub }
                         MouseArea { id: xm; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.popDismiss(pcard.model.key) } }
                     Timer { running: true; interval: pcard.model.urg===2 ? 12000 : 5000; onTriggered: root.popDismiss(pcard.model.key) }
@@ -5814,12 +6167,27 @@ ShellRoot {
         WlrLayershell.layer: WlrLayer.Overlay
         WlrLayershell.namespace: "sea-shell:osd"
         exclusionMode: ExclusionMode.Ignore
-        visible: root.osdKind !== ""
+        // Held mapped for the length of the fade-out, the same trick the dropdowns use, so
+        // the layer surface is never torn down with a visible card still on it. Every volume
+        // key press shows this — of everything in the shell it is the thing seen most often,
+        // and it was appearing and vanishing between two frames.
+        readonly property bool on: root.osdKind !== ""
+        property bool held: false
+        visible: osdWin.on || osdWin.held
+        onOnChanged: { if (osdWin.on) { osdHold.stop(); osdWin.held = true } else osdHold.restart() }
+        Timer { id: osdHold; interval: Tok.mFast + 30; onTriggered: osdWin.held = false }
         mask: Region { item: osdCard }
         Rectangle {
             id: osdCard
             anchors.centerIn: parent
-            scale: osdWin.ui                 // authored native; scaled around its centre
+            // authored native; scaled around its centre — and the last 6% of that scale is
+            // the entry, so it grows into place rather than being switched on.
+            scale: osdWin.ui * (osdWin.on ? 1.0 : 0.94)
+            opacity: osdWin.on ? 1 : 0
+            Behavior on opacity { NumberAnimation { duration: Tok.mFast } }
+            Behavior on scale { NumberAnimation { duration: Tok.mBase
+                                                  easing.type: Easing.Bezier
+                                                  easing.bezierCurve: Tok.mEnter } }
             width: 250; height: 54; radius: Tok.rCard
             color: Tok.alpha(Tok.surface, root.dropOpacity); border.width: 1; border.color: Tok.ruleHard
             Row { anchors.fill: parent; anchors.margins: 16; spacing: 13

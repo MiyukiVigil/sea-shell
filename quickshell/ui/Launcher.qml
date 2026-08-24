@@ -500,14 +500,32 @@ Scope {
                 id: list
                 anchors { top: head.bottom; topMargin: 6; left: parent.left; right: parent.right; leftMargin: 8; rightMargin: 8 }
                 height: Math.min(8, Math.max(1, root.results.length)) * 52
+                // The panel breathes as the result count changes instead of snapping to a
+                // new size on every keystroke.
+                Behavior on height { NumberAnimation { duration: Tok.mFast
+                                                       easing.type: Easing.Bezier
+                                                       easing.bezierCurve: Tok.mMove } }
                 clip: true
                 model: root.results
                 interactive: true
+                // A REAL highlight, so the selection travels down the list instead of one row
+                // switching off and another switching on. The delegate keeps only its hover
+                // shade; ListView draws the highlight underneath, which is exactly where a
+                // selection belongs. `sel` stays the source of truth — currentIndex follows it
+                // rather than replacing it, because the arrow keys, the mouse and alt+1–9 all
+                // write sel and none of them know about ListView.
+                currentIndex: root.sel
+                highlight: Rectangle { radius: Tok.r; color: theme.a(theme.iris, 0.15) }
+                highlightMoveDuration: Tok.mMicro
+                highlightResizeDuration: 0
+                highlightMoveVelocity: -1
                 delegate: Rectangle {
                     required property var modelData
                     required property int index
                     width: list.width; height: 52; radius: Tok.r
-                    color: index===root.sel ? theme.a(theme.iris, 0.15) : rowMa.containsMouse ? theme.a(theme.iris, 0.07) : "transparent"
+                    color: rowMa.containsMouse && index !== root.sel ? theme.a(theme.iris, 0.07)
+                                                                     : "transparent"
+                    Behavior on color { ColorAnimation { duration: Tok.mFast } }
                     // icon: real app icon when we have one, Material glyph otherwise, letter-tile fallback
                     Item {
                         id: ic; width: 30; height: 30

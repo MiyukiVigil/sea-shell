@@ -189,10 +189,24 @@ Singleton {
     // 130 here, 150 there, 200 somewhere else — which reads as three different products
     // when two of them animate at once. Anything slower than mSlow is not a transition,
     // it is a wait, and should show progress instead.
+    readonly property int mMicro: 90     // a press answering, a highlight stepping one row
     readonly property int mFast: 130     // hover, press, chip state — must feel instant
     readonly property int mBase: 200     // focus moves, panels opening
     readonly property int mSlow: 320     // a whole surface changing what it shows
     readonly property int mEase: Easing.OutCubic
+
+    // ---- direction-aware curves ----
+    // One curve for everything is what makes an interface feel mechanical: a card arriving
+    // and a card leaving are not the same event and should not move the same way. These are
+    // Material 3's emphasized pair — things ENTERING decelerate into place (they arrive
+    // fast and settle), things LEAVING accelerate away (they commit and go), and things
+    // MOVING between two on-screen positions use the symmetric one.
+    //
+    // Use with `easing.type: Easing.Bezier; easing.bezierCurve: Tok.mEnter`. QML's Bezier
+    // easing wants the two control points followed by the end point, hence the trailing 1,1.
+    readonly property var mEnter: [0.05, 0.7,  0.1, 1.0,  1, 1]
+    readonly property var mExit:  [0.3,  0.0,  0.8, 0.15, 1, 1]
+    readonly property var mMove:  [0.2,  0.0,  0.0, 1.0,  1, 1]
 
     function alpha(c, a) { return Qt.rgba(c.r, c.g, c.b, a) }
 

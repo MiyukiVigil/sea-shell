@@ -49,6 +49,24 @@ cleanup() {
 }
 trap cleanup TERM INT HUP
 
+# ---- do not hand the desktop a developer's environment ---------------------
+# Everything the launcher starts is a CHILD OF THE BAR and inherits this process's
+# environment. Restart the bar from inside an editor's integrated terminal — which is
+# exactly what you do while working on it — and the whole desktop inherits that editor's
+# variables. ELECTRON_RUN_AS_NODE=1 is the one that bites: every Electron app launched
+# from the launcher then starts as plain node and dies, while the same app started from a
+# terminal works, because the terminal was started by Hyprland and is clean. Cider and
+# Obsidian were unlaunchable this way and it looked like the launcher was broken.
+#
+# These are all injected by editors/toolchains and none of them mean anything to a bar.
+unset ELECTRON_RUN_AS_NODE ELECTRON_NO_ATTACH_CONSOLE ELECTRON_IS_DEV \
+      ELECTRON_FORCE_IS_PACKAGED ELECTRON_DISABLE_SECURITY_WARNINGS \
+      NODE_OPTIONS CHROME_DESKTOP
+for v in $(env | sed -n 's/^\(VSCODE_[A-Z_]*\)=.*/\1/p'); do unset "$v"; done
+# LD_LIBRARY_PATH pointed at an editor's bundled electron would break any app that loads
+# a different one; the bar itself has never needed it.
+case "$LD_LIBRARY_PATH" in *code*|*electron*) unset LD_LIBRARY_PATH ;; esac
+
 fails=0
 while :; do
     start=$(date +%s)

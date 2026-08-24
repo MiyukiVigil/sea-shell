@@ -28,7 +28,7 @@ Scope {
 
     property bool shown: false
     property int step: 0
-    readonly property int steps: 5
+    readonly property int steps: 6
 
     readonly property string setScript:  Qt.resolvedUrl("sea-set-appearance.py").toString().replace("file://", "")
     readonly property string wpSet:      Qt.resolvedUrl("sea-wallpaper-set.sh").toString().replace("file://", "")
@@ -168,7 +168,75 @@ Scope {
         } }
     }
     function still(w) { return !w ? "" : (w.vid ? w.poster : w.path) }
-    onShownChanged: if (shown && !root.papers.length) wpIndexProc.running = true
+    onShownChanged: if (shown) {
+        if (!root.papers.length) wpIndexProc.running = true;
+        gmCheck.running = true;
+    }
+
+    // ---------- the menu bar (step 5) ----------
+    // The tour asks about this one because it is the only feature that needs something done to
+    // the APPS rather than to the shell: firefox wants two prefs, and every electron app wants a
+    // flag that runs it under xwayland, before either will hand its menu over. Left to be
+    // discovered, that reads as "the menu bar doesn't work with my editor" rather than "my editor
+    // has not been told to share". One button here is the whole difference.
+    property bool gmEnabled: true
+    property bool gmPrime: false
+    property bool gmAccel: true
+    readonly property string gmScript: Qt.resolvedUrl("sea-appmenu.py").toString().replace("file://", "")
+    FileView {
+        id: gmCfg
+        path: Quickshell.env("HOME") + "/.config/sea-shell/appmenu.json"
+        watchChanges: true
+        function apply() {
+            try {
+                reload();
+                var t = text();
+                if (!t || !t.trim()) return;
+                var j = JSON.parse(t);
+                if (j.enabled !== undefined) root.gmEnabled = !!j.enabled;
+                if (j.prime !== undefined) root.gmPrime = !!j.prime;
+                if (j.accelerators !== undefined) root.gmAccel = !!j.accelerators;
+            } catch (e) {}
+        }
+        onFileChanged: apply()
+        onLoaded: apply()
+        Component.onCompleted: apply()
+    }
+    // Round-trips the two keys it does not offer instead of writing only its own: settings.qml
+    // owns this file as well, and a second surface rebuilding it from its own properties would
+    // quietly reset every key it had not heard of. Same reason the appearance writes all go
+    // through the python setter rather than being composed here.
+    function gmSet(on) {
+        var b64 = Qt.btoa(JSON.stringify({ enabled: !!on, prime: root.gmPrime,
+                                           accelerators: root.gmAccel }));
+        Quickshell.execDetached(["sh", "-c",
+            "d=\"$HOME/.config/sea-shell\"; mkdir -p \"$d\"; echo '" + b64
+            + "' | base64 -d > \"$d/.appmenu.tmp\" && mv -f \"$d/.appmenu.tmp\" \"$d/appmenu.json\""]);
+    }
+
+    // --setup only ever REPORTS; nothing on disk changes until --apply. The sidecar is asked
+    // rather than this file knowing what each toolkit needs, because it is the thing that knows.
+    property var gmApps: []
+    property bool gmSetupBusy: false
+    property bool gmSetupDone: false
+    readonly property int gmNeeds: {
+        var n = 0;
+        for (var i = 0; i < root.gmApps.length; i++) if (!root.gmApps[i].ok) n++;
+        return n;
+    }
+    Process {
+        id: gmCheck
+        command: ["python3", root.gmScript, "--setup"]
+        stdout: StdioCollector { id: gmCheckOut; onStreamFinished: {
+            try { root.gmApps = (JSON.parse(gmCheckOut.text || "{}").apps) || [] }
+            catch (e) { root.gmApps = [] }
+        } }
+    }
+    Process {
+        id: gmApply
+        command: ["python3", root.gmScript, "--setup", "--apply"]
+        onExited: { root.gmSetupBusy = false; root.gmSetupDone = true; gmCheck.running = true }
+    }
 
     // ================================================================= the card
     PanelWindow {
@@ -447,16 +515,80 @@ Scope {
                         Item { Layout.fillHeight: true }
                     }
 
-                    // 4 — done
+                    // 4 — menus
                     ColumnLayout {
                         anchors.fill: parent; spacing: 12
                         visible: root.step === 4
+                        WSection { title: "the menu bar" }
+                        IndText {
+                            Layout.fillWidth: true; wrapMode: Text.WordWrap
+                            mono: true; sz: Tok.tLabel; color: Tok.ink3
+                            text: "the bar can carry the focused window's own menus — file, edit, view — "
+                                + "instead of every window drawing its own. the workspace numbers step "
+                                + "aside while there is a menu to show and come straight back when there "
+                                + "isn't. SUPER+M opens it from the keyboard; SUPER+SHIFT+M searches every "
+                                + "command in it."
+                        }
+                        WToggle {
+                            label: "show the focused window's menus"
+                            on: root.gmEnabled
+                            onToggled: root.gmSet(!root.gmEnabled)
+                        }
+
+                        WSection { title: "apps"; visible: root.gmEnabled }
+                        IndText {
+                            visible: root.gmEnabled
+                            Layout.fillWidth: true; wrapMode: Text.WordWrap
+                            mono: true; sz: Tok.tLabel; color: Tok.ink3
+                            text: root.gmApps.length === 0
+                                  ? "looking at what is installed…"
+                                  : (root.gmNeeds === 0
+                                     ? "every app found here can already publish its menu. qt and gtk apps need nothing at all."
+                                     : root.gmNeeds + " of " + root.gmApps.length + " apps need one small change first — "
+                                       + "firefox two prefs, electron apps a flag that runs them under xwayland so they can "
+                                       + "hand the menu over as data. nothing else about them changes, and each one has to be "
+                                       + "restarted afterwards.")
+                        }
+                        RowLayout {
+                            visible: root.gmEnabled && root.gmNeeds > 0
+                            spacing: 10
+                            WBtn {
+                                primary: true
+                                enabled: !root.gmSetupBusy
+                                opacity: root.gmSetupBusy ? 0.6 : 1
+                                label: root.gmSetupBusy
+                                       ? "setting up…"
+                                       : "set up " + root.gmNeeds + " app" + (root.gmNeeds === 1 ? "" : "s")
+                                onTapped: { root.gmSetupBusy = true; gmApply.running = true }
+                            }
+                            Item { Layout.fillWidth: true }
+                        }
+                        IndText {
+                            visible: root.gmEnabled && root.gmSetupDone && root.gmNeeds === 0
+                            Layout.fillWidth: true; wrapMode: Text.WordWrap
+                            mono: true; sz: Tok.tLabel; color: Tok.ok
+                            text: "done — restart those apps and their menus turn up in the bar."
+                        }
+                        IndText {
+                            visible: root.gmEnabled
+                            Layout.fillWidth: true; wrapMode: Text.WordWrap
+                            mono: true; sz: Tok.tLabel; color: Tok.ink3
+                            text: "app by app — and why each one is or is not ready — lives in Settings → Bar."
+                        }
+                        Item { Layout.fillHeight: true }
+                    }
+
+                    // 5 — done
+                    ColumnLayout {
+                        anchors.fill: parent; spacing: 12
+                        visible: root.step === 5
                         Item { Layout.fillHeight: true }
                         IndText {
                             Layout.alignment: Qt.AlignHCenter
                             text: "that's it"; mono: true; sz: Tok.tTitle; font.weight: 700; color: Tok.ink
                         }
                         WHint { k: "SUPER+K";       v: "every keybind, with a description" }
+                        WHint { k: "SUPER+M";       v: "the focused window's menus, from the keyboard" }
                         WHint { k: "SUPER+S";       v: "the control center — everything here, and the rest" }
                         WHint { k: "SUPER+SHIFT+W"; v: "the wallpaper picker" }
                         WHint { k: "Hub Moon";      v: "parametric EQ and DAC control, if you want them" }

@@ -5,6 +5,119 @@ All notable changes to **sea-shell** are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.4.1] - 2026-08-23
+
+**The menu bar, properly.** 6.4.0 put the focused window's menus in the bar; this is the
+release where they stop misbehaving. Most of what follows is one mistake wearing different
+clothes — treating a question that *failed* as a question that was answered "no" — and the
+rest is a menu that finally looks like the thing it is imitating.
+
+### Added
+
+- **The application's name in the strip.** Mark, then the application, then its menus, the
+  way a mac reads. Taken from the snapshot's own window class rather than from the
+  compositor's idea of focus, so the name and the menus under it always describe the same
+  window — reading focus separately would put the new window's name over the old window's
+  menus for the frame between the two. It is a label, not a menu: what a mac puts under the
+  app name lives in the File menu on Linux, and inventing a menu whose items came from
+  nowhere would be worse than not having one.
+- **`read all` in the menu search.** Search can only search what is known, and an
+  application that builds each menu on first open is known only as far as you have happened
+  to click. One button reads every unopened menu once, remembers it, and closes it — visible
+  while it runs, because it opens real menus, and never paid twice in this session or the
+  next.
+- **Menus taller than the screen scroll.** A card was given the height its rows wanted, so a
+  menu with more rows than the display had room for was pinned to the top and the rest drawn
+  off the bottom — unreachable by pointer, invisible to the arrow keys walking onto them.
+  Fine on a 1080p panel, not on a 768px laptop, which is the sort of thing that only shows up
+  on somebody else's machine.
+- **Icons and radio marks in menu rows.** The icon the application named, resolved through
+  the theme; and a dot rather than a tick for one-of-these. Both share the column already
+  reserved for checkmarks — an item is checkable or it has a picture, essentially never
+  both, and two gutters would indent every label twice for the sake of a handful of rows.
+- **Search across every settings page.** Twenty-two pages and sixty-odd sections, and
+  nothing let you ask for one by name. Every section registers itself as it is built, so a
+  section added later is findable without being listed anywhere by hand.
+- **Jump chips on every settings page.** Each page's sections in one row, outside the scroll
+  area so they never leave. The global menu settings were four sections down a page that
+  opens with a twenty-row widget list.
+- **A menu-bar step in the first-run tour**, with the per-app setup behind it — the one
+  feature that needs something done to the *applications* rather than to the shell.
+- **Keyboard shortcuts in the system menu.** The real ones from `keybinds.lua`. A menu that
+  only works with the pointer teaches nothing; one that prints the keybind is how you stop
+  needing it.
+- **Motion that distinguishes arriving from leaving.** One curve for both is what makes an
+  interface feel mechanical. Notifications fly in and the stack closes up behind a
+  dismissal, the volume OSD grows into place instead of appearing between two frames, bar
+  pills animate their width so the cluster slides over to make room, and the launcher's
+  selection travels down the list rather than blinking between rows.
+
+### Changed
+
+- **The side bar is built from the same pill as the top bar.** `Pill` was written to serve a
+  vertical bar and then had `vert` declared `readonly ... : false`, which locked every one of
+  those branches off permanently — so a second, hand-written set of fourteen near-identical
+  pills grew beside it. That duplication is why this bar has been broken: see below for what
+  it cost. One definition now, and everything the horizontal bar gains the side bar gets
+  with it.
+- **The selected row is filled, not washed.** A 16% accent tint over a bar at 25% opacity is
+  "slightly different grey". Filled accent with `accentInk` on top — the token that exists
+  for exactly this — the same treatment the focused workspace chip already uses.
+- **Menu rows are inset from the card**, so the highlight is a pill floating inside it rather
+  than a band painted across it; separators inset to the text; accelerators capitalised, so a
+  column of shortcuts reads as a column.
+- **Hyprland is asked over its own socket** rather than by spawning `hyprctl`, whose entire
+  job is to make that same request. 40ms to 0.2ms, several times per focus change.
+- **Each window's menus are cached by pid**, so returning to a window you were using seconds
+  ago is instant instead of asking the application again. Focus switching went from 170–350ms
+  to under 25ms.
+- **The settings window is 1240x880**, up from 960x780 — nearly half the width of a 1080p
+  display was going unused while the pages inside scrolled.
+
+### Fixed
+
+- **A restarted Firefox read its menus again.** Three bugs, all the same shape. A failed
+  `owner_pid` was cached as "no owner" for ever; a failed lookup **deleted** the window's
+  registration outright, which cannot be undone because the application will not register
+  again until it restarts; and menus were remembered only on the path that has to open them,
+  so once demoted there was nothing to fall back on. The first two now distinguish "the bus
+  says no" from "I could not ask", and the third saves either way.
+- **The menu cascade flashed.** A Repeater regenerates *every* delegate when its model
+  changes — true for a JS array whose identity changed, and equally true for a plain number
+  that went from 1 to 2. Opening one submenu was rebuilding the parent card and all of its
+  rows. The cascade is a fixed pool of cards now, shown and hidden.
+- **A submenu opened and then closed a quarter-second later.** Hovering a row that must be
+  fetched does not descend, so it scheduled the ordinary grace-period close; the click that
+  followed opened the submenu but left that timer armed.
+- **Submenus were unreachable by mouse.** Moving from a row into its submenu is a diagonal
+  move, and passing over the rows below closed the submenu out from under the pointer
+  heading toward it.
+- **The bar served one window's menus under another window's name.** `_NET_ACTIVE_WINDOW`
+  answers with the last *X11* window to have focus, and under Wayland most windows are not
+  X11 at all — so a native window inherited whatever XWayland window came before it. Not
+  merely stale: a live menu wired to the wrong window.
+- **Switching workspaces showed the previous window's menus** for a quarter-second before
+  correcting. Not slowness — the wrong answer published first, because an addressless event
+  is not yet an answer.
+- **A bottom-docked bar drew its menus at the top of the screen**, one bar-height from the
+  wrong edge with nothing joining them to the thing that was clicked.
+- **`ReferenceError: wxPillVert is not defined`** on every reload of a side bar: the weather
+  card named a host that had never been written. The updates card pointed at a hidden
+  horizontal pill. The mark drew the sea wave whatever logo you had chosen. The workspaces
+  ignored the numbering and style you picked.
+- **The global menu ran on side bars**, where a 42px column has no room for "File Edit View"
+  — the cluster it lives in is hidden with `opacity: 0`, so it was still reading menus and
+  still opening its dropdown off an invisible pill.
+- **The system menu never opened.** It was not registered with the shared focus grab, so it
+  was treated as a click *outside* itself and dismissed on the frame it appeared. Its
+  Settings entry threw a `TypeError` besides.
+- **The highlight flew the length of the card** when the pointer brushed a disabled row, and
+  travelled across menus it had never been in once cards were pooled.
+- **A ticked row printed its label on top of its own checkmark.** The column was sized on the
+  assumption that the mark could overhang into the padding; it cannot.
+- **Keyboard-opened menus hung off the wrong place** — the start of the strip, which now
+  begins with the application's name, rather than the menu that was opened.
+
 ## [6.4.0] - 2026-08-21
 
 **The desktop update.** The shell has never done anything with the largest part of your

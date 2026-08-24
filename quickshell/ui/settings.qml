@@ -22,7 +22,7 @@ Scope {
     // release apart — the badge read v5.0.0 on a 6.0.0 install. A version badge that lies is worse
     // than no badge. The literal survives only as the fallback for a `qs -p` run out of the repo
     // with nothing deployed; the second path covers that case too (quickshell/ui/ → repo root).
-    property string seaVersion: "6.4.0"
+    property string seaVersion: "6.4.1"
     Process {
         running: true
         command: ["sh","-c","cat \"$HOME/.config/quickshell/sea-shell/VERSION\" 2>/dev/null || cat \"" + root.repo + "/../../VERSION\" 2>/dev/null"]
@@ -39,6 +39,145 @@ Scope {
     function openTab(t) { root.showTab(t) }
     function closePanel() { root.shown = false }
     function togglePanel() { if (root.shown) root.closePanel(); else root.openPanel() }
+    // ---------------- finding things ----------------
+    //
+    // TWENTY-TWO PAGES, SIXTY-ODD SECTIONS. The sidebar is grouped, which makes the pages
+    // scannable, and that is where its help stops: knowing that "global menu" lives on the
+    // Bar page — ninth section down, past the widget list — is knowledge you either have or
+    // do not. Every settings app that is pleasant to use answers that with a search field,
+    // and every critique of the ones that are not (Ventura's especially) comes back to
+    // things being buried with no way to ask for them by name.
+    //
+    // Two surfaces are built on one registry: type to find any section anywhere, or use the
+    // chips above a page to jump within it without scrolling.
+    property var sectionIndex: []
+    property bool sectionsReady: false
+    // Bumped once the registrations have stopped arriving, so the two views built on the
+    // registry recompute. NOT set from the panel's own Component.onCompleted: the settings
+    // window is not shown at startup and its contents are built later than this file's root,
+    // so that handler ran with an empty index and the chips never appeared. A short debounce
+    // makes "ready" mean "nothing has registered for a moment", which is true whenever the
+    // sections happen to be built.
+    property int sectionTick: 0
+    Timer {
+        id: secSettle
+        interval: 60
+        onTriggered: { root.sectionsReady = true; root.sectionTick++ }
+    }
+    function regSection(sec) {
+        // Walk up to whichever page column owns this section. The pages carry `tabIdx`
+        // precisely so a section does not have to be told twice which page it is on.
+        var t = -1, p = sec.parent;
+        while (p) { if (p.tabIdx !== undefined) { t = p.tabIdx; break } p = p.parent }
+        if (t < 0) return;
+        root.sectionIndex.push({ "tab": t, "title": sec.title, "icon": sec.icon, "item": sec });
+        secSettle.restart();
+    }
+
+    // idx -> what the sidebar calls that page, so a search hit can say where it lives.
+    readonly property var tabMeta: ({
+        0:  { l: "Audio",          i: "volume_up" },
+        1:  { l: "Display",        i: "brightness_6" },
+        2:  { l: "Network",        i: "wifi" },
+        3:  { l: "Weather",        i: "cloud" },
+        4:  { l: "Appearance",     i: "palette" },
+        5:  { l: "Actions",        i: "bolt" },
+        6:  { l: "Power",          i: "power_settings_new" },
+        7:  { l: "Keybinds",       i: "keyboard" },
+        8:  { l: "System",         i: "monitor_heart" },
+        9:  { l: "Bluetooth",      i: "bluetooth" },
+        10: { l: "Idle & lock",    i: "bedtime" },
+        11: { l: "Calendar",       i: "calendar_month" },
+        12: { l: "Bar Widgets",    i: "widgets" },
+        13: { l: "Theme Profiles", i: "auto_awesome" },
+        14: { l: "KDE Connect",    i: "phonelink" },
+        15: { l: "Input",          i: "mouse" },
+        16: { l: "Dock",           i: "dock_to_bottom" },
+        17: { l: "Window rules",   i: "picture_in_picture" },
+        18: { l: "Screen time",    i: "hourglass_top" },
+        19: { l: "Disks",          i: "hard_drive" },
+        20: { l: "Bar",            i: "view_agenda" },
+        21: { l: "Desktop",        i: "wallpaper" }
+    })
+    function tabLabel(t) { var m = root.tabMeta[t]; return m ? m.l : "" }
+    function tabIcon(t)  { var m = root.tabMeta[t]; return m ? m.i : "tune" }
+
+    property string navQuery: ""
+    // Matches on the section name AND on the page it lives on, so "bar menu" finds the
+    // global menu the same way "global" does, and a page name alone lists that page.
+    readonly property var navHits: {
+        var q = root.navQuery.toLowerCase().trim();
+        var _ = root.sectionTick;               // recompute when the registry settles
+        if (!root.sectionsReady || q.length === 0) return [];
+        var terms = q.split(/\s+/), out = [];
+        for (var i = 0; i < root.sectionIndex.length; i++) {
+            var e = root.sectionIndex[i];
+            var hay = (e.title + " " + root.tabLabel(e.tab)).toLowerCase();
+            var ok = true;
+            for (var t = 0; t < terms.length; t++)
+                if (hay.indexOf(terms[t]) < 0) { ok = false; break }
+            if (!ok) continue;
+            // an exact hit in the section's own name sorts above one that only matched
+            // because of the page it sits on
+            out.push({ "e": e, "rank": e.title.toLowerCase().indexOf(terms[0]) === 0 ? 0
+                              : (e.title.toLowerCase().indexOf(terms[0]) >= 0 ? 1 : 2) });
+            if (out.length > 60) break;
+        }
+        out.sort(function (a, b) { return a.rank - b.rank });
+        return out.map(function (o) { return o.e });
+    }
+    // The sections of the page being looked at, for the jump chips.
+    readonly property var pageSections: {
+        var _ = root.sectionTick;               // recompute when the registry settles
+        if (!root.sectionsReady) return [];
+        var out = [];
+        for (var i = 0; i < root.sectionIndex.length; i++)
+            if (root.sectionIndex[i].tab === root.tab) out.push(root.sectionIndex[i]);
+        // IN PAGE ORDER. Sections complete bottom-up, so the registry holds them backwards
+        // and the chips read the page from the end. Once the page is laid out the sections'
+        // own positions are the truth — and they are laid out, because chips are only drawn
+        // for the page being looked at. mapToItem, not `y`: a section nested one column
+        // deeper measures its y against that column, not the page.
+        try {
+            var ys = out.map(function (e) { return e.item.mapToItem(pane, 0, 0).y });
+            var spread = false;
+            for (var k = 1; k < ys.length; k++) if (ys[k] !== ys[0]) { spread = true; break }
+            if (spread) {
+                var pack = out.map(function (e, n) { return { e: e, y: ys[n] } });
+                pack.sort(function (a, b) { return a.y - b.y });
+                out = pack.map(function (o) { return o.e });
+            } else {
+                out.reverse();          // not laid out yet; the reversal is exactly right
+            }
+        } catch (err) { out.reverse() }
+        return out;
+    }
+
+    // Switching page and scrolling to a section are two different frames: the page is not
+    // laid out until after it is made visible, so its sections have no position yet. Hence
+    // the deferral rather than one call.
+    property var pendingJump: null
+    function jumpTo(entry) {
+        if (!entry) return;
+        if (root.tab !== entry.tab) root.showTab(entry.tab);
+        root.pendingJump = entry.item;
+        jumpTimer.restart();
+    }
+    function doJump() {
+        var it = root.pendingJump;
+        if (!it) return;
+        try {
+            var y = it.mapToItem(pane, 0, 0).y;
+            var max = Math.max(0, contentFlick.contentHeight - contentFlick.height);
+            contentFlick.contentY = Math.max(0, Math.min(y - 10, max));
+        } catch (e) {}
+    }
+    Timer { id: jumpTimer; interval: 16; repeat: true; property int n: 0
+        onRunningChanged: if (running) n = 0
+        // Runs a few frames: the first pass lands before the new page has finished laying
+        // out and would scroll to the wrong offset on a page that grows as it settles.
+        onTriggered: { root.doJump(); n++; if (n > 5) { stop(); root.pendingJump = null } } }
+
     function showTab(t) {
         // Not fresh until the read below lands. Everything this panel mirrors is stale between
         // here and there, and one of those mirrors drives the WHOLE SHELL's palette.
@@ -502,7 +641,13 @@ Scope {
                     var hasDesc = !!(b.description && b.description.length);
                     var desc = hasDesc ? b.description : (b.dispatcher + (b.arg ? " " + b.arg : ""));
                     var sig = keys + "|" + desc; if (seen[sig]) continue; seen[sig] = 1;
-                    out.push({ keys: keys, desc: desc, key: b.key, mods: mods, canEdit: hasDesc });
+                    // The ACTION comes through as well now, not just the keys. `exec` is
+                    // singled out because its argument is a plain command string that can
+                    // be edited safely; every other dispatcher is a structured lua call
+                    // and is shown read-only rather than handed to a text box.
+                    var isExec = (b.dispatcher || "").toLowerCase().indexOf("exec") >= 0;
+                    out.push({ keys: keys, desc: desc, key: b.key, mods: mods, canEdit: hasDesc,
+                               dispatcher: b.dispatcher || "", arg: b.arg || "", isExec: isExec });
                 }
                 root.kbBinds = out;
             } catch(e) {}
@@ -533,9 +678,14 @@ Scope {
             if (b.mods.join(" ") === combo && b.key.toLowerCase() === base.toLowerCase()) {
                 root.kbConflict = "already used by “" + b.desc + "”"; return }
         }
+        // Only send a command when it is an exec bind AND the text actually changed —
+        // sending the unchanged one would rewrite a hand-written lua expression (a
+        // variable, a multi-line call) into a plain string for no reason.
+        var cmd = (root.kbRec.isExec && root.kbRecAction.trim() !== ""
+                   && root.kbRecAction !== root.kbRec.arg) ? root.kbRecAction.trim() : "";
         Quickshell.execDetached(["sh", Qt.resolvedUrl("sea-rebind.sh").toString().replace("file://",""),
-                                 root.kbRec.desc, root.kbRec.key, combo, base]);
-        root.kbRec = null; root.kbConflict = "";
+                                 root.kbRec.desc, root.kbRec.key, combo, base, cmd]);
+        root.kbRec = null; root.kbRecAction = ""; root.kbConflict = "";
         kbRefetch.start();
     }
     function kbApplyAddBind() {
@@ -550,9 +700,11 @@ Scope {
         kbRefetch.start();
     }
     // ---- keybind editor popup: open in edit or add mode, and close ----
+    property string kbRecAction: ""
     function kbOpenEdit(bind) {
         root.kbAdding = false;
         root.kbRec = bind; root.kbRecMods = bind.mods.slice(); root.kbRecKey = bind.key;
+        root.kbRecAction = bind.arg || "";
         root.kbRecRecording = false; root.kbConflict = "";
     }
     function kbOpenAdd() {
@@ -561,7 +713,7 @@ Scope {
         root.kbAddDesc = ""; root.kbAddAction = "exec, "; root.kbAddKey = ""; root.kbAddMods = ["SUPER"];
     }
     function kbCloseEditor() {
-        root.kbRec = null; root.kbAdding = false;
+        root.kbRec = null; root.kbAdding = false; root.kbRecAction = "";
         root.kbRecRecording = false; root.kbAddRecording = false; root.kbConflict = "";
     }
 
@@ -1057,7 +1209,12 @@ Scope {
     // happened. Folded in here because a QML object may only assign Component.onCompleted
     // ONCE — a second one at root scope is "Property value set multiple times", which takes
     // the whole panel out of the shell.
-    Component.onCompleted: { root.wgSyncModel(); root.lgSyncModel(); root.rescanWallpapers() }
+    // ONE HANDLER, because an object may only assign a given signal once — a second
+    // `Component.onCompleted` further down does not add to this one, it makes the whole
+    // file fail to load with "Property value set multiple times", and the panel then never
+    // exists at all. Its IPC target vanishing is the only symptom you get.
+    Component.onCompleted: { root.wgSyncModel(); root.lgSyncModel(); root.rescanWallpapers();
+                             gmSetupCheck.running = true }
     onApWidgetOrderChanged: if (!root.wgDragging) root.wgSyncModel()
     property bool wgDragging: false
     // left-cluster reorder helpers (parallel to the widget ones)
@@ -1313,6 +1470,82 @@ Scope {
         bkRefresh.restart();
     }
     Timer { id: bkRefresh; interval: 1500; repeat: false; onTriggered: bkListProc.running = true }
+
+    // ---------- the global menu ----------
+    // Its own config file rather than a corner of appearance.json, because the SIDECAR reads
+    // it too: sea-appmenu.py re-reads ~/.config/sea-shell/appmenu.json on every pass, so
+    // "read menus in the background" takes effect without restarting the bar.
+    property bool gmEnabled: true
+    property bool gmPrime: false
+    property bool gmAccel: true
+    property string gmDoctor: ""
+    property bool gmDoctorBusy: false
+    readonly property string gmScript: Qt.resolvedUrl("sea-appmenu.py").toString().replace("file://","")
+    // WATCHED, NOT READ ONCE. This panel is resident — it is built when the bar starts and
+    // lives for the whole session — so a single `cat` at startup meant its idea of the
+    // settings was frozen at login. Right-click the bar to hide the strip and this still
+    // believed it was on; the next click of the toggle then "turned it off" a second time,
+    // wrote the value that was already on disk, and nothing happened. That is the bug that
+    // looked like the switch being dead.
+    FileView {
+        id: gmCfg
+        path: Quickshell.env("HOME") + "/.config/sea-shell/appmenu.json"
+        watchChanges: true
+        function apply() {
+            try {
+                reload();
+                var t = text();
+                if (!t || !t.trim()) return;
+                var j = JSON.parse(t);
+                if (j.enabled !== undefined) root.gmEnabled = !!j.enabled;
+                if (j.prime !== undefined) root.gmPrime = !!j.prime;
+                if (j.accelerators !== undefined) root.gmAccel = !!j.accelerators;
+            } catch (e) {}
+        }
+        onFileChanged: apply()
+        onLoaded: apply()
+        Component.onCompleted: apply()
+    }
+    function gmSave() {
+        var j = { enabled: root.gmEnabled, prime: root.gmPrime, accelerators: root.gmAccel };
+        var b64 = Qt.btoa(JSON.stringify(j));
+        run("d=\"$HOME/.config/sea-shell\"; mkdir -p \"$d\"; echo '" + b64
+            + "' | base64 -d > \"$d/.appmenu.tmp\" && mv -f \"$d/.appmenu.tmp\" \"$d/appmenu.json\"");
+    }
+    // "why has this window no menu?" answered for every open window at once. Worth a button
+    // because the answer is usually actionable (an Electron app needs a launch flag) and is
+    // otherwise invisible — the bar's only way of saying it is to show nothing at all.
+    Process { id: gmDoc
+        command: ["python3", root.gmScript, "--doctor"]
+        onExited: root.gmDoctorBusy = false
+        stdout: StdioCollector { id: gmDocOut; onStreamFinished: {
+            root.gmDoctor = (gmDocOut.text || "").trim() || "no windows to look at";
+        } } }
+    function gmRunDoctor() { root.gmDoctor = ""; root.gmDoctorBusy = true; gmDoc.running = true }
+
+    // ---- per-app setup ----
+    // Each toolkit needs something different before it will publish a menu, and the
+    // sidecar is the thing that knows what — so this asks rather than duplicating the
+    // knowledge. --setup only ever REPORTS; nothing is written until --apply.
+    property var gmApps: []
+    property bool gmSetupBusy: false
+    readonly property int gmNeeds: {
+        var n = 0;
+        for (var i = 0; i < root.gmApps.length; i++) if (!root.gmApps[i].ok) n++;
+        return n;
+    }
+    Process { id: gmSetupCheck
+        command: ["python3", root.gmScript, "--setup"]
+        stdout: StdioCollector { id: gmSetupOut; onStreamFinished: {
+            try { root.gmApps = (JSON.parse(gmSetupOut.text || "{}").apps) || []; }
+            catch (e) { root.gmApps = [] }
+        } } }
+    Process { id: gmSetupApply
+        command: ["python3", root.gmScript, "--setup", "--apply"]
+        onExited: { root.gmSetupBusy = false; gmSetupCheck.running = true }
+    }
+    function gmSetupRefresh() { gmSetupCheck.running = true }
+    function gmSetupAll() { root.gmSetupBusy = true; gmSetupApply.running = true }
 
     // ---------- touchpad gestures ----------
     // Valid values probed against this machine's Hyprland 0.56, one at a time with a reload
@@ -2437,8 +2670,14 @@ Scope {
     // heading is no longer accent-coloured — with one heading per group the accent was doing
     // decoration, not signalling, and it competed with genuinely active controls below it.
     component Section: ColumnLayout {
+        id: sec
         property string title: ""
         property string icon: ""
+        // Every section on every page puts itself on the map as it is built. That map is
+        // what the search field searches and what the jump chips above each page aim at —
+        // one registry, so a section added later is findable without being listed anywhere
+        // by hand.
+        Component.onCompleted: root.regSection(sec)
         Layout.fillWidth: true; Layout.leftMargin: 14; Layout.topMargin: 4
         spacing: 4
         RowLayout {
@@ -3149,8 +3388,14 @@ Scope {
 
         Rectangle {
             anchors.centerIn: parent
-            width: Math.min(parent.width / root.uiScale() - 60, 960)
-            height: Math.min(parent.height / root.uiScale() - 60, 780)
+            // USE THE SCREEN. This was capped at 960x780, which on a 1080p display left
+            // nearly half the width unused while the pages inside scrolled — the same
+            // complaint every review of Ventura's fixed-width System Settings makes: the
+            // sidebar and the content compete for a window that has been told not to grow.
+            // Still clamped to fit, and still capped so it never becomes a full-screen wall
+            // of controls on a 4K panel.
+            width: Math.min(parent.width / root.uiScale() - 60, 1240)
+            height: Math.min(parent.height / root.uiScale() - 60, 880)
             radius: Tok.rCard
             // fade in once the saved palette is read — no default sea-cyan flash first
             opacity: root.apLoaded ? 1 : 0
@@ -3194,6 +3439,58 @@ Scope {
                     }
                 }
                     Rectangle { Layout.fillWidth: true; Layout.topMargin: 4; Layout.bottomMargin: 2; height: 1; color: theme.a(theme.iris, 0.14) }
+
+                    // ---- search ----
+                    // The one control that makes twenty-two pages navigable: type a few
+                    // letters and Enter goes to the first hit. Deliberately NOT focused when
+                    // the panel opens — the panel's Escape-to-close lives on a sibling item,
+                    // and a text field holding focus would swallow that key. Escape inside
+                    // the field empties it rather than closing, so it can never trap you.
+                    Rectangle {
+                        Layout.fillWidth: true; Layout.topMargin: 2; Layout.bottomMargin: 2
+                        implicitHeight: 30; radius: Tok.r
+                        color: theme.a(theme.line, 0.45)
+                        border.width: 1
+                        border.color: navIn.activeFocus ? theme.iris : theme.a(theme.iris, 0.16)
+                        Behavior on border.color { ColorAnimation { duration: Tok.mFast } }
+                        Sym { id: navMag
+                            anchors { left: parent.left; leftMargin: 9; verticalCenter: parent.verticalCenter }
+                            text: "search"; sz: 14
+                            color: navIn.activeFocus ? theme.iris : theme.faint }
+                        TextInput {
+                            id: navIn
+                            anchors { left: navMag.right; leftMargin: 7; right: navClr.left; rightMargin: 4
+                                      verticalCenter: parent.verticalCenter }
+                            color: theme.text; font.pixelSize: 12; font.family: Tok.mono
+                            clip: true
+                            onTextChanged: root.navQuery = text
+                            Keys.onPressed: (e) => {
+                                if (e.key === Qt.Key_Escape) {
+                                    if (navIn.text.length) { navIn.text = ""; e.accepted = true }
+                                } else if ((e.key === Qt.Key_Return || e.key === Qt.Key_Enter)
+                                           && root.navHits.length > 0) {
+                                    root.jumpTo(root.navHits[0]); e.accepted = true;
+                                }
+                            }
+                            Text {
+                                anchors.verticalCenter: parent.verticalCenter
+                                visible: !navIn.text.length && !navIn.activeFocus
+                                text: "search settings"
+                                color: theme.faint; font.pixelSize: 12; font.family: Tok.mono
+                            }
+                        }
+                        Item {
+                            id: navClr
+                            anchors { right: parent.right; rightMargin: 6; verticalCenter: parent.verticalCenter }
+                            width: 18; height: 18
+                            visible: navIn.text.length > 0
+                            Sym { anchors.centerIn: parent; text: "close"; sz: 13
+                                  color: navClrMa.containsMouse ? theme.text : theme.faint }
+                            MouseArea { id: navClrMa; anchors.fill: parent; hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: { navIn.text = ""; navIn.forceActiveFocus() } }
+                        }
+                    }
                 }
 
                 Flickable {
@@ -3202,12 +3499,66 @@ Scope {
                     anchors.topMargin: 3; anchors.bottomMargin: 6
                     clip: true
                     contentWidth: width
-                    contentHeight: sbList.implicitHeight
+                    contentHeight: root.navQuery.length ? sbHits.implicitHeight
+                                                        : sbList.implicitHeight
                     // only grabs the wheel when there is somewhere to go
                     interactive: contentHeight > height
                     boundsBehavior: Flickable.StopAtBounds
+
+                    // ---- search results, in place of the page list ----
+                    // Replacing the list rather than sitting beside it: while you are asking
+                    // for something by name the page list is not what you are looking at, and
+                    // a 202px column has no room to show both.
+                    ColumnLayout {
+                        id: sbHits
+                        visible: root.navQuery.length > 0
+                        width: sbFlick.width
+                        spacing: 2
+                        Text {
+                            visible: root.navHits.length === 0
+                            Layout.fillWidth: true; Layout.topMargin: 8; Layout.leftMargin: 4
+                            text: "nothing matches\n\u201c" + root.navQuery + "\u201d"
+                            color: theme.faint; font.pixelSize: 11; font.family: Tok.mono
+                            wrapMode: Text.WordWrap
+                        }
+                        Repeater {
+                            model: root.navHits
+                            delegate: Rectangle {
+                                required property var modelData
+                                Layout.fillWidth: true
+                                implicitHeight: 38
+                                radius: Tok.r
+                                color: hitMa.containsMouse ? theme.a(theme.iris, 0.16) : "transparent"
+                                Behavior on color { ColorAnimation { duration: Tok.mFast } }
+                                Sym {
+                                    id: hitIco
+                                    anchors { left: parent.left; leftMargin: 9; verticalCenter: parent.verticalCenter }
+                                    text: modelData.icon && modelData.icon.length
+                                          ? modelData.icon : root.tabIcon(modelData.tab)
+                                    sz: 15
+                                    color: hitMa.containsMouse ? theme.frost : theme.faint
+                                }
+                                Column {
+                                    anchors { left: hitIco.right; leftMargin: 9; right: parent.right
+                                              rightMargin: 6; verticalCenter: parent.verticalCenter }
+                                    spacing: 0
+                                    Text { width: parent.width; elide: Text.ElideRight
+                                        text: modelData.title
+                                        color: theme.text; font.pixelSize: 12; font.family: Tok.mono }
+                                    Text { width: parent.width; elide: Text.ElideRight
+                                        text: root.tabLabel(modelData.tab)
+                                        color: theme.faint; font.pixelSize: 10; font.family: Tok.mono }
+                                }
+                                MouseArea { id: hitMa; anchors.fill: parent; hoverEnabled: true
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: root.jumpTo(modelData) }
+                            }
+                        }
+                    }
+
                     ColumnLayout {
                         id: sbList
+                        visible: root.navQuery.length === 0
                         width: sbFlick.width
                         spacing: 3
 
@@ -3270,9 +3621,82 @@ Scope {
             }
 
             // ---------------- content pane (anchored between sidebar and edge) ----------------
+            // ---------------- page header: where you are, and what is on this page ----------------
+            //
+            // The pages used to open straight into their first section, so the only thing
+            // telling you which one you were looking at was the highlight in the sidebar —
+            // and on a long page, scrolled down, not even that was in view.
+            //
+            // The chips are the fix for "it is so far down": every section of this page, in
+            // one row, ALWAYS ON SCREEN because this sits outside the scroll area. The Bar
+            // page has ten sections and the global menu is the ninth; reaching it was nine
+            // sections of scrolling and is now one click.
+            ColumnLayout {
+                id: pageHead
+                anchors { left: sidebar.right; leftMargin: 24; right: parent.right
+                          rightMargin: 20; top: parent.top; topMargin: 18 }
+                spacing: 9
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 10
+                    Sym { text: root.tabIcon(root.tab); sz: 21; color: theme.iris }
+                    Text {
+                        text: root.tabLabel(root.tab)
+                        color: theme.text; font.pixelSize: 19; font.family: Tok.mono; font.bold: true
+                    }
+                    Item { Layout.fillWidth: true }
+                }
+                Flow {
+                    Layout.fillWidth: true
+                    spacing: 6
+                    // Two or three sections are already all on screen; chips would be noise.
+                    visible: root.pageSections.length > 3
+                    Repeater {
+                        model: root.pageSections
+                        delegate: Rectangle {
+                            required property var modelData
+                            height: 25; radius: Tok.r
+                            width: chipT.implicitWidth + 22
+                            color: chipMa.containsMouse ? theme.a(theme.iris, 0.22)
+                                                        : theme.a(theme.line, 0.5)
+                            border.width: 1; border.color: theme.a(theme.iris, 0.16)
+                            Behavior on color { ColorAnimation { duration: Tok.mFast } }
+                            Text {
+                                id: chipT; anchors.centerIn: parent
+                                text: modelData.title
+                                color: chipMa.containsMouse ? theme.text : theme.sub
+                                font.pixelSize: 10; font.family: Tok.mono
+                                font.letterSpacing: 0.6; font.capitalization: Font.AllUppercase
+                            }
+                            MouseArea {
+                                id: chipMa; anchors.fill: parent; hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: root.jumpTo(modelData)
+                            }
+                        }
+                    }
+                }
+                Rectangle { Layout.fillWidth: true; height: 1; color: theme.a(theme.iris, 0.14) }
+            }
+
+            // The content column had no scrollbar of any kind — the only clue that a page
+            // continued below the fold was the text being cut off. Same hand-drawn approach
+            // as the sidebar's, for the same reason (no QtQuick.Controls in this shell).
+            Rectangle {
+                visible: contentFlick.contentHeight > contentFlick.height
+                width: 3; radius: 1.5
+                color: theme.a(theme.iris, 0.4)
+                anchors.right: contentFlick.right
+                anchors.rightMargin: -8
+                y: contentFlick.y + (contentFlick.contentY / contentFlick.contentHeight) * contentFlick.height
+                height: Math.max(24, (contentFlick.height / contentFlick.contentHeight) * contentFlick.height)
+                opacity: contentFlick.moving ? 0.85 : 0.35
+                Behavior on opacity { NumberAnimation { duration: Tok.mBase } }
+            }
+
             Flickable {
                 id: contentFlick
-                anchors { left: sidebar.right; leftMargin: 24; right: parent.right; rightMargin: 20; top: parent.top; topMargin: 20; bottom: parent.bottom; bottomMargin: 20 }
+                anchors { left: sidebar.right; leftMargin: 24; right: parent.right; rightMargin: 20; top: pageHead.bottom; topMargin: 10; bottom: parent.bottom; bottomMargin: 20 }
                 contentWidth: width
                 contentHeight: pane.implicitHeight
                 clip: true
@@ -3285,6 +3709,7 @@ Scope {
 
                         // ================= AUDIO =================
                         ColumnLayout {
+                            property int tabIdx: 0
                             visible: root.tab === 0; Layout.fillWidth: true; spacing: 12
                             Section { title: "output"; icon: "volume_up" }
                             RowLayout { Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; spacing: 12
@@ -3377,6 +3802,7 @@ Scope {
 
                         // ================= DISPLAY =================
                         ColumnLayout {
+                            property int tabIdx: 1
                             visible: root.tab === 1; Layout.fillWidth: true; spacing: 12
 
                             // ---- brightness ----
@@ -3559,6 +3985,7 @@ Scope {
 
                         // ================= NETWORK =================
                         ColumnLayout {
+                            property int tabIdx: 2
                             visible: root.tab === 2; Layout.fillWidth: true; spacing: 12
                             RowLayout {
                                 Layout.fillWidth: true; spacing: 8
@@ -3722,6 +4149,7 @@ Scope {
 
                         // ================= VPN =================
                         ColumnLayout {
+                            property int tabIdx: 2
                             visible: root.tab === 2; Layout.fillWidth: true; spacing: 10
 
                             // WARP header row
@@ -3917,6 +4345,7 @@ Scope {
 
                         // ================= WEATHER =================
                         ColumnLayout {
+                            property int tabIdx: 3
                             visible: root.tab === 3; Layout.fillWidth: true; spacing: 14
                             Section { title: "location"; icon: "location_on" }
                             RowLayout {
@@ -3968,6 +4397,7 @@ Scope {
 
                         // ================= APPEARANCE =================
                         ColumnLayout {
+                            property int tabIdx: 4
                             visible: root.tab === 4; Layout.fillWidth: true; spacing: 14
 
                             // segmented horizontal navigation bar for Appearance sub-menus
@@ -4660,6 +5090,7 @@ Scope {
                         // The space between the bar and the dock. Everything here is a
                         // request to sea-desktop.py; see the note by dtScript above.
                         ColumnLayout {
+                            property int tabIdx: 21
                             visible: root.tab === 21; Layout.fillWidth: true; spacing: 12
 
                             Section { title: "arranging"; icon: "drag_pan" }
@@ -4852,6 +5283,7 @@ Scope {
                         // which is about the bar. What is here IS the bar: its shape, how it draws
                         // workspaces, and the mark at its left end.
                         ColumnLayout {
+                            property int tabIdx: 20
                             visible: root.tab === 20; Layout.fillWidth: true; spacing: 12
 
                             Section { title: "shape"; icon: "view_agenda" }
@@ -5040,6 +5472,7 @@ Scope {
 
                         // ================= BAR WIDGETS =================
                         ColumnLayout {
+                            property int tabIdx: 12
                             visible: root.tab === 12; Layout.fillWidth: true; spacing: 14
                             Section { title: "bar widgets"; icon: "widgets" }
                             Text {
@@ -5328,6 +5761,118 @@ Scope {
                                     }
                                 }
                             }
+                            // ---- the global menu (it lives in the window-title slot) ----
+                            Section { title: "global menu"; icon: "menu_open"; Layout.topMargin: 8 }
+                            Text {
+                                text: "the focused window's own menu bar, drawn in the bar where the window title would be. it appears only for windows that actually export one — everything else keeps its title, so the bar looks unchanged."
+                                color: theme.faint; font.pixelSize: 11; font.family: root.apFont; Layout.bottomMargin: 6
+                                Layout.fillWidth: true; wrapMode: Text.WordWrap
+                            }
+                            ToggleCard {
+                                icon: "menu_open"; title: "show the global menu"
+                                desc: "replaces the window title when the focused window has a menu bar"
+                                on: root.gmEnabled
+                                onToggled: { root.gmEnabled = !root.gmEnabled; root.gmSave() }
+                            }
+                            ToggleCard {
+                                visible: root.gmEnabled
+                                icon: "keyboard"; title: "show keyboard shortcuts"
+                                desc: "the accelerator beside each item, where the application reports one"
+                                on: root.gmAccel
+                                onToggled: { root.gmAccel = !root.gmAccel; root.gmSave() }
+                            }
+                            ToggleCard {
+                                visible: root.gmEnabled
+                                icon: "bolt"; title: "read menus in the background"
+                                desc: "firefox and electron only describe a menu once it has been opened, and opening it is real — their own popup appears. off: it happens on the click that needs it, one menu at a time. on: backgrounded windows are read in advance, which is faster but can be seen if you switch to one mid-read."
+                                on: root.gmPrime
+                                onToggled: { root.gmPrime = !root.gmPrime; root.gmSave() }
+                            }
+                            Text {
+                                visible: root.gmEnabled
+                                text: "SUPER+M opens it · SUPER+SHIFT+M searches every command in it · arrows walk it, / searches, escape backs out"
+                                color: theme.faint; font.pixelSize: 10; font.family: root.apFont
+                                Layout.fillWidth: true; wrapMode: Text.WordWrap; Layout.topMargin: 2
+                            }
+                            AccentBtn {
+                                visible: root.gmEnabled
+                                label: root.gmDoctorBusy ? "checking…" : "why has a window no menu?"
+                                icon: "stethoscope"
+                                enabled: !root.gmDoctorBusy
+                                Layout.topMargin: 4
+                                onClicked: root.gmRunDoctor()
+                            }
+                            Rectangle {
+                                visible: root.gmEnabled && root.gmDoctor.length > 0
+                                Layout.fillWidth: true
+                                implicitHeight: docTxt.implicitHeight + 20
+                                radius: Tok.r
+                                color: theme.a(theme.line, 0.4)
+                                border.width: 1; border.color: theme.a(theme.iris, 0.14)
+                                Text {
+                                    id: docTxt
+                                    anchors.fill: parent; anchors.margins: 10
+                                    text: root.gmDoctor
+                                    color: theme.sub; font.pixelSize: 10; font.family: Tok.mono
+                                    wrapMode: Text.WordWrap
+                                }
+                            }
+
+                            // ---- per-app setup ----
+                            Text {
+                                visible: root.gmEnabled && root.gmApps.length > 0
+                                text: "apps on this machine"
+                                color: theme.faint; font.pixelSize: 10; font.family: Tok.mono
+                                Layout.topMargin: 8
+                            }
+                            Repeater {
+                                model: root.gmEnabled ? root.gmApps : []
+                                delegate: Rectangle {
+                                    required property var modelData
+                                    Layout.fillWidth: true
+                                    implicitHeight: Math.max(40, appCol.implicitHeight + 14)
+                                    radius: Tok.r
+                                    color: theme.a(theme.line, 0.4)
+                                    border.width: 1
+                                    border.color: modelData.ok ? theme.a(theme.good, 0.35)
+                                                               : theme.a(theme.warn, 0.35)
+                                    RowLayout {
+                                        anchors.fill: parent
+                                        anchors.leftMargin: 12; anchors.rightMargin: 12
+                                        spacing: 10
+                                        Sym { text: modelData.ok ? "check_circle" : "error"
+                                              sz: 17
+                                              color: modelData.ok ? theme.good : theme.warn
+                                              Layout.alignment: Qt.AlignVCenter }
+                                        ColumnLayout { id: appCol; spacing: 2; Layout.fillWidth: true
+                                            Text { text: modelData.label; color: theme.text
+                                                   font.pixelSize: 13; font.family: Tok.mono
+                                                   Layout.fillWidth: true; elide: Text.ElideRight }
+                                            Text { text: modelData.ok ? "ready" : modelData.how
+                                                   color: theme.faint; font.pixelSize: 10
+                                                   font.family: Tok.mono
+                                                   Layout.fillWidth: true; wrapMode: Text.WordWrap } }
+                                    }
+                                }
+                            }
+                            AccentBtn {
+                                visible: root.gmEnabled && root.gmNeeds > 0
+                                enabled: !root.gmSetupBusy
+                                icon: "auto_fix_high"
+                                label: root.gmSetupBusy ? "setting up…"
+                                       : "set up " + root.gmNeeds + " app" + (root.gmNeeds === 1 ? "" : "s")
+                                Layout.topMargin: 4
+                                onClicked: root.gmSetupAll()
+                            }
+                            Text {
+                                visible: root.gmEnabled && root.gmApps.length > 0
+                                Layout.fillWidth: true; wrapMode: Text.WordWrap
+                                text: root.gmNeeds > 0
+                                      ? "firefox needs two prefs; electron apps need to run under xwayland so they can hand their menu over as data. each app has to be restarted afterwards."
+                                      : "every app found here can publish its menu. qt and gtk apps need nothing at all."
+                                color: theme.faint; font.pixelSize: 10; font.family: Tok.mono
+                            }
+
                             // ---- bar layout presets (save/restore the whole bar layout) ----
                             Section { title: "layout presets"; icon: "bookmarks"; Layout.topMargin: 8 }
                             Text {
@@ -5380,6 +5925,7 @@ Scope {
 
                         // ================= THEME PROFILES =================
                         ColumnLayout {
+                            property int tabIdx: 13
                             visible: root.tab === 13; Layout.fillWidth: true; spacing: 14
                             Section { title: "theme profiles & presets"; icon: "auto_awesome" }
                             Text {
@@ -5461,6 +6007,7 @@ Scope {
 
                         // ================= ACTIONS =================
                         ColumnLayout {
+                            property int tabIdx: 5
                             visible: root.tab === 5; Layout.fillWidth: true; spacing: 14
                             Section { title: "quick actions"; icon: "bolt" }
                             GridLayout {
@@ -5484,6 +6031,7 @@ Scope {
 
                         // ================= KEYBINDS =================
                         ColumnLayout {
+                            property int tabIdx: 7
                             visible: root.tab === 7; Layout.fillWidth: true; spacing: 10
                             Section { title: "keybinds"; icon: "keyboard" }
                             // search
@@ -5543,6 +6091,7 @@ Scope {
                         // ================= SYSTEM =================
                         // ================= SYSTEM / ABOUT =================
                         ColumnLayout {
+                            property int tabIdx: 8
                             visible: root.tab === 8; Layout.fillWidth: true; spacing: 12
 
                             // ---- hero: brand · version · host ----
@@ -5741,6 +6290,7 @@ Scope {
 
                         // ================= DISKS =================
                         ColumnLayout {
+                            property int tabIdx: 19
                             visible: root.tab === 19; Layout.fillWidth: true; spacing: 14
 
                             // ---- overview ----
@@ -5906,6 +6456,7 @@ Scope {
 
                         // ================= SCREEN TIME =================
                         ColumnLayout {
+                            property int tabIdx: 18
                             visible: root.tab === 18; Layout.fillWidth: true; spacing: 14
 
                             Section { title: "today"; icon: "hourglass_top" }
@@ -5985,6 +6536,7 @@ Scope {
 
                         // ================= WINDOW RULES =================
                         ColumnLayout {
+                            property int tabIdx: 17
                             visible: root.tab === 17; Layout.fillWidth: true; spacing: 14
 
                             Section { title: "window rules"; icon: "picture_in_picture" }
@@ -6138,6 +6690,7 @@ Scope {
 
                         // ================= DOCK =================
                         ColumnLayout {
+                            property int tabIdx: 16
                             visible: root.tab === 16; Layout.fillWidth: true; spacing: 14
 
                             Section { title: "dock"; icon: "dock_to_bottom" }
@@ -6246,6 +6799,7 @@ Scope {
 
                         // ================= CALENDAR =================
                         ColumnLayout {
+                            property int tabIdx: 11
                             visible: root.tab === 11; Layout.fillWidth: true; spacing: 14
 
                             // header + live count
@@ -6433,6 +6987,7 @@ Scope {
 
                         // ================= BLUETOOTH =================
                         ColumnLayout {
+                            property int tabIdx: 9
                             visible: root.tab === 9; Layout.fillWidth: true; spacing: 12
                             RowLayout {
                                 Layout.fillWidth: true; spacing: 8
@@ -6475,6 +7030,7 @@ Scope {
 
                         // ================= KDE CONNECT =================
                         ColumnLayout {
+                            property int tabIdx: 14
                             visible: root.tab === 14; Layout.fillWidth: true; spacing: 12
                             RowLayout {
                                 Layout.fillWidth: true; spacing: 8
@@ -6625,6 +7181,7 @@ Scope {
 
                         // ================= IDLE & LOCK =================
                         ColumnLayout {
+                            property int tabIdx: 10
                             visible: root.tab === 10; Layout.fillWidth: true; spacing: 14
 
                             // segmented horizontal navigation bar for Idle & Lock sub-menus
@@ -7021,6 +7578,7 @@ Scope {
 
                         // ================= INPUT =================
                         ColumnLayout {
+                            property int tabIdx: 15
                             visible: root.tab === 15; Layout.fillWidth: true; spacing: 12
 
                             Section { title: "mouse"; icon: "mouse" }
@@ -7155,6 +7713,7 @@ Scope {
 
                         // ================= POWER =================
                         ColumnLayout {
+                            property int tabIdx: 6
                             visible: root.tab === 6; Layout.fillWidth: true; spacing: 14
                             Section { title: "battery"; icon: "battery_full" }
                             RowLayout {
@@ -7331,6 +7890,29 @@ Scope {
                             Text { text: "action / command"; color: theme.faint; font.pixelSize: 10; font.family: Tok.mono; Layout.topMargin: 4 }
                             Rectangle { Layout.fillWidth: true; implicitHeight: 32; radius: Tok.r; color: theme.a(theme.line,0.4); border.width: 1; border.color: kbActIn2.activeFocus ? theme.iris : theme.a(theme.iris,0.14)
                                 TextInput { id: kbActIn2; anchors.fill: parent; anchors.leftMargin: 8; anchors.rightMargin: 8; verticalAlignment: TextInput.AlignVCenter; color: theme.text; font.pixelSize: 12; font.family: Tok.mono; clip: true; text: root.kbAddAction; onTextChanged: root.kbAddAction = text } }
+                        }
+                        // edit-mode: what the bind actually runs
+                        ColumnLayout { visible: !root.kbAdding && root.kbRec !== null; spacing: 4; Layout.fillWidth: true
+                            Text { text: root.kbRec && root.kbRec.isExec ? "command" : "action (read-only)"
+                                color: theme.faint; font.pixelSize: 10; font.family: Tok.mono }
+                            Rectangle { Layout.fillWidth: true; implicitHeight: 32; radius: Tok.r
+                                color: theme.a(theme.line, root.kbRec && root.kbRec.isExec ? 0.4 : 0.22)
+                                border.width: 1
+                                border.color: kbActEdit.activeFocus ? theme.iris : theme.a(theme.iris,0.14)
+                                TextInput { id: kbActEdit
+                                    anchors.fill: parent; anchors.leftMargin: 8; anchors.rightMargin: 8
+                                    verticalAlignment: TextInput.AlignVCenter
+                                    color: root.kbRec && root.kbRec.isExec ? theme.text : theme.faint
+                                    font.pixelSize: 12; font.family: Tok.mono; clip: true
+                                    readOnly: !(root.kbRec && root.kbRec.isExec)
+                                    text: root.kbRec ? (root.kbRec.isExec ? root.kbRecAction
+                                                       : (root.kbRec.dispatcher + (root.kbRec.arg ? " " + root.kbRec.arg : "")))
+                                                     : ""
+                                    onTextChanged: if (root.kbRec && root.kbRec.isExec) root.kbRecAction = text } }
+                            Text { visible: !!(root.kbRec && !root.kbRec.isExec)
+                                Layout.fillWidth: true; wrapMode: Text.WordWrap
+                                text: "this one runs a compositor action, not a command — only its shortcut can be changed here"
+                                color: theme.faint; font.pixelSize: 10; font.family: Tok.mono }
                         }
                         // shortcut picker (both modes)
                         Text { text: "shortcut"; color: theme.faint; font.pixelSize: 10; font.family: Tok.mono }

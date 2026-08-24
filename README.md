@@ -4,7 +4,7 @@
 notification daemon and screen recorder are one Quickshell process — not six
 tools glued together. The whole palette follows your wallpaper.
 
-**`v6.4.0`** · [seashell.miyukivigil.tech](https://seashell.miyukivigil.tech) ·
+**`v6.4.1`** · [seashell.miyukivigil.tech](https://seashell.miyukivigil.tech) ·
 [changelog](https://seashell.miyukivigil.tech/changelog.html)
 
 ![The sea-shell desktop — translucent bar at the top, animated wallpaper, and the dock at the bottom](https://seashell.miyukivigil.tech/images/v6/hero.webp)
@@ -37,7 +37,7 @@ Arch-based for the package install; the configs work anywhere with `--no-deps`.
 |---|---|
 | **Bar** | Workspaces, focused app, centred media, tray, and status pills for CPU/RAM/GPU, weather, network throughput, package updates, wi-fi + VPN, bluetooth, KDE Connect, volume, battery, calendar and power. Reorderable, individually toggleable. |
 | **Desktop** | Widgets and shortcuts on the wallpaper — and they are placed around what is *in* it, not on top of it. |
-| **Global menu** | The focused window's own menu bar, in the bar. Qt, GTK, KDE and LibreOffice. |
+| **Global menu** | The focused window's own menu bar, in the bar. Qt, GTK, KDE, LibreOffice, Firefox and Electron. |
 | **Dock** | Pinned + running apps, any edge, per-monitor, cursor magnification. |
 | **Launcher** | Apps with frecency ranking, plus commands, maths, file search, web, clipboard history and system actions. |
 | **Control center** | 21 tabs — appearance, widgets, desktop, dock, window rules, input, audio, display, network, bluetooth, disks, weather, calendar, keybinds, screen time, idle, power. |
@@ -86,15 +86,40 @@ parts as the bar. Each takes a colour, a ground, an alignment and a size.
 
 ### The global menu
 
-The focused window's own menu bar, drawn in the bar where the window title goes, for as long
-as the focused window has one. **Qt, GTK, KDE and LibreOffice** hand over their whole menu
-tree, nested submenus included. It is invisible otherwise — most windows export no menu bar,
-and a global menu that answers those with an empty strip is worse than none, so the title
-comes back. The workspace pills stand down while a menu is showing.
+The focused window's own menu bar, drawn in the bar where the window title goes: the mark,
+then the application's name, then its menus. It is invisible otherwise — most windows export
+no menu bar, and a global menu that answers those with an empty strip is worse than none, so
+the window title comes back and the workspace pills return with it.
 
-Needs `at-spi2-core` and `python-gobject`, both installed by `install.sh`. Firefox works but
-is read while it is off-screen, because opening one of its menus is visible. Electron apps
-export nothing without a launch flag and are not supported.
+`SUPER+M` opens it from the keyboard. `SUPER+SHIFT+M` searches every command in it, which is
+the reason to have one at all on an application like LibreOffice: finding
+*Insert → Header and Footer → Header* by hand is four hovers and a memory of which top-level
+menu it lives under. Typing `head` is neither.
+
+#### Which applications
+
+| Application | How its menu arrives | What it needs |
+| --- | --- | --- |
+| **Qt / KDE** — Dolphin, Kate, Okular, kdenlive | Whole tree over accessibility, nested submenus included | Nothing |
+| **GTK** — GIMP, Inkscape, file managers | Whole tree over accessibility | Nothing |
+| **LibreOffice** — Writer, Calc, Impress | Whole tree over accessibility | Nothing |
+| **Firefox**, Thunderbird | Published as data over `com.canonical.dbusmenu` — nothing is ever opened | Two prefs |
+| **Electron / Chromium** — VS Code, Discord, Obsidian, Cider | Published as data, through sea-shell's own AppMenu registrar | Must run under XWayland — one launch flag |
+| **GTK4 / libadwaita** — apps with a hamburger button | No menu bar exists to show | — |
+
+The last two columns are not homework. **Settings → Bar Widgets → global menu** lists every
+application on the machine that needs something, says what and why, and sets them all up with
+one button; each one has to be restarted afterwards. The same page has a **doctor** that
+answers "why has this window no menu?" for every window currently open, which is otherwise
+invisible — the bar's only way of saying it is to show nothing at all.
+
+Menus are read once and remembered, on disk, across restarts. An application that builds each
+menu only when it is first opened — anything Electron, and Firefox when it cannot reach the
+registrar — can be read in full ahead of time from the `read all` button in the menu search,
+paid once and never again.
+
+Right-click the strip to hand the bar back to the workspace numbers, and again to bring it
+back. Needs `at-spi2-core` and `python-gobject`, both installed by `install.sh`.
 
 ### The bar
 
@@ -500,6 +525,7 @@ and a "used by …" note.
 | `SUPER+W` | Mission control |
 | `SUPER+V` | Clipboard history |
 | `SUPER+K` | Keybind cheat-sheet |
+| `SUPER+M` / `SUPER+SHIFT+M` | The focused window's menus / search them |
 | `SUPER+ESC` | Power menu |
 | `SUPER+R` | Screen recording — again to stop |
 | `Print` / `SUPER+Print` / `SUPER+SHIFT+S` | Screenshots |
