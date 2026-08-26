@@ -56,6 +56,13 @@ try:
 except Exception:
     AppMenu = None
 
+# "Open containing folder" is a D-Bus call, not a MIME lookup — see the note at
+# the top of sea_fm_fm1.py. Optional for the same reason as the menu export.
+try:
+    from sea_fm_fm1 import FileManager1
+except Exception:
+    FileManager1 = None
+
 # Lazy-loaded modules cache
 _LAZY_MODULES = {}
 
@@ -5222,6 +5229,98 @@ class FileManagerBackend(QObject):
 
         self.setStatus(f"Copied {len(clean_paths)} item(s) to clipboard")
 
+    # ---- answering other applications ----------------------------------
+    #
+    # These arrive from sea_fm_fm1 on a worker thread as queued signals, so they
+    # run here, on the UI thread, and may touch the window freely.
+
+    revealRequested = Signal(str)       # a path to select once the listing lands
+    propertiesRequested = Signal(list)
+
+    @Slot(list)
+    def revealFolders(self, paths):
+        """Open each folder. The first takes this window; the rest get their own."""
+        first = True
+        for raw in paths:
+            p = Path(raw)
+            if not p.is_dir():
+                p = p.parent
+            if not p.is_dir():
+                continue
+            if first:
+                self.cd(str(p))
+                self.raiseWindow()
+                first = False
+            else:
+                self.openNewWindow(str(p))
+
+    @Slot(list)
+    def revealItems(self, paths):
+        """Open the PARENT and select the item, which is what reveal means.
+
+        Grouped by parent first: "show in folder" on a multiple selection asks
+        for several items that usually live in one directory, and opening that
+        directory once per item would be three windows onto the same place.
+        """
+        by_parent = {}
+        for raw in paths:
+            p = Path(raw)
+            parent = str(p.parent)
+            by_parent.setdefault(parent, []).append(str(p))
+        first = True
+        for parent, items in by_parent.items():
+            if not Path(parent).is_dir():
+                continue
+            if first:
+                self.cd(parent)
+                self.raiseWindow()
+                # The listing is refreshed off the back of cd(), so the row does
+                # not exist yet — and on a COLD start, where this request is what
+                # launched the window, it does not exist for a good while. So it
+                # waits for the row rather than guessing a delay.
+                self._select_when_listed(items[0])
+                first = False
+            else:
+                self.openNewWindow(parent)
+
+    def _select_when_listed(self, path, tries=0):
+        """Select `path` once the listing holding it has actually arrived.
+
+        Bounded, because a file that is never going to appear — deleted between
+        the request and the listing, or filtered out of view — must not leave a
+        timer running for the life of the window.
+        """
+        if not Path(path).exists():
+            return
+        if self.rowOf(path) >= 0:
+            self.selectFile(path)
+            self.revealRequested.emit(path)
+            return
+        if tries >= 40:                 # ~4 seconds, then give up quietly
+            return
+        QTimer.singleShot(100, lambda: self._select_when_listed(path, tries + 1))
+
+    @Slot(list)
+    def revealProperties(self, paths):
+        good = [p for p in paths if Path(p).exists()]
+        if not good:
+            return
+        self.cd(str(Path(good[0]).parent))
+        self.raiseWindow()
+        self.propertiesRequested.emit(good)
+
+    @Slot()
+    def raiseWindow(self):
+        """Bring this window forward — a reveal that lands behind is a reveal
+        that did not happen. Hyprland has no activation protocol we can use from
+        here, so it is asked directly."""
+        try:
+            subprocess.Popen(
+                ["hyprctl", "dispatch", "focuswindow", "class:sea-fm"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
+
     @Slot()
     @Slot(str)
     def openNewWindow(self, path_str=""):
@@ -6878,6 +6977,19 @@ def main():
     engine.rootContext().setContextProperty("appmenu", appmenu)
     if appmenu is not None:
         app.aboutToQuit.connect(appmenu.stop)
+
+    # REVEAL REQUESTS FROM OTHER APPLICATIONS. Firefox's "open containing
+    # folder", Chromium's "show in folder", Steam and most Electron applications
+    # all ask org.freedesktop.FileManager1 rather than opening the directory, so
+    # being the declared handler for inode/directory is not enough to be asked.
+    # Claimed only if nothing else already holds the name.
+    fm1 = FileManager1() if FileManager1 is not None else None
+    if fm1 is not None and fm1.start():
+        fm1.showFolders.connect(backend.revealFolders)
+        fm1.showItems.connect(backend.revealItems)
+        fm1.showItemProperties.connect(backend.revealProperties)
+    else:
+        fm1 = None
 
     ui_dir = str(Path(__file__).parent.parent / "ui")
     if os.path.exists(ui_dir):

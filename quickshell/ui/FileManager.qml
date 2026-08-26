@@ -497,6 +497,16 @@ ApplicationWindow {
         return selectedPaths.indexOf(path) !== -1 || selectedPath === path
     }
 
+    // Put the selected row where it can be seen. A revealed file three screens
+    // down is not revealed.
+    function scrollToSelection() {
+        if (!be1 || !selectedPath) return
+        var i = be1.rowOf(selectedPath)
+        if (i < 0) return
+        var v = paneA.currentView()
+        if (v && v.positionViewAtIndex) v.positionViewAtIndex(i, ListView.Contain)
+    }
+
     function selectSingle(path) {
         selectedPath = path
         selectedPaths = [path]
@@ -674,6 +684,16 @@ ApplicationWindow {
         function onThumbnailReady(filePath, thumbPath) {
             window.pendingThumbs[filePath] = thumbPath
             thumbFlush.restart()
+        }
+        // "Open containing folder" from another application. The backend has
+        // already navigated and told the preview which file it is about, but the
+        // GRID's selection is this window's own state, so a reveal that only
+        // reached the backend opened the right folder with nothing highlighted —
+        // which is most of what makes a reveal a reveal.
+        function onRevealRequested(path) {
+            window.focusPane(0)
+            window.selectSingle(path)
+            window.scrollToSelection()
         }
     }
 
@@ -2696,6 +2716,14 @@ ApplicationWindow {
         // Where a shift-click measures from. Set by every plain or toggling click,
         // the way it works everywhere else.
         property int selAnchor: -1
+        // Whichever of the three is on screen, for anything that needs to scroll
+        // the list rather than read it.
+        function currentView() {
+            var vm = pane.be ? pane.be.viewMode : "grid"
+            if (vm === "list") return listView
+            if (vm === "compact") return compactView
+            return gridView
+        }
         function pick(p) { window.focusPane(pane.paneIndex); window.selectSingle(p) }
         function pickToggle(p) { window.focusPane(pane.paneIndex); window.toggleSelect(p) }
         function pickAt(p, i) { pane.selAnchor = i; pane.pick(p) }

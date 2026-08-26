@@ -226,6 +226,94 @@ def _save_own(d):
     os.replace(tmp, DEFAULTS_FILE)      # the shell watches this file
 
 
+# ---------------------------------------------------------------------------
+# "open containing folder" is a D-Bus call, not a MIME lookup
+# ---------------------------------------------------------------------------
+#
+# Setting inode/directory makes `xdg-open /some/folder` right, and that is what
+# most of the desktop uses. But "reveal this file" asks for a folder opened with
+# one item SELECTED, which a MIME handler cannot express, so Firefox, Chromium,
+# Steam and most Electron applications call org.freedesktop.FileManager1 instead.
+# That name belongs to whichever file manager shipped a D-Bus service file — on a
+# machine with GNOME's packages installed, Nautilus — and it is claimed whatever
+# the MIME database says. So choosing sea-fm here has to claim it too, or "open
+# containing folder" keeps opening something else.
+#
+# $XDG_DATA_HOME/dbus-1/services is searched BEFORE the system directories, so
+# this shadows their file rather than touching it; removing ours puts whichever
+# of them was answering back.
+
+FM1_NAME = "org.freedesktop.FileManager1"
+FM1_DIR = Path(os.environ.get("XDG_DATA_HOME")
+               or Path.home() / ".local" / "share") / "dbus-1" / "services"
+FM1_FILE = FM1_DIR / (FM1_NAME + ".service")
+FM1_STAMP = "# written by sea-shell (sea-defaults.py) — safe to delete\n"
+
+
+def _is_sea_fm(entry):
+    return "sea-fm" in (entry.get("Exec", "") or "")
+
+
+def install_filemanager1_service(entry):
+    argv = _exec_words(entry.get("Exec", ""))
+    if not argv:
+        return False, "that entry has no Exec line"
+    try:
+        FM1_DIR.mkdir(parents=True, exist_ok=True)
+        FM1_FILE.write_text(FM1_STAMP
+                            + "[D-BUS Service]\n"
+                            + "Name=%s\n" % FM1_NAME
+                            + "Exec=%s\n" % " ".join(argv))
+        return True, ""
+    except OSError as exc:
+        return False, str(exc)
+
+
+def uninstall_filemanager1_service():
+    """Only ever removes OUR file, never Nautilus's or Dolphin's."""
+    try:
+        if not FM1_FILE.read_text().startswith(FM1_STAMP):
+            return True, ""             # somebody else's; leave it alone
+    except OSError:
+        return True, ""                 # nothing there
+    try:
+        FM1_FILE.unlink()
+        return True, ""
+    except OSError as exc:
+        return False, str(exc)
+
+
+def _bus_rescan():
+    """Tell the session bus to re-read its service files.
+
+    IT DOES NOT NOTICE ON ITS OWN. dbus-broker indexes the activatable services
+    at startup, so a service file written now is not seen until the next login —
+    which means choosing sea-fm appeared to do nothing at all until you rebooted,
+    and the old file manager kept answering. Best effort: if this fails the file
+    is still correct and takes effect next session.
+    """
+    try:
+        subprocess.run(
+            ["gdbus", "call", "--session",
+             "--dest", "org.freedesktop.DBus",
+             "--object-path", "/org/freedesktop/DBus",
+             "--method", "org.freedesktop.DBus.ReloadConfig"],
+            capture_output=True, timeout=10)
+    except Exception:
+        pass
+
+
+def _exec_words(exec_line):
+    """The Exec line with the field codes stripped — %u, %F and friends mean
+    nothing to a D-Bus service, which is started with no arguments at all."""
+    out = []
+    for w in (exec_line or "").split():
+        if re.fullmatch(r"%[fFuUdDnNickvm]", w):
+            continue
+        out.append(w)
+    return out
+
+
 def current(role):
     spec = ROLES.get(role) or {}
     mimes = spec.get("mimes") or []
@@ -266,6 +354,16 @@ def set_default(role, entry_id):
         if role == "browser" and shutil.which("xdg-settings"):
             subprocess.run(["xdg-settings", "set", "default-web-browser", entry_id],
                            capture_output=True, timeout=20)
+
+    # Choosing a file manager is also choosing who answers reveal requests.
+    if role == "filemanager":
+        if _is_sea_fm(known[entry_id]):
+            ok2, msg2 = install_filemanager1_service(known[entry_id])
+        else:
+            ok2, msg2 = uninstall_filemanager1_service()
+        if not ok2:
+            return False, msg2
+        _bus_rescan()
 
     # Recorded either way: the shell reads its own file for the terminal, and for
     # everything else it is a note of what was chosen HERE, so the settings page
