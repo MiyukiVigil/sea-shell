@@ -22,7 +22,7 @@ Scope {
     // release apart — the badge read v5.0.0 on a 6.0.0 install. A version badge that lies is worse
     // than no badge. The literal survives only as the fallback for a `qs -p` run out of the repo
     // with nothing deployed; the second path covers that case too (quickshell/ui/ → repo root).
-    property string seaVersion: "6.4.1"
+    property string seaVersion: "6.5.0"
     Process {
         running: true
         command: ["sh","-c","cat \"$HOME/.config/quickshell/sea-shell/VERSION\" 2>/dev/null || cat \"" + root.repo + "/../../VERSION\" 2>/dev/null"]
@@ -97,11 +97,53 @@ Scope {
         18: { l: "Screen time",    i: "hourglass_top" },
         19: { l: "Disks",          i: "hard_drive" },
         20: { l: "Bar",            i: "view_agenda" },
-        21: { l: "Desktop",        i: "wallpaper" }
+        21: { l: "Desktop",        i: "wallpaper" },
+        22: { l: "Default Apps",   i: "apps" }
     })
     function tabLabel(t) { var m = root.tabMeta[t]; return m ? m.l : "" }
     function tabIcon(t)  { var m = root.tabMeta[t]; return m ? m.i : "tune" }
 
+    // ---- default applications -------------------------------------------------
+    // WHICH PROGRAM OPENS WHAT is a system-wide setting, not a shell one: it lives
+    // in mimeapps.list and every toolkit on the machine reads it. sea-defaults.py
+    // owns the writing (through xdg-mime, which knows the file's precedence rules)
+    // and this page only asks and shows. The terminal is the exception -- nothing
+    // in the spec says which terminal is yours -- and is kept in the shell's own
+    // defaults.json, which is why it is marked as not standard below.
+    property var defRoles: []
+    property var defCands: ({})
+    property string defBusy: ""             // the role currently being written
+    property string defError: ""
+    property string defOpen: ""             // the role whose choices are expanded
+    readonly property string defScript: Qt.resolvedUrl("sea-defaults.py").toString().replace("file://","")
+
+    function defRefresh() { defProc.command = ["python3", root.defScript, "--all"]; defProc.running = false; defProc.running = true }
+    function defSet(role, id) {
+        root.defBusy = role; root.defError = "";
+        defSetProc.command = ["python3", root.defScript, "--set", role, id];
+        defSetProc.running = false; defSetProc.running = true;
+    }
+    Process {
+        id: defProc
+        stdout: StdioCollector { id: defOut; onStreamFinished: {
+            try {
+                var d = JSON.parse(defOut.text);
+                root.defRoles = d.roles || [];
+                root.defCands = d.candidates || ({});
+            } catch (e) { root.defError = "Could not read the application list" }
+        } }
+    }
+    Process {
+        id: defSetProc
+        stdout: StdioCollector { id: defSetOut; onStreamFinished: {
+            root.defBusy = "";
+            try {
+                var d = JSON.parse(defSetOut.text);
+                if (!d.ok) root.defError = d.error || "It refused the change";
+            } catch (e) { root.defError = "It gave no answer" }
+            root.defRefresh();          // read back what actually took, not what we asked for
+        } }
+    }
     property string navQuery: ""
     // Matches on the section name AND on the page it lives on, so "bar menu" finds the
     // global menu the same way "global" does, and a page name alone lists that page.
@@ -252,7 +294,16 @@ Scope {
         out.sort(function (a, b) { return ("" + a.name).localeCompare("" + b.name) });
         return out.slice(0, 7);
     }
-    onTabChanged: refreshTab(tab)
+    onTabChanged: {
+        refreshTab(tab);
+        // The applications list is filled when that page is first looked at, not
+        // at startup: it walks every applications directory on the machine and
+        // nothing needs that until asked. There can only be ONE handler for a
+        // signal in QML -- a second `onTabChanged` elsewhere in this file is a
+        // "Property value set multiple times" error and the panel does not load
+        // at all -- so it goes here rather than beside the state it belongs to.
+        if (tab === 22 && root.defRoles.length === 0) root.defRefresh();
+    }
 
     // SUPER+S and other external triggers toggle the resident panel through this handler
     IpcHandler {
@@ -1234,8 +1285,14 @@ Scope {
     property string apFont: "monospace"
     property bool apLight: false            // dark (default) ↔ light palette
     property bool apMatugen: false          // recolour accent + kitty from the wallpaper
-    property string apScheme: "scheme-tonal-spot"   // matugen colour-scheme algorithm
-    readonly property var schemes: ["scheme-tonal-spot","scheme-content","scheme-neutral","scheme-expressive","scheme-fidelity","scheme-monochrome","scheme-rainbow","scheme-fruit-salad"]
+    // "smart" is the default because it is the only one that LOOKS at the picture
+    // before deciding: matugen measures the image's colourfulness (Hasler-Suesstrunk)
+    // and picks monochrome, neutral, tonal-spot or vibrant to match. The rest apply
+    // one algorithm to everything, which is why a black-and-white wallpaper under
+    // tonal-spot comes back blue -- Material's scorer hands out a default hue when
+    // it cannot find one in the image.
+    property string apScheme: "scheme-smart"        // matugen colour-scheme algorithm
+    readonly property var schemes: ["scheme-smart","scheme-tonal-spot","scheme-vibrant","scheme-content","scheme-neutral","scheme-expressive","scheme-fidelity","scheme-monochrome","scheme-rainbow","scheme-fruit-salad"]
     property string apBarFill: "matugen"            // top-bar fill: matugen · black · white
     property string apEdge: "top"                   // bar dock edge: top, bottom, left, right
     // ---------- user window rules ----------
@@ -3585,6 +3642,7 @@ Scope {
                             TabBtn { icon: "keyboard";             label: "Keybinds";    idx: 7 }
                             TabBtn { icon: "mouse";                label: "Input";       idx: 15 }
                 TabBtn { icon: "hourglass_top";        label: "Screen time"; idx: 18 }
+                            TabBtn { icon: "apps";                 label: "Default Apps"; idx: 22 }
                             GroupLabel { text: "SESSION" }
                             TabBtn { icon: "bedtime";              label: "Idle & lock"; idx: 10 }
                             TabBtn { icon: "bolt";                 label: "Actions";     idx: 5 }
@@ -5087,6 +5145,237 @@ Scope {
                         }
 
                         // ================= DESKTOP =================
+                        // Which program opens what. See the note by defScript above:
+                        // this page asks and shows, sea-defaults.py writes.
+                        ColumnLayout {
+                            property int tabIdx: 22
+                            visible: root.tab === 22; Layout.fillWidth: true; spacing: 12
+
+                            Section { title: "what opens what"; icon: "apps" }
+                            Text {
+                                Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14
+                                wrapMode: Text.Wrap
+                                color: Tok.ink3; font.pixelSize: Tok.tDense; font.family: Tok.mono
+                                text: "These are the machine's associations, not the shell's — set one here "
+                                    + "and every application that asks the system will follow it. The only "
+                                    + "exception is the terminal, which no standard covers; that one is "
+                                    + "sea-shell's own and is used by its command actions."
+                            }
+
+                            Text {
+                                visible: root.defError.length > 0
+                                Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14
+                                wrapMode: Text.Wrap
+                                color: theme.love !== undefined ? theme.love : "#e06c75"
+                                font.pixelSize: Tok.tDense; font.family: Tok.mono
+                                text: "⚠  " + root.defError
+                            }
+
+                            Text {
+                                visible: root.defRoles.length === 0
+                                Layout.leftMargin: 14; Layout.topMargin: 6
+                                color: Tok.ink3; font.pixelSize: Tok.tDense; font.family: Tok.mono
+                                text: "reading the applications on this machine…"
+                            }
+
+                            Repeater {
+                                model: root.defRoles
+                                delegate: ColumnLayout {
+                                    id: roleBlock
+                                    required property var modelData
+                                    readonly property bool expanded: root.defOpen === modelData.role
+                                    readonly property var choices: root.defCands[modelData.role] || []
+                                    Layout.fillWidth: true
+                                    Layout.leftMargin: 14; Layout.rightMargin: 14
+                                    spacing: 6
+
+                                    Rectangle {
+                                        Layout.fillWidth: true
+                                        implicitHeight: 46
+                                        radius: Tok.r
+                                        color: roleBlock.expanded ? theme.a(theme.iris, 0.10)
+                                             : (roleMa.containsMouse ? Tok.hover : "transparent")
+                                        border.width: 1
+                                        border.color: roleBlock.expanded ? theme.a(theme.iris, 0.35) : Tok.rule
+
+                                        RowLayout {
+                                            anchors.fill: parent
+                                            anchors.leftMargin: 12; anchors.rightMargin: 12
+                                            spacing: 10
+
+                                            Sym { text: roleBlock.modelData.icon; sz: 17; color: theme.frost }
+
+                                            // preferredWidth 0 with fillWidth means "take the
+                                            // slack, but do not ASK for anything". Without it a
+                                            // row's implicit width included the note's full
+                                            // text, so the rows that have a note came out wider
+                                            // than the rows that do not and the columns to the
+                                            // right of them started in a different place on
+                                            // every line. Eliding alone does not fix that: elide
+                                            // changes what is drawn once a width is decided, not
+                                            // the width the item asks for.
+                                            ColumnLayout {
+                                                spacing: 0
+                                                Layout.fillWidth: true
+                                                Layout.preferredWidth: 0
+                                                Text {
+                                                    Layout.fillWidth: true
+                                                    Layout.preferredWidth: 0
+                                                    elide: Text.ElideRight
+                                                    text: roleBlock.modelData.label
+                                                    color: Tok.ink; font.pixelSize: 13; font.family: Tok.mono
+                                                    font.bold: true
+                                                }
+                                                Text {
+                                                    visible: roleBlock.modelData.note.length > 0
+                                                    text: roleBlock.modelData.note
+                                                    color: Tok.ink3; font.pixelSize: 10; font.family: Tok.mono
+                                                    elide: Text.ElideRight
+                                                    Layout.fillWidth: true
+                                                    Layout.preferredWidth: 0
+                                                }
+                                            }
+
+                                            // Not a standard association: say so rather than
+                                            // letting it look like the others and quietly not be.
+                                            Rectangle {
+                                                visible: !roleBlock.modelData.standard
+                                                implicitHeight: 15; implicitWidth: shellOnlyT.width + 12
+                                                radius: Tok.r
+                                                color: theme.a(theme.iris, 0.12)
+                                                border.width: 1; border.color: theme.a(theme.iris, 0.28)
+                                                Text {
+                                                    id: shellOnlyT; anchors.centerIn: parent
+                                                    text: "sea-shell only"
+                                                    color: theme.frost; font.pixelSize: 9; font.family: Tok.mono
+                                                }
+                                            }
+
+                                            // A COLUMN, NOT TWO LOOSE ITEMS. Laid out
+                                            // inline, the icon and the name took whatever x
+                                            // the widths around them left over, so no two
+                                            // rows agreed on where either began — a fixed
+                                            // cell gives the eye one edge to run down. The
+                                            // icon keeps its 18px whether or not there is an
+                                            // icon to draw, so the names line up under each
+                                            // other even where the theme has nothing to give.
+                                            RowLayout {
+                                                Layout.preferredWidth: 240
+                                                Layout.maximumWidth: 240
+                                                spacing: 8
+                                                // The slack sits BEFORE the value, not after,
+                                                // so the name ends flush against the chevron on
+                                                // every row. Left-aligning it inside a fixed
+                                                // cell lined the icons up but left every short
+                                                // name hanging in the middle of the row with a
+                                                // gap after it; a value column reads as a column
+                                                // because its edge is the one nearest the
+                                                // control it belongs to.
+                                                Item { Layout.fillWidth: true }
+                                                IconImage {
+                                                    Layout.preferredWidth: 18
+                                                    Layout.preferredHeight: 18
+                                                    visible: roleBlock.modelData.currentIcon.length > 0
+                                                             && status === Image.Ready
+                                                    source: roleBlock.modelData.currentIcon.length > 0
+                                                            ? Quickshell.iconPath(roleBlock.modelData.currentIcon, true) : ""
+                                                }
+                                                Text {
+                                                    Layout.maximumWidth: 214
+                                                    elide: Text.ElideRight
+                                                    horizontalAlignment: Text.AlignRight
+                                                    text: root.defBusy === roleBlock.modelData.role ? "setting…"
+                                                        : (roleBlock.modelData.currentName.length > 0
+                                                           ? roleBlock.modelData.currentName : "not set")
+                                                    color: roleBlock.modelData.currentName.length > 0 ? Tok.ink2 : Tok.ink3
+                                                    font.pixelSize: 12; font.family: Tok.mono
+                                                }
+                                            }
+                                            Sym {
+                                                text: roleBlock.expanded ? "expand_less" : "expand_more"
+                                                sz: 16; color: Tok.ink3
+                                            }
+                                        }
+
+                                        MouseArea {
+                                            id: roleMa
+                                            anchors.fill: parent
+                                            hoverEnabled: true
+                                            cursorShape: Qt.PointingHandCursor
+                                            onClicked: root.defOpen = roleBlock.expanded ? "" : roleBlock.modelData.role
+                                        }
+                                    }
+
+                                    // The applications that say they can do this job.
+                                    Flow {
+                                        visible: roleBlock.expanded
+                                        Layout.fillWidth: true
+                                        Layout.leftMargin: 8; Layout.bottomMargin: 4
+                                        spacing: 6
+
+                                        Repeater {
+                                            model: roleBlock.expanded ? roleBlock.choices : []
+                                            delegate: Rectangle {
+                                                id: appChip
+                                                required property var modelData
+                                                readonly property bool chosen: modelData.id === roleBlock.modelData.current
+                                                implicitHeight: 30
+                                                implicitWidth: chipRow.implicitWidth + 20
+                                                radius: Tok.r
+                                                color: appChip.chosen ? theme.a(theme.iris, 0.18)
+                                                     : (chipMa2.containsMouse ? Tok.hover : Tok.sunken)
+                                                border.width: 1
+                                                border.color: appChip.chosen ? theme.iris : Tok.rule
+
+                                                RowLayout {
+                                                    id: chipRow
+                                                    anchors.centerIn: parent
+                                                    spacing: 7
+                                                    IconImage {
+                                                        visible: appChip.modelData.icon.length > 0 && status === Image.Ready
+                                                        implicitSize: 16
+                                                        source: appChip.modelData.icon.length > 0
+                                                                ? Quickshell.iconPath(appChip.modelData.icon, true) : ""
+                                                    }
+                                                    Text {
+                                                        text: appChip.modelData.name
+                                                        color: appChip.chosen ? theme.frost : Tok.ink2
+                                                        font.pixelSize: 12; font.family: Tok.mono
+                                                        font.bold: appChip.chosen
+                                                    }
+                                                    Sym {
+                                                        visible: appChip.chosen
+                                                        text: "check"; sz: 13; color: theme.frost
+                                                    }
+                                                }
+
+                                                MouseArea {
+                                                    id: chipMa2
+                                                    anchors.fill: parent
+                                                    hoverEnabled: true
+                                                    cursorShape: Qt.PointingHandCursor
+                                                    onClicked: root.defSet(roleBlock.modelData.role, appChip.modelData.id)
+                                                }
+                                            }
+                                        }
+
+                                        Text {
+                                            visible: roleBlock.expanded && roleBlock.choices.length === 0
+                                            text: "nothing installed says it can do this"
+                                            color: Tok.ink3; font.pixelSize: Tok.tDense; font.family: Tok.mono
+                                        }
+                                    }
+                                }
+                            }
+
+                            RowLayout {
+                                Layout.fillWidth: true; Layout.leftMargin: 14; Layout.topMargin: 6
+                                spacing: 10
+                                Chip { label: "rescan"; icon: "refresh"; onPicked: root.defRefresh() }
+                                Item { Layout.fillWidth: true }
+                            }
+                        }
+
                         // The space between the bar and the dock. Everything here is a
                         // request to sea-desktop.py; see the note by dtScript above.
                         ColumnLayout {

@@ -20,6 +20,7 @@
 import Quickshell
 import Quickshell.Wayland
 import Quickshell.Io
+import Quickshell.Widgets
 import QtQuick
 import QtQuick.Layouts
 
@@ -28,7 +29,10 @@ Scope {
 
     property bool shown: false
     property int step: 0
-    readonly property int steps: 6
+    // The applications list is a walk of every applications directory on the
+    // machine, so it is read when that screen is reached rather than at startup.
+    onStepChanged: if (step === 5 && root.defRoles.length === 0) root.defRefresh()
+    readonly property int steps: 7
 
     readonly property string setScript:  Qt.resolvedUrl("sea-set-appearance.py").toString().replace("file://", "")
     readonly property string wpSet:      Qt.resolvedUrl("sea-wallpaper-set.sh").toString().replace("file://", "")
@@ -171,6 +175,44 @@ Scope {
     onShownChanged: if (shown) {
         if (!root.papers.length) wpIndexProc.running = true;
         gmCheck.running = true;
+    }
+
+    // ---------- default applications (step 5) ----------
+    // Asked here because it is the one setting a fresh machine most often has
+    // WRONG rather than merely unset: a distro ships one browser and one file
+    // manager as the answer to everything, and you find out the first time a link
+    // opens somewhere you did not want it. sea-defaults.py does the writing; see
+    // the note at the top of it for why the terminal is not like the others.
+    readonly property string defScript: Qt.resolvedUrl("sea-defaults.py").toString().replace("file://","")
+    property var defRoles: []
+    property var defCands: ({})
+    property string defBusy: ""
+    // Only the three the shell itself leans on. The other five are on the
+    // Settings page; a first run is not the place to work through eight of them.
+    readonly property var defAsk: ["terminal", "browser", "filemanager"]
+    function defRefresh() { defProc.command = ["python3", root.defScript, "--all"]; defProc.running = false; defProc.running = true }
+    function defSet(role, id) {
+        root.defBusy = role;
+        defSetProc.command = ["python3", root.defScript, "--set", role, id];
+        defSetProc.running = false; defSetProc.running = true;
+    }
+    function defRoleOf(name) {
+        for (var i = 0; i < root.defRoles.length; i++)
+            if (root.defRoles[i].role === name) return root.defRoles[i];
+        return null;
+    }
+    Process {
+        id: defProc
+        stdout: StdioCollector { id: defOut; onStreamFinished: {
+            try {
+                var d = JSON.parse(defOut.text);
+                root.defRoles = d.roles || []; root.defCands = d.candidates || ({});
+            } catch (e) {}
+        } }
+    }
+    Process {
+        id: defSetProc
+        stdout: StdioCollector { id: defSetOut; onStreamFinished: { root.defBusy = ""; root.defRefresh() } }
     }
 
     // ---------- the menu bar (step 5) ----------
@@ -578,10 +620,101 @@ Scope {
                         Item { Layout.fillHeight: true }
                     }
 
-                    // 5 — done
+                    // 5 — default applications
                     ColumnLayout {
                         anchors.fill: parent; spacing: 12
                         visible: root.step === 5
+                        WSection { title: "which app opens what" }
+                        IndText {
+                            Layout.fillWidth: true; wrapMode: Text.WordWrap
+                            mono: true; sz: Tok.tLabel; color: Tok.ink3
+                            text: "these are the machine's own associations — every application that asks "
+                                + "the system will follow them, not just this shell. the terminal is the "
+                                + "one exception: no standard covers it, so sea-shell keeps that answer "
+                                + "itself and uses it for “open in terminal”."
+                        }
+
+                        Repeater {
+                            model: root.defAsk
+                            delegate: ColumnLayout {
+                                id: wRole
+                                required property string modelData
+                                readonly property var info: root.defRoleOf(modelData)
+                                readonly property var choices: root.defCands[modelData] || []
+                                visible: !!info && choices.length > 0
+                                Layout.fillWidth: true
+                                spacing: 4
+
+                                RowLayout {
+                                    Layout.fillWidth: true; spacing: 8
+                                    IndText {
+                                        mono: true; sz: Tok.tLabel; color: Tok.ink2
+                                        text: wRole.info ? wRole.info.label.toLowerCase() : ""
+                                    }
+                                    Item { Layout.fillWidth: true }
+                                    IndText {
+                                        mono: true; sz: Tok.tLabel; color: Tok.ink3
+                                        text: root.defBusy === wRole.modelData ? "setting…" : ""
+                                    }
+                                }
+
+                                Flow {
+                                    Layout.fillWidth: true
+                                    spacing: 6
+                                    Repeater {
+                                        model: wRole.choices
+                                        delegate: Rectangle {
+                                            id: wChip
+                                            required property var modelData
+                                            readonly property bool chosen: !!wRole.info
+                                                && modelData.id === wRole.info.current
+                                            implicitHeight: 28
+                                            implicitWidth: wChipRow.implicitWidth + 18
+                                            radius: Tok.r
+                                            color: wChip.chosen ? Tok.accentWash
+                                                 : (wChipMa.containsMouse ? Tok.hover : Tok.sunken)
+                                            border.width: 1
+                                            border.color: wChip.chosen ? Tok.accent : Tok.ruleHard
+                                            RowLayout {
+                                                id: wChipRow
+                                                anchors.centerIn: parent; spacing: 6
+                                                IconImage {
+                                                    visible: wChip.modelData.icon.length > 0 && status === Image.Ready
+                                                    implicitSize: 15
+                                                    source: wChip.modelData.icon.length > 0
+                                                            ? Quickshell.iconPath(wChip.modelData.icon, true) : ""
+                                                }
+                                                IndText {
+                                                    mono: true; sz: Tok.tLabel
+                                                    color: wChip.chosen ? Tok.accent : Tok.ink2
+                                                    text: wChip.modelData.name
+                                                }
+                                            }
+                                            MouseArea {
+                                                id: wChipMa
+                                                anchors.fill: parent; hoverEnabled: true
+                                                cursorShape: Qt.PointingHandCursor
+                                                onClicked: root.defSet(wRole.modelData, wChip.modelData.id)
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        IndText {
+                            Layout.fillWidth: true; wrapMode: Text.WordWrap
+                            mono: true; sz: Tok.tLabel; color: Tok.ink3
+                            text: "the rest — images, video, music, documents — are on the same page in "
+                                + "Settings → Default Apps, whenever you want them."
+                        }
+                        Item { Layout.fillHeight: true }
+                    }
+
+                    // 6 — done
+                    ColumnLayout {
+                        anchors.fill: parent; spacing: 12
+                        visible: root.step === 6
                         Item { Layout.fillHeight: true }
                         IndText {
                             Layout.alignment: Qt.AlignHCenter

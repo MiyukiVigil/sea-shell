@@ -21,7 +21,7 @@ hl.bind(mod .. " + T",         hl.dsp.exec_cmd(term),                           
 hl.bind(mod .. " + Q",         hl.dsp.window.close(),                                          { description = "Close window" })
 hl.bind("CTRL + Space",        hl.dsp.exec_cmd(menu),                                          { description = "App launcher" })
 hl.bind(mod .. " + Space",     hl.dsp.exec_cmd(menu),                                          { description = "App launcher" })
-hl.bind(mod .. " + E",         hl.dsp.exec_cmd("nautilus"),                                    { description = "File manager" })
+hl.bind(mod .. " + E",         hl.dsp.exec_cmd("python3 ~/.config/quickshell/sea-shell/sea-fm.py"),             { description = "File manager (sea-fm)" })
 hl.bind(mod .. " + A",         hl.dsp.exec_cmd(browser),                                       { description = "Browser" })
 hl.bind(mod .. " + S",         hl.dsp.exec_cmd(settings),                                      { description = "Control center" })
 hl.bind(mod .. " + SHIFT + W", hl.dsp.exec_cmd(wallpick),                                      { description = "Wallpaper picker" })
@@ -145,4 +145,4 @@ hl.bind(mod .. " + 0",           hl.dsp.exec_cmd("qs -c sea-shell ipc call zoom 
 
 -- NOTE: preserved from keybinds.conf — SUPER+C is bound twice (center window above, and Code here).
 -- The last-registered wins in Hyprland; left as-is for a faithful migration. Remove one to resolve.
-hl.bind(mod .. " + C", hl.dsp.exec_cmd("visual-studio-code-electron"), { description = "Code" })
+hl.bind(mod .. " + C", hl.dsp.exec_cmd("code"), { description = "Code" })

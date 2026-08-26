@@ -4,7 +4,7 @@
 notification daemon and screen recorder are one Quickshell process — not six
 tools glued together. The whole palette follows your wallpaper.
 
-**`v6.4.1`** · [seashell.miyukivigil.tech](https://seashell.miyukivigil.tech) ·
+**`v6.5.0`** · [seashell.miyukivigil.tech](https://seashell.miyukivigil.tech) ·
 [changelog](https://seashell.miyukivigil.tech/changelog.html)
 
 ![The sea-shell desktop — translucent bar at the top, animated wallpaper, and the dock at the bottom](https://seashell.miyukivigil.tech/images/v6/hero.webp)

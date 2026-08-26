@@ -201,12 +201,31 @@ os.replace(_t, cfg)   # atomic: the bar watches this file and a torn read is a l
 PY
 }
 
+remember_user_accent() {   # $1 = the hex the user picked by hand
+    [ -z "$1" ] && return
+    python3 - "$cfg" "$1" <<'MUPY'
+import json, os, sys
+cfg, col = sys.argv[1], sys.argv[2]
+try:
+    d = json.load(open(cfg))
+except Exception:
+    d = {}
+if d.get("userAccent") != col:
+    d["userAccent"] = col
+    _t = cfg + ".tmp"
+    with open(_t, "w") as _fh:
+        json.dump(d, _fh)
+    os.replace(_t, cfg)
+MUPY
+}
+
 star="$HOME/.config/starship.toml"
 sdef="$HOME/.config/sea-shell/starship-default.toml"
 
 if [ "$1" = "--reset" ]; then
     eval "$(read_overrides)"
     set_accent "$DEFAULT"
+    remember_user_accent "$DEFAULT"
     if [ "$KITTY" = 1 ]; then
         : > "$kitty"                       # empty → kitty falls back to sea-cyan.conf defaults
         : > "$HOME/.config/sea-shell/kitty-matugen-light.conf"   # clear the light variant too
@@ -254,31 +273,22 @@ if [ "$matugen_enabled" = "True" ]; then
             fi ;;
     esac
 
-    # A PICTURE WITH NO COLOUR IN IT DOES NOT GET TO INVENT ONE. Material's palette generation
-    # always returns a hue, including from an image that has none — a black-and-white manga page
-    # came back blue, and a monochrome one came back GREEN. Both are arbitrary, and a green
-    # desktop under a greyscale wallpaper reads as a bug because it is one.
+    # A PICTURE WITH NO COLOUR IN IT DOES NOT GET TO INVENT ONE -- and matugen
+    # knows that itself, so this no longer second-guesses it with ImageMagick.
     #
-    # Chroma is the distance of the image's mean a*/b* from neutral in LAB. NOT HSL saturation,
-    # which is useless here: it reads 0.81 for a page made of near-white and near-black pixels,
-    # because S is ill-defined at both ends of lightness. Measured across a real twelve-wallpaper
-    # library, the ones with colour in them sit at 0.013–0.22 and the two genuinely monochrome
-    # ones at 0.004. The gate is 0.008 — a little under twice either side.
+    # scheme-smart (matugen 4.2) measures the image's COLOURFULNESS by the
+    # Hasler-Suesstrunk metric -- the spread and mean of the red-green and
+    # yellow-blue opponent channels -- and picks the palette to match:
     #
-    # Below it, this behaves exactly as "match colours" being off: your chosen accent stands.
-    if [ -n "$wp" ] && [ -f "$wp" ] && command -v magick >/dev/null 2>&1; then
-        lab=$(magick "$wp" -colorspace LAB -channel GB -separate -format "%[fx:mean] " info: 2>/dev/null)
-        if printf '%s' "$lab" | python3 -c "
-import sys
-try:
-    a, b = [float(x) for x in sys.stdin.read().split()[:2]]
-    raise SystemExit(0 if ((a - 0.5) ** 2 + (b - 0.5) ** 2) ** 0.5 < 0.008 else 1)
-except (ValueError, IndexError):
-    raise SystemExit(1)          # unreadable — treat it as coloured and let matugen decide
-"; then
-            matugen_enabled="Greyscale"
-        fi
-    fi
+    #     under 6   monochrome     a black-and-white photograph
+    #     6 to 20   neutral        nearly colourless
+    #     20 to 70  tonal spot     an ordinary picture
+    #     over 70   vibrant        something loud
+    #
+    # That is strictly better than the chroma gate that used to live here, which
+    # was one threshold with two outcomes and had to be tuned by hand against a
+    # library of twelve wallpapers. It is also the tool's own answer rather than
+    # ours, so it stays right as matugen improves.
 fi
 
 # The shell's light/dark can also follow the picture — that lives in sea-theme-from-wallpaper.sh
@@ -290,18 +300,33 @@ fi
 # check if auto colours from wallpaper (matugen) is enabled globally
 jf=$(mktemp) || exit 1
 
+# THE ACCENT FIELD IS NOT A RECORD OF WHAT YOU CHOSE. With matching on, matugen
+# overwrites it from every wallpaper, so the accent in the file is only ever the
+# LAST wallpaper's answer. A hand-picked accent is therefore kept separately under
+# userAccent -- used when matugen cannot run at all, so a failure falls back to
+# your colour rather than to whichever picture happened to come before.
+user_accent=$(python3 -c "
+import json,sys
+try: d=json.load(open(sys.argv[1]))
+except Exception: d={}
+v=str(d.get('userAccent') or '').strip()
+print(v if v.startswith('#') and len(v)==7 else '$DEFAULT')" "$cfg" 2>/dev/null)
+case "$user_accent" in \#??????) ;; *) user_accent="$DEFAULT" ;; esac
+
 if [ "$matugen_enabled" = "True" ]; then
-    scheme=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('scheme','scheme-tonal-spot'))" "$cfg" 2>/dev/null)
-    case "$scheme" in scheme-*) ;; *) scheme="scheme-tonal-spot" ;; esac
+    scheme=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('scheme','scheme-smart'))" "$cfg" 2>/dev/null)
+    case "$scheme" in scheme-*) ;; *) scheme="scheme-smart" ;; esac
     json=$(matugen --json hex --type "$scheme" --prefer saturation image "$wp" 2>/dev/null)
     if [ -n "$json" ]; then
         printf '%s' "$json" > "$jf"
     else
-        manual_accent=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('accent','#63c7dd'))" "$cfg" 2>/dev/null)
-        printf '{"colors":{"primary":{"default":{"color":"%s"}}}}' "$manual_accent" > "$jf"
+        printf '{"colors":{"primary":{"default":{"color":"%s"}}}}' "$user_accent" > "$jf"
     fi
 else
+    # Matching is off, so the accent in the file IS the user's choice. Recorded as
+    # such, so it survives matching being turned on and off again.
     manual_accent=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('accent','#63c7dd'))" "$cfg" 2>/dev/null)
+    remember_user_accent "$manual_accent"
     printf '{"colors":{"primary":{"default":{"color":"%s"}}}}' "$manual_accent" > "$jf"
 fi
 
@@ -310,13 +335,25 @@ fi
 # ── per-target overrides ─────────────────────────────────────────────────────
 eval "$(read_overrides)"
 
-pal=$(WRITE_KITTY="$KITTY" KITTY_CUSTOM_ACCENT="$KITTY_CUSTOM_ACCENT" KITTY_CUSTOM_BG="$KITTY_CUSTOM_BG" python3 - "$cfg" "$kitty" "$DEFAULT" "$jf" <<'PY'
+shell_mode=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('mode','dark'))" "$cfg" 2>/dev/null)
+pal=$(SHELL_MODE="$shell_mode" WRITE_KITTY="$KITTY" KITTY_CUSTOM_ACCENT="$KITTY_CUSTOM_ACCENT" KITTY_CUSTOM_BG="$KITTY_CUSTOM_BG" python3 - "$cfg" "$kitty" "$DEFAULT" "$jf" <<'PY'
 import json, sys, os
 cfg, kitty, default, jf = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 data = json.load(open(jf))
+# MATERIAL PUBLISHES TWO CUTS OF EVERY ROLE and this took the dark one always.
+# In light mode that is backwards: the light scheme's `primary` is the darker,
+# higher-contrast colour meant to sit ON a pale surface, and the dark scheme's is
+# the pale one meant to sit on a dark surface. Reading the dark cut while the
+# shell was light put a washed-out accent on a white background -- readable only
+# by accident, and one of the "colour issues" the accent seemed to have.
+_LIGHT = os.environ.get('SHELL_MODE', 'dark') == 'light'
 def pick(node):
     if not node: return None
-    return (node.get('dark') or node.get('default') or node.get('light') or {}).get('color')
+    order = ('light', 'default', 'dark') if _LIGHT else ('dark', 'default', 'light')
+    for k in order:
+        got = (node.get(k) or {}).get('color')
+        if got: return got
+    return None
 def lighten(hx, amt=0.30):
     h = hx.lstrip('#'); r, g, b_ = int(h[0:2],16), int(h[2:4],16), int(h[4:6],16)
     return '#%02x%02x%02x' % (int(r+(255-r)*amt), int(g+(255-g)*amt), int(b_+(255-b_)*amt))
@@ -360,26 +397,44 @@ def readable(col, bg, target, up):        # nudge lightness until it clears the 
     return H(hh, s, max(0.0,min(1.0,l)))
 AH, ASAT, _AL = _hsl(kitty_accent)              # wallpaper accent HUE drives every tint
 
+# A WHITE OR BLACK ACCENT HAS NO HUE, AND HUE ZERO IS RED.
+# scheme-smart answers a black-and-white wallpaper with a monochrome palette, so
+# the accent comes back as #ffffff or #000000 -- whose hue reads as 0.0 simply
+# because there is nothing to measure. Every tint below then forced a saturation
+# floor onto that zero, and a greyscale wallpaper produced a red-brown terminal
+# (#291717). So an accent with no colour in it tints nothing: the surfaces stay
+# neutral and the ANSI hues stay where they belong.
+ACHROMATIC = ASAT < 0.04
+def SAT(lo, hi):
+    return 0.0 if ACHROMATIC else min(max(ASAT, lo), hi)
+def AHUE(fallback):
+    return fallback if ACHROMATIC else AH
+
 def kitty_rows(dark, opacity):
     # Background carries the wallpaper HUE at real saturation + enough lightness to actually
     # SEE the colour (a near-black bg reads the same for every wallpaper). Readability is kept
     # by a near-white/near-black foreground whose contrast is *enforced*, plus contrast-checked
     # ANSI — so a saturated bg is fine (white-on-teal, white-on-plum … all read clean).
     if dark:
-        bg=custom_bg if custom_bg else H(AH, min(max(ASAT,0.28),0.55), 0.125)
-        fg=readable(H(AH,0.08,0.94), bg, 9.0, True)
-        c0=H(AH,0.32,0.24); c8=H(AH,0.22,0.44); c7=H(AH,0.09,0.83); c15=H(AH,0.05,0.98)
+        bg=custom_bg if custom_bg else H(AH, SAT(0.28,0.55), 0.125)
+        fg=readable(H(AH,0.0 if ACHROMATIC else 0.08,0.94), bg, 9.0, True)
+        c0=H(AH,SAT(0.32,0.32),0.24); c8=H(AH,SAT(0.22,0.22),0.44)
+        c7=H(AH,SAT(0.09,0.09),0.83); c15=H(AH,SAT(0.05,0.05),0.98)
         nL,bL,S,up = 0.66, 0.76, 0.62, True
     else:
-        bg=custom_bg if custom_bg else H(AH, min(max(ASAT,0.14),0.28), 0.955)
-        fg=readable(H(AH,0.45,0.12), bg, 8.0, False)
-        c0=H(AH,0.30,0.40); c8=H(AH,0.22,0.54); c7=H(AH,0.24,0.28); c15=H(AH,0.55,0.09)
+        bg=custom_bg if custom_bg else H(AH, SAT(0.14,0.28), 0.955)
+        fg=readable(H(AH,0.0 if ACHROMATIC else 0.45,0.12), bg, 8.0, False)
+        c0=H(AH,SAT(0.30,0.30),0.40); c8=H(AH,SAT(0.22,0.22),0.54)
+        c7=H(AH,SAT(0.24,0.24),0.28); c15=H(AH,SAT(0.55,0.55),0.09)
         nL,bL,S,up = 0.44, 0.52, 0.70, False
     # ANSI hues nudged toward the accent (short-arc blend) so they carry the theme too, but not
     # so far they stop reading as red/green/blue. The "blue" slot IS the accent hue.
     def tint(h, amt=0.18):
+        if ACHROMATIC: return h        # nothing to lean towards
         d=(AH-h+0.5)%1.0-0.5; return (h+d*amt)%1.0
-    R,Y,G,Cy,Bl,M = tint(0.00), tint(0.12), tint(0.34), tint(0.50), AH, tint(0.83)
+    # The "blue" slot is normally the accent's own hue so the terminal reads as
+    # wallpaper-matched. With no hue to borrow it goes back to being blue.
+    R,Y,G,Cy,Bl,M = tint(0.00), tint(0.12), tint(0.34), tint(0.50), AHUE(0.60), tint(0.83)
     def C(hue,l): return readable(H(hue,S,l), bg, 4.2, up)
     acc = readable(kitty_accent, bg, 3.0, up)                  # accent kept readable for cursor/borders
     return [

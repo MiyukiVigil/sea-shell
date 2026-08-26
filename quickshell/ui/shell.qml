@@ -3831,7 +3831,14 @@ ShellRoot {
                                 MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
                                     acceptedButtons: Qt.LeftButton | Qt.RightButton
                                     onClicked: (e)=> {
-                                        if (e.button === Qt.RightButton) { root.gmenuToggle(); return }
+                                        if (e.button === Qt.RightButton) {
+                                            if (!gmenu.hasNativeMenu) {
+                                                gmenu.showManualMenu = !gmenu.showManualMenu;
+                                                return;
+                                            }
+                                            root.gmenuToggle();
+                                            return;
+                                        }
                                         Hyprland.dispatch("hl.dsp.focus({ workspace = "+modelData.id+" })");
                                     } }
                             }
@@ -3932,6 +3939,11 @@ ShellRoot {
                         width: Math.min(implicitWidth, 130); elide: Text.ElideRight
                         color: theme.faint; font.pixelSize: 12; font.family: root.cfgFont
                         text: {
+                            // Same staleness as the strip had: activeToplevel keeps naming the
+                            // window you left once focus drops to nothing, so an empty desktop
+                            // sat here labelled "code". The daemon's snapshot is the one thing
+                            // that can say nothing is focused.
+                            if (gmenu.snapSaysNoWindow) return "";
                             try {
                                 var t = Hyprland.activeToplevel;
                                 if (!t) return "";

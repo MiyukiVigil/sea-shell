@@ -5,6 +5,154 @@ All notable changes to **sea-shell** are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.5.0] - 2026-08-26
+
+**The file manager update.** sea-shell has shipped a file manager for a while; this is the
+release where it stops being a viewer and becomes something you can keep your files in. It
+was reworked against what Nautilus and Dolphin actually do — and against a fair number of
+its own bugs, several of which quietly lost data.
+
+Alongside it: the shell finally asks which applications you want things to open in, the menu
+bar shows each application's real icon, and the colours derived from your wallpaper stop
+inventing a hue when the picture has none.
+
+### Added
+
+- **Every file operation runs off the UI thread, and reports itself.** Copy, move, trash,
+  delete, compress, extract and share all go through one engine with one progress contract,
+  so a popover in the corner can show what is happening and stop it. Before this, only copy
+  and move ran in the background at all: zipping a folder, extracting an archive or deleting
+  a large tree froze the window with no indication anything was happening and no way out.
+
+  It says **how long is left**, once that is worth saying. The estimate is held back for the
+  first second and a half and until a fiftieth of the work is done — an estimate made from
+  the first fraction of a second is worthless, and a number that reads "4 hours" and then
+  "12 seconds" is worse than no number — and the rate behind it is a moving average rather
+  than a running total, so a copy that speeds up is reflected instead of being averaged away
+  by its own slow start. Measured against a controlled clock, the median error is 2%.
+
+- **Conflicts are a question, not a silent overwrite.** Replace, keep both, skip, and
+  apply-to-all, asked from the worker thread and answered by the window. What is replaced is
+  moved to the trash rather than destroyed, so undo can put it back.
+
+- **A faceted filter.** Kind, size, date and tag, combining freely — *images · 1–100 MB ·
+  this week · Blue* — with a count of what is showing and what is filtered out. Modelled on
+  the filter chips in Finder and the search filters in Windows Explorer.
+
+- **`.7z` and `.rar` are browsable**, not handed to another application. Listed through
+  `7z l -slt`, which emits one key per line, so a name with a space in it survives being
+  parsed; `bsdtar` is the fallback. Members can be previewed and extracted individually.
+
+- **Split view and tabs.** Right-click a folder to open it beside the current one, or drag
+  one tab onto another to merge the two into a split.
+
+- **Share to a phone.** The KDE Connect devices the shell already knows about are offered
+  for any selection; folders are zipped first, because the share plugin takes files and
+  silently sends nothing when handed a directory.
+
+- **Default applications, as a settings page and a first-run question.** Which program
+  opens web pages, folders, text, images, video, music and documents — written through
+  `xdg-mime`, so it is the machine's association and every toolkit follows it, not a private
+  idea this shell holds. The terminal is the exception: no standard covers it, so that one
+  is sea-shell's own and is what "open in terminal" and the shell's command actions use.
+  The welcome window asks for the first three on a fresh install.
+
+- **The menu bar shows each application's own icon.** Taken from its desktop entry, beside
+  the name it already took from there. The category glyph it used before was guessed from
+  substrings of the window class, so Firefox and Chromium got the same picture and anything
+  unrecognised got "apps"; that guess is now only the fallback.
+
+### Changed
+
+- **The colour scheme derived from a wallpaper is matugen's own choice, not ours.**
+  `scheme-smart` measures the image's colourfulness — the Hasler–Süsstrunk metric over the
+  red-green and yellow-blue opponent channels — and picks monochrome, neutral, tonal-spot or
+  vibrant to match. That replaces a hand-rolled ImageMagick chroma gate with one threshold,
+  tuned against a library of twelve wallpapers. ImageMagick is no longer called at all.
+
+- **The accent follows the light/dark cut it is meant to.** Material publishes `primary`
+  twice: a pale one to sit on a dark surface and a darker one to sit on a pale one. The dark
+  cut was being read in both modes, so a light-mode accent measured **1.55:1** against the
+  background, where 3:1 is the floor for something you are meant to be able to see. Choosing
+  by mode takes the same wallpaper to 5.9:1, and switching mode re-derives it.
+
+- **A hand-picked accent is remembered separately.** With matching on, matugen overwrites
+  `accent` from every wallpaper, so the field was never a record of what you chose. It is
+  now kept as `userAccent` and is what a failure falls back to — rather than to whatever the
+  previous picture happened to produce.
+
+- **The file manager follows the shell again by default.** Its own appearance panel must
+  change the file manager and nothing else, and the fix for that was to give the window its
+  own values — but defaulting to them left it in dark mode while the shell went light.
+  Following is the default; choosing anything in its Appearance menu switches that window to
+  its own copy, and that copy is still never written back to the shell.
+
+- **Icons are Papirus where it is installed**, tinted to the accent where the theme carries
+  a coloured folder, and they change **without a restart**. QML caches provider pixmaps by
+  URL and an icon's name does not change when the theme does, so `image://fileicon/folder`
+  kept serving the bitmap it fetched first — the new theme only appeared after a restart,
+  which emptied the cache along with everything else.
+
+- **Office and PDF previews are fast.** Every OpenDocument file is required to embed its own
+  thumbnail and most OOXML files carry one, so that is read straight out of the container:
+  **24 ms against 675 ms** for a LibreOffice conversion, and that is against a warm soffice.
+  PDF and office pages publish progressively, so a thirty-page document shows page one at
+  29 ms instead of after 647 ms.
+
+### Fixed
+
+- **Pasting could destroy a file without asking.** `shutil.copy2` over an existing path only
+  de-duplicated when the source and destination shared a parent; anywhere else the file at
+  the destination was overwritten in place with no prompt and no undo.
+
+- **Renaming could destroy a file without asking.** `Path.rename()` overwrites silently on
+  POSIX. Collisions are now refused, and a name containing `/` is rejected rather than
+  quietly writing somewhere else.
+
+- **The eject button was not clickable at all.** `z` orders an item against its own
+  siblings; the button carried it, but the row's click handler is a sibling one level up and
+  was declared last, so it hit-tested above the whole row. Every press went to the row and
+  opened the volume instead.
+
+- **The progress popover never updated.** Its job map was mutated and assigned back to
+  itself — the same object reference, which QML does not consider a change — so no
+  notification fired and it kept showing whatever the first frame said. It only appeared to
+  work because a second operation starting rebuilt the delegates.
+
+- **Ctrl-click did not add to the selection.** The press handler toggled and the click
+  handler toggled the same row straight back, so ctrl-clicking an unselected file selected
+  and deselected it in one gesture. Shift-click range selection, which was missing entirely,
+  is in too.
+
+- **Documents previewed as their raw text**, for as long as LibreOffice took and for ever on
+  anything it could not convert. The extracted text is a fallback, not the preview; the panel
+  says it is rendering and falls back only when the render reports that it failed.
+
+- **A blank preview panel.** A document with a thumbnail but no pages yet matched none of
+  the panel's cases and drew nothing at all.
+
+- **Binary files were read as UTF-8.** An `.epub` is a zip, but the extension list called it
+  a document and filled the panel with replacement characters. What is text is decided by the
+  MIME database now — which also fixed the opposite error, where `.mjs`, `.jsonc`, `.bat` and
+  `.sh` showed a grey icon. `text/x-shellscript` does not inherit `text/plain` in
+  shared-mime-info at all, so an `inherits()` test alone called every shell script binary.
+
+- **Dragging files crashed the window.** Every mouse move started a nested, blocking
+  `QDrag.exec()`, inside which further moves arrived and nested again, without bound.
+
+- **A descending sort put files before folders**, `.tar.gz` extracted to a folder named
+  `photos.tar`, zipping dropped empty subdirectories, and the listing model inserted
+  duplicate rows when the sort order changed — a re-sort moves every row at once, which the
+  diff read as "missing here, new there".
+
+- **The trash respects the volume a file was on.** Deleting from a removable drive used to
+  move the file across the filesystem boundary into `~/.local/share/Trash`; it now uses
+  `$topdir/.Trash-$uid` with a relative `Path=`, as the spec requires, so the drive can be
+  unplugged and the file restored on another machine.
+
+- **The render cache is bounded.** Nothing ever removed anything from `~/.cache/sea-fm`, so
+  every PDF ever opened left up to thirty 300-DPI page images behind for good.
+
 ## [6.4.1] - 2026-08-23
 
 **The menu bar, properly.** 6.4.0 put the focused window's menus in the bar; this is the

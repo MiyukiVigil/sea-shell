@@ -30,6 +30,7 @@
 //           happens ONCE PER MENU, on the click that asks for it, and is remembered for the
 //           life of the window. A menu you never open costs nothing and is never touched.
 import Quickshell
+import Quickshell.Hyprland
 import Quickshell.Io
 import Quickshell.Wayland
 import Quickshell.Widgets
@@ -39,60 +40,27 @@ Item {
     id: root
 
     // ---- wiring from the bar ----
-    property var pal                         // the shell's palette object (NOT named
-                                             // `theme`: the bar binds this from an object whose id
-                                             // is `theme`, and a property of the same name shadows
-                                             // that id inside the binding, so `theme: theme` would
-                                             // resolve to itself)
+    property var pal                         // the shell's palette object
     property string uiFont: "sans"
     property string script: ""               // absolute path to sea-appmenu.py
     property string screenName: ""           // the monitor THIS bar is on
     property string focusedMonitor: ""       // the monitor Hyprland says is focused
     property real ui: 1.0
     property int barEdgeY: 0                 // the bar's thickness, in native px
-    // Which screen edge the bar is docked to. A menu bar hangs off the FREE side of the bar,
-    // and for a bottom-docked bar that is upward — the cards were being placed one bar-height
-    // from the TOP of the screen no matter where the bar was, so a bottom bar opened its menus
-    // in the far corner with nothing connecting them to the thing that was clicked.
     property string barEdge: "top"
-    // How much of the bar the strip may take before it starts folding menus away behind a
-    // chevron. 0 means unbounded. LibreOffice exports twelve top-level menus; unbounded,
-    // they pushed the media pill out of the centre of the bar.
     property real maxWidth: 0
-    // How see-through the cards are. The bar binds its own `dropOpacity`, which is the
-    // opacity slider with a floor under it, so the menu reads as the same material as the
-    // bar it drops out of and as every other dropdown in the shell — one slider moves all
-    // of them. It is a floor rather than the raw value because a menu at 0% would be an
-    // unreadable set of floating labels, whereas a bar at 0% is a deliberate look.
     property real dropOpacity: 1.0
     readonly property color cardBg: root.pal ? Tok.alpha(root.pal.panel, root.dropOpacity)
                                              : "#181818"
-    // Settings, from ~/.config/sea-shell/appmenu.json by way of the bar. NOT called
-    // `enabled`: that is an Item property already, and shadowing it would switch off input
-    // handling for the strip rather than switch off the feature.
     property bool featureOn: true
     property bool showKeys: true
-    // Right-click the strip to hand the bar back to the workspaces. The bar owns the
-    // setting, so this only asks.
     signal toggleRequested()
 
-    // WHAT THE FOCUSED WINDOW IS, as far as the bar knows. Bound by the bar; its only job
-    // is to CHANGE when you switch windows.
-    //
-    // The snapshot is meant to arrive by file watch, and usually does. But the sidecar
-    // writes it the safe way — to a temp file, then rename — so every update swaps the
-    // inode out from under the watcher, and a watcher that is following an inode rather
-    // than a path silently stops hearing about it. When that happened the strip kept
-    // drawing the PREVIOUS window's menus: VS Code's File/Edit/Selection sitting above a
-    // music player, which is worse than showing nothing because the menu still worked and
-    // still acted on the window it came from.
-    //
-    // So the watch is no longer the only way in. Switching windows is a thing the bar
-    // already knows about first-hand, and it re-reads for a moment afterwards — the
-    // daemon needs a beat to walk the new window and write — then stops. Twelve reads of
-    // a small JSON file, only after an actual focus change, costs nothing measurable.
     property string focusHint: ""
-    onFocusHintChanged: reread.restart()
+    onFocusHintChanged: {
+        root.showManualMenu = false;
+        reread.restart();
+    }
     Timer {
         id: reread
         interval: 120
@@ -105,15 +73,7 @@ Item {
             if (n > 12) stop();
         }
     }
-    // AND A SLOW HEARTBEAT, because the two mechanisms above are both signals and a signal
-    // that does not arrive leaves the wrong application's menus sitting in the bar for as
-    // long as you leave them there. That is the worst failure this feature has: the strip
-    // is not merely stale, it is a WORKING menu wired to a window you are no longer looking
-    // at, and choosing something from it acts on that other window.
-    //
-    // Re-reading a small JSON file once a second costs nothing measurable and puts a hard
-    // ceiling of one second on how wrong the bar can be. It is not a substitute for the
-    // watch — it is the thing that means a missed watch is a blink instead of a bug.
+
     Timer {
         interval: 1000
         running: true
@@ -121,79 +81,364 @@ Item {
         onTriggered: snapFile.apply()
     }
 
-    // Keyboard entry points, bumped by the bar's "menu" IPC target. Counters rather than
-    // signals because every strip on every monitor watches the same two numbers and only
-    // the one on the focused screen is allowed to answer — see the note in shell.qml.
     property int openPing: 0
     property int searchPing: 0
     onOpenPingChanged: {
         if (!root.available) return;
         if (root.openIndex !== -1) { root.close(); return }
-        // firstCell(), not `strip`. The strip now begins with the application's NAME, so
-        // anchoring here put the card under that instead of under "File" — a card floating
-        // one app-name to the left of the menu it belongs to, which is exactly as odd as it
-        // sounds. It was right by accident for as long as the strip started at the first menu.
         root.openAt(0, root.firstCell());
         root.cursor = -1;
         root.step(1);
     }
     onSearchPingChanged: if (root.available) root.startSearch()
 
-    // ---- the snapshot ----
+    // ---- the snapshot & smart fallback menus ----
     property var snap: ({ "menus": [], "mode": "none" })
-    // EVERY MENU THE WINDOW HAS, including ones whose contents are not known yet. A `lazy`
-    // entry is a real menu with a real label that simply has not been opened; it is drawn
-    // and it works, it just costs one ~350ms read the first time it is clicked. The old
-    // version hid these, which meant Firefox — the single most common window on most
-    // desktops — showed no menu at all unless a background sweep had happened to reach it.
-    readonly property var menus: (root.snap && root.snap.menus) ? root.snap.menus : []
-    readonly property string mode: (root.snap && root.snap.mode) ? root.snap.mode : "none"
+    property bool showManualMenu: false
+
+    // THE DAEMON IS THE ONLY THING THAT CAN SAY "NOTHING". snapshot() omits the class
+    // key when, and only when, it resolved no focused window — after its addressless-race
+    // handling, so it is a deliberate statement rather than a gap. A window-to-window
+    // switch always carries a class, which is why this cannot misfire mid-switch.
+    //
+    // It has to be a veto rather than the first question asked, because Hyprland.activeToplevel
+    // is what makes the app NAME change on the same frame as the focus; demoting it would put
+    // the workspace-switch lag straight back.
+    readonly property bool snapSaysNoWindow: {
+        if (!root.snap || root.snap.v === undefined) return false;   // nothing read yet
+        var c = root.snap["class"];
+        return !(c && ("" + c).trim().length > 0);
+    }
+
+    readonly property bool hasWindow: {
+        // activeToplevel keeps pointing at the window you just left once focus drops to
+        // nothing at all — an empty workspace kept the last app's name in the strip, with
+        // its fallback menus underneath, instead of standing down for the desktop.
+        if (root.snapSaysNoWindow) return false;
+        try {
+            var t = Hyprland.activeToplevel;
+            if (t) {
+                var c = (t.lastIpcObject && t.lastIpcObject.class) ? ("" + t.lastIpcObject.class) : "";
+                if (!c && t.wayland && t.wayland.appId) c = "" + t.wayland.appId;
+                if (c.trim().length > 0) return true;
+            }
+        } catch(e) {}
+        if (root.snap && root.snap["class"] && ("" + root.snap["class"]).trim().length > 0) return true;
+        return false;
+    }
+
+    readonly property bool hasNativeMenu: !!(root.snap && root.snap.menus && root.snap.menus.length > 0 && root.hasWindow)
+
+    readonly property string activeClass: {
+        if (!root.hasWindow) return "";
+        try {
+            var t = Hyprland.activeToplevel;
+            if (t) {
+                if (t.lastIpcObject && t.lastIpcObject.class) return "" + t.lastIpcObject.class;
+                if (t.wayland && t.wayland.appId) return "" + t.wayland.appId;
+            }
+        } catch(e) {}
+        if (root.snap && root.snap["class"] && ("" + root.snap["class"]).length > 0) return "" + root.snap["class"];
+        return "";
+    }
+
+    readonly property var fallbackMenus: {
+        var c = (root.activeClass || "").toLowerCase();
+        var isTerm = c.indexOf("term") >= 0 || c.indexOf("kitty") >= 0 || c.indexOf("alacritty") >= 0 || c.indexOf("ghostty") >= 0 || c.indexOf("foot") >= 0;
+        var isFm = c.indexOf("file") >= 0 || c.indexOf("fm") >= 0 || c.indexOf("dolphin") >= 0 || c.indexOf("thunar") >= 0 || c.indexOf("nautilus") >= 0;
+        var isBrowser = c.indexOf("fire") >= 0 || c.indexOf("chrome") >= 0 || c.indexOf("zen") >= 0 || c.indexOf("brave") >= 0 || c.indexOf("browser") >= 0;
+        var isEditor = c.indexOf("code") >= 0 || c.indexOf("antigravity") >= 0 || c.indexOf("nvim") >= 0 || c.indexOf("edit") >= 0;
+        var isMedia = c.indexOf("spot") >= 0 || c.indexOf("music") >= 0 || c.indexOf("mpv") >= 0 || c.indexOf("vlc") >= 0;
+
+        var windowItems = [
+            { label: "Toggle Floating", key: "Super+V", dispatch: "togglefloating" },
+            { label: "Toggle Fullscreen", key: "Super+F", dispatch: "fullscreen" },
+            { label: "Pin Window", dispatch: "pin" },
+            { label: "Center Window", dispatch: "centerwindow" },
+            { sep: true },
+            {
+                label: "Move to Workspace",
+                items: [
+                    { label: "Workspace 1", key: "Super+Shift+1", dispatch: "movetoworkspacesilent, 1" },
+                    { label: "Workspace 2", key: "Super+Shift+2", dispatch: "movetoworkspacesilent, 2" },
+                    { label: "Workspace 3", key: "Super+Shift+3", dispatch: "movetoworkspacesilent, 3" },
+                    { label: "Workspace 4", key: "Super+Shift+4", dispatch: "movetoworkspacesilent, 4" },
+                    { label: "Workspace 5", key: "Super+Shift+5", dispatch: "movetoworkspacesilent, 5" },
+                    { label: "Workspace 6", key: "Super+Shift+6", dispatch: "movetoworkspacesilent, 6" },
+                    { label: "Workspace 7", key: "Super+Shift+7", dispatch: "movetoworkspacesilent, 7" },
+                    { label: "Workspace 8", key: "Super+Shift+8", dispatch: "movetoworkspacesilent, 8" },
+                    { label: "Workspace 9", key: "Super+Shift+9", dispatch: "movetoworkspacesilent, 9" },
+                    { sep: true },
+                    { label: "Special Stash", key: "Super+Shift+`", dispatch: "movetoworkspacesilent, special:scratch" }
+                ]
+            },
+            { label: "Toggle Opacity", dispatch: "setprop, active, opaque, toggle" },
+            { sep: true },
+            { label: "Close Window", key: "Super+Q", dispatch: "killactive" }
+        ];
+
+        var toolsItems = [
+            { label: "Area Screenshot", key: "Super+Shift+S", command: ["sh", "-c", "grim -g \"$(slurp)\" - | wl-copy"] },
+            { label: "Full Screenshot", command: ["sh", "-c", "grim - | wl-copy"] },
+            { label: "Color Picker", command: ["hyprpicker", "-a"] },
+            { sep: true },
+            { label: "Toggle Dark / Light Theme", command: ["sh", "-c", "$HOME/.config/quickshell/sea-shell/sea-toggle-theme.sh"] },
+            { label: "Toggle Night Light", command: ["sh", "-c", "$HOME/.config/quickshell/sea-shell/sea-toggle-night.sh"] },
+            { sep: true },
+            { label: "Lock Screen", key: "Super+L", command: ["sh", "-c", "$HOME/.config/quickshell/sea-shell/sea-lock.sh"] },
+            { label: "Power Menu", command: ["sh", "-c", "quickshell -p $HOME/.config/quickshell/sea-shell/power.qml"] }
+        ];
+
+        if (isFm) {
+            return [
+                {
+                    label: "File",
+                    enabled: true,
+                    items: [
+                        { label: "New Window", key: "Ctrl+N", command: ["python3", Quickshell.env("HOME") + "/.config/quickshell/sea-shell/sea-fm.py"] },
+                        { label: "Open in Terminal", key: "Ctrl+Alt+T", command: ["kitty"] },
+                        { sep: true },
+                        { label: "Home Directory", command: ["python3", Quickshell.env("HOME") + "/.config/quickshell/sea-shell/sea-fm.py", Quickshell.env("HOME")] },
+                        { label: "Downloads", command: ["python3", Quickshell.env("HOME") + "/.config/quickshell/sea-shell/sea-fm.py", Quickshell.env("HOME") + "/Downloads"] },
+                        { label: "Documents", command: ["python3", Quickshell.env("HOME") + "/.config/quickshell/sea-shell/sea-fm.py", Quickshell.env("HOME") + "/Documents"] }
+                    ]
+                },
+                {
+                    label: "Edit",
+                    enabled: true,
+                    items: [
+                        { label: "Cut", key: "Ctrl+X" },
+                        { label: "Copy", key: "Ctrl+C" },
+                        { label: "Paste", key: "Ctrl+V" },
+                        { label: "Duplicate", key: "Ctrl+D" },
+                        { label: "Rename", key: "F2" },
+                        { sep: true },
+                        { label: "Select All", key: "Ctrl+A" }
+                    ]
+                },
+                {
+                    label: "View",
+                    enabled: true,
+                    items: [
+                        { label: "Grid View", key: "Ctrl+1" },
+                        { label: "List View", key: "Ctrl+2" },
+                        { label: "Toggle Hidden Files", key: "Ctrl+H" },
+                        { label: "Toggle Inspector", key: "Ctrl+I" },
+                    ]
+                },
+                { label: "Window", enabled: true, items: windowItems },
+                { label: "Tools", enabled: true, items: toolsItems }
+            ];
+        }
+
+        var actionsItems = [];
+        if (isTerm) {
+            actionsItems = [
+                { label: "New Terminal Window", key: "Ctrl+Shift+N", command: ["kitty"] },
+                { label: "Split Horizontal", dispatch: "layoutmsg, splith" },
+                { label: "Split Vertical", dispatch: "layoutmsg, splitv" },
+                { sep: true },
+                { label: "Open File Manager", key: "Super+E", command: ["python3", Quickshell.env("HOME") + "/.config/quickshell/sea-shell/sea-fm.py"] },
+                { label: "Toggle Floating", key: "Super+V", dispatch: "togglefloating" }
+            ];
+        } else if (isBrowser) {
+            actionsItems = [
+                { label: "New Tab", key: "Ctrl+T" },
+                { label: "New Window", key: "Ctrl+N" },
+                { label: "New Private Window", key: "Ctrl+Shift+P" },
+                { sep: true },
+                { label: "Downloads", key: "Ctrl+J" },
+                { label: "History", key: "Ctrl+H" },
+                { label: "Reload Page", key: "Ctrl+R" }
+            ];
+        } else if (isEditor) {
+            actionsItems = [
+                { label: "Command Palette", key: "Ctrl+Shift+P" },
+                { label: "New File", key: "Ctrl+N" },
+                { label: "Toggle Terminal", key: "Ctrl+`" },
+                { label: "Toggle Sidebar", key: "Ctrl+B" },
+                { sep: true },
+                { label: "Save All", key: "Ctrl+K S" }
+            ];
+        } else if (isMedia) {
+            actionsItems = [
+                { label: "Play / Pause", command: ["playerctl", "play-pause"] },
+                { label: "Next Track", command: ["playerctl", "next"] },
+                { label: "Previous Track", command: ["playerctl", "previous"] },
+                { sep: true },
+                { label: "Mute Audio", command: ["wpctl", "set-mute", "@DEFAULT_AUDIO_SINK@", "toggle"] },
+                { label: "Volume +5%", command: ["wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", "5%+"] },
+                { label: "Volume -5%", command: ["wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", "5%-"] }
+            ];
+        } else {
+            actionsItems = [
+                { label: "Launch Terminal", key: "Super+Return", command: ["kitty"] },
+                { label: "File Manager", key: "Super+E", command: ["python3", Quickshell.env("HOME") + "/.config/quickshell/sea-shell/sea-fm.py"] },
+                { label: "Wallpaper Picker", key: "Super+Alt+W", command: ["sh", "-c", "quickshell -p $HOME/.config/quickshell/sea-shell/WallpaperPicker.qml"] },
+                { label: "System Monitor", command: ["sh", "-c", "quickshell -p $HOME/.config/quickshell/sea-shell/Dashboard.qml"] },
+                { sep: true },
+                { label: "Sea Shell Settings", key: "Super+,", command: ["sh", "-c", "quickshell -p $HOME/.config/quickshell/sea-shell/settings.qml"] }
+            ];
+        }
+
+        return [
+            { label: "Actions", enabled: true, items: actionsItems },
+            { label: "Window", enabled: true, items: windowItems },
+            { label: "Tools", enabled: true, items: toolsItems }
+        ];
+    }
+
+    readonly property var menus: {
+        if (root.hasNativeMenu) return root.snap.menus;
+        return root.fallbackMenus;
+    }
+    readonly property string mode: (root.snap && root.snap.mode) ? root.snap.mode : "ready"
     readonly property int pid: (root.snap && root.snap.pid) ? root.snap.pid : 0
 
     // ---- who this menu belongs to ----
-    // A mac menu bar reads mark → APPLICATION → its menus, and the middle term is not
-    // decoration: without it a strip of File/Edit/View belongs to nothing in particular, and
-    // on a desktop where the window with focus changes far more often than it does on a mac
-    // that is a real question. It is a label, not a menu — the things a mac puts under the
-    // app name (Preferences, Quit) live in the app's own File menu on Linux, and inventing
-    // a menu whose items came from nowhere would be worse than not having one.
-    //
-    // Taken from the SNAPSHOT's class, never from Hyprland's focused window, so the name and
-    // the menus under it always describe the same window. Reading Hyprland here would put
-    // the new window's name over the old window's menus for the frame between the two.
-    readonly property string appClass: (root.snap && root.snap["class"]) ? "" + root.snap["class"] : ""
+    readonly property string appClass: root.activeClass
     readonly property string appName: {
         var c = root.appClass;
-        if (!c.length) return "";
-        // The .desktop name is what the application calls ITSELF — "Visual Studio Code",
-        // not "code"; "Dolphin", not "org.kde.dolphin".
+        if (!c.length) return "Desktop";
         try {
             var e = DesktopEntries.heuristicLookup(c);
             if (e && e.name && ("" + e.name).length) return "" + e.name;
         } catch (err) {}
         var t = c.indexOf(".") >= 0 ? c.slice(c.lastIndexOf(".") + 1) : c;
-        return t.length ? t.charAt(0).toUpperCase() + t.slice(1) : "";
+        return t.length ? t.charAt(0).toUpperCase() + t.slice(1) : "Desktop";
+    }
+    // THE APPLICATION'S OWN ICON, when the desktop entry names one we can find.
+    // The glyph below is a category guess made from substrings of the window class
+    // -- it calls Firefox and Chromium the same picture, and anything it has not
+    // heard of "apps". The entry already tells us the real icon, and the same
+    // lookup is already trusted for the name in the pill beside it, so the two now
+    // come from one place. Falls back to the glyph when the entry has no icon or
+    // the theme cannot supply it.
+    readonly property string appIconSource: {
+        var c = root.appClass;
+        if (!c.length) return "";
+        try {
+            var e = DesktopEntries.heuristicLookup(c);
+            if (e && e.icon && ("" + e.icon).length)
+                return Quickshell.iconPath("" + e.icon, true);
+        } catch (err) {}
+        return "";
+    }
+    // THE APPLICATION MENU, under the application's name.
+    //
+    // 6.4 made the name a label and sent a click on it to the File menu, on the
+    // grounds that what a mac puts under the app name lives in File on Linux and
+    // inventing a menu would be worse than not having one. The first half of that
+    // is still true; the second half was too strict. Nothing here is invented:
+    // the top group is the application's OWN actions, read from the desktop entry
+    // it already supplies, and the rest are things the compositor really can do to
+    // the window in front of you. Where an application has no actions, the group
+    // is simply absent rather than stubbed.
+    readonly property int appMenuIndex: -2      // openIndex sentinel; -1 is "closed"
+    readonly property var appMenuItems: {
+        var out = [];
+        try {
+            var e = DesktopEntries.heuristicLookup(root.appClass);
+            if (e && e.actions && e.actions.length) {
+                for (var i = 0; i < e.actions.length; i++) {
+                    var act = e.actions[i];
+                    out.push({
+                        label: "" + act.name,
+                        // Captured per iteration; a shared reference would leave every
+                        // row running the last action in the list.
+                        action: (function (a) { return function () { a.execute() } })(act)
+                    });
+                }
+                out.push({ sep: true });
+            }
+        } catch (err) {}
+
+        out.push({ label: "Hide Window", key: "Super+Shift+`",
+                   dispatch: "movetoworkspacesilent, special:magic" });
+        out.push({ label: "Toggle Floating", key: "Super+V", dispatch: "togglefloating" });
+        out.push({ label: "Toggle Fullscreen", key: "Super+F", dispatch: "fullscreen" });
+        out.push({ sep: true });
+        out.push({ label: "Close Window", key: "Super+Q", dispatch: "killactive" });
+        out.push({
+            label: root.appWindowCount > 1
+                   ? ("Quit " + root.appName + " — " + root.appWindowCount + " windows")
+                   : ("Quit " + root.appName),
+            action: function () { root.closeAllOfApp() }
+        });
+        return out;
+    }
+    readonly property var appMenuNode: ({ label: root.appName, items: root.appMenuItems })
+    // menus[] holds the real ones; the application menu is not in it, because it is
+    // not a cell in the strip. Everything that opens a menu goes through here.
+    function menuAt(i) { return i === root.appMenuIndex ? root.appMenuNode : root.menus[i] }
+
+    readonly property int appWindowCount: {
+        var n = 0;
+        try {
+            var list = Hyprland.toplevels ? Hyprland.toplevels.values : [];
+            for (var i = 0; i < list.length; i++) {
+                var lw = list[i] && list[i].lastIpcObject;
+                if (lw && ("" + lw["class"]) === root.appClass) n++;
+            }
+        } catch (err) {}
+        return n;
+    }
+    function closeAllOfApp() {
+        root.close();
+        try {
+            var list = Hyprland.toplevels ? Hyprland.toplevels.values : [];
+            for (var i = 0; i < list.length; i++) {
+                var lw = list[i] && list[i].lastIpcObject;
+                if (lw && ("" + lw["class"]) === root.appClass && lw.address)
+                    Hyprland.dispatch("closewindow address:" + lw.address);
+            }
+        } catch (err) {}
     }
 
-    // The strip belongs to the focused monitor. Comparing names rather than trusting the
-    // snapshot's monitor id: the id is Hyprland's index and the bar only knows its name.
+    readonly property string appIcon: {
+        var c = (root.appClass || "").toLowerCase();
+        if (!c.length) return "desktop_windows";
+        if (c.indexOf("term") >= 0 || c.indexOf("kitty") >= 0 || c.indexOf("alacritty") >= 0 || c.indexOf("ghostty") >= 0 || c.indexOf("foot") >= 0) return "terminal";
+        if (c.indexOf("code") >= 0 || c.indexOf("antigravity") >= 0 || c.indexOf("nvim") >= 0 || c.indexOf("edit") >= 0) return "code";
+        if (c.indexOf("fire") >= 0 || c.indexOf("chrome") >= 0 || c.indexOf("zen") >= 0 || c.indexOf("brave") >= 0 || c.indexOf("browser") >= 0) return "public";
+        if (c.indexOf("file") >= 0 || c.indexOf("fm") >= 0 || c.indexOf("dolphin") >= 0 || c.indexOf("thunar") >= 0 || c.indexOf("nautilus") >= 0) return "folder";
+        if (c.indexOf("spot") >= 0 || c.indexOf("music") >= 0 || c.indexOf("mpv") >= 0 || c.indexOf("vlc") >= 0) return "play_circle";
+        if (c.indexOf("setting") >= 0 || c.indexOf("pref") >= 0) return "settings";
+        return "apps";
+    }
+
     readonly property bool onFocusedScreen:
-        root.screenName.length > 0 && root.screenName === root.focusedMonitor
-    readonly property bool available: root.featureOn && root.menus.length > 0
-                                     && root.onFocusedScreen
+        root.screenName.length === 0 || root.focusedMonitor.length === 0 || root.screenName === root.focusedMonitor
+    readonly property bool available: {
+        if (!root.featureOn || !root.onFocusedScreen) return false;
+        // ONLY A MENU THE APPLICATION ACTUALLY EXPORTS EARNS THE STRIP UNPROMPTED.
+        // A launcher or a terminal has no menu bar, and inventing an Actions/Window/Tools
+        // one for it claims something about the app that isn't true — the strip stops
+        // meaning "here is this program's menu" and starts meaning "here is a menu".
+        // Both "ready" and "lazy" count: lazy labels are real, they just need opening.
+        //
+        // Everything without one — the desktop included — is still one right-click away,
+        // and onFocusHintChanged drops that back to false when the focus moves on.
+        if (root.hasNativeMenu) return true;
+        return root.showManualMenu;
+    }
+
+    function handleToggle() {
+        root.close();
+        if (root.hasNativeMenu) {
+            root.toggleRequested();
+        } else {
+            root.showManualMenu = !root.showManualMenu;
+        }
+    }
 
     implicitWidth: root.available ? Math.ceil(stripWidth) : 0
     implicitHeight: parent ? parent.height : 22
-    // An Item does not size itself to its implicit size; the bar's left group measures
-    // children by `width`, so without these the strip would lay out as zero-wide.
     width: implicitWidth
     height: implicitHeight
     visible: root.available
     onAvailableChanged: if (!root.available) root.close()
 
-    // A menu that is no longer the focused window's menu must not stay open over the next
-    // one. Closing on pid change rather than on `available` alone catches the case where
-    // you alt-tab between two applications that BOTH have menus.
     onPidChanged: root.close()
 
     FileView {
@@ -314,8 +559,11 @@ Item {
 
     // The name's own cell: a touch more room after it than between two menus, because it is
     // a different kind of thing and the gap is what says so.
+    // The icon and the gap after it are part of the cell, so they are part of its
+    // width -- the old figure covered the text and two pixels, which was already
+    // tight and would have clipped a real icon.
     readonly property real nameW: root.appName.length
-                                  ? Math.ceil(fmName.advanceWidth(root.appName)) + 20 : 0
+                                  ? Math.ceil(fmName.advanceWidth(root.appName)) + 26 : 0
 
     // Rows breathe a little more than they used to (22 → 24) and the card is padded to
     // match. A menu is a list you scan, and the thing that makes a list scannable is the
@@ -470,7 +718,7 @@ Item {
     readonly property real stripWidth: {
         var w = root.nameW;
         for (var i = 0; i < root.fitCount; i++) w += root.cellWidths[i] + 2;
-        return w + (root.overflowing ? 22 : 0);
+        return w + (root.overflowing ? 22 : 0) + 26;
     }
 
     // One top-level menu label in the bar.
@@ -479,28 +727,18 @@ Item {
         property int idx: 0
         readonly property var entry: root.menus[cell.idx]
         readonly property bool open: root.openIndex === cell.idx
-        // A menu the application reports as disabled. Rare at the top level, but when it
-        // happens the cell used to look exactly like a working one and clicking it did
-        // nothing — which reads as the bar being broken rather than the menu being off.
         readonly property bool dead: !!(cell.entry && cell.entry.enabled === false)
         width: root.cellWidths[cell.idx] !== undefined ? root.cellWidths[cell.idx] : 0
         height: Math.max(18, root.height - 8)
         radius: Tok.r
-        // Filled when open — the same accent-with-background-ink the selected row inside the
-        // card uses, so the cell and the menu hanging off it read as one object. A 16% wash
-        // over a 25%-opacity bar was, in practice, invisible.
         color: cell.dead ? "transparent"
                          : (cell.open ? root.pal.iris
                                       : (ma.containsMouse ? root.pal.a(root.pal.line, 0.55)
                                                           : "transparent"))
-        // A menu bar is read by sweeping across it, and a label that snaps between three
-        // inks as the pointer passes flickers. Both the shade and the ink cross-fade.
         Behavior on color { ColorAnimation { duration: Tok.mFast } }
         Text {
             anchors.centerIn: parent
             text: cell.entry ? (cell.entry.label || "") : ""
-            // The strip sits where the window title was, so it starts at the title's
-            // weight. The open one lifts to full ink; nothing else shouts.
             color: cell.dead ? root.pal.faint
                              : (cell.open ? Tok.accentInk
                                           : (ma.containsMouse ? root.pal.text : root.pal.sub))
@@ -515,50 +753,86 @@ Item {
             cursorShape: cell.dead ? Qt.ArrowCursor : Qt.PointingHandCursor
             acceptedButtons: Qt.LeftButton | Qt.RightButton
             onClicked: (e)=> {
-                if (e.button === Qt.RightButton) { root.close(); root.toggleRequested(); return }
+                if (e.button === Qt.RightButton) { root.handleToggle(); return }
                 if (cell.dead) return;
                 root.toggle(cell.idx, cell);
             }
-            // Once one menu is open, sliding across the strip moves between them,
-            // the way a menu bar has always worked. Only while open: hover-to-open
-            // from cold would fire every time the pointer crossed the bar.
             onEntered: if (root.openIndex >= 0 && root.openIndex !== cell.idx)
                            root.openAt(cell.idx, cell)
         }
     }
 
     // ---- the strip ----
-    // Under the labels, so it only ever sees a right-click that missed one.
     MouseArea {
         anchors.fill: parent
         acceptedButtons: Qt.RightButton
-        onClicked: { root.close(); root.toggleRequested(); }
+        onClicked: root.handleToggle()
     }
     Row {
         id: strip
         anchors.verticalCenter: parent.verticalCenter
         spacing: 2
-        // ---- the application ----
-        // Deliberately NOT a MenuCell: it has no hover shade and no click, so sliding across
-        // an open menu bar passes over it without the menus appearing to jump a slot, and the
-        // strip's right-click (hand the bar back to the workspaces) still lands here because
-        // nothing above it eats the event.
-        Item {
+
+        // App Pill with Icon & Name
+        Rectangle {
             id: nameCell
             visible: root.appName.length > 0
             width: root.appName.length ? root.nameW : 0
             height: Math.max(18, root.height - 8)
-            Text {
+            radius: Tok.r
+            color: nameMa.containsMouse ? (root.pal ? root.pal.a(root.pal.line, 0.45) : "#333") : "transparent"
+            Behavior on color { ColorAnimation { duration: Tok.mFast } }
+
+            Row {
                 anchors.centerIn: parent
-                anchors.horizontalCenterOffset: -3       // the trailing gap is the separation
-                text: root.appName
-                font.pixelSize: 12
-                font.bold: true
-                font.family: root.uiFont
-                color: root.pal ? root.pal.text : "#eee"
-                Behavior on color { ColorAnimation { duration: Tok.mFast } }
+                spacing: 5
+                IconImage {
+                    id: appPixmap
+                    anchors.verticalCenter: parent.verticalCenter
+                    visible: root.appIconSource.length > 0 && status === Image.Ready
+                    implicitSize: 15
+                    source: root.appIconSource
+                }
+                Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    // Only when the real thing is unavailable, so the two never
+                    // draw at once and the pill never has a hole in it either.
+                    visible: !appPixmap.visible && root.appIcon.length > 0
+                    text: root.appIcon
+                    font.family: "Material Symbols Outlined"
+                    font.pixelSize: 13
+                    color: root.pal ? root.pal.iris : "#818cf8"
+                }
+                Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: root.appName
+                    font.pixelSize: 12
+                    font.bold: true
+                    font.family: root.uiFont
+                    color: root.pal ? root.pal.text : "#eee"
+                }
+            }
+
+            MouseArea {
+                id: nameMa
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                acceptedButtons: Qt.LeftButton | Qt.RightButton
+                onClicked: function(mouse) {
+                    if (mouse.button === Qt.RightButton) {
+                        root.handleToggle();
+                        return;
+                    }
+                    if (root.openIndex === root.appMenuIndex) {
+                        root.close();
+                        return;
+                    }
+                    root.openAt(root.appMenuIndex, root.firstCell());
+                }
             }
         }
+
         Repeater {
             id: cellRep
             model: root.fitCount
@@ -567,6 +841,7 @@ Item {
                 idx: index
             }
         }
+
         // The fold. Everything that did not fit, as an ordinary menu of its own.
         Rectangle {
             id: moreCell
@@ -600,6 +875,38 @@ Item {
                     root.cursor = -1;
                     root.searching = false;
                     drop.shown = true;
+                }
+            }
+        }
+
+        // Dedicated Search HUD Pill Button (Command Palette / Action Palette)
+        Rectangle {
+            id: hudBtn
+            width: 22
+            height: Math.max(18, root.height - 8)
+            radius: Tok.r
+            color: root.searching ? (root.pal ? root.pal.iris : "#818cf8")
+                                  : (hudMa.containsMouse ? (root.pal ? root.pal.a(root.pal.line, 0.55) : "#333")
+                                                         : "transparent")
+            Behavior on color { ColorAnimation { duration: Tok.mFast } }
+            Text {
+                anchors.centerIn: parent
+                text: "search"
+                font.family: "Material Symbols Outlined"
+                font.pixelSize: 13
+                color: root.searching ? Tok.accentInk
+                                      : (hudMa.containsMouse ? (root.pal ? root.pal.text : "#fff")
+                                                             : (root.pal ? root.pal.faint : "#777"))
+                Behavior on color { ColorAnimation { duration: Tok.mFast } }
+            }
+            MouseArea {
+                id: hudMa
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: {
+                    if (root.searching) { root.close(); return; }
+                    root.startSearch();
                 }
             }
         }
@@ -649,8 +956,8 @@ Item {
             }
             return out;
         }
-        if (root.openIndex < 0) return out;
-        var m = root.menus[root.openIndex];
+        if (root.openIndex === -1) return out;
+        var m = root.menuAt(root.openIndex);
         if (!m) return out;
         var parts = [m.label];
         var items = (m.items && m.items.length) ? m.items : root.cached(parts);
@@ -699,8 +1006,10 @@ Item {
             }
             return fp;
         }
-        if (root.openIndex < 0) return [];
-        var parts = [root.menus[root.openIndex].label];
+        if (root.openIndex === -1) return [];
+        var openMenu = root.menuAt(root.openIndex);
+        if (!openMenu) return [];
+        var parts = [openMenu.label];
         for (var k = 0; k < level && k < root.openPath.length; k++) {
             var it = root.levels[k] ? root.levels[k][root.openPath[k]] : null;
             if (!it) break;
@@ -725,7 +1034,7 @@ Item {
     }
 
     function openAt(i, host) {
-        var m = root.menus[i];
+        var m = root.menuAt(i);
         if (!m) return;
         root.openIndex = i;
         root.openHost = host;
@@ -797,8 +1106,32 @@ Item {
     function holdOpen() { keepOpen.stop() }
 
     Process { id: invoker }
-    // The sidecar resolves by label path, so the chain has to be rebuilt from what is open.
+    // The sidecar resolves by label path, or executes direct action/command/dispatch
     function activate(level, label) {
+        var items = root.levels[level];
+        var it = null;
+        if (items) {
+            for (var i = 0; i < items.length; i++) {
+                if (items[i] && items[i].label === label) { it = items[i]; break; }
+            }
+        }
+        if (it) {
+            if (it.dispatch) {
+                root.close();
+                Hyprland.dispatch(it.dispatch);
+                return;
+            }
+            if (it.command) {
+                root.close();
+                Quickshell.execDetached(it.command);
+                return;
+            }
+            if (it.action && typeof it.action === "function") {
+                root.close();
+                it.action();
+                return;
+            }
+        }
         if (!root.script.length || root.openIndex === -1) return;
         var parts = root.pathTo(level);
         parts.push(label);
@@ -810,14 +1143,27 @@ Item {
         invoker.command = ["python3", root.script, "--invoke", parts.join("/")];
         invoker.running = true;
     }
+    function activateHit(hit) {
+        if (!hit) return;
+        if (hit.dispatch) {
+            root.close();
+            Hyprland.dispatch(hit.dispatch);
+            return;
+        }
+        if (hit.command) {
+            root.close();
+            Quickshell.execDetached(hit.command);
+            return;
+        }
+        if (hit.action && typeof hit.action === "function") {
+            root.close();
+            hit.action();
+            return;
+        }
+        root.activatePath(hit.parts);
+    }
 
     // ---- search ----
-    //
-    // The reason a global menu is worth having at all on a big application. LibreOffice
-    // exports fifty-four nested submenus; finding "Insert > Header and Footer > Header" by
-    // hand is four hovers and a memory of which top-level menu it lives under. Typing "head"
-    // is neither. Only menus whose contents are actually known can be searched — for a lazy
-    // application that means the ones you have opened, which is stated rather than hidden.
     readonly property var flat: {
         var out = [];
         if (!root.searching) return out;
@@ -830,7 +1176,14 @@ Item {
                 var kids = (it.items && it.items.length) ? it.items : root.cached(here);
                 if (kids && kids.length) walk(kids, here, depth + 1);
                 else if (it.enabled !== false && !it.stub)
-                    out.push({ parts: here, label: it.label, key: it.key || "" });
+                    out.push({
+                        parts: here,
+                        label: it.label,
+                        key: it.key || "",
+                        dispatch: it.dispatch || "",
+                        command: it.command || null,
+                        action: it.action || null
+                    });
             }
         }
         for (var m = 0; m < root.menus.length; m++) {
@@ -841,9 +1194,6 @@ Item {
         }
         return out;
     }
-    // Top-level menus whose contents nobody has asked for yet. Zero for an application that
-    // publishes its menu as data; for one that builds each menu on first open it is however
-    // many you have not clicked — and those are exactly the ones search cannot see.
     readonly property int unreadMenus: {
         var n = 0;
         for (var i = 0; i < root.menus.length; i++) {
@@ -859,10 +1209,8 @@ Item {
         command: ["python3", root.script, "--prime-all"]
         onExited: {
             root.priming = false;
-            // The sidecar rewrites the snapshot as it goes; this pulls the finished one in
-            // so the search list grows the moment the reading stops.
             snapFile.apply();
-            root.cache = root.cache;          // nudge anything derived from the cache
+            root.cache = root.cache;
         }
     }
     function primeEverything() {
@@ -880,7 +1228,6 @@ Item {
             var f = root.flat[i];
             var hay = f.parts.join(" ").toLowerCase();
             var ok = true, from = 0;
-            // subsequence match over the whole path, so "inhead" finds Insert > Header
             for (var c = 0; c < q.length; c++) {
                 if (q.charAt(c) === " ") continue;
                 var at = hay.indexOf(q.charAt(c), from);
@@ -888,7 +1235,6 @@ Item {
                 from = at + 1;
             }
             if (!ok) continue;
-            // an exact hit in the leaf label sorts above a scattered one in the path
             out.push({ f: f, rank: f.label.toLowerCase().indexOf(q) >= 0 ? 0 : 1 });
         }
         out.sort(function (a, b) { return a.rank - b.rank });
@@ -908,11 +1254,6 @@ Item {
     }
 
     // ---- keyboard ----
-    //
-    // A menu bar you cannot drive from the keyboard is half a menu bar. Everything below is
-    // what a menu has done since 1984: arrows walk, Right opens, Left backs out, Enter fires,
-    // Escape lets go one level at a time. Separators and disabled rows are stepped over
-    // rather than landed on.
     function rowUsable(it) {
         if (!it || it.sep) return false;
         if (it.items && it.items.length) return true;
@@ -941,9 +1282,16 @@ Item {
         }
     }
     function moveTop(dir) {
-        if (root.openIndex < 0 || !root.menus.length) return;
-        var i = (root.openIndex + dir + root.menus.length) % root.menus.length;
-        root.openAt(i, root.openHost);
+        if (root.openIndex === -1 || !root.menus.length) return;
+        // From the application menu, right goes to the first real menu and left to
+        // the last -- it sits before all of them, so it is not part of the cycle.
+        if (root.openIndex === root.appMenuIndex) {
+            root.openAt(dir > 0 ? 0 : root.menus.length - 1, root.openHost);
+            return;
+        }
+        var i = root.openIndex + dir;
+        if (i < 0) { root.openAt(root.appMenuIndex, root.firstCell()); return }
+        root.openAt(i % root.menus.length, root.openHost);
     }
     function enterRow() {
         var lvl = root.levels.length - 1;
@@ -971,10 +1319,10 @@ Item {
                 root.cursor = Math.max(root.cursor - 1, 0); e.accepted = true;
             } else if (e.key === Qt.Key_Return || e.key === Qt.Key_Enter) {
                 var h = root.hits[root.cursor];
-                if (h) root.activatePath(h.parts);
+                if (h) root.activateHit(h);
                 e.accepted = true;
             }
-            return;                            // everything else belongs to the field
+            return;
         }
         switch (e.key) {
         case Qt.Key_Down:  root.step(1);  e.accepted = true; break;
@@ -1744,7 +2092,7 @@ Item {
                                 hoverEnabled: true
                                 cursorShape: Qt.PointingHandCursor
                                 onEntered: root.cursor = hitRow.index
-                                onClicked: if (hitRow.hit) root.activatePath(hitRow.hit.parts)
+                                onClicked: if (hitRow.hit) root.activateHit(hitRow.hit)
                             }
                         }
                     }

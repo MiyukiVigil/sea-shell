@@ -17,6 +17,21 @@ d="$HOME/.config/sea-shell"
 kmode="$d/kitty-mode.conf"
 mkdir -p "$d"
 
+# THE ACCENT HAS A LIGHT CUT AND A DARK CUT and they are not interchangeable.
+# Material publishes `primary` twice: a pale one to sit on a dark surface and a
+# darker one to sit on a pale surface. Switching the shell between them without
+# re-deriving the accent leaves the wrong cut in place -- a pale accent on a white
+# background measured 1.5:1, where 3:1 is the floor for something you are meant to
+# be able to see. So a mode change re-runs the derivation, but only when matching
+# is on; a hand-picked accent is the user's and stays exactly as picked.
+rederive_accent() {
+    m=$(python3 -c "import json,sys; print(str(json.load(open(sys.argv[1])).get('matugen', False)))" "$d/appearance.json" 2>/dev/null)
+    [ "$m" = "True" ] || return 0
+    for c in "$(dirname "$0")/matugen-accent.sh" "$HOME/.config/quickshell/sea-shell/matugen-accent.sh"; do
+        [ -f "$c" ] && { sh "$c" >/dev/null 2>&1 & return 0; }
+    done
+}
+
 if [ "$mode" = "light" ]; then
     # Check if user has a forced app preference (dark/light independent from the shell)
     appMode=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('appMode','auto'))" "$d/appearance.json" 2>/dev/null)
@@ -34,6 +49,7 @@ if [ "$mode" = "light" ]; then
     if [ "$matugen_on" = "True" ] && [ -s "$lm" ]; then
         cp "$lm" "$kmode"
         pkill -USR1 -x kitty 2>/dev/null || true
+        rederive_accent
         exit 0
     fi
 
@@ -86,3 +102,4 @@ else
 fi
 
 pkill -USR1 -x kitty 2>/dev/null || true
+rederive_accent
