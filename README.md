@@ -1,5 +1,7 @@
 # sea-shell
 
+# Project is paused for a while until I am back from my final year of my uni
+
 **A Hyprland desktop shell, not a status bar.** The bar, dock, launcher, control center,
 notification daemon and screen recorder are one Quickshell process — not six
 tools glued together. The whole palette follows your wallpaper.
