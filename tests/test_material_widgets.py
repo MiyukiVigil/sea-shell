@@ -32,7 +32,8 @@ Window { width: 760; height: 680; visible: true; color: "#edeaf3"
             player=w.findChild(QObject,'player')
             media=w.findChild(QQuickItem,'media')
             def find(item,name):
-                if item.objectName()==name:return item
+                # Each size has its own transport; click the one actually displayed.
+                if item.objectName()==name and item.isVisible():return item
                 for child in item.childItems():
                     found=find(child,name)
                     if found:return found
@@ -64,3 +65,31 @@ Window { width: 760; height: 680; visible: true; color: "#edeaf3"
             self.assertFalse(errors,errors)
             QTest.qWait(160);w.grabWindow().save('/tmp/sea-material-widgets-preview.png')
         finally:w.close();APP.processEvents()
+
+    def test_calendar_and_batteries_render_in_all_sizes(self):
+        uri=(Path(__file__).resolve().parents[1]/'quickshell/ui').as_uri()
+        for kind in ('calendar','batteries'):
+            for size,width,height in [('s',170,170),('m',360,170),('l',360,376)]:
+                with self.subTest(kind=kind,size=size):
+                    engine=QQmlApplicationEngine();errors=[]
+                    engine.warnings.connect(lambda ws:errors.extend(str(w) for w in ws))
+                    code='''import QtQuick
+import QtQuick.Window
+import "'''+uri+'''" as Sea
+Window { width:400; height:420; visible:true
+ Sea.MaterialWidget { objectName:"card"; kind:"'''+kind+'''"; size:"'''+size+'''"
+ width:'''+str(width)+'''; height:'''+str(height)+'''; now:new Date(2026,9,30,10,25)
+ readings:({calEvents:[{title:"Sample event",date:"2026-10-30",time:"11:00"}],
+ batteries:[{n:"Laptop",p:68,charging:true,i:"laptop"}],batEta:"2 hours"}) }
+}'''
+                    engine.loadData(code.encode(),QUrl('file:///tmp/calendar-battery-test.qml'))
+                    self.assertTrue(engine.rootObjects(),errors)
+                    window=engine.rootObjects()[0]
+                    try:
+                        APP.processEvents();QTest.qWait(30)
+                        card=window.findChild(QQuickItem,'card')
+                        self.assertEqual(card.property('cls'),size)
+                        self.assertTrue(card.isVisible())
+                        self.assertFalse(errors,errors)
+                    finally:
+                        window.close();APP.processEvents()

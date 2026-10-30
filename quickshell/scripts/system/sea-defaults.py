@@ -344,6 +344,14 @@ def set_default(role, entry_id):
         if shutil.which("xdg-mime") is None:
             return False, "xdg-mime is not installed"
         try:
+            if role == "filemanager" and entry_id == "sea-fm.desktop":
+                before = CONFIG_DIR / "before-filemanager"
+                if not before.exists():
+                    previous = subprocess.run(["xdg-mime", "query", "default", "inode/directory"],
+                                              capture_output=True, text=True, timeout=20, check=True).stdout.strip()
+                    if previous and previous != "sea-fm.desktop":
+                        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+                        before.write_text(previous + "\n")
             subprocess.run(["xdg-mime", "default", entry_id] + mimes,
                            capture_output=True, text=True, timeout=20, check=True)
         except subprocess.CalledProcessError as exc:

@@ -17,6 +17,9 @@
 cfg="$HOME/.config/sea-shell/appearance.json"
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 
+# Independent of automatic light/dark mode.
+python3 "$here/sea-folder-color.py" 2>/dev/null
+
 src=$(python3 -c "import json,sys
 try: d=json.load(open(sys.argv[1]))
 except Exception: d={}

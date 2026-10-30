@@ -266,13 +266,15 @@ hypr_block() {
   # $1 = absolute dir the sea-shell .lua files live in. Emits the Lua block dofile'd from
   # hyprland.lua (Hyprland 0.55+). idle daemon + polkit agent are runtime-guarded, so
   # installing the package later makes them work on the next login without re-running this.
+  if [ -f "$CFG/hypr/hyprland.lua" ]; then
+    sed -i '/-- >>> sea-shell polkit fallback >>>/,/-- <<< sea-shell polkit fallback <<</d' "$CFG/hypr/hyprland.lua"
+  fi
   local block="dofile(\"$1/sea.lua\")
 dofile(\"$1/keybinds.lua\")
 hl.on(\"hyprland.start\", function()
     hl.exec_cmd(\"exec ~/.config/quickshell/sea-shell/sea-wallpaper-restore.sh\")
     hl.exec_cmd(\"sh ~/.config/quickshell/sea-shell/sea-bar-supervisor.sh\")
     hl.exec_cmd(\"command -v hypridle >/dev/null && exec hypridle\")
-    hl.exec_cmd(\"[ -x /usr/lib/hyprpolkitagent/hyprpolkitagent ] && exec /usr/lib/hyprpolkitagent/hyprpolkitagent\")
 end)"
   printf '%s' "$block"
 }
@@ -383,6 +385,13 @@ do_install() {
     copy_file "$SCRIPT_DIR/fontconfig/60-sea-fonts.conf" "$CFG/fontconfig/conf.d/60-sea-fonts.conf"
     fc-cache -f >/dev/null 2>&1 || true
     if command -v gsettings >/dev/null 2>&1 && gsettings get org.gnome.desktop.interface font-name 2>/dev/null | grep -qE "^'(Adwaita Sans|Cantarell) "; then
+      # Save each original value once, before the first managed font change.
+      mkdir -p "$DATA_DIR/before-fonts"
+      for font_key in font-name document-font-name monospace-font-name; do
+        if [ ! -f "$DATA_DIR/before-fonts/$font_key" ]; then
+          gsettings get org.gnome.desktop.interface "$font_key" > "$DATA_DIR/before-fonts/$font_key"
+        fi
+      done
       gsettings set org.gnome.desktop.interface font-name 'Inter 11'
       gsettings set org.gnome.desktop.interface document-font-name 'Inter 11'
       gsettings set org.gnome.desktop.interface monospace-font-name 'JetBrains Mono 11'
@@ -540,6 +549,21 @@ set_wallpaper() {
   else warn "install 'swww' (or awww) for the wallpaper to apply + restore on login"; fi
 }
 
+# Explicit opt-in: install only the fixed-argument Papirus helper and its rule.
+install_folder_helper() {
+  local owner="${SUDO_USER:-$USER}" rule
+  [[ "$owner" =~ ^[a-zA-Z_][a-zA-Z0-9_-]*[$]?$ ]] || { warn "unsupported account name"; return 1; }
+  [ -x /usr/bin/papirus-folders ] || { warn "install papirus-folders first"; return 1; }
+  rule="$(mktemp)" || return 1
+  printf '%s ALL=(root) NOPASSWD: /usr/local/bin/sea-folder-color\n' "$owner" > "$rule"
+  sudo visudo -cf "$rule" || { rm -f "$rule"; return 1; }
+  sudo install -o root -g root -m 755 "$SCRIPT_DIR/quickshell/scripts/system/sea-folder-color.sh" /usr/local/bin/sea-folder-color &&
+    sudo install -o root -g root -m 440 "$rule" /etc/sudoers.d/sea-folder-color
+  local result=$?
+  rm -f "$rule"
+  return "$result"
+}
+
 do_uninstall() {
   title "uninstalling sea-shell"
   # stop the supervisor first, or it just respawns the bar we are removing
@@ -555,13 +579,41 @@ do_uninstall() {
   [ -f "$KITTY_THEME" ] && { rm -f "$KITTY_THEME"; ok "removed ${KITTY_THEME/#$HOME/\~}"; }
   # per-file installs: only remove if ours (or a --dev symlink), then restore the newest backup
   local f bak
-  for f in "$CFG/starship.toml" "$CFG/hypr/hyprlock.conf" "$CFG/hypr/hypridle.conf"; do
+  for f in "$CFG/starship.toml" "$CFG/hypr/hyprlock.conf"; do
     if [ -L "$f" ] || grep -qsF "sea-shell" "$f"; then
       rm -f "$f"; ok "removed ${f/#$HOME/\~}"
       bak="$(ls -1t "$f".bak-* 2>/dev/null | head -1 || true)"
       [ -n "$bak" ] && { mv "$bak" "$f"; info "restored backup → ${f/#$HOME/\~}"; }
     fi
   done
+  # Restore a kept idle config as well as any backup restored above.
+  if [ -f "$CFG/hypr/hypridle.conf" ]; then
+    sed -i '\@^[[:space:]]*lock_cmd = .*sea-lock.sh@c\    lock_cmd = pidof hyprlock || hyprlock' "$CFG/hypr/hypridle.conf"
+    ok "restored hypridle lock command"
+  fi
+  if cmp -s "$SCRIPT_DIR/fontconfig/60-sea-fonts.conf" "$CFG/fontconfig/conf.d/60-sea-fonts.conf"; then
+    rm -f "$CFG/fontconfig/conf.d/60-sea-fonts.conf"
+    fc-cache -f >/dev/null 2>&1 || true
+    ok "removed sea-shell font aliases"
+  fi
+  for font_key in font-name document-font-name monospace-font-name; do
+    if [ -s "$DATA_DIR/before-fonts/$font_key" ]; then
+      gsettings set org.gnome.desktop.interface "$font_key" "$(cat "$DATA_DIR/before-fonts/$font_key")" &&
+        ok "restored GTK $font_key"
+    else
+      info "kept GTK $font_key: no original value was recorded"
+    fi
+  done
+  # A separate marked block survives removal of the shell's login block.
+  if [ -x /usr/lib/hyprpolkitagent/hyprpolkitagent ]; then
+    add_block "$CFG/hypr/hyprland.lua" 'hl.on("hyprland.start", function()
+    hl.exec_cmd("/usr/lib/hyprpolkitagent/hyprpolkitagent")
+end)' '-- >>> sea-shell polkit fallback >>>' '-- <<< sea-shell polkit fallback <<<'
+    ok "restored hyprpolkitagent for the next login"
+  else
+    warn "hyprpolkitagent is missing; install it to restore password prompts"
+  fi
+  python3 "$SCRIPT_DIR/quickshell/scripts/system/sea-restore-defaults.py"
   info "runtime data kept at ${DATA_DIR/#$HOME/\~} (appearance, launcher history) — delete it manually if unwanted"
   title "done — run 'hyprctl reload' to apply"
 }
@@ -570,6 +622,7 @@ do_uninstall() {
 ACTION=install
 for arg in "$@"; do
   case "$arg" in
+    --folder-helper) install_folder_helper; exit $? ;;
     --uninstall|-u) ACTION=uninstall ;;
     --deps)         ACTION=deps ;;
     --no-deps)      NO_DEPS=1 ;;

@@ -5,6 +5,7 @@
 //   qs -c sea-shell ipc call settings toggle       (SUPER+S)
 // or, in-process, settingsLoader.item.openTab(n).  Esc / click-outside hides it.
 import Quickshell
+import Quickshell.Hyprland
 import Quickshell.Wayland
 import Quickshell.Widgets
 import Quickshell.Io
@@ -23,7 +24,7 @@ Scope {
     // release apart — the badge read v5.0.0 on a 6.0.0 install. A version badge that lies is worse
     // than no badge. The literal survives only as the fallback for a `qs -p` run out of the repo
     // with nothing deployed; the second path covers that case too (quickshell/ui/ → repo root).
-    property string seaVersion: "6.5.0"
+    property string seaVersion: "7.0.0"
     Process {
         running: true
         command: ["sh","-c","cat \"$HOME/.config/quickshell/sea-shell/VERSION\" 2>/dev/null || cat \"" + root.repo + "/../../VERSION\" 2>/dev/null"]
@@ -45,7 +46,10 @@ Scope {
     property bool shown: false
     property bool authenticationPending: false
     function openPanel() { root.showTab(8) }
-    function openTab(t) { root.showTab(t) }
+    function openTab(t) {
+        var requested = Number(t);
+        root.showTab(Number.isInteger(requested) && root.tabMeta[requested] ? requested : 8);
+    }
     function closePanel() { root.shown = false }
     function togglePanel() { if (root.shown) root.closePanel(); else root.openPanel() }
     // ---------------- finding things ----------------
@@ -116,7 +120,7 @@ Scope {
         if (t === 4 || t === 13) return "Appearance saves automatically; app icons may need an app restart.";
         if (t === 17) return "Some window rules take effect when the application opens a new window.";
         if (t === 22) return "Defaults affect future opens. An already-running file manager may keep handling reveal requests until it closes.";
-        return "Use Apply where shown. Each section keeps its existing behavior.";
+        return "";
     }
     function tabLabel(t) { var m = root.tabMeta[t]; return m ? m.l : "" }
     function tabIcon(t)  { var m = root.tabMeta[t]; return m ? m.i : "tune" }
@@ -299,6 +303,13 @@ Scope {
         onTriggered: { root.doJump(); n++; if (n > 5) { stop(); root.pendingJump = null } } }
 
     function showTab(t) {
+        // Select the active output each time; the warm surface otherwise stays on its first output.
+        var focused = Hyprland.focusedMonitor;
+        var screens = Quickshell.screens;
+        for (var i = 0; focused && i < screens.length; i++) {
+            if (screens[i].name === focused.name) { panel.screen = screens[i]; break; }
+        }
+
         // Not fresh until the read below lands. Everything this panel mirrors is stale between
         // here and there, and one of those mirrors drives the WHOLE SHELL's palette.
         root.apFresh = false;
@@ -362,6 +373,7 @@ Scope {
             } else if (exitCode !== 0) root.appearancePostSaveAction = null;
         }
     }
+    property bool apFolderColorFollow: false
     property string apIconTheme: "breeze"
     property var installedIconThemes: []
     property var iconPreviewCatalog: []
@@ -473,7 +485,7 @@ Scope {
         target: "settings"
         function toggle(): void { root.togglePanel() }
         function open(): void { root.openPanel() }
-        function openTab(tab: int): void { root.openTab(tab) }
+        function openTab(requestedTab: int): void { root.openTab(requestedTab) }
         function close(): void { root.closePanel() }
     }
 
@@ -2192,6 +2204,7 @@ Scope {
             if(j.barOpaque!==undefined) root.apBarOpaque=!!j.barOpaque;
             if(j.radius!==undefined) root.apRadius=j.radius; if(j.opacity!==undefined) root.apOpacity=j.opacity;
             if(j.height!==undefined) root.apHeight=j.height; if(j.scale!==undefined) root.apScale=j.scale; if(j.accent!==undefined) root.apAccent=j.accent;
+            if(j.folderColorFollow!==undefined) root.apFolderColorFollow=j.folderColorFollow;
             if(j.iconTheme!==undefined) root.apIconTheme=j.iconTheme; if(j.font!==undefined) root.apFont=j.font; if(j.customFonts!==undefined) root.apCustomFonts=j.customFonts;
             if(j.mode!==undefined) root.apLight=(""+j.mode==="light"); if(j.matugen!==undefined) root.apMatugen=!!j.matugen;
             if(j.scheme!==undefined && (""+j.scheme).length>0) root.apScheme=j.scheme;
@@ -2466,6 +2479,7 @@ Scope {
             scale:           Number(root.apScale.toFixed(2)),
             accent:          root.apAccent,
             iconTheme:       root.apIconTheme,
+            folderColorFollow: root.apFolderColorFollow,
             font:            root.apFont,
             customFonts:     root.apCustomFonts,
             mode:            (root.apLight?'light':'dark'),
@@ -4916,6 +4930,16 @@ Scope {
                                             onPicked: root.applyIconTheme(modelData) }
                                     }
                                 }
+                                ToggleCard { icon: "palette"; title: "folders follow wallpaper colour"
+                                    desc: "Papirus folders use the nearest accent colour; requires the folder helper."
+                                    on: root.apFolderColorFollow
+                                    onToggled: { root.apFolderColorFollow = !root.apFolderColorFollow; root.saveAppearance();
+                                        root.afterAppearanceSave(function() { Quickshell.execDetached(["python3", Qt.resolvedUrl("sea-folder-color.py").toString().replace("file://", "")]); }) }
+                                }
+                                Chip { Layout.leftMargin: 14; label: "reset folder colour"; icon: "restart_alt"
+                                    onPicked: { root.apFolderColorFollow = false; root.saveAppearance();
+                                        root.afterAppearanceSave(function() { Quickshell.execDetached(["python3", Qt.resolvedUrl("sea-folder-color.py").toString().replace("file://", ""), "--reset"]); }) }
+                                }
                                 Text { Layout.leftMargin: 14; text: root.iconApplyState || "Some running applications need reopening to refresh their icons."
                                     color: root.iconApplyFailed ? theme.bad : theme.faint; font.pixelSize: 10; font.family: Tok.sans }
                             }
@@ -4964,7 +4988,7 @@ Scope {
                                 // ---------- per-target colour overrides ----------
                                 ColumnLayout { Layout.fillWidth: true; spacing: 8
                                     Section { title: "colour targets"; icon: "tune" }
-                                    Text { text: "customize which apps auto-match wallpaper/global accent · disabled auto-match targets can use custom colors"; color: theme.faint; font.pixelSize: 10; font.family: root.apFont }
+                                    Text { text: "Choose which apps follow the accent or use custom colours."; color: theme.faint; font.pixelSize: 10; font.family: root.apFont }
                                     // Hyprland borders
                                     Rectangle { Layout.fillWidth: true; implicitHeight: hyprCol.implicitHeight + 20; radius: Tok.r
                                         color: theme.a(theme.line,0.4); border.width: 1; border.color: root.ovrHyprland?theme.a(theme.iris,0.5):theme.a(theme.iris,0.16)
@@ -5761,7 +5785,7 @@ Scope {
 
                             Section { title: "arranging"; icon: "drag_pan" }
                             Text {
-                                text: "while arranging, drag anything on the desktop. shaded areas are where the shell thinks your wallpaper has something in it — a widget dropped there moves aside unless you hold shift, which also pins it. follow-wallpaper: RESCUE moves only what a new wallpaper actually covers, and only as far as it must — often nothing, which is correct. ARRANGE re-places everything in the calmest space of every new picture. pinned widgets never move."
+                                text: "Drag widgets to arrange them; hold Shift to pin them over busy wallpaper areas."
                                 color: theme.faint; font.pixelSize: 10; font.family: Tok.mono
                                 wrapMode: Text.WordWrap
                                 Layout.leftMargin: 14; Layout.rightMargin: 14; Layout.fillWidth: true
@@ -6165,7 +6189,7 @@ Scope {
                             visible: root.tab === 12; Layout.fillWidth: true; spacing: 14
                             Section { title: "bar widgets"; icon: "widgets" }
                             Text {
-                                text: "toggle widgets on/off, drag the ⠿ handle to reorder where they sit on the bar, and open ⚙ on any row to set how that pill looks. Media Player always stays centred."
+                                text: "Toggle widgets, drag ⠿ to reorder, or open ⚙ to change their appearance."
                                 color: theme.faint; font.pixelSize: 11; font.family: root.apFont; Layout.bottomMargin: 6
                                 Layout.fillWidth: true; wrapMode: Text.WordWrap
                             }
@@ -6353,7 +6377,7 @@ Scope {
                             // card had its VRAM measured on every tick and shown nowhere.
                             Section { title: "system monitor"; icon: "speed"; Layout.topMargin: 8 }
                             Text {
-                                text: "which readings reach the bar pill. all of them are already being sampled, so adding one costs nothing. GPU readings hide themselves on a machine with no discrete card."
+                                text: "Choose bar readings; GPU readings appear when a discrete card is available."
                                 color: theme.faint; font.pixelSize: 11; font.family: root.apFont; Layout.bottomMargin: 6
                                 Layout.fillWidth: true; wrapMode: Text.WordWrap
                             }
@@ -6453,7 +6477,7 @@ Scope {
                             // ---- the global menu (it lives in the window-title slot) ----
                             Section { title: "global menu"; icon: "menu_open"; Layout.topMargin: 8 }
                             Text {
-                                text: "the focused window's own menu bar, drawn in the bar where the window title would be. it appears only for windows that actually export one — everything else keeps its title, so the bar looks unchanged."
+                                text: "Show the active app’s menu in place of its window title when available."
                                 color: theme.faint; font.pixelSize: 11; font.family: root.apFont; Layout.bottomMargin: 6
                                 Layout.fillWidth: true; wrapMode: Text.WordWrap
                             }
@@ -7449,7 +7473,7 @@ Scope {
                             Text {
                                 Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; Layout.bottomMargin: 4
                                 wrapMode: Text.WordWrap
-                                text: "clicking a link somewhere else asks the browser to come forward — Wayland calls it activation, and Hyprland leaves it to the shell to decide what that means. with both of these off the window is raised where it is and you go looking for it."
+                                text: "Choose whether app activation changes your workspace or brings the window to you."
                                 color: theme.faint; font.pixelSize: 10; font.family: Tok.mono
                             }
                             ToggleCard {
@@ -7466,7 +7490,7 @@ Scope {
                             Text {
                                 Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; Layout.topMargin: 4
                                 wrapMode: Text.WordWrap
-                                text: "pinned apps are stored in ~/.config/sea-shell/dock.json. per-monitor: the dock follows the same monitor list as the bar in Display."
+                                text: "The dock uses the monitors selected for the bar in Display."
                                 color: theme.faint; font.pixelSize: 10; font.family: Tok.mono
                             }
                         }

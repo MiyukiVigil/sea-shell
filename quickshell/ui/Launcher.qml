@@ -13,6 +13,7 @@
 // Esc / click-outside closes. ↑↓/Tab navigate · PgUp/PgDn jump · ALT+1..9 quick-launch.
 import Quickshell
 import Quickshell.Io
+import Quickshell.Hyprland
 import Quickshell.Wayland
 import Quickshell.Widgets
 import QtQuick
@@ -46,6 +47,7 @@ Scope {
     property bool held: false      // keep the window mapped a few frames past close (no unmap flash)
 
     function open(prefix) {
+        Hyprland.refreshToplevels()
         clipProc.running = true                     // refresh clipboard cache on every open
         clipThumbProc.running = true                // (re)generate image previews for ; mode
         apProc.running = true                       // re-read accent + light/dark each open
@@ -364,6 +366,21 @@ Scope {
                 if (best) scored.push({e:a, sc:best.score, pos: bi===0 ? best.pos : []});
             }
             scored.sort((x,y) => (y.sc + frecency(y.e.id)*4) - (x.sc + frecency(x.e.id)*4) || x.e.name.localeCompare(y.e.name));
+            // Open windows come before launching another instance. Prefix modes never reach here.
+            var windows = Hyprland.toplevels.values, windowHits = [];
+            for (var wi = 0; wi < windows.length; wi++) {
+                var win = windows[wi], ipc = win.lastIpcObject;
+                if (!win.wayland || !ipc || !ipc.address) continue;
+                var cls = String(win.wayland.appId || ipc.class || ""), title = String(win.wayland.title || ipc.title || cls);
+                var match = q === "" ? {score:0} : fuzzy(q, cls + " " + title);
+                if (!match) continue;
+                var ws = win.workspace ? win.workspace.id : (ipc.workspace ? ipc.workspace.id : "?");
+                windowHits.push({type:"window", title:esc(cls || title),
+                    sub:"Window · " + esc(title) + " · workspace " + esc(String(ws)),
+                    mi:"window", address:ipc.address, score:match.score});
+            }
+            windowHits.sort((a,b) => b.score - a.score);
+            windowHits.forEach(w => out.push(w));
             scored.forEach(s => out.push({type:"app", title:highlight(s.e.name, s.pos),
                 sub: esc(s.e.genericName || s.e.comment || ""), entry:s.e, fav: frecency(s.e.id) > 2}));
         }
@@ -379,6 +396,7 @@ Scope {
     // ---------- activate ----------
     function activate(idx) {
         var r = root.results[idx]; if (!r || r.type === "hint") return;
+        if (r.type === "window") Hyprland.dispatch("hl.dsp.focus({ window = 'address:" + r.address + "' })");
         if (r.type === "app")  { bump(r.entry.id); r.entry.execute() }
         if (r.type === "run")  Quickshell.execDetached(["sh","-c",r.exec])
         if (r.type === "term") Quickshell.execDetached(["kitty","--hold","sh","-c",r.exec])

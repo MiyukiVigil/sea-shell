@@ -6,7 +6,7 @@
 notification daemon and screen recorder are one Quickshell process — not six
 tools glued together. The whole palette follows your wallpaper.
 
-**`v6.5.0`** · [seashell.miyukivigil.tech](https://seashell.miyukivigil.tech) ·
+**`v7.0.0`** · [seashell.miyukivigil.tech](https://seashell.miyukivigil.tech) ·
 [changelog](https://seashell.miyukivigil.tech/changelog.html)
 
 ![The sea-shell desktop — translucent bar at the top, animated wallpaper, and the dock at the bottom](https://seashell.miyukivigil.tech/images/v6/hero.webp)
@@ -38,12 +38,13 @@ Arch-based for the package install; the configs work anywhere with `--no-deps`.
 | | |
 |---|---|
 | **Bar** | Workspaces, focused app, centred media, tray, and status pills for CPU/RAM/GPU, weather, network throughput, package updates, wi-fi + VPN, bluetooth, KDE Connect, volume, battery, calendar and power. Reorderable, individually toggleable. |
-| **Desktop** | Widgets and shortcuts on the wallpaper — and they are placed around what is *in* it, not on top of it. |
+| **Desktop** | Calendar and battery widgets, adaptive text, plus widgets and shortcuts on the wallpaper — and they are placed around what is *in* it, not on top of it. |
 | **Global menu** | The focused window's own menu bar, in the bar. Qt, GTK, KDE, LibreOffice, Firefox and Electron. |
 | **Dock** | Pinned + running apps, any edge, per-monitor, cursor magnification. |
-| **Launcher** | Apps with frecency ranking, plus commands, maths, file search, web, clipboard history and system actions. |
+| **Launcher** | Open windows above app launches, with workspace labels and frecency ranking, plus commands, maths, file search, web, clipboard history and system actions. |
 | **Control center** | 21 tabs — appearance, widgets, desktop, dock, window rules, input, audio, display, network, bluetooth, disks, weather, calendar, keybinds, screen time, idle, power. |
-| **Notifications** | Its own daemon: popups, history, and action buttons. Don't run mako or dunst alongside. |
+| **Notifications** | Its own daemon: popups, history grouped by app, dismiss with undo, and action buttons. Don't run mako or dunst alongside. |
+| **Lock and power** | A built-in lock screen with grouped notifications, shell password prompts, and a power menu with hold-to-confirm actions and shutdown timers. |
 | **Audio** | Output routing, per-app volume, synced lyrics, bit-perfect detection. (Parametric EQ and DAC control live in [Hub Moon](https://hubmoon.miyukivigil.tech) now.) |
 | **Capture** | Screenshots with an editor, region OCR to clipboard, and a screen recorder with mic + system audio mixing. |
 | **Upkeep** | Over-the-air updates, a health check, backup/restore, and a supervisor that respawns the bar. |

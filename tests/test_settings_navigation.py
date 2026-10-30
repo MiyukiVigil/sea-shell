@@ -28,3 +28,12 @@ class SettingsNavigationTests(unittest.TestCase):
         result = engine.evaluate('root.sectionIndex=[0,1,2,3,4,5].map(function(t){return {tab:4,title:String(t),item:{parent:{appearanceSubTab:t,parent:null}}}}); sections().map(function(e){return e.title}).join(",")')
         self.assertFalse(result.isError(), result.toString())
         self.assertEqual(result.toString(), '2')
+
+    def test_open_tab_validates_ipc_input(self):
+        body = SOURCE.split('    function openTab(t) {', 1)[1].split('\n    function closePanel()', 1)[0]
+        engine = QJSEngine()
+        engine.evaluate('var root={tab:8,tabMeta:{0:{},4:{},8:{},23:{}},showTab:function(t){this.tab=t}}; function openTab(t){'+body)
+        for value, expected in [('4',4), ('23',23), ('-1',8), ('99',8), ('undefined',8), ('"4"',4)]:
+            result = engine.evaluate('openTab('+value+'); root.tab')
+            self.assertFalse(result.isError(), result.toString())
+            self.assertEqual(result.toInt(), expected)

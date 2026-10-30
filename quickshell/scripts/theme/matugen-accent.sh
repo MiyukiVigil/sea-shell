@@ -529,3 +529,6 @@ mode=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('mode'
 [ "$mode" = "light" ] && cp "$HOME/.config/sea-shell/kitty-matugen-light.conf" "$HOME/.config/sea-shell/kitty-mode.conf" 2>/dev/null
 reload_kitty
 notify-send 'sea-shell' 'Colours matched to wallpaper 🎨' 2>/dev/null
+
+# Refresh folders after the newly generated accent has been saved.
+python3 "$(dirname "$0")/sea-folder-color.py" 2>/dev/null

@@ -28,6 +28,7 @@ Scope {
     id: root
 
     property bool shown: false
+    property bool whatsNew: false
     property int step: 0
     // The applications list is a walk of every applications directory on the
     // machine, so it is read when that screen is reached rather than at startup.
@@ -39,7 +40,7 @@ Scope {
     readonly property string wpIndex:    Qt.resolvedUrl("sea-wallpaper-index.py").toString().replace("file://", "")
     readonly property string matugen:    Qt.resolvedUrl("matugen-accent.sh").toString().replace("file://", "")
 
-    function open()   { root.step = 0; root.shown = true }
+    function open()   { root.whatsNew = false; root.step = 0; root.shown = true }
     function close()  { root.shown = false }
     // The flag is written when the tour is first SHOWN (see the timer below), so finishing is
     // only closing. Kept as its own function because the footer button says "finish" and
@@ -148,7 +149,13 @@ Scope {
     // Shown once ever is the whole contract; the flag belongs at the moment it is shown.
     Timer {
         interval: 1400; running: true; repeat: false
-        onTriggered: if (!root.welcomed) { root.set("welcomed=true"); root.open() }
+        onTriggered: { if (!root.welcomed) { updateCheck.command = updateCheck.command.concat(["--fresh"]); updateCheck.running = true; root.set("welcomed=true"); root.open() } else updateCheck.running = true }
+    }
+
+    Process {
+        id: updateCheck
+        command: ["python3", Qt.resolvedUrl("sea-whats-new.py").toString().replace("file://", "")]
+        stdout: StdioCollector { onStreamFinished: if (text.trim() === "show") { root.whatsNew = true; root.shown = true } }
     }
 
     // ---------- the wallpaper shelf's data ----------
@@ -287,7 +294,7 @@ Scope {
         anchors { top: true; bottom: true; left: true; right: true }
         color: "transparent"
         WlrLayershell.layer: WlrLayer.Overlay
-        WlrLayershell.keyboardFocus: WlrKeyboardFocus.Exclusive
+        WlrLayershell.keyboardFocus: root.whatsNew ? WlrKeyboardFocus.OnDemand : WlrKeyboardFocus.Exclusive
         exclusionMode: ExclusionMode.Ignore
 
         // Clicking outside the card leaves. Without this the only ways out were the finish
@@ -300,7 +307,8 @@ Scope {
             anchors.fill: parent
             focus: root.shown
             Keys.onPressed: (e) => {
-                if (e.key === Qt.Key_Escape) { root.finish(); e.accepted = true }
+                if (root.whatsNew && (e.key === Qt.Key_Return || e.key === Qt.Key_Enter)) { root.finish(); e.accepted = true }
+                else if (e.key === Qt.Key_Escape) { root.finish(); e.accepted = true }
                 else if (e.key === Qt.Key_Right && root.step < root.steps - 1) { root.step++; e.accepted = true }
                 else if (e.key === Qt.Key_Left && root.step > 0) { root.step--; e.accepted = true }
                 else if (e.key === Qt.Key_Return || e.key === Qt.Key_Enter) {
@@ -310,8 +318,18 @@ Scope {
             }
         }
 
+        WhatsNewCard {
+            visible: root.whatsNew
+            anchors.centerIn: parent
+            width: Math.min(620, parent.width - 40)
+            surface: Tok.surface; raised: Tok.raised; ink: Tok.ink; secondary: Tok.ink2
+            accent: Tok.accent; wash: Tok.accentWash; rule: Tok.ruleHard
+            sans: Tok.sans; mono: Tok.mono; rounding: Tok.rCard; controlRadius: Tok.r
+            onFinished: root.finish()
+        }
         Rectangle {
             anchors.centerIn: parent
+            visible: !root.whatsNew
             width: 760; height: 580
             radius: Tok.rCard
             color: Tok.bg

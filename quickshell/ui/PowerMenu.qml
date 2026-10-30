@@ -6,6 +6,7 @@
 // shut down later (a transient systemd user timer, sea-shutdown.timer).
 import Quickshell
 import Quickshell.Io
+import Quickshell.Hyprland
 import Quickshell.Wayland
 import Quickshell.Services.UPower
 import QtQuick
@@ -19,6 +20,13 @@ Scope {
     property bool shown: false
     signal closed()
     function open() {
+        // Select the active output each time; the warm surface otherwise stays on its first output.
+        var focused = Hyprland.focusedMonitor;
+        var screens = Quickshell.screens;
+        for (var i = 0; focused && i < screens.length; i++) {
+            if (screens[i].name === focused.name) { win.screen = screens[i]; break; }
+        }
+
         root.sel = 0; root.holding = null; root.holdP = 0;
         upProc.running = true; appsProc.running = true; laterProc.running = true;
         root.shown = true;

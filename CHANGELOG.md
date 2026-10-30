@@ -5,9 +5,39 @@ All notable changes to **sea-shell** are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [7.0.0] - 2026-10-30
+
+The lock screen, power menu and password prompts now share the shell’s design.
+Notifications group by app, dropdowns share controls, and calendar and battery widgets
+adapt to the wallpaper. The launcher finds open windows, while Settings and uninstall
+handle navigation and restoration more reliably.
+
+### Fixed
+
+- **Settings ignores invalid page requests.** Bad tab numbers fall back to About;
+  longer help text is shorter and repeated Apply boilerplate is gone.
+- **Uninstall restores more of your desktop.** GTK fonts are saved before installation
+  changes them, the kept idle configuration returns to hyprlock, and the previous file
+  manager is recorded before selecting Files. Uninstall restores those saved values,
+  preserves a later file-manager choice, and restores hyprpolkitagent at login. Missing
+  backups are reported instead of guessing your previous settings.
+
+- **Settings and the power menu open on the active workspace’s monitor.** Moving to
+  another monitor before opening either panel no longer leaves it on the previous one.
 
 ### Added
+
+- **A “What’s new in 7.0” page after upgrading.** Six short notes cover the lock, power
+  menu, password prompts, notifications, dropdowns and widgets. It appears once; new
+  installations keep the setup tour.
+
+- **Papirus folders can follow the wallpaper accent.** Enable it in Settings → Appearance
+  after installing `papirus-folders` and running `./install.sh --folder-helper`. Reset
+  restores the default folder colour and turns following off. The helper only accepts
+  named colours for the three stock Papirus themes.
+
+- **Find open windows in the launcher.** Search an app or window title to see its open
+  windows and workspaces above app launch results. Enter focuses the selected window.
 
 - **A new lock screen, built into sea-shell.** The lock is now `lock.qml`, a Quickshell
   session lock that looks like the login screen it hands back to. It has two states:
