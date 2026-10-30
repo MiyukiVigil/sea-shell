@@ -46,6 +46,8 @@ Item {
     property var player: null
     // 0 = the wallpaper is empty here, 1 = there is something under this widget.
     property real busy: 0
+    // how light the wallpaper is under this item, 0..1 (Desktop.lumaAt); 0.5 when unknown
+    property real under: 0.5
     property var history: []
     property var memHistory: []
     property var gpuHistory: []
@@ -145,10 +147,13 @@ Item {
         anchors.margins: -10
         radius: 22
         visible: item.editing
-        color: item.pal ? item.pal.bg : "#101010"
-        border.width: 1
-        border.color: item.pal ? item.pal.a(item.pal.iris, dragArea.drag.active ? 0.95 : 0.4)
-                               : "#7788ccff"
+        // a light wash and an outline, not a slab: a solid frame turned every glass and clear
+        // widget opaque the moment you started arranging, so you arranged something that did
+        // not look like your desktop
+        color: Qt.rgba(Tok.bg.r, Tok.bg.g, Tok.bg.b, dragArea.drag.active ? 0.45 : 0.22)
+        border.width: dragArea.drag.active ? 2 : 1.5
+        border.color: Qt.rgba(Tok.accent.r, Tok.accent.g, Tok.accent.b, dragArea.drag.active ? 0.95 : 0.5)
+        Behavior on color { ColorAnimation { duration: Tok.mFast } }
     }
 
     MaterialWidget {
@@ -165,7 +170,14 @@ Item {
         bare: item.ground === "bare"
               || (item.kind === "clock" && ((item.spec && item.spec.size) || "small") === "small" && item.ground !== "panel")
         surface: Tok.surface; container: Tok.accentWash; accent: Tok.accent
-        ink: Tok.ink; secondary: Tok.ink2; accentInk: Tok.accentInk; reducedMotion: Tok.reducedMotion
+        // On its own tile the text follows the theme. With little or no tile (clear, bare) it
+        // sits on the photo, so it follows the photo instead: dark on a light patch, light on
+        // a dark one. The light-mode theme's dark ink was unreadable on a night wallpaper.
+        readonly property bool onPhoto: bare || fill < 0.45
+        readonly property bool lightPhoto: item.under > 0.58
+        ink: onPhoto ? (lightPhoto ? "#14161c" : "#ffffff") : Tok.ink
+        secondary: onPhoto ? (lightPhoto ? Qt.rgba(0.08, 0.09, 0.11, 0.72) : Qt.rgba(1, 1, 1, 0.78)) : Tok.ink2
+        accentInk: Tok.accentInk; reducedMotion: Tok.reducedMotion
     }
 
     // ---------- the read-out ----------
@@ -552,7 +564,9 @@ Item {
             DesktopOption { item: item; label: "Size"; key: "size"; current: (item.spec && item.spec.size) || (item.kind === "clock" ? "small" : "medium")
                 choices: [{ v: "small", l: "S" }, { v: "medium", l: "M" }, { v: "large", l: "L" }] }
             DesktopOption { item: item; label: "Look"; key: "look"; current: item.look
-                choices: [{ v: "card", l: "Card" }, { v: "glass", l: "Glass" }, { v: "clear", l: "Clear" }, { v: "classic", l: "Classic" }] }
+                // Classic is the original read-out, which only knows the first four kinds
+                choices: [{ v: "card", l: "Card" }, { v: "glass", l: "Glass" }, { v: "clear", l: "Clear" }]
+                    .concat(item.kind === "calendar" || item.kind === "battery" ? [] : [{ v: "classic", l: "Classic" }]) }
             DesktopOption { item: item; visible: item.kind === "clock"; label: "Face"; key: "face"; current: (item.spec && item.spec.face) || "dial"
                 choices: [{ v: "dial", l: "Dial" }, { v: "cookie", l: "Cookie" }, { v: "digital", l: "Digital" }, { v: "stacked", l: "Stack" }] }
             DesktopOption { item: item; visible: item.look === "classic"; label: "Ground"; key: "ground"; current: item.ground

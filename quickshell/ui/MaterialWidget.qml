@@ -1,4 +1,4 @@
-// sea-shell — one widget: clock, weather, system or media.
+// sea-shell — one widget: clock, weather, system, media, calendar or batteries.
 //
 // SHAPED LIKE macOS, DRESSED LIKE MATERIAL 3, SPEAKING SEA-SHELL. macOS gives the structure:
 // three size classes, and each class is its own layout rather than the same one stretched — a
@@ -69,7 +69,7 @@ Rectangle {
 
     Timer {
         interval: 1000; repeat: true
-        running: card.active && card.visible && (card.kind === "clock" || (card.kind === "media" && card.playing))
+        running: card.active && card.visible && (card.kind === "clock" || card.kind === "calendar" || (card.kind === "media" && card.playing))
         triggeredOnStart: true
         onTriggered: { card.now = new Date(); if (card.player) card.playPosition = card.player.position }
     }
@@ -574,5 +574,171 @@ Rectangle {
         Seek { Layout.fillWidth: true }
         Transport { Layout.alignment: Qt.AlignHCenter; k: card.u }
         Item { Layout.fillHeight: true }
+    }
+
+    // =====================================================================================
+    // CALENDAR
+    // =====================================================================================
+    // Small: today as a page, the weekday in the accent and the date large, with the next
+    // thing under it. Medium: the page beside what is coming up. Large: the month, then the list.
+    readonly property var events: ((card.readings || {}).calEvents || [])
+    function dayKey(d) { return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0") }
+    function evWhen(e) {
+        var p = ("" + e.date).split("-"), d = new Date(+p[0], (+p[1] || 1) - 1, +p[2] || 1);
+        var t = new Date(card.now.getFullYear(), card.now.getMonth(), card.now.getDate());
+        var days = Math.round((d - t) / 86400000);
+        var when = days <= 0 ? "Today" : days === 1 ? "Tomorrow" : days < 7 ? Qt.formatDate(d, "dddd") : Qt.formatDate(d, "d MMM");
+        return when + (e.time ? " · " + e.time : "");
+    }
+    readonly property var monthCells: {
+        var y = card.now.getFullYear(), m = card.now.getMonth(), lead = new Date(y, m, 1).getDay();
+        var n = new Date(y, m + 1, 0).getDate(), out = [], busy = {};
+        for (var i = 0; i < card.events.length; i++) busy["" + card.events[i].date] = true;
+        for (var j = 0; j < lead; j++) out.push({ d: 0 });
+        for (var k = 1; k <= n; k++) out.push({ d: k, ev: !!busy[card.dayKey(new Date(y, m, k))] });
+        return out;
+    }
+    Item {
+        visible: card.kind === "calendar"
+        anchors.fill: parent; anchors.margins: card.pad
+        // today, as a page
+        Column {
+            id: calPage
+            width: card.cls === "s" ? parent.width : 112 * card.u
+            spacing: 0
+            Label { text: Qt.formatDate(card.now, "dddd").toUpperCase(); color: card.accent
+                font.pixelSize: 11 * card.u; font.weight: Font.DemiBold; font.letterSpacing: 1 * card.u }
+            Label { text: card.now.getDate(); font.pixelSize: (card.cls === "l" ? 46 : 52) * card.u; font.weight: Font.DemiBold
+                font.features: { "tnum": 1 }; topPadding: -2 * card.u; bottomPadding: -4 * card.u }
+            Label { text: Qt.formatDate(card.now, "MMMM"); color: card.secondary; font.pixelSize: 12 * card.u }
+        }
+        // small: the one next thing, at the foot of the page
+        Column {
+            visible: card.cls === "s"
+            anchors.left: parent.left; anchors.right: parent.right; anchors.bottom: parent.bottom
+            spacing: 1 * card.u
+            Label { width: parent.width; text: card.events.length ? card.events[0].title : "No events"
+                font.pixelSize: 12 * card.u; font.weight: Font.DemiBold; color: card.events.length ? card.ink : card.secondary }
+            Label { visible: card.events.length > 0; width: parent.width; text: card.events.length ? card.evWhen(card.events[0]) : ""
+                color: card.secondary; font.pixelSize: 10 * card.u }
+        }
+        // large: the month, right of the page
+        Grid {
+            id: calMonth
+            visible: card.cls === "l"
+            anchors.right: parent.right; anchors.top: parent.top
+            width: parent.width - calPage.width - 14 * card.u
+            columns: 7; rowSpacing: 1 * card.u; columnSpacing: 0
+            Repeater {
+                model: card.cls === "l" ? ["S", "M", "T", "W", "T", "F", "S"].concat(card.monthCells) : []
+                delegate: Item {
+                    required property var modelData
+                    required property int index
+                    readonly property bool head: index < 7
+                    readonly property bool today: !head && modelData.d === card.now.getDate()
+                    width: parent.width / 7; height: 19 * card.u
+                    Rectangle { anchors.centerIn: parent; width: 18 * card.u; height: width; radius: width / 2
+                        visible: today; color: card.accent }
+                    Label { anchors.centerIn: parent; text: head ? modelData : (modelData.d || "")
+                        color: head ? card.secondary : today ? card.accentInk : card.ink
+                        font.pixelSize: (head ? 9 : 10) * card.u; font.weight: head || today ? Font.DemiBold : Font.Normal }
+                    Rectangle { visible: !head && !!modelData.ev && !today; anchors.horizontalCenter: parent.horizontalCenter
+                        anchors.bottom: parent.bottom; width: 3 * card.u; height: width; radius: width / 2; color: card.accent }
+                }
+            }
+        }
+        // medium and large: what is coming up
+        Column {
+            visible: card.cls !== "s"
+            anchors.left: card.cls === "m" ? calPage.right : parent.left; anchors.leftMargin: card.cls === "m" ? 14 * card.u : 0
+            anchors.right: parent.right
+            // large: under whichever of the page and the month reaches lower
+            y: card.cls === "m" ? 2 * card.u : Math.max(calPage.height, calMonth.height) + 18 * card.u
+            spacing: 7 * card.u
+            Label { visible: card.events.length === 0; text: "Nothing coming up"; color: card.secondary; font.pixelSize: 12 * card.u }
+            Repeater {
+                model: card.events.slice(0, card.cls === "l" ? 5 : 3)
+                delegate: Row {
+                    required property var modelData
+                    width: parent.width; spacing: 8 * card.u
+                    Rectangle { width: 3 * card.u; height: 30 * card.u; radius: width / 2; color: card.accent }
+                    Column {
+                        width: parent.width - 11 * card.u; spacing: 1 * card.u
+                        Label { width: parent.width; text: modelData.title || "Event"; font.pixelSize: 12 * card.u; font.weight: Font.DemiBold }
+                        Label { width: parent.width; text: card.evWhen(modelData); color: card.secondary; font.pixelSize: 10 * card.u }
+                    }
+                }
+            }
+        }
+    }
+
+    // =====================================================================================
+    // BATTERIES
+    // =====================================================================================
+    // As macOS's Batteries widget: this computer and every connected Bluetooth device that
+    // reports a level. Small: one ring. Medium: a ring each. Large: a list with time left.
+    // from the shell (readings.batteries / batEta): this file stays plain QtQuick
+    readonly property var batItems: ((card.readings || {}).batteries || [])
+    readonly property color batTrack: Qt.rgba(card.secondary.r, card.secondary.g, card.secondary.b, 0.22)
+    function batTone(b) { return b.c ? "#4caf50" : b.p <= 15 ? "#e5484d" : card.accent }
+    function batEta() { return (card.readings || {}).batEta || "" }
+    Item {
+        visible: card.kind === "battery"
+        anchors.fill: parent; anchors.margins: card.pad
+        Label { visible: card.batItems.length === 0; anchors.centerIn: parent; text: "No batteries"; color: card.secondary; font.pixelSize: 12 * card.u }
+        // small: the first one, large and alone
+        Column {
+            visible: card.cls === "s" && card.batItems.length > 0
+            anchors.centerIn: parent; spacing: 8 * card.u
+            BatteryRing { anchors.horizontalCenter: parent.horizontalCenter; width: 92 * card.u; height: width; stroke: 8 * card.u; ink: card.ink; track: card.batTrack
+                value: card.batItems.length ? card.batItems[0].p : 0; icon: card.batItems.length ? card.batItems[0].i : ""
+                tint: card.batItems.length ? card.batTone(card.batItems[0]) : card.accent }
+            Label { anchors.horizontalCenter: parent.horizontalCenter; text: card.batItems.length ? Math.round(card.batItems[0].p) + "%" : ""
+                font.pixelSize: 15 * card.u; font.weight: Font.DemiBold; font.features: { "tnum": 1 } }
+        }
+        // medium: a ring each, as many as fit
+        Row {
+            visible: card.cls === "m" && card.batItems.length > 0
+            anchors.centerIn: parent; spacing: 16 * card.u
+            Repeater {
+                model: card.cls === "m" ? card.batItems.slice(0, 4) : []
+                delegate: Column {
+                    required property var modelData
+                    spacing: 8 * card.u
+                    BatteryRing { anchors.horizontalCenter: parent.horizontalCenter; width: 62 * card.u; height: width; stroke: 5 * card.u; ink: card.ink; track: card.batTrack
+                        value: modelData.p; icon: modelData.i; tint: card.batTone(modelData) }
+                    Label { anchors.horizontalCenter: parent.horizontalCenter; text: Math.round(modelData.p) + "%"
+                        font.pixelSize: 13 * card.u; font.weight: Font.DemiBold; font.features: { "tnum": 1 } }
+                }
+            }
+        }
+        // large: a list, with how long this computer has left
+        Column {
+            visible: card.cls === "l" && card.batItems.length > 0
+            anchors.fill: parent; spacing: 12 * card.u
+            Header { icon: "battery_full"; text: "Batteries" }
+            Label { visible: text !== ""; text: card.batEta(); color: card.secondary; font.pixelSize: 12 * card.u }
+            Repeater {
+                model: card.cls === "l" ? card.batItems.slice(0, 5) : []
+                delegate: Row {
+                    required property var modelData
+                    width: parent.width; spacing: 12 * card.u
+                    BatteryRing { width: 40 * card.u; height: width; stroke: 4 * card.u; ink: card.ink; track: card.batTrack; value: modelData.p; icon: modelData.i; tint: card.batTone(modelData) }
+                    Column {
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: parent.width - 52 * card.u; spacing: 5 * card.u
+                        Item {
+                            width: parent.width; height: 16 * card.u
+                            Label { anchors.left: parent.left; width: parent.width - 50 * card.u; text: modelData.n; font.pixelSize: 12 * card.u }
+                            Label { anchors.right: parent.right; text: Math.round(modelData.p) + "%"
+                                color: card.secondary; font.pixelSize: 12 * card.u; font.features: { "tnum": 1 } }
+                        }
+                        Rectangle { width: parent.width; height: 5 * card.u; radius: height / 2
+                            color: Qt.rgba(card.secondary.r, card.secondary.g, card.secondary.b, 0.22)
+                            Rectangle { width: parent.width * Math.max(0.02, modelData.p / 100); height: parent.height; radius: parent.radius; color: card.batTone(modelData) } }
+                    }
+                }
+            }
+        }
     }
 }

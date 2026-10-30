@@ -5,6 +5,7 @@ import QtQuick.Effects
 Item {
     id: frame
     property var player: null
+    property string uiFont: "sans-serif"     // the shell passes Tok.sans; plain QtQuick here so it loads in tests
     property url mascotSource: ""
     property var viz: []
     property bool active: true
@@ -25,7 +26,7 @@ Item {
     Text {
         x: frame.outerPadding; y: 15; width: frame.leftWidth-frame.outerPadding*2
         text: frame.player ? (frame.player.identity || "Music") : "Music"
-        color: frame.secondary; font.family: "Adwaita Sans"; font.pixelSize: 11; elide: Text.ElideRight
+        color: frame.secondary; font.family: frame.uiFont; font.pixelSize: 11; elide: Text.ElideRight
     }
     Rectangle {
         id: artwork
@@ -64,13 +65,13 @@ Item {
         id: title; objectName: "trackTitle"
         x: frame.outerPadding; y: artwork.y+artwork.height+12; width: frame.leftWidth-frame.outerPadding*2
         text: frame.player ? (frame.player.trackTitle || "Unknown track") : "Nothing playing"
-        color: frame.ink; font.family: "Adwaita Sans"; font.pixelSize: 17; font.weight: Font.DemiBold
+        color: frame.ink; font.family: frame.uiFont; font.pixelSize: 17; font.weight: Font.DemiBold
         wrapMode: Text.WordWrap; maximumLineCount: 2; elide: Text.ElideRight
     }
     Text {
         x: frame.outerPadding; y: title.y+title.height+5; width: frame.leftWidth-frame.outerPadding*2
         text: frame.player ? (frame.player.trackArtist || frame.player.trackAlbum || "") : "Open a music player"
-        color: frame.secondary; font.family: "Adwaita Sans"; font.pixelSize: 12; elide: Text.ElideRight
+        color: frame.secondary; font.family: frame.uiFont; font.pixelSize: 12; elide: Text.ElideRight
     }
     Rectangle { x: frame.leftWidth; y: 18; width: 1; height: parent.height-36; color: frame.rule }
     Row {
@@ -83,7 +84,7 @@ Item {
                 objectName: "player-tab-" + index
                 width: tabs.width/3; height: tabs.height
                 Text { anchors.centerIn: parent; text: modelData; color: frame.selectedTab===index ? frame.accent : frame.secondary
-                    font.family: "Adwaita Sans"; font.pixelSize: 12; font.weight: frame.selectedTab===index ? Font.DemiBold : Font.Normal }
+                    font.family: frame.uiFont; font.pixelSize: 12; font.weight: frame.selectedTab===index ? Font.DemiBold : Font.Normal }
                 Rectangle { anchors { left: parent.left; right: parent.right; bottom: parent.bottom; leftMargin: 12; rightMargin: 12 }
                     height: frame.selectedTab===index ? 3 : 1; radius: 1.5; color: frame.selectedTab===index ? frame.accent : frame.rule }
                 MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: frame.selected(index) }
@@ -94,13 +95,13 @@ Item {
         visible: frame.mascotWidth > 0
         x: frame.width-frame.mascotWidth; y: 20; width: frame.mascotWidth
         text: "Miku"; horizontalAlignment: Text.AlignHCenter
-        color: frame.accent; font.family: "Adwaita Sans"; font.pixelSize: 15; font.weight: Font.DemiBold
+        color: frame.accent; font.family: frame.uiFont; font.pixelSize: 15; font.weight: Font.DemiBold
     }
     Text {
         visible: frame.mascotWidth > 0
         x: frame.width-frame.mascotWidth; y: 43; width: frame.mascotWidth
         text: frame.player ? (frame.player.isPlaying ? "Playing" : "Paused") : "Music buddy"
-        horizontalAlignment: Text.AlignHCenter; color: frame.secondary; font.family: "Adwaita Sans"; font.pixelSize: 11
+        horizontalAlignment: Text.AlignHCenter; color: frame.secondary; font.family: frame.uiFont; font.pixelSize: 11
     }
     Rectangle {
         x: mascot.x-4; y: mascot.y-4; width: mascot.width+8; height: mascot.height+8

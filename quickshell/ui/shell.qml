@@ -162,7 +162,7 @@ ShellRoot {
             required property var modelData
             screen: modelData
             pal: theme
-            uiFont: "Adwaita Sans"
+            uiFont: Tok.sans
             ui: root.uiFor(modelData)
             editing: root.desktopEditing
             // right-click on the desktop while arranging: finish, and close the gallery with it
@@ -176,7 +176,9 @@ ShellRoot {
                 "cpu": root.cpuUsage, "cpuTemp": root.cpuTemp,
                 "memPct": root.memPct, "memUsed": root.memUsed, "memTotal": root.memTotal,
                 "gpuName": root.gpuName, "gpu": root.gpuUsage, "gpuTemp": root.gpuTemp,
-                "netRx": root.netRx, "netTx": root.netTx
+                "netRx": root.netRx, "netTx": root.netTx,
+                "calEvents": root.calUpcoming.slice(0, 8),
+                "batteries": root.widgetBatteries, "batEta": root.widgetBatEta
             })
             player: root.player
             // The same bars the media pill draws — real cava, or the ambient wave in
@@ -211,7 +213,8 @@ ShellRoot {
             readings: ({ wxTemp: root.wxTemp, wxCond: root.wxCond, wxFeels: root.wxFeels, wxHumid: root.wxHumid, wxWind: root.wxWind,
                          wxForecast: root.wxForecast, wxLoc: root.wxLoc, cpu: root.cpuUsage, cpuTemp: root.cpuTemp,
                          memPct: root.memPct, memUsed: root.memUsed, memTotal: root.memTotal,
-                         gpuName: root.gpuName, gpu: root.gpuUsage, gpuTemp: root.gpuTemp, netRx: root.netRx })
+                         gpuName: root.gpuName, gpu: root.gpuUsage, gpuTemp: root.gpuTemp, netRx: root.netRx,
+                         calEvents: root.calUpcoming.slice(0, 8), batteries: root.widgetBatteries, batEta: root.widgetBatEta })
             player: root.player; viz: root.vizBars
             insetTop: root.cfgEdge === "top" ? root.cfgHeight + 6 : 6
             insetBottom: root.cfgEdge === "bottom" ? root.cfgHeight + 6 : (root.cfgDock ? 78 : 6)
@@ -957,7 +960,7 @@ ShellRoot {
         return Math.min(2.5, h / 1080);
     }
     property string cfgAccent: "#63c7dd"
-    property string cfgFont: "monospace"
+    property string cfgFont: "Inter"
     property bool   cfgLight: false          // dark (default) ↔ light palette
     property string cfgBarFill: "matugen"    // top-bar fill: matugen (accent-tinted) · black · white
     property string cfgEdge: "top"           // which screen edge the bar docks to: top or bottom
@@ -1215,7 +1218,7 @@ ShellRoot {
 
     // Popup readability is independent of bar transparency and the window behind it.
     readonly property real dropOpacity: 1.0
-    Process { running: true; command: ["sh","-c","d=\"$HOME/.config/sea-shell\"; mkdir -p \"$d\"; touch \"$d/kitty-matugen.conf\"; [ -f \"$d/appearance.json\" ] || printf '{\"radius\":14,\"opacity\":0.80,\"height\":42,\"accent\":\"#63c7dd\",\"font\":\"monospace\"}' > \"$d/appearance.json\"; echo \"$d/appearance.json\""]
+    Process { running: true; command: ["sh","-c","d=\"$HOME/.config/sea-shell\"; mkdir -p \"$d\"; touch \"$d/kitty-matugen.conf\"; [ -f \"$d/appearance.json\" ] || printf '{\"radius\":14,\"opacity\":0.80,\"height\":42,\"accent\":\"#63c7dd\",\"font\":\"Inter\"}' > \"$d/appearance.json\"; echo \"$d/appearance.json\""]
         // Seeding only. It used to also be what TOLD the FileView below where the file is,
         // which meant the bar's own colours waited on a shell fork before they could even
         // start loading — the second half of the blue flash. The path is known without
@@ -1527,6 +1530,20 @@ ShellRoot {
     function streamName(n) { return n ? (n.name || n.description || n.nickname || "app") : "" }
     PwObjectTracker { objects: root.streams }
     function nodeName(n) { return n ? (n.description || n.nickname || n.name || "device") : "" }
+    // For the output list: what the output IS ("Speaker", "HDMI 1"), with the card it lives on
+    // as a second line. The full descriptions all start with the same controller name, which
+    // made four rows read "Alder Lake PCH-P High Definition Aud…".
+    function sinkLabel(n) {
+        if (!n) return "";
+        var nick = "" + (n.nickname || "");
+        if (nick === "Speaker") return "Speakers";
+        return nick || root.nodeName(n);
+    }
+    function sinkCard(n) {
+        var d = n ? "" + (n.description || "") : "";
+        var m = d.match(/^(.*?)\s+(High Definition Audio|HD Audio|Audio)\b/i);
+        return m ? m[1] : (n && n.nickname ? d : "");
+    }
 
     // ---------- sound: per-sink format + per-app routing (sea-audio.py, 4.0) ----------
     // Enriches the volume dropdown with what PipeWire's own model doesn't surface: each
@@ -1914,6 +1931,30 @@ ShellRoot {
 
 
     // ---------- bluetooth ----------
+    // The Batteries widget's rows: this computer and every connected Bluetooth device that
+    // reports a level. Built here because MaterialWidget is plain QtQuick (it loads in tests).
+    readonly property var widgetBatteries: {
+        var out = [], d0 = UPower.displayDevice;
+        if (d0 && d0.isLaptopBattery)
+            out.push({ n: "This computer", i: "laptop_chromebook", p: (d0.percentage || 0) * 100, c: !UPower.onBattery });
+        var ds = root.btDevices;
+        for (var i = 0; i < ds.length; i++) {
+            var d = ds[i];
+            if (!d || !d.connected || !d.batteryAvailable) continue;
+            var ic = "" + (d.icon || "");
+            out.push({ n: root.btName(d), p: (d.battery || 0) * 100, c: false,
+                       i: /headset|audio|headphone/.test(ic) ? "headphones" : /mouse/.test(ic) ? "mouse" : /keyboard/.test(ic) ? "keyboard"
+                        : /phone/.test(ic) ? "smartphone" : /game/.test(ic) ? "sports_esports" : "bluetooth" });
+        }
+        return out;
+    }
+    readonly property string widgetBatEta: {
+        var d = UPower.displayDevice; if (!d || !d.isLaptopBattery) return "";
+        var sec = UPower.onBattery ? d.timeToEmpty : d.timeToFull;
+        if (!(sec > 0)) return UPower.onBattery ? "" : ((d.percentage || 0) >= 0.995 ? "Fully charged" : "Charging");
+        var h = Math.floor(sec / 3600), m = Math.round((sec % 3600) / 60);
+        return (h ? h + " h " : "") + m + " min" + (UPower.onBattery ? " left" : " to full");
+    }
     readonly property var btAdapter: Bluetooth.defaultAdapter
     readonly property var btDevices: (btAdapter && btAdapter.devices) ? btAdapter.devices.values : []
     readonly property var btActive: { var d = root.btDevices; for (var i=0;i<d.length;i++) if (d[i] && d[i].connected) return d[i]; return null }
@@ -3099,9 +3140,16 @@ ShellRoot {
             root.saveNotes();
             // DND or a per-app mute swallows the popup but keeps the history entry;
             // critical (urgency 2) breaks through either way so alerts aren't lost.
+            // One popup per app: a newer message from the same app replaces the one on screen
+            // and carries the count, so a burst of chat messages is one card, not a column.
+            var piled = 1;
+            for (var pi = popupModel.count - 1; pi >= 0; pi--) {
+                var pm = popupModel.get(pi);
+                if (pm.appName === app && pm.urg !== 2 && n.urgency !== 2) { piled += (pm.n || 1); popupModel.remove(pi) }
+            }
             if ((!root.dnd && !root.isMuted(app)) || n.urgency === 2)
                 popupModel.insert(0, { key: k, summary: entry.summary, body: entry.body,
-                                       appName: entry.appName, urg: n.urgency,
+                                       appName: entry.appName, urg: n.urgency, n: piled,
                                        // ListModel roles stay primitive; the array rides as JSON
                                        acts: JSON.stringify(acts) });
             // not tracked → server releases it after this handler; we've copied the fields
@@ -3128,9 +3176,44 @@ ShellRoot {
         root.popDismiss(k);
     }
     function popDismiss(k) { root.noteRelease(k); for (var i=0;i<popupModel.count;i++) if (popupModel.get(i).key===k) { popupModel.remove(i); return } }
+    // Dismissing keeps what it took for a few seconds so it can be put back: a stray key or
+    // click in the centre should never cost the history.
+    property var noteUndo: null        // { label, items } of the last dismissal, while it can be undone
+    Timer { id: noteUndoT; interval: 8000; onTriggered: root.noteUndo = null }
+    function noteTake(keep, label) {
+        var gone = root.notes.filter(function(n) { return !keep(n) });
+        if (!gone.length) return;
+        gone.forEach(function(n) { root.noteRelease(n.key); root.popDismiss(n.key) });
+        root.notes = root.notes.filter(keep); root.saveNotes();
+        root.noteUndo = { label: label, items: gone }; noteUndoT.restart();
+    }
+    function noteRemove(k) { root.noteTake(function(n) { return n.key !== k }, "Dismissed 1 notification") }
+    function noteRemoveApp(app) { root.noteTake(function(n) { return n.appName !== app }, "Dismissed " + app) }
+    function noteUndoNow() {
+        if (!root.noteUndo) return;
+        root.notes = root.notes.concat(root.noteUndo.items).sort(function(a, b) { return (b.key || 0) - (a.key || 0) }).slice(0, 40);
+        root.saveNotes(); root.noteUndo = null; noteUndoT.stop();
+    }
+    // The centre shows one card per app, newest app first; within one, newest first.
+    readonly property var noteGroups: {
+        var by = {}, order = [];
+        for (var i = 0; i < root.notes.length; i++) {
+            var n = root.notes[i], k = n.appName || "notification";
+            if (!by[k]) { by[k] = { app: k, icon: n.appIcon || "", items: [] }; order.push(k) }
+            by[k].items.push(n);
+        }
+        return order.map(function(k) { return by[k] });
+    }
+    IpcHandler { target: "notifs"
+        function dismissApp(app: string): void { root.noteRemoveApp(app) }
+        function count(): int { return root.notes.length } }
+    property var notifOpen: ({})       // app → expanded, for this opening of the centre
+    property int notifCursor: -1       // keyboard position in noteGroups, -1 = none
     function noteClear() {
+        var all = root.notes.slice();
         for (var k in root.noteObjs) root.noteRelease(k);
         root.notes = []; popupModel.clear(); root.saveNotes();
+        if (all.length) { root.noteUndo = { label: "Cleared " + all.length + " notifications", items: all }; noteUndoT.restart() }
     }
 
     // ---------- OSD (volume + brightness) ----------
@@ -3908,7 +3991,7 @@ ShellRoot {
                                         elide: Text.ElideRight
                                         text: modelData.label || ""
                                         color: smRow.lit ? Tok.accentInk : theme.text
-                                        font.pixelSize: 12; font.family: "Adwaita Sans"
+                                        font.pixelSize: 12; font.family: Tok.sans
                                         Behavior on color { ColorAnimation { duration: Tok.mFast } } }
                                     Text { id: smKey
                                         visible: !smRow.isSep && !!modelData.key
@@ -4121,7 +4204,7 @@ ShellRoot {
                         opacity: leftGroup.swapFade
                         transform: Translate { x: leftGroup.swapSlide }
                         width: Math.min(implicitWidth, 130); elide: Text.ElideRight
-                        color: theme.sub; font.pixelSize: 12; font.family: "Adwaita Sans"
+                        color: theme.sub; font.pixelSize: 12; font.family: Tok.sans
                         text: {
                             // Same staleness as the strip had: activeToplevel keeps naming the
                             // window you left once focus drops to nothing, so an empty desktop
@@ -4177,6 +4260,7 @@ ShellRoot {
 
                     onVisibleChanged: if (visible && root.lyricsOpen) root.fetchLyrics()   // track may have changed while closed
                     MediaPlayerFrame {
+                        uiFont: Tok.sans
                         id: mediaFrame; anchors.fill: mprisDrop.card
                         player: root.player; mascotSource: Qt.resolvedUrl("media-miku.gif"); selectedTab: root.mediaTab; viz: root.vizBars; active: mprisDrop.shown; reducedMotion: Tok.reducedMotion
                         ink: Tok.ink; secondary: Tok.ink2; accent: Tok.accent; wash: Tok.accentWash; rule: Tok.rule
@@ -4195,7 +4279,7 @@ ShellRoot {
                                     color: cur ? theme.a(theme.iris,0.28) : (pcMa.containsMouse ? theme.a(theme.iris,0.14) : theme.a(theme.line,0.5))
                                     border.width: 1; border.color: cur ? theme.iris : theme.a(theme.line,0.9)
                                     Text { id: pcTxt; anchors.centerIn: parent; text: (root.players[index].identity||"player").toLowerCase()
-                                        color: cur ? theme.text : theme.sub; font.pixelSize: 9; font.family: "Adwaita Sans" }
+                                        color: cur ? theme.text : theme.sub; font.pixelSize: 9; font.family: Tok.sans }
                                     MouseArea { id: pcMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
                                         onClicked: root.playerSel = index } } } }
 
@@ -4208,14 +4292,14 @@ ShellRoot {
                         Row { spacing: 8; width: parent.width
                             Rectangle { width: (parent.width-8)/2; height: 30; radius: 15
                                 color: root.player && root.player.shuffle ? Tok.accentWash : "transparent"
-                                Text { anchors.centerIn: parent; text: "Shuffle"; color: Tok.ink2; font.family: "Adwaita Sans"; font.pixelSize: 12 }
+                                Text { anchors.centerIn: parent; text: "Shuffle"; color: Tok.ink2; font.family: Tok.sans; font.pixelSize: 12 }
                                 opacity: root.player && root.player.shuffleSupported ? 1 : 0.4
                                 MouseArea { anchors.fill: parent; enabled: !!root.player && root.player.shuffleSupported; cursorShape: Qt.PointingHandCursor
                                     onClicked: root.player.shuffle = !root.player.shuffle }
                             }
                             Rectangle { width: (parent.width-8)/2; height: 30; radius: 15
                                 color: root.player && root.player.loopState !== MprisLoopState.None ? Tok.accentWash : "transparent"
-                                Text { anchors.centerIn: parent; text: root.player && root.player.loopState===MprisLoopState.Track ? "Repeat track" : root.player && root.player.loopState===MprisLoopState.Playlist ? "Repeat playlist" : "Repeat off"; color: Tok.ink2; font.family: "Adwaita Sans"; font.pixelSize: 12 }
+                                Text { anchors.centerIn: parent; text: root.player && root.player.loopState===MprisLoopState.Track ? "Repeat track" : root.player && root.player.loopState===MprisLoopState.Playlist ? "Repeat playlist" : "Repeat off"; color: Tok.ink2; font.family: Tok.sans; font.pixelSize: 12 }
                                 opacity: root.player && root.player.loopSupported ? 1 : 0.4
                                 MouseArea { anchors.fill: parent; enabled: !!root.player && root.player.loopSupported; cursorShape: Qt.PointingHandCursor
                                     onClicked: root.player.loopState = root.player.loopState===MprisLoopState.None ? MprisLoopState.Playlist : root.player.loopState===MprisLoopState.Playlist ? MprisLoopState.Track : MprisLoopState.None }
@@ -4243,7 +4327,7 @@ ShellRoot {
                                 Text { anchors.verticalCenter: parent.verticalCenter
                                     text: root.outputLabel; elide: Text.ElideRight
                                     color: theme.sub
-                                    font.pixelSize: 11; font.family: "Adwaita Sans" } }
+                                    font.pixelSize: 11; font.family: Tok.sans } }
                             IndChip { id: hqChip
                                 anchors.right: parent.right; anchors.rightMargin: 6
                                 anchors.verticalCenter: parent.verticalCenter
@@ -4276,28 +4360,28 @@ ShellRoot {
                                 width: parent.width; height: 24
                                 Text { anchors.left: parent.left; anchors.verticalCenter: parent.verticalCenter
                                     width: Math.max(0,parent.width-lyricHeaderActions.width-12); elide: Text.ElideRight
-                                    text: "Lyrics"; color: theme.text; font.pixelSize: 12; font.bold: true; font.family: "Adwaita Sans" }
+                                    text: "Lyrics"; color: theme.text; font.pixelSize: 12; font.bold: true; font.family: Tok.sans }
                                 Row { id: lyricHeaderActions; anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter; spacing: 6
                                     Repeater { model: [{k:"r",l:"あ→a"},{k:"t",l:"EN"}]
                                         delegate: Rectangle { required property var modelData
                                             readonly property bool on: modelData.k==="r" ? root.cfgLyrRomaji : root.cfgLyrTrans
                                             height: 20; radius: 6; width: languageLabel.implicitWidth+12
                                             color: on ? Tok.accentWash : Tok.sunken
-                                            Text { id: languageLabel; anchors.centerIn: parent; text: modelData.l; color: Tok.ink2; font.pixelSize: 10; font.family: "Adwaita Sans" }
+                                            Text { id: languageLabel; anchors.centerIn: parent; text: modelData.l; color: Tok.ink2; font.pixelSize: 10; font.family: Tok.sans }
                                             MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
                                                 onClicked: modelData.k==="r" ? root.lyrToggleRomaji() : root.lyrToggleTrans() }
                                         }
                                     }
                                     Text { anchors.verticalCenter: parent.verticalCenter; visible: root.lyricsState==="ok"
-                                        text: "Synced"; color: theme.sub; font.pixelSize: 10; font.family: "Adwaita Sans" }
+                                        text: "Synced"; color: theme.sub; font.pixelSize: 10; font.family: Tok.sans }
                                 }
                             }
                             Rectangle { width: parent.width; height: 1; color: theme.a(theme.iris,0.2) }
                             // height was hardcoded to `- 34` against a header that has since grown a
                             // row of 18px chips, so the list ran past the bottom of the panel
                             Item { width: parent.width; height: parent.height - 44
-                                Text { anchors.centerIn: parent; visible: root.lyricsState==="loading"; text: "fetching lyrics…"; color: theme.sub; font.pixelSize: 11; font.family: "Adwaita Sans" }
-                                Text { anchors.centerIn: parent; visible: root.lyricsState==="none"; text: "no lyrics found"; color: theme.sub; font.pixelSize: 11; font.family: "Adwaita Sans" }
+                                Text { anchors.centerIn: parent; visible: root.lyricsState==="loading"; text: "fetching lyrics…"; color: theme.sub; font.pixelSize: 11; font.family: Tok.sans }
+                                Text { anchors.centerIn: parent; visible: root.lyricsState==="none"; text: "no lyrics found"; color: theme.sub; font.pixelSize: 11; font.family: Tok.sans }
                                 // synced: follows playback, current line highlighted, click to seek
                                 ListView { id: lyrView; anchors.fill: parent; visible: root.lyricsState==="ok"; clip: true
                                     model: root.lyrics; spacing: 3
@@ -4326,12 +4410,12 @@ ShellRoot {
                                         Text { id: lyT; width: parent.width
                                             text: modelData.l; wrapMode: Text.Wrap; horizontalAlignment: Text.AlignHCenter
                                             color: index===root.lyrIdx ? theme.frost : (index<root.lyrIdx ? theme.faint : theme.sub)
-                                            font.pixelSize: index===root.lyrIdx ? 17 : 13; font.bold: index===root.lyrIdx; font.family: "Adwaita Sans"
+                                            font.pixelSize: index===root.lyrIdx ? 17 : 13; font.bold: index===root.lyrIdx; font.family: Tok.sans
                                             Behavior on color { ColorAnimation { duration: 150 } } }
                                         Text { width: parent.width; visible: parent.parent.sub2 !== ""
                                             text: parent.parent.sub2; wrapMode: Text.Wrap; horizontalAlignment: Text.AlignHCenter
                                             color: index===root.lyrIdx ? theme.iris : theme.faint
-                                            font.pixelSize: index===root.lyrIdx ? 11 : 10; font.family: "Adwaita Sans"
+                                            font.pixelSize: index===root.lyrIdx ? 11 : 10; font.family: Tok.sans
                                             font.italic: true } }
                                         MouseArea { anchors.fill: parent; cursorShape: (root.player&&root.player.canSeek)?Qt.PointingHandCursor:Qt.ArrowCursor
                                             onClicked: { if (root.player && root.player.canSeek) { root.player.position = modelData.t; root.mprisPos = modelData.t } } } }
@@ -4340,7 +4424,7 @@ ShellRoot {
                                 Flickable { anchors.fill: parent; visible: root.lyricsState==="plain"; clip: true
                                     contentHeight: plainT.height; boundsBehavior: Flickable.StopAtBounds
                                     Text { id: plainT; width: parent.width; text: root.plainLyrics; wrapMode: Text.Wrap
-                                        horizontalAlignment: Text.AlignHCenter; color: theme.sub; font.pixelSize: 12; font.family: "Adwaita Sans" } } } } }
+                                        horizontalAlignment: Text.AlignHCenter; color: theme.sub; font.pixelSize: 12; font.family: Tok.sans } } } } }
 
                     // ---- track-details sidecar: opens on the OPPOSITE side of the lyrics panel ----
                     Rectangle {
@@ -4359,7 +4443,7 @@ ShellRoot {
                         Column { id: detailsCol; width: infoScroll.width; spacing: 6
                             Row { width: parent.width; spacing: 6
                                 Sym { anchors.verticalCenter: parent.verticalCenter; text: "info"; sz: 15; color: theme.iris }
-                                Text { anchors.verticalCenter: parent.verticalCenter; text: "track details"; color: theme.text; font.pixelSize: 12; font.bold: true; font.family: "Adwaita Sans" } }
+                                Text { anchors.verticalCenter: parent.verticalCenter; text: "track details"; color: theme.text; font.pixelSize: 12; font.bold: true; font.family: Tok.sans } }
                             Rectangle { width: parent.width; height: 1; color: theme.a(theme.iris,0.2) }
                             // detail rows (static ones via a model; live time rows bound directly so they don't rebuild the list)
                             Column { id: infoRows; width: parent.width; spacing: 6
@@ -4407,13 +4491,13 @@ ShellRoot {
                                             mono: true; sz: 11; text: modelData.v; color: theme.text } }
                                 }
                                 Item { width: infoRows.width; height: 16
-                                    Text { anchors.left: parent.left; anchors.verticalCenter: parent.verticalCenter; text: "Elapsed"; color: theme.sub; font.pixelSize: 11; font.family: "Adwaita Sans" }
+                                    Text { anchors.left: parent.left; anchors.verticalCenter: parent.verticalCenter; text: "Elapsed"; color: theme.sub; font.pixelSize: 11; font.family: Tok.sans }
                                     Text { anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter; horizontalAlignment: Text.AlignRight
-                                        text: root.fmtTime(root.mprisPos); color: theme.text; font.pixelSize: 11; font.family: "Adwaita Sans" } }
+                                        text: root.fmtTime(root.mprisPos); color: theme.text; font.pixelSize: 11; font.family: Tok.sans } }
                                 Item { width: infoRows.width; height: 16
-                                    Text { anchors.left: parent.left; anchors.verticalCenter: parent.verticalCenter; text: "Remaining"; color: theme.sub; font.pixelSize: 11; font.family: "Adwaita Sans" }
+                                    Text { anchors.left: parent.left; anchors.verticalCenter: parent.verticalCenter; text: "Remaining"; color: theme.sub; font.pixelSize: 11; font.family: Tok.sans }
                                     Text { anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter; horizontalAlignment: Text.AlignRight
-                                        text: "-" + root.fmtTime(Math.max(0,(root.player?root.player.length:0)-root.mprisPos)); color: theme.text; font.pixelSize: 11; font.family: "Adwaita Sans" } } }
+                                        text: "-" + root.fmtTime(Math.max(0,(root.player?root.player.length:0)-root.mprisPos)); color: theme.text; font.pixelSize: 11; font.family: Tok.sans } } }
                         }
                         }
                     } }
@@ -4770,14 +4854,14 @@ ShellRoot {
                         cardW: 340; cardH: updCol.implicitHeight + 30
                         Column { id: updCol; anchors.fill: updDrop.card; anchors.margins: 15; spacing: 10
                             Row { width: parent.width
-                                Text { text: "Updates"; color: theme.text; font.pixelSize: 15; font.family: "Adwaita Sans"; font.bold: true }
+                                Text { text: "Updates"; color: theme.text; font.pixelSize: 15; font.family: Tok.sans; font.bold: true }
                                 Item { width: parent.width - 120; height: 1 }
                                 Text { text: root.updChecking ? "checking…" : (root.updRepo + " repo · " + root.updAur + " aur")
                                     color: theme.sub; font.pixelSize: 10; font.family: Tok.mono } }
                             Rectangle { width: parent.width; height: 1; color: theme.a(theme.iris, 0.16) }
 
                             Text { visible: root.updTotal === 0 && !root.updChecking
-                                text: "everything is up to date"; color: theme.sub; font.pixelSize: 12; font.family: "Adwaita Sans" }
+                                text: "everything is up to date"; color: theme.sub; font.pixelSize: 12; font.family: Tok.sans }
 
                             // Capped, but the footer says by how much — a list that silently stops
                             // at 12 reads as "12 updates" when it might be 90.
@@ -4817,7 +4901,7 @@ ShellRoot {
                                         Sym { anchors.verticalCenter: parent.verticalCenter; text: "download"; sz: 15
                                             color: updGoMa.containsMouse ? Tok.accentInk : theme.frost }
                                         Text { anchors.verticalCenter: parent.verticalCenter; text: "update now"
-                                            color: updGoMa.containsMouse ? Tok.accentInk : theme.text; font.pixelSize: 12; font.family: "Adwaita Sans" } }
+                                            color: updGoMa.containsMouse ? Tok.accentInk : theme.text; font.pixelSize: 12; font.family: Tok.sans } }
                                     MouseArea { id: updGoMa; anchors.fill: parent; hoverEnabled: true
                                         enabled: root.updTotal > 0
                                         cursorShape: Qt.PointingHandCursor; onClicked: root.updRun() } }
@@ -4826,7 +4910,7 @@ ShellRoot {
                                     border.width: 1; border.color: theme.a(theme.iris, 0.16)
                                     Row { anchors.centerIn: parent; spacing: 6
                                         Sym { anchors.verticalCenter: parent.verticalCenter; text: "refresh"; sz: 15; color: theme.frost }
-                                        Text { anchors.verticalCenter: parent.verticalCenter; text: "check"; color: theme.sub; font.pixelSize: 11; font.family: "Adwaita Sans" } }
+                                        Text { anchors.verticalCenter: parent.verticalCenter; text: "check"; color: theme.sub; font.pixelSize: 11; font.family: Tok.sans } }
                                     MouseArea { id: updReMa; anchors.fill: parent; hoverEnabled: true
                                         cursorShape: Qt.PointingHandCursor; onClicked: root.updRefresh() } }
                             }
@@ -4838,7 +4922,7 @@ ShellRoot {
                         id: ccDrop; host: root.barVertical ? ccPillVert : ccPill; shown: root.openPop === "cc" && root.openBar === bar
                         cardW: 316; cardH: ccCol.implicitHeight + 30
                         Column { id: ccCol; anchors.fill: ccDrop.card; anchors.margins: 15; spacing: 12
-                            Text { text: "Quick settings"; color: theme.text; font.pixelSize: 15; font.family: "Adwaita Sans"; font.bold: true }
+                            Text { text: "Quick settings"; color: theme.text; font.pixelSize: 15; font.family: Tok.sans; font.bold: true }
                             // toggle tiles
                             Grid { width: parent.width; columns: 2; columnSpacing: 8; rowSpacing: 8
                                 Repeater {
@@ -4860,13 +4944,13 @@ ShellRoot {
                                         Behavior on color { ColorAnimation { duration: 120 } }
                                         Row { anchors.left: parent.left; anchors.leftMargin: 11; anchors.right: parent.right; anchors.rightMargin: 8; anchors.verticalCenter: parent.verticalCenter; spacing: 8
                                             Sym { anchors.verticalCenter: parent.verticalCenter; text: on ? modelData.onI : modelData.offI; sz: 18; color: on ? theme.iris : theme.sub }
-                                            Text { anchors.verticalCenter: parent.verticalCenter; width: parent.width - 26; text: modelData.l; color: on ? theme.text : theme.sub; font.pixelSize: 12; font.family: "Adwaita Sans"; elide: Text.ElideRight } }
+                                            Text { anchors.verticalCenter: parent.verticalCenter; width: parent.width - 26; text: modelData.l; color: on ? theme.text : theme.sub; font.pixelSize: 12; font.family: Tok.sans; elide: Text.ElideRight } }
                                         MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.ccToggle(modelData.k) }
                                     }
                                 }
                             }
                             // power profile
-                            Text { text: "power profile"; color: theme.sub; font.pixelSize: 10; font.family: "Adwaita Sans" }
+                            Text { text: "power profile"; color: theme.sub; font.pixelSize: 10; font.family: Tok.sans }
                             Row { width: parent.width; spacing: 6
                                 Repeater {
                                     model: [ { k: "power-saver", i: "eco", l: "Saver" }, { k: "balanced", i: "balance", l: "Balanced" }, { k: "performance", i: "bolt", l: "Perf" } ]
@@ -4878,13 +4962,13 @@ ShellRoot {
                                         Behavior on color { ColorAnimation { duration: 120 } }
                                         Column { anchors.centerIn: parent; spacing: 2
                                             Sym { anchors.horizontalCenter: parent.horizontalCenter; text: modelData.i; sz: 16; color: sel ? theme.bg : theme.sub }
-                                            Text { anchors.horizontalCenter: parent.horizontalCenter; text: modelData.l; color: sel ? theme.bg : theme.sub; font.pixelSize: 10; font.family: "Adwaita Sans"; font.bold: sel } }
+                                            Text { anchors.horizontalCenter: parent.horizontalCenter; text: modelData.l; color: sel ? theme.bg : theme.sub; font.pixelSize: 10; font.family: Tok.sans; font.bold: sel } }
                                         MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.setProfile(modelData.k) }
                                     }
                                 }
                             }
                             // gaming fan preset: profile + fan curve in one click; game mode re-applies the last pick
-                            Text { visible: root.hasFanCurve; text: "gaming fans · used by game mode"; color: theme.sub; font.pixelSize: 10; font.family: "Adwaita Sans" }
+                            Text { visible: root.hasFanCurve; text: "gaming fans · used by game mode"; color: theme.sub; font.pixelSize: 10; font.family: Tok.sans }
                             Row { visible: root.hasFanCurve; width: parent.width; spacing: 6
                                 Repeater {
                                     model: [ { k: "auto", i: "auto_mode", l: "Auto" }, { k: "quiet", i: "mode_fan", l: "Quiet" }, { k: "max", i: "speed", l: "Max" } ]
@@ -4896,7 +4980,7 @@ ShellRoot {
                                         Behavior on color { ColorAnimation { duration: 120 } }
                                         Column { anchors.centerIn: parent; spacing: 2
                                             Sym { anchors.horizontalCenter: parent.horizontalCenter; text: modelData.i; sz: 16; color: sel ? theme.bg : theme.sub }
-                                            Text { anchors.horizontalCenter: parent.horizontalCenter; text: modelData.l; color: sel ? theme.bg : theme.sub; font.pixelSize: 10; font.family: "Adwaita Sans"; font.bold: sel } }
+                                            Text { anchors.horizontalCenter: parent.horizontalCenter; text: modelData.l; color: sel ? theme.bg : theme.sub; font.pixelSize: 10; font.family: Tok.sans; font.bold: sel } }
                                         MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.setFanMode(modelData.k) }
                                     }
                                 }
@@ -4907,7 +4991,7 @@ ShellRoot {
                                 border.width: 1; border.color: theme.a(theme.iris, 0.16)
                                 Row { anchors.centerIn: parent; spacing: 8
                                     Sym { anchors.verticalCenter: parent.verticalCenter; text: "settings"; sz: 16; color: theme.frost }
-                                    Text { anchors.verticalCenter: parent.verticalCenter; text: "all settings"; color: theme.text; font.pixelSize: 12; font.family: "Adwaita Sans" } }
+                                    Text { anchors.verticalCenter: parent.verticalCenter; text: "all settings"; color: theme.text; font.pixelSize: 12; font.family: Tok.sans } }
                                 MouseArea { id: ccSetMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
                                     onClicked: { root.openPop = ""; root.openSettings(0) } }
                             }
@@ -4920,33 +5004,33 @@ ShellRoot {
                             Row { width: parent.width; spacing: 10
                                 Sym { anchors.verticalCenter: parent.verticalCenter; text: root.wxIcon(root.wxCond); sz: 30; color: theme.frost }
                                 Column { anchors.verticalCenter: parent.verticalCenter; spacing: 1; width: parent.width - 40
-                                    Text { text: root.wxTemp; color: theme.text; font.pixelSize: 20; font.family: "Adwaita Sans"; font.bold: true }
-                                    Text { width: parent.width; text: root.wxCond; color: theme.sub; font.pixelSize: 11; font.family: "Adwaita Sans"
+                                    Text { text: root.wxTemp; color: theme.text; font.pixelSize: 20; font.family: Tok.sans; font.bold: true }
+                                    Text { width: parent.width; text: root.wxCond; color: theme.sub; font.pixelSize: 11; font.family: Tok.sans
                                         wrapMode: Text.Wrap; maximumLineCount: 2; elide: Text.ElideRight } } }
                             Rectangle { width: parent.width; height: 1; color: theme.a(theme.line,0.7) }
                             Repeater { model: [{i:"thermostat",l:"feels like",v:root.wxFeels},{i:"humidity_percentage",l:"humidity",v:root.wxHumid},{i:"air",l:"wind",v:root.wxWind}]
                                 delegate: Item { required property var modelData; width: parent.width; height: 20
                                     Sym { id: wxdIc; anchors.verticalCenter: parent.verticalCenter; text: modelData.i; sz: 15; color: theme.iris }
                                     Text { anchors { left: wxdIc.right; leftMargin: 8; verticalCenter: parent.verticalCenter }
-                                        text: modelData.l; color: theme.sub; font.pixelSize: 12; font.family: "Adwaita Sans" }
+                                        text: modelData.l; color: theme.sub; font.pixelSize: 12; font.family: Tok.sans }
                                     Text { anchors { right: parent.right; verticalCenter: parent.verticalCenter }
                                         width: Math.min(implicitWidth, parent.width - 110); elide: Text.ElideLeft; horizontalAlignment: Text.AlignRight
-                                        text: modelData.v; color: theme.text; font.pixelSize: 12; font.family: "Adwaita Sans" } } }
+                                        text: modelData.v; color: theme.text; font.pixelSize: 12; font.family: Tok.sans } } }
                             // ---- 3-day forecast ----
                             Rectangle { width: parent.width; height: 1; color: theme.a(theme.line,0.7); visible: root.wxForecast.length>0 }
-                            Text { visible: root.wxForecast.length>0; text: "forecast"; color: theme.sub; font.pixelSize: 10; font.family: "Adwaita Sans" }
+                            Text { visible: root.wxForecast.length>0; text: "forecast"; color: theme.sub; font.pixelSize: 10; font.family: Tok.sans }
                             Repeater { model: root.wxForecast
                                 delegate: Row { required property var modelData; width: parent.width; height: 26; spacing: 8
-                                    Text { anchors.verticalCenter: parent.verticalCenter; text: modelData.day; color: theme.text; font.pixelSize: 12; font.family: "Adwaita Sans"; width: 46 }
+                                    Text { anchors.verticalCenter: parent.verticalCenter; text: modelData.day; color: theme.text; font.pixelSize: 12; font.family: Tok.sans; width: 46 }
                                     Sym { anchors.verticalCenter: parent.verticalCenter; text: root.wxIcon(modelData.cond); sz: 17; color: theme.frost }
-                                    Text { anchors.verticalCenter: parent.verticalCenter; width: parent.width - 168; elide: Text.ElideRight; text: modelData.cond; color: theme.sub; font.pixelSize: 11; font.family: "Adwaita Sans" }
-                                    Text { anchors.verticalCenter: parent.verticalCenter; text: modelData.hi; color: theme.text; font.pixelSize: 12; font.family: "Adwaita Sans" }
-                                    Text { anchors.verticalCenter: parent.verticalCenter; text: modelData.lo; color: theme.sub; font.pixelSize: 12; font.family: "Adwaita Sans" } } }
+                                    Text { anchors.verticalCenter: parent.verticalCenter; width: parent.width - 168; elide: Text.ElideRight; text: modelData.cond; color: theme.sub; font.pixelSize: 11; font.family: Tok.sans }
+                                    Text { anchors.verticalCenter: parent.verticalCenter; text: modelData.hi; color: theme.text; font.pixelSize: 12; font.family: Tok.sans }
+                                    Text { anchors.verticalCenter: parent.verticalCenter; text: modelData.lo; color: theme.sub; font.pixelSize: 12; font.family: Tok.sans } } }
                             Rectangle { width: parent.width; height: 1; color: theme.a(theme.line,0.7) }
                             Item { width: parent.width; height: 26
                                 Row { anchors.fill: parent; spacing: 8
                                     Sym { anchors.verticalCenter: parent.verticalCenter; text: "settings"; sz: 15; color: theme.sub }
-                                    Text { anchors.verticalCenter: parent.verticalCenter; text: "set location / units"; color: theme.sub; font.pixelSize: 11; font.family: "Adwaita Sans" } }
+                                    Text { anchors.verticalCenter: parent.verticalCenter; text: "set location / units"; color: theme.sub; font.pixelSize: 11; font.family: Tok.sans } }
                                 MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { root.openPop=""; root.openSettings(3) } } } } }
                     Drop { screen: bar.screen
                         id: trayDrop; host: bar.trayHost
@@ -4962,7 +5046,7 @@ ShellRoot {
                                     try { return !trayMenu.children || !trayMenu.children.values || trayMenu.children.values.length === 0 }
                                     catch (e) { return true }
                                 }
-                                text: "no menu"; color: theme.sub; font.pixelSize: 11; font.family: "Adwaita Sans"; leftPadding: 6; topPadding: 4
+                                text: "no menu"; color: theme.sub; font.pixelSize: 11; font.family: Tok.sans; leftPadding: 6; topPadding: 4
                             }
                             Repeater { model: { try { return trayMenu.children ? trayMenu.children : [] } catch(e) { return [] } }
                                 delegate: Rectangle { required property var modelData
@@ -4970,18 +5054,20 @@ ShellRoot {
                                     color: (modelData && !modelData.isSeparator && em.containsMouse) ? theme.a(theme.iris,0.16) : "transparent"
                                     Rectangle { visible: !!(modelData && modelData.isSeparator); anchors.verticalCenter: parent.verticalCenter; x: 5; width: parent.width-10; height: 1; color: theme.a(theme.line,0.8) }
                                     Row { visible: !!(modelData && !modelData.isSeparator); anchors.fill: parent; anchors.leftMargin: 9; anchors.rightMargin: 9; spacing: 8
-                                        Text { anchors.verticalCenter: parent.verticalCenter; text: (modelData && modelData.text) ? modelData.text : ""; color: (modelData && modelData.enabled)?theme.text:theme.faint; font.pixelSize: 12; font.family: "Adwaita Sans"; elide: Text.ElideRight; width: parent.width-22 }
+                                        Text { anchors.verticalCenter: parent.verticalCenter; text: (modelData && modelData.text) ? modelData.text : ""; color: (modelData && modelData.enabled)?theme.text:theme.faint; font.pixelSize: 12; font.family: Tok.sans; elide: Text.ElideRight; width: parent.width-22 }
                                         Sym { anchors.verticalCenter: parent.verticalCenter; visible: !!(modelData && modelData.hasChildren); text: "chevron_right"; sz: 14; color: theme.sub } }
                                     MouseArea { id: em; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; enabled: !!(modelData && !modelData.isSeparator)
                                         onClicked: { try { if(modelData && !modelData.hasChildren){ modelData.triggered(); root.openPop="" } } catch(e) { root.openPop=""; } } } } } } }
                     Drop { screen: bar.screen
                         id: notifDrop; host: root.barVertical ? bellPillVert : bellPill; shown: root.openPop ==="notif" && root.openBar === bar
-                        cardW: 350; cardH: Math.min(460, notifCol.implicitHeight + 28)
+                        cardW: 360; cardH: Math.min(480, notifCol.implicitHeight + 28)
+                        // the keys need the keyboard while the centre is open (see the list below)
+                        WlrLayershell.keyboardFocus: shown ? WlrKeyboardFocus.Exclusive : WlrKeyboardFocus.OnDemand
                         Column { id: notifCol; anchors.fill: notifDrop.card; anchors.margins: 14; spacing: 4
                             // Header
                             Item { width: parent.width; height: 28
                                 Text { anchors.verticalCenter: parent.verticalCenter; anchors.left: parent.left
-                                    text: "Notifications"; color: theme.text; font.pixelSize: 15; font.family: "Adwaita Sans"; font.bold: true }
+                                    text: "Notifications"; color: theme.text; font.pixelSize: 15; font.family: Tok.sans; font.bold: true }
                                 Row { anchors.verticalCenter: parent.verticalCenter; anchors.right: parent.right; spacing: 6
                                     // Do Not Disturb toggle
                                     Rectangle { anchors.verticalCenter: parent.verticalCenter
@@ -4990,20 +5076,20 @@ ShellRoot {
                                         border.width: 1; border.color: root.dnd ? theme.a(theme.warn, 0.5) : "transparent"
                                         Row { id: dndRow; anchors.centerIn: parent; spacing: 4
                                             Sym { anchors.verticalCenter: parent.verticalCenter; text: root.dnd ? "do_not_disturb_on" : "do_not_disturb_off"; sz: 13; color: root.dnd ? theme.warn : theme.sub }
-                                            Text { anchors.verticalCenter: parent.verticalCenter; text: "DND"; color: root.dnd ? theme.warn : theme.sub; font.pixelSize: 10; font.family: "Adwaita Sans"; font.bold: root.dnd } }
+                                            Text { anchors.verticalCenter: parent.verticalCenter; text: "DND"; color: root.dnd ? theme.warn : theme.sub; font.pixelSize: 10; font.family: Tok.sans; font.bold: root.dnd } }
                                         MouseArea { id: dndMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.setDnd(!root.dnd) } }
                                     // clear all
                                     Rectangle { anchors.verticalCenter: parent.verticalCenter
                                         visible: root.notes.length > 0
                                         width: clrTxt.implicitWidth + 16; height: 22; radius: Tok.r
                                         color: clrMa.containsMouse ? theme.a(theme.bad, 0.18) : theme.a(theme.line, 0.5)
-                                        Text { id: clrTxt; anchors.centerIn: parent; text: "clear all"; color: clrMa.containsMouse ? theme.bad : theme.sub; font.pixelSize: 10; font.family: "Adwaita Sans" }
+                                        Text { id: clrTxt; anchors.centerIn: parent; text: "clear all"; color: clrMa.containsMouse ? theme.bad : theme.sub; font.pixelSize: 10; font.family: Tok.sans }
                                         MouseArea { id: clrMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.noteClear() } } } }
                             Rectangle { width: parent.width; height: 1; color: theme.a(theme.line, 0.6) }
                             Item { height: 2; width: 1 }
                             // ---- muted apps (per-app DND) — chips you can tap to un-mute ----
                             Column { width: parent.width; spacing: 5; visible: root.mutedApps.length > 0
-                                Text { text: "muted apps"; color: theme.sub; font.pixelSize: 10; font.family: "Adwaita Sans"; font.letterSpacing: 0.5 }
+                                Text { text: "muted apps"; color: theme.sub; font.pixelSize: 10; font.family: Tok.sans; font.letterSpacing: 0.5 }
                                 Flow { width: parent.width; spacing: 5
                                     Repeater { model: root.mutedApps
                                         delegate: Rectangle { required property var modelData
@@ -5012,59 +5098,61 @@ ShellRoot {
                                             border.width: 1; border.color: theme.a(theme.warn,0.35)
                                             Row { id: mchip; anchors.centerIn: parent; spacing: 4
                                                 Sym { anchors.verticalCenter: parent.verticalCenter; text: "notifications_off"; sz: 11; color: theme.warn }
-                                                Text { anchors.verticalCenter: parent.verticalCenter; text: modelData; color: theme.sub; font.pixelSize: 10; font.family: "Adwaita Sans" }
+                                                Text { anchors.verticalCenter: parent.verticalCenter; text: modelData; color: theme.sub; font.pixelSize: 10; font.family: Tok.sans }
                                                 Sym { anchors.verticalCenter: parent.verticalCenter; text: "close"; sz: 11; color: theme.sub } }
                                             MouseArea { id: mchMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.toggleMute(modelData) } } } }
                                 Rectangle { width: parent.width; height: 1; color: theme.a(theme.line, 0.6) } }
-                            Text { visible: root.notes.length===0; text: "no notifications"; color: theme.sub; font.pixelSize: 12; font.family: "Adwaita Sans"; topPadding: 4 }
-                            Flickable { width: parent.width; height: Math.min(390, listCol.implicitHeight); contentHeight: listCol.implicitHeight; clip: true; boundsBehavior: Flickable.StopAtBounds; visible: root.notes.length>0
-                                Column { id: listCol; width: parent.width; spacing: 6
-                                    Repeater { model: root.notes
-                                        delegate: Rectangle { id: nrow; required property var modelData; width: listCol.width; radius: Tok.r
-                                            implicitHeight: ec.implicitHeight + 16; color: theme.a(theme.line,0.38)
-                                            border.width: 1; border.color: modelData.urgency===2 ? theme.a(theme.bad,0.45) : theme.a(theme.iris,0.12)
-                                            Column { id: ec; anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top; anchors.margins: 10; spacing: 3
-                                                Item { width: parent.width; height: 16
-                                                    Text { anchors.left: parent.left; anchors.verticalCenter: parent.verticalCenter
-                                                        text: modelData.appName; color: theme.frost; font.pixelSize: 10; font.family: "Adwaita Sans"; elide: Text.ElideRight; width: parent.width - 46 - 26; font.bold: true }
-                                                    // mute-this-app toggle
-                                                    Rectangle { id: noteMute; anchors.right: noteTime.left; anchors.rightMargin: 6; anchors.verticalCenter: parent.verticalCenter
-                                                        width: 18; height: 16; radius: Tok.r
-                                                        readonly property bool m: root.isMuted(modelData.appName)
-                                                        color: nmMa.containsMouse ? theme.a(theme.warn,0.2) : "transparent"
-                                                        Sym { anchors.centerIn: parent; text: noteMute.m ? "notifications_off" : "notifications_active"; sz: 12; color: noteMute.m ? theme.warn : theme.faint }
-                                                        MouseArea { id: nmMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.toggleMute(modelData.appName) } }
-                                                    Text { id: noteTime; anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
-                                                        text: modelData.time; color: theme.sub; font.pixelSize: 10; font.family: "Adwaita Sans"; width: 46; horizontalAlignment: Text.AlignRight } }
-                                                Text { width: parent.width; visible: modelData.summary!==""; text: modelData.summary; color: theme.text; font.pixelSize: 12; font.family: "Adwaita Sans"; wrapMode: Text.WordWrap }
-                                                Text { width: parent.width; visible: modelData.body!==""; text: modelData.body; color: theme.sub; font.pixelSize: 11; font.family: "Adwaita Sans"; wrapMode: Text.WordWrap; maximumLineCount: 3; elide: Text.ElideRight; textFormat: Text.PlainText }
-                                                // The actions were recorded on every notification and drawn on
-                                                // none of them here, so anything that timed out or arrived
-                                                // during DND landed in history with its buttons in the data
-                                                // and nowhere on screen — a Reply you could see the trace of
-                                                // and not press.
-                                                //
-                                                // They only fire while the sending app still holds the
-                                                // notification open; once the server releases it the button is
-                                                // inert, so it goes visibly dead rather than staying pressable
-                                                // and quietly doing nothing.
-                                                Flow { width: parent.width; spacing: 5; topPadding: 3
-                                                    visible: nrow.modelData.actions !== undefined && nrow.modelData.actions.length > 0
-                                                    Repeater { model: nrow.modelData.actions || []
-                                                        delegate: Rectangle { id: nact
-                                                            required property var modelData
-                                                            readonly property bool live: root.noteLive(nrow.modelData.key)
-                                                            height: 22; radius: Tok.r; width: nactT.implicitWidth + 18
-                                                            opacity: nact.live ? 1.0 : 0.4
-                                                            color: (nact.live && naMa.containsMouse) ? theme.a(theme.iris,0.24) : theme.a(theme.line,0.55)
-                                                            border.width: 1
-                                                            border.color: nact.live ? theme.a(theme.iris,0.35) : theme.a(theme.line,0.9)
-                                                            Text { id: nactT; anchors.centerIn: parent
-                                                                text: nact.modelData.t; color: nact.live ? theme.text : theme.faint
-                                                                font.pixelSize: 10; font.family: "Adwaita Sans" }
-                                                            MouseArea { id: naMa; anchors.fill: parent; hoverEnabled: true
-                                                                cursorShape: nact.live ? Qt.PointingHandCursor : Qt.ArrowCursor
-                                                                onClicked: if (nact.live) root.noteInvoke(nrow.modelData.key, nact.modelData.i) } } } } } } } } } } }
+                            Rectangle { visible: !!root.noteUndo; width: parent.width; height: 32; radius: Tok.r
+                                color: Tok.sunken; border.width: 1; border.color: Tok.rule
+                                Text { anchors.left: parent.left; anchors.leftMargin: 12; anchors.verticalCenter: parent.verticalCenter
+                                    text: root.noteUndo ? root.noteUndo.label : ""; color: Tok.ink2; font.pixelSize: 11; font.family: Tok.sans }
+                                Text { anchors.right: parent.right; anchors.rightMargin: 12; anchors.verticalCenter: parent.verticalCenter
+                                    text: "Undo"; color: Tok.accent; font.pixelSize: 11; font.family: Tok.sans; font.weight: Font.DemiBold
+                                    MouseArea { anchors.fill: parent; anchors.margins: -8; cursorShape: Qt.PointingHandCursor; onClicked: root.noteUndoNow() } } }
+                            Text { visible: root.notes.length===0; text: "No notifications"; color: theme.sub; font.pixelSize: 12; font.family: Tok.sans; topPadding: 4 }
+                            // Grouped by app (NotifGroup.qml). Keys while the centre is open:
+                            // ↑↓ move between apps · ⏎/space show all · delete dismiss (undoable) · m mute
+                            Flickable { id: notifFlick
+                                width: parent.width; height: Math.min(400, listCol.implicitHeight); contentHeight: listCol.implicitHeight
+                                clip: true; boundsBehavior: Flickable.StopAtBounds; visible: root.notes.length>0
+                                focus: notifDrop.shown
+                                Keys.onPressed: (e) => {
+                                    var n = root.noteGroups.length, c = root.notifCursor;
+                                    if (e.key === Qt.Key_Z && (e.modifiers & Qt.ControlModifier)) { root.noteUndoNow(); e.accepted = true; return }
+                                    if (!n) return;
+                                    if (e.key === Qt.Key_Down) { root.notifCursor = c < 0 ? 0 : Math.min(n - 1, c + 1) }
+                                    else if (e.key === Qt.Key_Up) { root.notifCursor = c < 0 ? 0 : Math.max(0, c - 1) }
+                                    else if (c < 0) return;
+                                    else if (e.key === Qt.Key_Return || e.key === Qt.Key_Enter || e.key === Qt.Key_Space) {
+                                        var app = root.noteGroups[c].app, o = Object.assign({}, root.notifOpen); o[app] = !o[app]; root.notifOpen = o }
+                                    // Delete only: Backspace is what typing elsewhere sends, and it must never dismiss
+                                    else if (e.key === Qt.Key_Delete) {
+                                        root.noteRemoveApp(root.noteGroups[c].app); root.notifCursor = Math.min(c, root.noteGroups.length - 1) }
+                                    else if (e.key === Qt.Key_M) root.toggleMute(root.noteGroups[c].app)
+                                    else if (e.key === Qt.Key_Escape) root.openPop = ""
+                                    else return;
+                                    e.accepted = true;
+                                    var it = groupRep.itemAt(root.notifCursor);
+                                    if (it) notifFlick.contentY = Math.max(0, Math.min(it.y, it.y + it.height - notifFlick.height, notifFlick.contentHeight - notifFlick.height));
+                                }
+                                Connections { target: notifDrop; function onShownChanged() { root.notifCursor = -1; root.notifOpen = ({}) } }
+                                Column { id: listCol; width: parent.width; spacing: 8
+                                    Repeater { id: groupRep; model: root.noteGroups
+                                        delegate: NotifGroup {
+                                            required property var modelData
+                                            required property int index
+                                            width: listCol.width
+                                            group: modelData
+                                            expanded: !!root.notifOpen[modelData.app]
+                                            current: root.notifCursor === index
+                                            muted: root.isMuted(modelData.app)
+                                            isLive: k => root.noteLive(k)
+                                            onToggle: { var o = Object.assign({}, root.notifOpen); o[modelData.app] = !o[modelData.app]; root.notifOpen = o }
+                                            onDismissAll: root.noteRemoveApp(modelData.app)
+                                            onDismiss: k => root.noteRemove(k)
+                                            onMute: root.toggleMute(modelData.app)
+                                            onInvoke: (k, i) => root.noteInvoke(k, i)
+                                        } } } } } }
                     Drop { screen: bar.screen
                         id: wifiDrop; host: root.barVertical ? wifiPillVert : wifiPill; shown: root.openPop ==="wifi" && root.openBar === bar
                         cardW: 320; cardH: wifiCol.implicitHeight + 24
@@ -5074,7 +5162,7 @@ ShellRoot {
                             // Header
                             Item { width: parent.width; height: 28
                                 Text { anchors.verticalCenter: parent.verticalCenter; anchors.left: parent.left
-                                    text: "Wi-Fi"; color: theme.text; font.pixelSize: 16; font.family: "Adwaita Sans"; font.bold: true; font.letterSpacing: 0.8 }
+                                    text: "Wi-Fi"; color: theme.text; font.pixelSize: 16; font.family: Tok.sans; font.bold: true; font.letterSpacing: 0.8 }
                                 Rectangle { anchors.verticalCenter: parent.verticalCenter; anchors.right: parent.right
                                     width: 26; height: 26; radius: Tok.r
                                     color: rfm.containsMouse ? theme.a(theme.iris,0.18) : "transparent"
@@ -5082,9 +5170,9 @@ ShellRoot {
                                     MouseArea { id: rfm; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.wifiRescan(true) } } }
                             Text { width: parent.width; elide: Text.ElideRight
                                 text: root.wifiOn ? "Connected to " + root.ssid : "Choose a network to connect"
-                                color: root.wifiOn ? theme.good : theme.sub; font.pixelSize: 12; font.family: "Adwaita Sans" }
+                                color: root.wifiOn ? theme.good : theme.sub; font.pixelSize: 12; font.family: Tok.sans }
                             Text { text: root.wifiScanning ? "Scanning for networks…" : "Available networks"; color: theme.sub
-                                font.pixelSize: 11; font.family: "Adwaita Sans" }
+                                font.pixelSize: 11; font.family: Tok.sans }
                             // This editor is outside Repeater: scan replacement cannot destroy focus, cursor or draft.
                             WifiJoinCard {
                                 width: parent.width; visible: root.wifiPwFor.length > 0
@@ -5092,7 +5180,7 @@ ShellRoot {
                                 message: root.wifiJoinMessage; failed: root.wifiJoinFailed
                                 surface: theme.a(theme.iris, 0.07); ink: theme.text; muted: theme.sub
                                 accent: theme.iris; accentInk: Tok.accentInk; danger: theme.bad
-                                fontFamily: "Adwaita Sans"; rounding: Tok.rSmall
+                                fontFamily: Tok.sans; rounding: Tok.rSmall
                                 onEdited: value => root.wifiDraft = value
                                 onSubmitted: value => root.wifiJoin(root.wifiPwFor, value)
                                 onCancelled: root.wifiCancelDraft()
@@ -5154,7 +5242,7 @@ ShellRoot {
                                             anchors.verticalCenter: parent.verticalCenter
                                             elide: Text.ElideRight; text: netRow.modelData.ssid
                                             color: netRow.modelData.active ? theme.text : theme.sub
-                                            font.pixelSize: 12; font.family: "Adwaita Sans"; font.bold: netRow.modelData.active }
+                                            font.pixelSize: 12; font.family: Tok.sans; font.bold: netRow.modelData.active }
                                         // forget — only for remembered networks, and only on hover so it can't be hit by accident
                                         Rectangle {
                                             anchors.verticalCenter: parent.verticalCenter; anchors.right: parent.right; anchors.rightMargin: 6
@@ -5167,18 +5255,18 @@ ShellRoot {
                                 } }
                             Text { visible: root.wifiList.length===0
                                 text: root.wifiScanning ? "scanning…" : "no networks in range"
-                                color: theme.sub; font.pixelSize: 11; font.family: "Adwaita Sans"; topPadding: 4 }
+                                color: theme.sub; font.pixelSize: 11; font.family: Tok.sans; topPadding: 4 }
                             Rectangle {
                                 visible: root.wifiList.length > 4; width: parent.width; height: 28; radius: 7
                                 color: moreWifi.containsMouse ? Tok.accentWash : "transparent"
                                 Text { anchors.centerIn: parent; text: wifiDrop.expanded ? "Show fewer networks" : "Other networks…"
-                                    color: theme.sub; font.family: "Adwaita Sans"; font.pixelSize: 12 }
+                                    color: theme.sub; font.family: Tok.sans; font.pixelSize: 12 }
                                 MouseArea { id: moreWifi; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
                                     onClicked: wifiDrop.expanded = !wifiDrop.expanded }
                             }
                             Text { visible: wifiDrop.expanded && root.wifiSeen > root.wifiList.length
                                 text: "+" + (root.wifiSeen - root.wifiList.length) + " more nearby"
-                                color: theme.sub; font.pixelSize: 11; font.family: "Adwaita Sans" }
+                                color: theme.sub; font.pixelSize: 11; font.family: Tok.sans }
 
                             // ---- VPN Section ----
                             Item { height: 2; width: 1 }
@@ -5199,10 +5287,10 @@ ShellRoot {
                                     Text { anchors.verticalCenter: parent.verticalCenter
                                         text: "Cloudflare WARP"
                                         color: root.warpConnected ? theme.text : theme.sub
-                                        font.pixelSize: 12; font.family: "Adwaita Sans" }
+                                        font.pixelSize: 12; font.family: Tok.sans }
                                     Text { anchors.verticalCenter: parent.verticalCenter
                                         visible: root.warpConnected
-                                        text: "· " + root.warpMode; color: theme.sub; font.pixelSize: 10; font.family: "Adwaita Sans" } }
+                                        text: "· " + root.warpMode; color: theme.sub; font.pixelSize: 10; font.family: Tok.sans } }
                                 IndToggle { anchors.verticalCenter: parent.verticalCenter; anchors.right: parent.right
                                     on: root.warpConnected; onToggled: root.warpToggle() } }
 
@@ -5216,7 +5304,7 @@ ShellRoot {
                                         border.width: cur ? 1 : 0; border.color: theme.a(theme.good,0.4)
                                         Text { id: modeTxt; anchors.centerIn: parent
                                             text: modelData; color: cur ? theme.good : theme.faint
-                                            font.pixelSize: 9; font.family: "Adwaita Sans"; font.bold: cur }
+                                            font.pixelSize: 9; font.family: Tok.sans; font.bold: cur }
                                         MouseArea { id: modeMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
                                             onClicked: root.warpSetMode(modelData) } } } }
 
@@ -5232,12 +5320,12 @@ ShellRoot {
                                                 color: modelData.active ? theme.iris : (connecting ? theme.frost : (failed ? theme.bad : theme.faint)) }
                                             Text { anchors.verticalCenter: parent.verticalCenter
                                                 text: modelData.name; color: modelData.active ? theme.text : (connecting ? theme.frost : (failed ? theme.bad : theme.sub))
-                                                font.pixelSize: 11; font.family: "Adwaita Sans"; font.bold: modelData.active || connecting; elide: Text.ElideRight } }
+                                                font.pixelSize: 11; font.family: Tok.sans; font.bold: modelData.active || connecting; elide: Text.ElideRight } }
                                         Text {
                                             visible: connecting || failed || modelData.active
                                             text: connecting ? "connecting…" : (failed ? "connection failed" : "connected")
                                             color: connecting ? theme.frost : (failed ? theme.bad : theme.good)
-                                            font.pixelSize: 9; font.family: "Adwaita Sans"; leftPadding: 21 } }
+                                            font.pixelSize: 9; font.family: Tok.sans; leftPadding: 21 } }
                                     Rectangle { anchors.verticalCenter: parent.verticalCenter; anchors.right: parent.right
                                         width: 36; height: 20; radius: Tok.r
                                         color: modelData.active ? theme.iris : (connecting ? theme.a(theme.frost, 0.4) : theme.a(theme.line, 0.85))
@@ -5249,38 +5337,48 @@ ShellRoot {
                                             onClicked: if (!connecting) root.vpnToggle(modelData.name) } } } } } }
                     Drop { screen: bar.screen
                         id: btDrop; host: root.barVertical ? btPillVert : btPill; shown: root.openPop ==="bt" && root.openBar === bar
-                        cardW: 300; cardH: btCol.implicitHeight + 24
-                        Column { id: btCol; anchors.fill: btDrop.card; anchors.margins: 12; spacing: 5
-                            // Header
-                            Item { width: parent.width; height: 28
-                                Text { anchors.verticalCenter: parent.verticalCenter; anchors.left: parent.left
-                                    text: "Bluetooth"; color: theme.text; font.pixelSize: 15; font.family: "Adwaita Sans"; font.bold: true }
-                                Row { anchors.verticalCenter: parent.verticalCenter; anchors.right: parent.right; spacing: 6
-                                    Rectangle { width: 26; height: 26; radius: Tok.r
-                                        color: btScanMa.containsMouse ? theme.a(theme.iris,0.18) : "transparent"
-                                        Sym { anchors.centerIn: parent; text: (root.btAdapter&&root.btAdapter.discovering)?"sync":"search"; sz: 15; color: theme.sub }
-                                        MouseArea { id: btScanMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: if(root.btAdapter) root.btAdapter.discovering = !root.btAdapter.discovering } }
-                                    // power toggle
-                                    Rectangle { width: 36; height: 20; radius: Tok.r; anchors.verticalCenter: undefined
-                                        color: (root.btAdapter&&root.btAdapter.enabled)?theme.iris:theme.a(theme.line,0.85); border.width: 1; border.color: theme.a(theme.iris,0.3)
-                                        Rectangle { width: 15; height: 15; radius: Tok.r; color: theme.frost; anchors.verticalCenter: parent.verticalCenter
-                                            x: (root.btAdapter&&root.btAdapter.enabled)?19:2; Behavior on x { NumberAnimation { duration: 130 } } }
-                                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: if(root.btAdapter) root.btAdapter.enabled = !root.btAdapter.enabled } } } }
-                            Rectangle { width: parent.width; height: 1; color: theme.a(theme.line, 0.6) }
-                            Item { height: 2; width: 1 }
-                            Repeater { model: root.btDevices
-                                delegate: Rectangle { required property var modelData; width: parent.width; height: 36; radius: Tok.r
-                                    color: modelData.connected ? theme.a(theme.iris,0.18) : (dm.containsMouse ? theme.a(theme.line,0.45) : "transparent")
-                                    border.width: modelData.connected ? 1 : 0; border.color: theme.a(theme.iris,0.3)
-                                    Row { anchors.fill: parent; anchors.leftMargin: 10; anchors.rightMargin: 10; spacing: 8
-                                        Sym { anchors.verticalCenter: parent.verticalCenter; text: root.btIcon(modelData); sz: 17; color: modelData.connected?theme.iris:theme.frost }
-                                        Text { anchors.verticalCenter: parent.verticalCenter; width: parent.width - (modelData.batteryAvailable?100:60); elide: Text.ElideRight; text: root.btName(modelData); color: theme.text; font.pixelSize: 12; font.family: "Adwaita Sans"; font.bold: modelData.connected }
-                                        Text { anchors.verticalCenter: parent.verticalCenter; visible: modelData.batteryAvailable; text: Math.round((modelData.battery||0)*100)+"%"; color: theme.sub; font.pixelSize: 10; font.family: "Adwaita Sans" }
-                                        Sym { anchors.verticalCenter: parent.verticalCenter; visible: modelData.connected; text: "check_circle"; sz: 14; color: theme.good }
-                                        Sym { anchors.verticalCenter: parent.verticalCenter; visible: modelData.pairing; text: "sync"; sz: 14; color: theme.warn } }
-                                    MouseArea { id: dm; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
-                                        onClicked: { if(modelData.connected) modelData.disconnect(); else modelData.connect() } } } }
-                            Text { visible: root.btDevices.length===0; text: (root.btAdapter&&root.btAdapter.enabled) ? (root.btAdapter.discovering ? "Searching for nearby devices…" : "No devices listed. Use search to discover.") : "Bluetooth is turned off"; color: theme.sub; font.pixelSize: 11; font.family: "Adwaita Sans"; topPadding: 4 } } }
+                        cardW: 320; cardH: btCol.implicitHeight + 24
+                        readonly property bool on: !!root.btAdapter && root.btAdapter.enabled
+                        readonly property var linked: root.btDevices.filter(d => d.connected)
+                        readonly property var paired: root.btDevices.filter(d => d.paired || d.bonded || d.connected)
+                        readonly property var nearby: root.btDevices.filter(d => !(d.paired || d.bonded || d.connected))
+                        Column { id: btCol; anchors.fill: btDrop.card; anchors.margins: 12; spacing: 3
+                            DropHeader {
+                                title: "Bluetooth"
+                                status: !btDrop.on ? "Off"
+                                      : btDrop.linked.length === 1 ? "Connected to " + root.btName(btDrop.linked[0])
+                                      : btDrop.linked.length > 1 ? btDrop.linked.length + " devices connected"
+                                      : root.btAdapter.discovering ? "Looking for devices…" : "On · nothing connected"
+                                tone: btDrop.linked.length ? "ok" : "neutral"
+                                actionIcon: btDrop.on ? (root.btAdapter.discovering ? "sync" : "search") : ""
+                                actionBusy: btDrop.on && root.btAdapter.discovering
+                                onAction: root.btAdapter.discovering = !root.btAdapter.discovering
+                                hasSwitch: !!root.btAdapter; switchOn: btDrop.on
+                                onSwitched: v => { if (root.btAdapter) root.btAdapter.enabled = v }
+                            }
+                            DropSection { visible: btDrop.on && btDrop.paired.length > 0; text: "My devices" }
+                            Repeater { model: btDrop.on ? btDrop.paired : []
+                                delegate: DropRow { required property var modelData
+                                    icon: root.btIcon(modelData); label: root.btName(modelData)
+                                    current: modelData.connected; busy: modelData.pairing || modelData.state === 2
+                                    value: modelData.batteryAvailable ? Math.round((modelData.battery || 0) * 100) + "%" : ""
+                                    chip: modelData.connected ? "" : "PAIRED"
+                                    hoverIcon: modelData.connected ? "link_off" : ""
+                                    onClicked: modelData.connected ? null : modelData.connect()
+                                    onHoverAction: modelData.disconnect() } }
+                            DropSection { visible: btDrop.on && btDrop.nearby.length > 0; text: "Nearby"; rule: btDrop.paired.length > 0
+                                note: root.btAdapter && root.btAdapter.discovering ? "searching" : "" }
+                            Repeater { model: btDrop.on ? btDrop.nearby.slice(0, 6) : []
+                                delegate: DropRow { required property var modelData
+                                    icon: root.btIcon(modelData); label: root.btName(modelData)
+                                    busy: modelData.pairing; chip: modelData.pairing ? "PAIRING" : ""
+                                    onClicked: modelData.pair() } }
+                            Text { visible: btDrop.on && root.btDevices.length === 0; width: parent.width; wrapMode: Text.Wrap
+                                text: root.btAdapter.discovering ? "Searching for nearby devices…" : "No devices yet. Press search to find one."
+                                color: Tok.ink3; font.pixelSize: 11; font.family: Tok.sans; topPadding: 4 }
+                            Text { visible: !btDrop.on; width: parent.width; wrapMode: Text.Wrap
+                                text: "Turn Bluetooth on to see your devices."
+                                color: Tok.ink3; font.pixelSize: 11; font.family: Tok.sans; topPadding: 4 } } }
                     // KDE Connect: the phone's state, then the things you actually open the
                     // widget for — ring, send a file, push the clipboard, browse its storage.
                     // The settings tab is one gear away rather than the only destination.
@@ -5292,7 +5390,7 @@ ShellRoot {
                             // Header
                             Item { width: parent.width; height: 26
                                 Text { anchors.verticalCenter: parent.verticalCenter; anchors.left: parent.left
-                                    text: "Kde connect"; color: theme.text; font.pixelSize: 15; font.family: "Adwaita Sans"; font.bold: true }
+                                    text: "Kde connect"; color: theme.text; font.pixelSize: 15; font.family: Tok.sans; font.bold: true }
                                 Row { anchors.verticalCenter: parent.verticalCenter; anchors.right: parent.right; spacing: 2
                                     Rectangle { width: 26; height: 26; radius: Tok.r
                                         color: kdeRfMa.containsMouse ? theme.a(theme.iris,0.18) : "transparent"
@@ -5319,7 +5417,7 @@ ShellRoot {
                                             // capped so one long hostname can't push the switcher to three rows
                                             Text { id: chipTxt; anchors.verticalCenter: parent.verticalCenter; text: modelData.name
                                                 width: Math.min(implicitWidth, 104); elide: Text.ElideRight
-                                                color: sel ? theme.text : theme.sub; font.pixelSize: 10; font.family: "Adwaita Sans" } }
+                                                color: sel ? theme.text : theme.sub; font.pixelSize: 10; font.family: Tok.sans } }
                                         MouseArea { id: chipMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
                                             onClicked: root.kdeSel = modelData.id } } } }
                             // The device itself
@@ -5336,10 +5434,10 @@ ShellRoot {
                                                 color: root.kdeActive ? theme.iris : theme.faint } }
                                         Column { anchors.verticalCenter: parent.verticalCenter; width: parent.width - 43; spacing: 2
                                             Text { width: parent.width; elide: Text.ElideRight; text: kdeCol.dev ? kdeCol.dev.name : ""
-                                                color: theme.text; font.pixelSize: 13; font.family: "Adwaita Sans"; font.bold: true }
+                                                color: theme.text; font.pixelSize: 13; font.family: Tok.sans; font.bold: true }
                                             Row { spacing: 6
                                                 Text { anchors.verticalCenter: parent.verticalCenter; text: root.kdeStatus(kdeCol.dev)
-                                                    color: root.kdeActive ? theme.frost : theme.faint; font.pixelSize: 10; font.family: "Adwaita Sans" }
+                                                    color: root.kdeActive ? theme.frost : theme.faint; font.pixelSize: 10; font.family: Tok.sans }
                                                 // cellular strength, 0–4 bars
                                                 Row { anchors.verticalCenter: parent.verticalCenter; spacing: 2; height: 11
                                                     visible: kdeCol.dev && kdeCol.dev.signal >= 0
@@ -5380,7 +5478,7 @@ ShellRoot {
                                 Text { width: parent.width; wrapMode: Text.WordWrap
                                     visible: kdeCol.dev && (kdeCol.dev.isPairRequestedByPeer || kdeCol.dev.isPairRequested)
                                     text: "check that your device shows the key " + (kdeCol.dev ? kdeCol.dev.verificationKey : "")
-                                    color: theme.sub; font.pixelSize: 10; font.family: "Adwaita Sans" }
+                                    color: theme.sub; font.pixelSize: 10; font.family: Tok.sans }
                                 Row { width: parent.width; spacing: 8
                                     visible: kdeCol.dev && kdeCol.dev.isPairRequestedByPeer
                                     KdeAct { width: (kdeCol.width - 8)/2; icon: "check_circle"; label: "accept"; tint: theme.good
@@ -5392,20 +5490,20 @@ ShellRoot {
                                     onAct: root.kdeRun(["--pair", kdeCol.dev.id]) }
                                 Text { visible: kdeCol.dev && !kdeCol.dev.isReachable
                                     text: "not on this network — open the app on the device"
-                                    color: theme.sub; font.pixelSize: 10; font.family: "Adwaita Sans" } }
+                                    color: theme.sub; font.pixelSize: 10; font.family: Tok.sans } }
                             // Unpair sits at the bottom, small and out of the way of the shortcuts
                             Item { width: parent.width; height: 16; visible: kdeCol.dev !== null && kdeCol.dev.isPaired
                                 Text { anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
                                     text: "unpair"; color: unpMa.containsMouse ? theme.bad : theme.a(theme.faint, 0.8)
-                                    font.pixelSize: 10; font.family: "Adwaita Sans"
+                                    font.pixelSize: 10; font.family: Tok.sans
                                     MouseArea { id: unpMa; anchors.fill: parent; anchors.margins: -6; hoverEnabled: true
                                         cursorShape: Qt.PointingHandCursor; onClicked: root.kdeRun(["--unpair", kdeCol.dev.id]) } } }
                             // Nothing at all — usually the daemon just hasn't seen the phone yet
                             Column { width: parent.width; spacing: 3; visible: root.kdeDevices.length === 0
-                                Text { text: "no devices"; color: theme.sub; font.pixelSize: 12; font.family: "Adwaita Sans" }
+                                Text { text: "no devices"; color: theme.sub; font.pixelSize: 12; font.family: Tok.sans }
                                 Text { width: parent.width; wrapMode: Text.WordWrap
                                     text: "open KDE Connect on your phone, make sure it's on the same network, then hit refresh"
-                                    color: theme.sub; font.pixelSize: 10; font.family: "Adwaita Sans" } } } }
+                                    color: theme.sub; font.pixelSize: 10; font.family: Tok.sans } } } }
                     Drop { screen: bar.screen
                         id: sysDrop; host: root.barVertical ? sysPillVert : sysPill; shown: root.openPop ==="sys" && root.openBar === bar
                         cardW: 250; cardH: sysCol.implicitHeight + 28
@@ -5413,10 +5511,10 @@ ShellRoot {
                             // Header
                             Item { width: parent.width; height: 20
                                 Text { anchors.verticalCenter: parent.verticalCenter; anchors.left: parent.left
-                                    text: "System"; color: theme.text; font.pixelSize: 15; font.family: "Adwaita Sans"; font.bold: true }
+                                    text: "System"; color: theme.text; font.pixelSize: 15; font.family: Tok.sans; font.bold: true }
                                 Row { anchors.verticalCenter: parent.verticalCenter; anchors.right: parent.right; spacing: 4
                                     Sym { anchors.verticalCenter: parent.verticalCenter; text: "developer_board"; sz: 13; color: theme.sub }
-                                    Text { anchors.verticalCenter: parent.verticalCenter; text: "live"; color: theme.sub; font.pixelSize: 9; font.family: "Adwaita Sans" } } }
+                                    Text { anchors.verticalCenter: parent.verticalCenter; text: "live"; color: theme.sub; font.pixelSize: 9; font.family: Tok.sans } } }
                             Rectangle { width: parent.width; height: 1; color: theme.a(theme.line, 0.6) }
                             // CPU
                             StatBar { width: parent.width; label: "CPU"
@@ -5431,10 +5529,10 @@ ShellRoot {
                                 Rectangle { width: parent.width; height: 1; color: theme.a(theme.line, 0.6) }
                                 Item { width: parent.width; height: 14
                                     Text { anchors.left: parent.left; anchors.verticalCenter: parent.verticalCenter
-                                        text: "GPU"; color: theme.frost; font.pixelSize: 10; font.family: "Adwaita Sans"; font.bold: true; font.letterSpacing: 0.6 }
+                                        text: "GPU"; color: theme.frost; font.pixelSize: 10; font.family: Tok.sans; font.bold: true; font.letterSpacing: 0.6 }
                                     Text { anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
                                         width: parent.width - 40; elide: Text.ElideLeft; horizontalAlignment: Text.AlignRight
-                                        text: root.gpuName; color: theme.sub; font.pixelSize: 10; font.family: "Adwaita Sans" } }
+                                        text: root.gpuName; color: theme.sub; font.pixelSize: 10; font.family: Tok.sans } }
                                 StatBar { width: parent.width; label: "usage"
                                     value: root.gpuUsage; barColor: root.loadColor(root.gpuUsage, 70, 90)
                                     rightText: Math.round(root.gpuUsage)+"%  ·  "+Math.round(root.gpuTemp)+"°C" }
@@ -5443,21 +5541,19 @@ ShellRoot {
                                     rightText: root.gpuMemUsed.toFixed(1)+" / "+root.gpuMemTotal.toFixed(1)+" GB" }
                                 Item { width: parent.width; height: 15
                                     Text { anchors.left: parent.left; anchors.verticalCenter: parent.verticalCenter
-                                        text: "power draw"; color: theme.sub; font.pixelSize: 11; font.family: "Adwaita Sans" }
+                                        text: "power draw"; color: theme.sub; font.pixelSize: 11; font.family: Tok.sans }
                                     Text { anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
-                                        text: root.gpuPower.toFixed(1)+" W"; color: theme.text; font.pixelSize: 11; font.family: "Adwaita Sans"; font.bold: true } } } } }
+                                        text: root.gpuPower.toFixed(1)+" W"; color: theme.text; font.pixelSize: 11; font.family: Tok.sans; font.bold: true } } } } }
                     Drop { screen: bar.screen
                         id: volDrop; host: root.barVertical ? volPillVert : volPill; shown: root.openPop ==="vol" && root.openBar === bar
                         cardW: 320; cardH: volCol.implicitHeight + 24
                         Column { id: volCol; anchors.fill: volDrop.card; anchors.margins: 12; spacing: 5
-                            // Header
-                            Item { width: parent.width; height: 28
-                                Text { anchors.verticalCenter: parent.verticalCenter; anchors.left: parent.left
-                                    text: "Volume"; color: theme.text; font.pixelSize: 15; font.family: "Adwaita Sans"; font.bold: true }
-                                Text { anchors.verticalCenter: parent.verticalCenter; anchors.right: parent.right
-                                    text: volPill.vol+"%"; color: theme.sub; font.pixelSize: 12; font.family: "Adwaita Sans" } }
-                            Rectangle { width: parent.width; height: 1; color: theme.a(theme.line, 0.6) }
-                            Item { height: 4; width: 1 }
+                            DropHeader {
+                                title: "Sound"
+                                status: (volPill.au && volPill.au.muted) ? "Muted" : (Pipewire.defaultAudioSink ? "Playing on " + root.sinkLabel(Pipewire.defaultAudioSink) : "No output")
+                                tone: (volPill.au && volPill.au.muted) ? "warn" : "neutral"
+                                value: volPill.vol + "%"
+                            }
                             // Volume slider row
                             Row { width: parent.width; spacing: 10; height: 32
                                 Rectangle { width: 28; height: 28; radius: Tok.r; anchors.verticalCenter: parent.verticalCenter
@@ -5467,22 +5563,17 @@ ShellRoot {
                                 Slider { anchors.verticalCenter: parent.verticalCenter; width: parent.width - 38
                                     value: volPill.au ? volPill.au.volume : 0
                                     onMoved: (v)=>{ if(volPill.au){ volPill.au.muted=false; volPill.au.volume=v } } } }
-                            Item { height: 2; width: 1 }
-                            Text { text: "Output"; color: theme.sub; font.pixelSize: 12; font.family: "Adwaita Sans"; font.letterSpacing: 0.5 }
-                            Item { height: 1; width: 1 }
+                            DropSection { text: "Output"; rule: true; note: root.sinks.length > 1 ? root.sinks.length + " devices" : "" }
                             Repeater { model: root.sinks
-                                delegate: Rectangle { required property var modelData; readonly property bool cur: Pipewire.defaultAudioSink && Pipewire.defaultAudioSink.id===modelData.id
-                                    width: parent.width; height: 32; radius: Tok.r
-                                    color: cur ? theme.a(theme.iris,0.18) : (sm.containsMouse?theme.a(theme.line,0.45):"transparent")
-                                    border.width: cur ? 1 : 0; border.color: theme.a(theme.iris,0.3)
-                                    Row { anchors.fill: parent; anchors.leftMargin: 10; anchors.rightMargin: 10; spacing: 8
-                                        Sym { anchors.verticalCenter: parent.verticalCenter; text: cur?"radio_button_checked":"radio_button_unchecked"; sz: 15; color: cur?theme.iris:theme.faint }
-                                        Text { anchors.verticalCenter: parent.verticalCenter; width: parent.width-42-sinkBadge.width; elide: Text.ElideMiddle; text: root.nodeName(modelData); color: theme.text; font.pixelSize: 12; font.family: "Adwaita Sans"; font.bold: cur }
-                                        Text { id: sinkBadge; anchors.verticalCenter: parent.verticalCenter; text: root.audioFmtBadge(modelData.name); visible: text!==""; color: theme.frost; font.pixelSize: 10; font.family: "Adwaita Sans" } }
-                                    MouseArea { id: sm; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: Pipewire.preferredDefaultAudioSink = modelData } } }
+                                delegate: DropRow { required property var modelData
+                                    readonly property string nm: (modelData.name || "").toLowerCase()
+                                    icon: nm.indexOf("bluez") >= 0 ? "headphones" : nm.indexOf("hdmi") >= 0 ? "tv" : nm.indexOf("usb") >= 0 ? "speaker" : "laptop_chromebook"
+                                    label: root.sinkLabel(modelData); sub: root.sinkCard(modelData)
+                                    current: !!Pipewire.defaultAudioSink && Pipewire.defaultAudioSink.id === modelData.id
+                                    value: root.audioFmtBadge(modelData.name)
+                                    onClicked: Pipewire.preferredDefaultAudioSink = modelData } }
                             // ---- bluetooth codec — only when the current output is a BT device offering a choice ----
-                            Item { height: 6; width: 1; visible: root.audioBtSink !== null }
-                            Text { visible: root.audioBtSink !== null; text: "Bluetooth codec"; color: theme.sub; font.pixelSize: 12; font.family: "Adwaita Sans"; font.letterSpacing: 0.5 }
+                            DropSection { visible: root.audioBtSink !== null; text: "Bluetooth codec"; rule: true }
                             Flow { visible: root.audioBtSink !== null; width: parent.width; spacing: 6
                                 Repeater { model: root.audioBtSink ? root.audioBtSink.bt_codecs : []
                                     delegate: Rectangle { required property var modelData
@@ -5490,13 +5581,12 @@ ShellRoot {
                                         implicitHeight: 24; implicitWidth: ccT.implicitWidth + 18; radius: Tok.r
                                         color: on ? theme.a(theme.iris, 0.25) : (ccMa.containsMouse ? theme.a(theme.line, 0.55) : theme.a(theme.line, 0.32))
                                         border.width: 1; border.color: on ? theme.a(theme.iris, 0.55) : theme.a(theme.iris, 0.14)
-                                        Text { id: ccT; anchors.centerIn: parent; text: modelData.codec; color: on ? theme.iris : theme.sub; font.pixelSize: 10; font.family: "Adwaita Sans"; font.bold: on }
+                                        Text { id: ccT; anchors.centerIn: parent; text: modelData.codec; color: on ? theme.iris : theme.sub; font.pixelSize: 10; font.family: Tok.sans; font.bold: on }
                                         MouseArea { id: ccMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.audioSetCodec(root.audioBtSink.name, modelData.profile) } }
                                 }
                             }
                             // ---- per-app mixer (sea-audio.py, 4.0): volume slider + click the chip to change output ----
-                            Item { height: 6; width: 1; visible: root.streams.length > 0 }
-                            Text { visible: root.streams.length > 0; text: "Applications"; color: theme.sub; font.pixelSize: 12; font.family: "Adwaita Sans"; font.letterSpacing: 0.5 }
+                            DropSection { visible: root.streams.length > 0; text: "Apps"; rule: true }
                             Repeater { model: root.streams
                                 delegate: Column {
                                     required property var modelData
@@ -5505,13 +5595,13 @@ ShellRoot {
                                     Row { width: parent.width; height: 20; spacing: 8
                                         Sym { anchors.verticalCenter: parent.verticalCenter; text: "graphic_eq"; sz: 14; color: theme.sub }
                                         Text { anchors.verticalCenter: parent.verticalCenter; width: parent.width - 22 - appChip.width - 16; elide: Text.ElideRight
-                                            text: root.streamName(modelData); color: theme.sub; font.pixelSize: 11; font.family: "Adwaita Sans" }
+                                            text: root.streamName(modelData); color: theme.sub; font.pixelSize: 11; font.family: Tok.sans }
                                         Rectangle { id: appChip; anchors.verticalCenter: parent.verticalCenter
                                             implicitWidth: acRow.implicitWidth + 14; height: 20; radius: Tok.r
                                             color: acMa.containsMouse ? theme.a(theme.iris, 0.28) : theme.a(theme.iris, 0.14); border.width: 1; border.color: theme.a(theme.iris, 0.28)
                                             Row { id: acRow; anchors.centerIn: parent; spacing: 3
                                                 Sym { anchors.verticalCenter: parent.verticalCenter; text: "arrow_forward"; sz: 11; color: theme.frost }
-                                                Text { anchors.verticalCenter: parent.verticalCenter; text: root.audioSinkLabelOf(modelData.id); color: theme.frost; font.pixelSize: 10; font.family: "Adwaita Sans" } }
+                                                Text { anchors.verticalCenter: parent.verticalCenter; text: root.audioSinkLabelOf(modelData.id); color: theme.frost; font.pixelSize: 10; font.family: Tok.sans } }
                                             MouseArea { id: acMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.audioCycleRouteById(modelData.id) } } }
                                     // volume slider + readout
                                     Row { width: parent.width; height: 20; spacing: 8
@@ -5520,31 +5610,37 @@ ShellRoot {
                                             value: modelData.audio ? modelData.audio.volume : 0
                                             onMoved: (v) => { if (modelData.audio) { modelData.audio.muted = false; modelData.audio.volume = v } } }
                                         Text { anchors.verticalCenter: parent.verticalCenter; width: 44; horizontalAlignment: Text.AlignRight
-                                            text: modelData.audio ? Math.round(modelData.audio.volume * 100) + "%" : "—"; color: theme.sub; font.pixelSize: 10; font.family: "Adwaita Sans" } }
+                                            text: modelData.audio ? Math.round(modelData.audio.volume * 100) + "%" : "—"; color: theme.sub; font.pixelSize: 10; font.family: Tok.sans } }
                                 }
                             }
                         } }
                     Drop { screen: bar.screen
                         id: batDrop; host: root.barVertical ? batPillVert : batPill; shown: root.openPop ==="bat" && root.openBar === bar
-                        cardW: 230; cardH: batCol.implicitHeight + 28
-                        Column { id: batCol; anchors.fill: batDrop.card; anchors.margins: 14; spacing: 4
-                            // Header
-                            Item { width: parent.width; height: 28
-                                Text { anchors.verticalCenter: parent.verticalCenter; anchors.left: parent.left
-                                    text: "Power profile"; color: theme.text; font.pixelSize: 15; font.family: "Adwaita Sans"; font.bold: true }
-                                Text { anchors.verticalCenter: parent.verticalCenter; anchors.right: parent.right
-                                    text: batPill.pct+"%"; color: batPill.charging?theme.good:batPill.pct<=20?theme.bad:theme.sub; font.pixelSize: 12; font.family: "Adwaita Sans" } }
-                            Rectangle { width: parent.width; height: 1; color: theme.a(theme.line, 0.6) }
-                            Item { height: 2; width: 1 }
-                            Repeater { model: [{k:"performance",i:"speed",l:"Performance"},{k:"balanced",i:"balance",l:"Balanced"},{k:"power-saver",i:"eco",l:"Power Saver"}]
-                                delegate: Rectangle { required property var modelData; readonly property bool cur: root.powerProfile===modelData.k
-                                    width: parent.width; height: 34; radius: Tok.r
-                                    color: cur ? theme.a(theme.iris,0.18) : (bm.containsMouse?theme.a(theme.line,0.45):"transparent")
-                                    border.width: cur ? 1 : 0; border.color: theme.a(theme.iris,0.3)
-                                    Row { anchors.fill: parent; anchors.leftMargin: 10; anchors.rightMargin: 10; spacing: 10
-                                        Sym { anchors.verticalCenter: parent.verticalCenter; text: modelData.i; sz: 17; color: cur?theme.iris:theme.frost }
-                                        Text { anchors.verticalCenter: parent.verticalCenter; text: modelData.l; color: cur?theme.text:theme.sub; font.pixelSize: 12; font.family: "Adwaita Sans"; font.bold: cur } }
-                                    MouseArea { id: bm; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.setProfile(modelData.k) } } } } }
+                        cardW: 280; cardH: batCol.implicitHeight + 24
+                        // "2 h 10 min left" / "full in 40 min": the one number a battery menu is opened for
+                        function span(sec) {
+                            if (!(sec > 0)) return "";
+                            var h = Math.floor(sec / 3600), m = Math.round((sec % 3600) / 60);
+                            return h > 0 ? h + " h " + m + " min" : m + " min";
+                        }
+                        readonly property var dev: UPower.displayDevice
+                        readonly property string eta: !dev ? "" : batPill.charging ? (dev.timeToFull > 0 ? "full in " + span(dev.timeToFull) : "")
+                                                                                  : (dev.timeToEmpty > 0 ? span(dev.timeToEmpty) + " left" : "")
+                        Column { id: batCol; anchors.fill: batDrop.card; anchors.margins: 12; spacing: 3
+                            DropHeader {
+                                title: "Battery"
+                                status: (batPill.charging ? (batPill.pct >= 100 ? "Fully charged" : "Charging") : "On battery") + (batDrop.eta ? " · " + batDrop.eta : "")
+                                tone: batPill.charging ? "ok" : batPill.pct <= 10 ? "crit" : batPill.pct <= 20 ? "warn" : "neutral"
+                                value: batPill.pct + "%"
+                            }
+                            DropSection { text: "Power profile" }
+                            Repeater { model: [{k:"performance",i:"speed",l:"Performance",d:"Fastest, fans and battery work harder"},
+                                               {k:"balanced",i:"balance",l:"Balanced",d:"The everyday default"},
+                                               {k:"power-saver",i:"eco",l:"Power saver",d:"Slower, quieter, longer on battery"}]
+                                delegate: DropRow { required property var modelData
+                                    icon: modelData.i; label: modelData.l; sub: modelData.d
+                                    current: root.powerProfile === modelData.k
+                                    onClicked: root.setProfile(modelData.k) } } } }
                     Drop { screen: bar.screen
                         id: calDrop; host: root.barVertical ? clockPillVert : clockPill; shown: root.openPop ==="cal" && root.openBar === bar
                         cardW: 280; cardH: calCol.implicitHeight + 32
@@ -5556,11 +5652,19 @@ ShellRoot {
                             property int today: dt.getDate()
                             property int lead: new Date(yr, mo, 1).getDay()
                             property var days: { var arr=[]; var n=new Date(yr, mo+1, 0).getDate(); for(var i=1;i<=n;i++) arr.push(i); return arr }
+                            // today, and what is next, in the same header the other dropdowns use
+                            DropHeader {
+                                title: Qt.formatDate(clock.date, "dddd, d MMMM")
+                                status: root.calUpcoming.length === 0 ? "Nothing coming up"
+                                      : "Next: " + (root.calUpcoming[0].title || "event") + " · " + root.calRel(root.calUpcoming[0].date)
+                                tone: root.calUpcoming.length && root.calRel(root.calUpcoming[0].date) === "today" ? "accent" : "neutral"
+                                value: Qt.formatTime(clock.date, "HH:mm")
+                            }
                             // The month keeps its own title row rather than a CalHead: it is the panel's
                             // identity, not a section label, so it stays centred and full size and only
                             // borrows the chevron.
                             Item { width: parent.width; height: 20
-                                Text { anchors.centerIn: parent; text: Qt.formatDateTime(clock.date,"MMMM yyyy"); color: theme.frost; font.pixelSize: 14; font.family: "Adwaita Sans"; font.bold: true }
+                                Text { anchors.centerIn: parent; text: Qt.formatDateTime(clock.date,"MMMM yyyy"); color: theme.frost; font.pixelSize: 14; font.family: Tok.sans; font.bold: true }
                                 Sym { anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
                                     text: root.calFolded("cal") ? "expand_more" : "expand_less"; sz: 13
                                     color: mgm.containsMouse ? theme.iris : theme.faint }
@@ -5577,10 +5681,10 @@ ShellRoot {
                                 }
                                 visible: weekN > 0
                                 text: [ todayN>0 ? todayN + " today" : "", weekN>0 ? weekN + " this week" : "" ].filter(Boolean).join("  ·  ")
-                                color: theme.sub; font.pixelSize: 9; font.family: "Adwaita Sans" }
+                                color: theme.sub; font.pixelSize: 9; font.family: Tok.sans }
                             Grid { anchors.horizontalCenter: parent.horizontalCenter; columns: 7; spacing: 4
                                 Repeater { model: ["S","M","T","W","T","F","S"]
-                                    delegate: Text { required property var modelData; width: 34; horizontalAlignment: Text.AlignHCenter; text: modelData; color: theme.sub; font.pixelSize: 11; font.family: "Adwaita Sans" } }
+                                    delegate: Text { required property var modelData; width: 34; horizontalAlignment: Text.AlignHCenter; text: modelData; color: theme.sub; font.pixelSize: 11; font.family: Tok.sans } }
                                 Repeater { model: calCol.lead
                                     delegate: Item { width: 34; height: 26 } }
                                 Repeater { model: calCol.days
@@ -5594,7 +5698,7 @@ ShellRoot {
                                         width: 34; height: 26; radius: Tok.r
                                         color: isToday ? theme.iris : (hasEvent ? theme.a(theme.iris, 0.13) : "transparent")
                                         border.width: (hasEvent && !isToday) ? 1 : 0; border.color: theme.a(theme.frost, 0.4)
-                                        Text { anchors.centerIn: parent; text: parent.modelData; color: parent.isToday ? theme.bg : theme.text; font.pixelSize: 12; font.family: "Adwaita Sans"; font.bold: parent.isToday }
+                                        Text { anchors.centerIn: parent; text: parent.modelData; color: parent.isToday ? theme.bg : theme.text; font.pixelSize: 12; font.family: Tok.sans; font.bold: parent.isToday }
                                         Rectangle {
                                             visible: parent.hasEvent && !parent.isToday
                                             width: 3; height: 3; radius: 1.5; color: theme.frost
@@ -5607,7 +5711,6 @@ ShellRoot {
                                     summary: root.calUpcoming.length === 0 ? "none"
                                            : root.calUpcoming.length + (root.calUpcoming.length > 4 ? " · +" + (root.calUpcoming.length - 4) + " more" : "") }
                                 Column { width: parent.width; spacing: 5; visible: !root.calFolded("up")
-                                Text { visible: root.calUpcoming.length === 0; text: "nothing coming up"; color: theme.sub; font.pixelSize: 10; font.family: "Adwaita Sans" }
                                 Repeater {
                                     model: root.calUpcoming.slice(0, 4)
                                     delegate: Rectangle {
@@ -5621,13 +5724,13 @@ ShellRoot {
                                             anchors.fill: parent; anchors.leftMargin: 7; anchors.rightMargin: 8; spacing: 9
                                             Column { anchors.verticalCenter: parent.verticalCenter; width: 26
                                                 Text { anchors.horizontalCenter: parent.horizontalCenter; text: (""+evRow.modelData.date).slice(8)
-                                                    color: evRow.soon ? theme.frost : theme.iris; font.pixelSize: 15; font.family: "Adwaita Sans"; font.bold: true }
+                                                    color: evRow.soon ? theme.frost : theme.iris; font.pixelSize: 15; font.family: Tok.sans; font.bold: true }
                                                 Text { anchors.horizontalCenter: parent.horizontalCenter; text: Qt.formatDate(root.calDate(evRow.modelData.date), "MMM").toUpperCase()
-                                                    color: theme.sub; font.pixelSize: 8; font.family: "Adwaita Sans" } }
+                                                    color: theme.sub; font.pixelSize: 8; font.family: Tok.sans } }
                                             Column { anchors.verticalCenter: parent.verticalCenter; width: parent.width - 44; spacing: 1
-                                                Text { width: parent.width; text: evRow.modelData.title; color: theme.text; font.pixelSize: 11; font.family: "Adwaita Sans"; elide: Text.ElideRight }
+                                                Text { width: parent.width; text: evRow.modelData.title; color: theme.text; font.pixelSize: 11; font.family: Tok.sans; elide: Text.ElideRight }
                                                 Text { text: evRow.rel + "  ·  " + Qt.formatDate(root.calDate(evRow.modelData.date), "ddd") + (evRow.modelData.time ? "  ·  " + evRow.modelData.time : "")
-                                                    color: evRow.soon ? theme.frost : theme.faint; font.pixelSize: 9; font.family: "Adwaita Sans" } } } } } }
+                                                    color: evRow.soon ? theme.frost : theme.faint; font.pixelSize: 9; font.family: Tok.sans } } } } } }
 
                             }
                             // ================= TIMER · POMODORO =================
@@ -5643,11 +5746,11 @@ ShellRoot {
                                 // ---- active countdown ----
                                 Column { width: parent.width; spacing: 6; visible: root.tmrRunning
                                     Row { width: parent.width; spacing: 10
-                                        Text { anchors.verticalCenter: parent.verticalCenter; text: root.tmrText; color: root.tmrPaused?theme.warn:theme.frost; font.pixelSize: 30; font.family: "Adwaita Sans"; font.bold: true }
+                                        Text { anchors.verticalCenter: parent.verticalCenter; text: root.tmrText; color: root.tmrPaused?theme.warn:theme.frost; font.pixelSize: 30; font.family: Tok.sans; font.bold: true }
                                         Column { anchors.verticalCenter: parent.verticalCenter; spacing: 1
                                             Text { text: root.pomoActive ? (root.pomoPhase==="focus"?"focus":(root.pomoPhase==="long"?"long break":"break")) : "timer"
-                                                color: (root.pomoActive && root.pomoPhase!=="focus") ? theme.good : theme.iris; font.pixelSize: 12; font.family: "Adwaita Sans"; font.bold: true }
-                                            Text { visible: root.tmrPaused; text: "paused"; color: theme.warn; font.pixelSize: 9; font.family: "Adwaita Sans" } } }
+                                                color: (root.pomoActive && root.pomoPhase!=="focus") ? theme.good : theme.iris; font.pixelSize: 12; font.family: Tok.sans; font.bold: true }
+                                            Text { visible: root.tmrPaused; text: "paused"; color: theme.warn; font.pixelSize: 9; font.family: Tok.sans } } }
                                     Rectangle { width: parent.width; height: 5; radius: 2.5; color: theme.a(theme.line,0.7)
                                         Rectangle { height: parent.height; radius: 2.5
                                             width: parent.width * (root.tmrTotal>0 ? Math.max(0,Math.min(1, 1 - root.tmrRemain/root.tmrTotal)) : 0)
@@ -5657,19 +5760,19 @@ ShellRoot {
                                             color: tpMa.containsMouse ? theme.a(theme.iris,0.25) : theme.a(theme.line,0.4); border.width:1; border.color: theme.a(theme.iris,0.2)
                                             Row { anchors.centerIn: parent; spacing: 5
                                                 Sym { anchors.verticalCenter: parent.verticalCenter; text: root.tmrPaused?"play_arrow":"pause"; sz: 14; color: theme.frost }
-                                                Text { anchors.verticalCenter: parent.verticalCenter; text: root.tmrPaused?"resume":"pause"; color: theme.text; font.pixelSize: 11; font.family: "Adwaita Sans" } }
+                                                Text { anchors.verticalCenter: parent.verticalCenter; text: root.tmrPaused?"resume":"pause"; color: theme.text; font.pixelSize: 11; font.family: Tok.sans } }
                                             MouseArea { id: tpMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.tmrToggle() } }
                                         Rectangle { visible: root.pomoActive; width: (parent.width - 12)/3; height: 30; radius: Tok.r
                                             color: tsMa.containsMouse ? theme.a(theme.iris,0.25) : theme.a(theme.line,0.4); border.width:1; border.color: theme.a(theme.iris,0.2)
                                             Row { anchors.centerIn: parent; spacing: 5
                                                 Sym { anchors.verticalCenter: parent.verticalCenter; text: "skip_next"; sz: 14; color: theme.frost }
-                                                Text { anchors.verticalCenter: parent.verticalCenter; text: "skip"; color: theme.text; font.pixelSize: 11; font.family: "Adwaita Sans" } }
+                                                Text { anchors.verticalCenter: parent.verticalCenter; text: "skip"; color: theme.text; font.pixelSize: 11; font.family: Tok.sans } }
                                             MouseArea { id: tsMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.pomoSkip() } }
                                         Rectangle { width: root.pomoActive ? (parent.width-12)/3 : (parent.width-6)/2; height: 30; radius: Tok.r
                                             color: txMa.containsMouse ? theme.a(theme.bad,0.22) : theme.a(theme.line,0.4); border.width:1; border.color: theme.a(theme.bad,0.25)
                                             Row { anchors.centerIn: parent; spacing: 5
                                                 Sym { anchors.verticalCenter: parent.verticalCenter; text: "stop"; sz: 14; color: theme.bad }
-                                                Text { anchors.verticalCenter: parent.verticalCenter; text: "stop"; color: theme.text; font.pixelSize: 11; font.family: "Adwaita Sans" } }
+                                                Text { anchors.verticalCenter: parent.verticalCenter; text: "stop"; color: theme.text; font.pixelSize: 11; font.family: Tok.sans } }
                                             MouseArea { id: txMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.tmrStop() } } } }
 
                                 // ---- idle: quick timers + pomodoro ----
@@ -5678,31 +5781,31 @@ ShellRoot {
                                         Repeater { model: [1,5,10,15,25]
                                             delegate: Rectangle { required property var modelData; height: 28; radius: Tok.r; width: (parent.width - 4*5)/5
                                                 color: qcMa.containsMouse ? theme.a(theme.iris,0.2) : theme.a(theme.line,0.4); border.width:1; border.color: theme.a(theme.iris,0.16)
-                                                Text { anchors.centerIn: parent; text: modelData+"m"; color: theme.text; font.pixelSize: 11; font.family: "Adwaita Sans"; font.bold: true }
+                                                Text { anchors.centerIn: parent; text: modelData+"m"; color: theme.text; font.pixelSize: 11; font.family: Tok.sans; font.bold: true }
                                                 MouseArea { id: qcMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.timerStartMin(modelData) } } } }
                                     Rectangle { width: parent.width; height: 34; radius: Tok.r
                                         color: psMa.containsMouse ? theme.iris : theme.a(theme.iris,0.22); border.width:1; border.color: theme.iris
                                         Row { anchors.centerIn: parent; spacing: 7
                                             Sym { anchors.verticalCenter: parent.verticalCenter; text: "local_fire_department"; sz: 16; color: psMa.containsMouse?theme.bg:theme.frost }
-                                            Text { anchors.verticalCenter: parent.verticalCenter; text: "Start Pomodoro · " + root.pomoFocusMin + "/" + root.pomoBreakMin; color: psMa.containsMouse?theme.bg:theme.frost; font.pixelSize: 12; font.family: "Adwaita Sans"; font.bold: true } }
+                                            Text { anchors.verticalCenter: parent.verticalCenter; text: "Start Pomodoro · " + root.pomoFocusMin + "/" + root.pomoBreakMin; color: psMa.containsMouse?theme.bg:theme.frost; font.pixelSize: 12; font.family: Tok.sans; font.bold: true } }
                                         MouseArea { id: psMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.pomoStart() } }
                                     // compact config: focus / break steppers + DND toggle
                                     Row { width: parent.width; spacing: 8
                                         Row { spacing: 3
-                                            Text { anchors.verticalCenter: parent.verticalCenter; text: "focus"; color: theme.sub; font.pixelSize: 10; font.family: "Adwaita Sans" }
+                                            Text { anchors.verticalCenter: parent.verticalCenter; text: "focus"; color: theme.sub; font.pixelSize: 10; font.family: Tok.sans }
                                             Rectangle { width: 20; height: 20; radius: Tok.r; color: fmMa.containsMouse?theme.a(theme.iris,0.2):theme.a(theme.line,0.4)
                                                 Sym { anchors.centerIn: parent; text: "remove"; sz: 12; color: theme.frost }
                                                 MouseArea { id: fmMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: { root.pomoFocusMin = Math.max(5, root.pomoFocusMin-5); root.tmrSaveCfg() } } }
-                                            Text { anchors.verticalCenter: parent.verticalCenter; width: 22; horizontalAlignment: Text.AlignHCenter; text: root.pomoFocusMin; color: theme.text; font.pixelSize: 11; font.family: "Adwaita Sans"; font.bold: true }
+                                            Text { anchors.verticalCenter: parent.verticalCenter; width: 22; horizontalAlignment: Text.AlignHCenter; text: root.pomoFocusMin; color: theme.text; font.pixelSize: 11; font.family: Tok.sans; font.bold: true }
                                             Rectangle { width: 20; height: 20; radius: Tok.r; color: fpMa.containsMouse?theme.a(theme.iris,0.2):theme.a(theme.line,0.4)
                                                 Sym { anchors.centerIn: parent; text: "add"; sz: 12; color: theme.frost }
                                                 MouseArea { id: fpMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: { root.pomoFocusMin = Math.min(120, root.pomoFocusMin+5); root.tmrSaveCfg() } } } }
                                         Row { spacing: 3
-                                            Text { anchors.verticalCenter: parent.verticalCenter; text: "break"; color: theme.sub; font.pixelSize: 10; font.family: "Adwaita Sans" }
+                                            Text { anchors.verticalCenter: parent.verticalCenter; text: "break"; color: theme.sub; font.pixelSize: 10; font.family: Tok.sans }
                                             Rectangle { width: 20; height: 20; radius: Tok.r; color: bmMa.containsMouse?theme.a(theme.iris,0.2):theme.a(theme.line,0.4)
                                                 Sym { anchors.centerIn: parent; text: "remove"; sz: 12; color: theme.frost }
                                                 MouseArea { id: bmMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: { root.pomoBreakMin = Math.max(1, root.pomoBreakMin-1); root.tmrSaveCfg() } } }
-                                            Text { anchors.verticalCenter: parent.verticalCenter; width: 22; horizontalAlignment: Text.AlignHCenter; text: root.pomoBreakMin; color: theme.text; font.pixelSize: 11; font.family: "Adwaita Sans"; font.bold: true }
+                                            Text { anchors.verticalCenter: parent.verticalCenter; width: 22; horizontalAlignment: Text.AlignHCenter; text: root.pomoBreakMin; color: theme.text; font.pixelSize: 11; font.family: Tok.sans; font.bold: true }
                                             Rectangle { width: 20; height: 20; radius: Tok.r; color: bpMa.containsMouse?theme.a(theme.iris,0.2):theme.a(theme.line,0.4)
                                                 Sym { anchors.centerIn: parent; text: "add"; sz: 12; color: theme.frost }
                                                 MouseArea { id: bpMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: { root.pomoBreakMin = Math.min(60, root.pomoBreakMin+1); root.tmrSaveCfg() } } } }
@@ -5724,15 +5827,15 @@ ShellRoot {
                                         color: wcm.containsMouse ? theme.a(theme.line,0.4) : "transparent"
                                         Row { anchors.fill: parent; anchors.leftMargin: 8; anchors.rightMargin: 8; spacing: 8
                                             Sym { anchors.verticalCenter: parent.verticalCenter; text: "public"; sz: 13; color: theme.sub }
-                                            Text { anchors.verticalCenter: parent.verticalCenter; width: parent.width - 120; elide: Text.ElideRight; text: modelData.label; color: theme.text; font.pixelSize: 11; font.family: "Adwaita Sans" }
-                                            Text { anchors.verticalCenter: parent.verticalCenter; text: modelData.day; color: theme.sub; font.pixelSize: 9; font.family: "Adwaita Sans" }
-                                            Text { anchors.verticalCenter: parent.verticalCenter; text: modelData.time; color: theme.frost; font.pixelSize: 12; font.family: "Adwaita Sans"; font.bold: true } }
+                                            Text { anchors.verticalCenter: parent.verticalCenter; width: parent.width - 120; elide: Text.ElideRight; text: modelData.label; color: theme.text; font.pixelSize: 11; font.family: Tok.sans }
+                                            Text { anchors.verticalCenter: parent.verticalCenter; text: modelData.day; color: theme.sub; font.pixelSize: 9; font.family: Tok.sans }
+                                            Text { anchors.verticalCenter: parent.verticalCenter; text: modelData.time; color: theme.frost; font.pixelSize: 12; font.family: Tok.sans; font.bold: true } }
                                         MouseArea { id: wcm; anchors.fill: parent; hoverEnabled: true; acceptedButtons: Qt.NoButton }
                                         Rectangle { anchors.right: parent.right; anchors.rightMargin: 3; anchors.verticalCenter: parent.verticalCenter; visible: wcm.containsMouse
                                             width: 20; height: 20; radius: Tok.r; color: theme.a(theme.bad,0.22)
                                             Sym { anchors.centerIn: parent; text: "close"; sz: 12; color: theme.bad }
                                             MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.wcRemove(modelData.zone) } } } }
-                                Text { visible: root.wcTimes.length===0; text: "add a city below"; color: theme.sub; font.pixelSize: 10; font.family: "Adwaita Sans" }
+                                Text { visible: root.wcTimes.length===0; text: "add a city below"; color: theme.sub; font.pixelSize: 10; font.family: Tok.sans }
                                 Flow { width: parent.width; spacing: 5; topPadding: 2
                                     Repeater { model: root.wcPresets
                                         delegate: Rectangle { required property var modelData
@@ -5741,7 +5844,7 @@ ShellRoot {
                                             color: wcaMa.containsMouse ? theme.a(theme.iris,0.2) : theme.a(theme.line,0.35); border.width: 1; border.color: theme.a(theme.iris,0.18)
                                             Row { id: wcAddRow; anchors.centerIn: parent; spacing: 3
                                                 Sym { anchors.verticalCenter: parent.verticalCenter; text: "add"; sz: 11; color: theme.frost }
-                                                Text { anchors.verticalCenter: parent.verticalCenter; text: modelData.l; color: theme.text; font.pixelSize: 9; font.family: "Adwaita Sans" } }
+                                                Text { anchors.verticalCenter: parent.verticalCenter; text: modelData.l; color: theme.text; font.pixelSize: 9; font.family: Tok.sans } }
                                             MouseArea { id: wcaMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.wcAdd(modelData.z) } } } } } } } }
                     // Same rules as the full power menu (PowerMenu.qml): lock and suspend lose nothing
                     // and act at once; log out, restart and shut down are HELD, a fill sweeping the row
@@ -6124,12 +6227,12 @@ ShellRoot {
                                 spacing: 0
                                 Text {
                                     text: Qt.formatDateTime(clock.date, "HH")
-                                    color: theme.text; font.pixelSize: 13; font.bold: true; font.family: "Adwaita Sans"
+                                    color: theme.text; font.pixelSize: 13; font.bold: true; font.family: Tok.sans
                                     Layout.alignment: Qt.AlignHCenter
                                 }
                                 Text {
                                     text: Qt.formatDateTime(clock.date, "mm")
-                                    color: theme.iris; font.pixelSize: 13; font.bold: true; font.family: "Adwaita Sans"
+                                    color: theme.iris; font.pixelSize: 13; font.bold: true; font.family: Tok.sans
                                     Layout.alignment: Qt.AlignHCenter
                                 }
                             }
@@ -6243,7 +6346,7 @@ ShellRoot {
                     Column { id: pcc; anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top; anchors.margins: 12; anchors.rightMargin: 36; spacing: 3
                         Row { width: parent.width
                             Sym { anchors.verticalCenter: parent.verticalCenter; text: pcard.model.urg===2 ? "priority_high" : "notifications"; sz: 13; color: pcard.model.urg===2 ? theme.bad : theme.frost }
-                            Text { leftPadding: 6; anchors.verticalCenter: parent.verticalCenter; text: pcard.model.appName; color: theme.frost; font.pixelSize: 10; font.family: root.cfgFont; elide: Text.ElideRight; width: parent.width-24 } }
+                            Text { leftPadding: 6; anchors.verticalCenter: parent.verticalCenter; text: pcard.model.appName + (pcard.model.n > 1 ? "  ·  " + pcard.model.n + " new" : ""); color: theme.frost; font.pixelSize: 10; font.family: root.cfgFont; elide: Text.ElideRight; width: parent.width-24 } }
                         Text { width: parent.width; visible: pcard.model.summary!==""; text: pcard.model.summary; color: theme.text; font.pixelSize: 13; font.family: root.cfgFont; font.bold: true; wrapMode: Text.WordWrap }
                         Text { width: parent.width; visible: pcard.model.body!==""; text: pcard.model.body; color: theme.sub; font.pixelSize: 11; font.family: root.cfgFont; wrapMode: Text.WordWrap; maximumLineCount: 4; elide: Text.ElideRight; textFormat: Text.PlainText }
                         // action buttons the app supplied (Reply, Mark as read, …)

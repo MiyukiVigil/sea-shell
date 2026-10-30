@@ -5,3 +5,6 @@ __pycache__/
 
 # Rust build output
 native/sea-fm-core/target/
+
+# local notes for whoever continues the release; not part of the project
+HANDOFF-7.0.md

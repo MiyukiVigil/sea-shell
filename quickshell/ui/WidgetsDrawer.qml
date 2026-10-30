@@ -99,7 +99,9 @@ PanelWindow {
                  { size: "large", face: "dial", l: "With calendar" } ],
         weather: [ { size: "small", l: "Now" }, { size: "medium", l: "Three days" }, { size: "large", l: "With details" } ],
         system: [ { size: "small", l: "Processor" }, { size: "medium", l: "Gauges" }, { size: "large", l: "With details" } ],
-        media: [ { size: "small", l: "Cover" }, { size: "medium", l: "Player" }, { size: "large", l: "Big cover" } ] })
+        media: [ { size: "small", l: "Cover" }, { size: "medium", l: "Player" }, { size: "large", l: "Big cover" } ],
+        calendar: [ { size: "small", l: "Today" }, { size: "medium", l: "Up next" }, { size: "large", l: "Month" } ],
+        battery: [ { size: "small", l: "This computer" }, { size: "medium", l: "Devices" }, { size: "large", l: "With time left" } ] })
     Rectangle {
         id: sheet
         // the shelf's height: a large widget fills it, small and medium ones stand at 62% of it,
@@ -124,7 +126,8 @@ PanelWindow {
                 Text { text: "Widgets"; color: Tok.ink; font.family: Tok.sans; font.pixelSize: 17 * drawer.ui; font.bold: true; Layout.rightMargin: 10 * drawer.ui }
                 Repeater {
                     model: [{ k: "clock", l: "Clock", i: "schedule" }, { k: "weather", l: "Weather", i: "partly_cloudy_day" },
-                            { k: "system", l: "System", i: "monitor_heart" }, { k: "media", l: "Music", i: "graphic_eq" }]
+                            { k: "system", l: "System", i: "monitor_heart" }, { k: "media", l: "Music", i: "graphic_eq" },
+                            { k: "calendar", l: "Calendar", i: "calendar_month" }, { k: "battery", l: "Batteries", i: "battery_full" }]
                     delegate: Rectangle {
                         required property var modelData
                         readonly property bool on: drawer.tab === modelData.k
@@ -239,21 +242,40 @@ PanelWindow {
             Text { text: "Drop here to cancel"; color: drawer.overCancel ? Tok.crit : Tok.ink2; font.family: Tok.sans; font.pixelSize: 12 * drawer.ui; anchors.verticalCenter: parent.verticalCenter } }
     }
 
+    // The handle sits where the drawer comes from: the BOTTOM edge, left of the dock. It used to
+    // be a sliver on the left edge pulled sideways, from when the gallery slid in from the left;
+    // once it rose from the bottom, the gesture and the motion pointed different ways.
     Rectangle {
         id: edgeTab
-        x: 0; y: (drawer.height-height)/2; width: (edgeMouse.containsMouse || edgeMouse.pressed ? 22 : 5) * drawer.ui; height: 44 * drawer.ui
-        radius: 11 * drawer.ui; color: edgeMouse.containsMouse || edgeMouse.pressed ? Tok.surface : "transparent"
-        border.width: edgeMouse.containsMouse || edgeMouse.pressed ? 1 : 0; border.color: Tok.ruleHard
+        readonly property bool hot: edgeMouse.containsMouse || edgeMouse.pressed
+        x: 28 * drawer.ui
+        y: drawer.height - height
+        width: (hot ? tabLabel.implicitWidth + 40 : 44) * drawer.ui
+        height: (hot ? 30 : 5) * drawer.ui
+        radius: hot ? 12 * drawer.ui : height / 2
+        // the resting sliver is a hint of a handle, not a button: barely there until pointed at
+        color: hot ? Tok.surface : Qt.rgba(Tok.ink.r, Tok.ink.g, Tok.ink.b, 0.28)
+        border.width: hot ? 1 : 0; border.color: Tok.ruleHard
         visible: drawer.edgeEnabled && !drawer.opened
-        Text { visible: edgeMouse.containsMouse || edgeMouse.pressed; anchors.centerIn: parent; text: "›"; color: Tok.ink2; font.family: Tok.sans; font.pixelSize: 26 * drawer.ui }
+        Behavior on width { NumberAnimation { duration: Tok.mFast; easing.type: Easing.OutCubic } }
+        Behavior on height { NumberAnimation { duration: Tok.mFast; easing.type: Easing.OutCubic } }
+        Row {
+            anchors.centerIn: parent; spacing: 6 * drawer.ui
+            opacity: edgeTab.hot ? 1 : 0
+            Behavior on opacity { NumberAnimation { duration: Tok.mFast } }
+            Text { text: "widgets"; font.family: "Material Symbols Rounded"; font.pixelSize: 15 * drawer.ui; color: Tok.accent; anchors.verticalCenter: parent.verticalCenter }
+            Text { id: tabLabel; text: "Widgets"; color: Tok.ink; font.family: Tok.sans; font.pixelSize: 12 * drawer.ui; anchors.verticalCenter: parent.verticalCenter }
+        }
         MouseArea {
             id: edgeMouse; hoverEnabled: true
-            anchors.fill: parent; cursorShape: Qt.PointingHandCursor
-            property real startX: 0
-            onPressed: event => { startX = event.x; drawer.dragging = true }
-            onPositionChanged: event => { if (pressed) drawer.pull = Math.min(1,Math.max(0,(event.x-startX)/(sheet.width+24))) }
+            // a few pixels of reach above the sliver, so it can be found without aiming
+            anchors.fill: parent; anchors.topMargin: edgeTab.hot ? 0 : -6 * drawer.ui
+            cursorShape: Qt.PointingHandCursor
+            property real startY: 0
+            onPressed: event => { startY = event.y; drawer.dragging = true }
+            onPositionChanged: event => { if (pressed) drawer.pull = Math.min(1, Math.max(0, (startY - event.y) / (sheet.height + 24))) }
             onReleased: event => {
-                var distance = event.x-startX;
+                var distance = startY - event.y;
                 drawer.dragging = false;
                 if (distance > 64 * drawer.ui || Math.abs(distance) < 6 * drawer.ui) drawer.requested(true);
                 drawer.pull = 0;

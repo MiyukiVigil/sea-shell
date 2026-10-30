@@ -168,6 +168,17 @@ PanelWindow {
         return n ? (sum / n) / 255 : 0;
     }
 
+    // How LIGHT the picture is under a rectangle, 0 (black) to 1 (white); 0.5 when unknown.
+    readonly property var qluma: (root.quiet && root.quiet.luma) ? root.quiet.luma : []
+    function lumaAt(fx, fy, fw, fh) {
+        if (root.qluma.length !== root.qw * root.qh) return 0.5;
+        var x0 = Math.max(0, Math.floor(fx * root.qw)), y0 = Math.max(0, Math.floor(fy * root.qh));
+        var x1 = Math.min(root.qw, Math.ceil((fx + fw) * root.qw)), y1 = Math.min(root.qh, Math.ceil((fy + fh) * root.qh));
+        var sum = 0, n = 0;
+        for (var y = y0; y < y1; y++) for (var x = x0; x < x1; x++) { sum += root.qluma[y * root.qw + x]; n++ }
+        return n ? sum / n / 255 : 0.5;
+    }
+
     // Anything above this is "there is something here". Chosen against the measured library:
     // wallpapers with a subject sit well above it, open sky and water well below.
     readonly property real busyLimit: 0.30
@@ -246,24 +257,34 @@ PanelWindow {
 
         // keep-clear shading, only while arranging. The point is that you can SEE what the
         // shell thinks is in the picture, and disagree with it.
-        Item {
-            anchors.fill: parent
+        //
+        // One 96x54 image, drawn once and stretched smoothly over the screen, so the busy parts
+        // read as a soft shadow over the subject. It was 5184 red squares: a hard-edged grid
+        // that looked like an error, and that much scene for something only seen while dragging.
+        Canvas {
+            id: veil
+            x: 0; y: root.insetTop
+            width: root.qw; height: root.qh
+            transformOrigin: Item.TopLeft
+            transform: Scale { xScale: root.sw / root.qw; yScale: (root.sh - root.insetTop - root.insetBottom) / root.qh }
+            smooth: true
             visible: root.editing && root.haveQuiet
-            opacity: 0.55
-            Repeater {
-                model: root.editing && root.haveQuiet ? root.qw * root.qh : 0
-                delegate: Rectangle {
-                    required property int index
-                    readonly property real v: root.qmap[index] / 255
-                    visible: v > root.busyLimit
-                    x: (index % root.qw) * (root.sw / root.qw)
-                    y: Math.floor(index / root.qw) * ((root.sh - root.insetTop - root.insetBottom) / root.qh) + root.insetTop
-                    width: root.sw / root.qw + 1
-                    height: (root.sh - root.insetTop - root.insetBottom) / root.qh + 1
-                    color: root.pal ? root.pal.a(root.pal.bad, Math.min(0.5, (v - root.busyLimit) * 1.1))
-                                    : Qt.rgba(1, 0.2, 0.2, Math.min(0.5, (v - root.busyLimit) * 1.1))
+            opacity: root.editing ? 1 : 0
+            Behavior on opacity { NumberAnimation { duration: Tok.mBase } }
+            onPaint: {
+                var ctx = getContext("2d");
+                ctx.clearRect(0, 0, width, height);
+                for (var i = 0; i < root.qmap.length; i++) {
+                    var v = root.qmap[i] / 255;
+                    // fades in from a little below the limit, so the edge of a subject is a
+                    // gradient and not a line
+                    var a = Math.max(0, Math.min(0.42, (v - root.busyLimit + 0.08) * 1.1));
+                    if (a <= 0) continue;
+                    ctx.fillStyle = Qt.rgba(0.05, 0.06, 0.1, a);
+                    ctx.fillRect(i % root.qw, Math.floor(i / root.qw), 1, 1);
                 }
             }
+            Connections { target: root; function onQmapChanged() { veil.requestPaint() } function onEditingChanged() { if (root.editing) veil.requestPaint() } }
         }
 
         Repeater {
@@ -281,6 +302,7 @@ PanelWindow {
                 // What the wallpaper is doing under this item, so it can decide whether it
                 // needs a ground at all. Same map, same threshold as the placement nudge.
                 busy: root.busyAt(modelData.x, modelData.y, modelData.w, modelData.h)
+                under: root.lumaAt(modelData.x, modelData.y, modelData.w, modelData.h)
                 history: root.cpuHistory
                 memHistory: root.memHistory
                 gpuHistory: root.gpuHistory

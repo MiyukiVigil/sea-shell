@@ -47,23 +47,35 @@ QUIET = os.path.join(os.environ.get("XDG_CACHE_HOME", os.path.join(HOME, ".cache
 # On a 1080p field these are about 170x170, 360x170 and 360x376.
 FOOTPRINTS = {"small": {"w": 0.0885, "h": 0.17}, "medium": {"w": 0.1875, "h": 0.17},
               "large": {"w": 0.1875, "h": 0.376}}
-DEFAULT_SIZE = {"clock": "small", "weather": "medium", "media": "medium", "system": "medium"}
+DEFAULT_SIZE = {"clock": "small", "weather": "medium", "media": "medium", "system": "medium",
+                "calendar": "medium", "battery": "small"}
 DEFAULTS = {
     "clock":   FOOTPRINTS["small"],
     "weather": FOOTPRINTS["medium"],
     "media":   FOOTPRINTS["medium"],
     "system":  FOOTPRINTS["medium"],
+    "calendar": FOOTPRINTS["medium"],
+    "battery": FOOTPRINTS["small"],
     "launch":  {"w": 0.055, "h": 0.085},
 }
-# Which pre-solved zone list in wallquiet.json best matches each footprint.
+# Which pre-solved zone list in wallquiet.json best matches each footprint. Widgets with a size
+# class use the zone solved for exactly that size; the older generic shapes remain for
+# shortcuts and for a wallquiet.json written before the size zones existed.
 ZONE_FOR = {"clock": "16x9", "weather": "16x9", "media": "16x9",
             "system": "10x10", "launch": "10x10"}
-KINDS = ("clock", "weather", "media", "system")
+
+
+def zone_list(zones, kind, size=None):
+    size = size or DEFAULT_SIZE.get(kind)
+    if size and zones.get(size):
+        return zones[size]
+    return zones.get(ZONE_FOR.get(kind, "16x9"), [])
+KINDS = ("clock", "weather", "media", "system", "calendar", "battery")
 SIZES = {"small": 0.75, "medium": 1.0, "large": 1.4}
 
 
 AUTO_MODES = ("off", "rescue", "arrange")
-FOOTPRINTS_KINDS = ("clock", "weather", "media", "system")
+FOOTPRINTS_KINDS = ("clock", "weather", "media", "system", "calendar", "battery")
 
 
 def auto_arrange():
@@ -148,7 +160,7 @@ def place(kind, items):
         with open(QUIET) as fh:
             q = json.load(fh) or {}
         gw, gh = q.get("gw") or 96, q.get("gh") or 54
-        for z in (q.get("zones") or {}).get(ZONE_FOR.get(kind, "16x9"), []):
+        for z in zone_list(q.get("zones") or {}, kind):
             cand = {"x": clamp(z["x"] / gw, size["w"]),
                     "y": clamp(z["y"] / gh, size["h"]),
                     "w": size["w"], "h": size["h"]}
@@ -225,7 +237,7 @@ def zone_for(q, it, others):
     except Exception:
         return None
     w, h = it.get("w", 0.1), it.get("h", 0.08)
-    for z in zones.get(ZONE_FOR.get(it.get("kind"), "16x9"), []):
+    for z in zone_list(zones, it.get("kind"), it.get("size")):
         nx, ny = clamp(z["x"] / gw, w), clamp(z["y"] / gh, h)
         if any(overlaps({"x": nx, "y": ny, "w": w, "h": h}, o) for o in others):
             continue

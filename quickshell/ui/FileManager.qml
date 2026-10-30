@@ -118,7 +118,7 @@ ApplicationWindow {
     // permissions. Tabular figures stop columns of numbers from shivering as
     // they update.
     readonly property string monoFont: backend && backend.theme && backend.theme.fontMono
-                                       ? backend.theme.fontMono : "Roboto Mono"
+                                       ? backend.theme.fontMono : "JetBrains Mono"
 
     // Category colours and the destructive-action red live in one place so a
     // context-menu glyph can never disagree with the file icon it acts on.

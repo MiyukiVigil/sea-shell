@@ -27,7 +27,7 @@ Singleton {
     property string accentRaw: "#63c7dd"
     property bool   light: false
     property string sans: "Adwaita Sans"
-    property string mono: "Roboto Mono"
+    property string mono: "JetBrains Mono"
     // raw "roundness" from appearance.json — drives the whole radius scale below
     property real   radiusCfg: 14
     property real   cfgScale: 0

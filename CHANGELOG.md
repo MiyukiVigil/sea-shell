@@ -81,6 +81,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   hyprpolkitagent no longer starts at login. The shell starts it as a fallback if it cannot
   register as the agent itself.
+- **Notifications are grouped by app.**
+  - **The centre** shows one card per app: the newest message in full, a line naming the
+    next one, and the rest stacked behind. Click the card to see every message, each with
+    its own dismiss.
+  - **On hover:** mute, dismiss-app and expand controls appear.
+  - **Keyboard,** while the centre is open: ↑↓ moves between apps, ⏎ shows all, Delete
+    dismisses, M mutes, Ctrl+Z undoes.
+  - **Undo:** every dismissal, including "clear all", can be undone for 8 seconds.
+  - **Popups** group too: a new message from an app already on screen replaces its card
+    and shows "3 new", instead of stacking a column of cards.
+- **Two new desktop widgets: Calendar and Batteries.** Both come in all three sizes.
+  - **Calendar:** small is today as a page with the next event. Medium puts the page
+    beside what is coming up. Large adds the month, with dots on days that have events.
+  - **Batteries:** shows this computer and every connected Bluetooth device that reports
+    a level. Small is a ring, medium is a ring per device, and large is a list with time
+    left.
+- **Clear widgets keep their text readable.** The wallpaper map now records how light the
+  picture is under each cell. A widget drawn straight on the photo (the clear look, a bare
+  clock) uses dark text on a light patch and light text on a dark one.
 - **Miku on the power menu.** An animated sticker sits on the card's corner and only plays
   while the menu is open.
 
@@ -102,6 +121,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     hold, replacing "click again".
   - A pending timed shutdown shows here and can be cancelled.
   - "More options" opens the full menu.
+- **Bluetooth, sound, battery and calendar match the Wi-Fi dropdown.** They now share
+  three building blocks (`DropHeader`, `DropSection`, `DropRow`): a title, a status line
+  that says what is happening, section labels, and rows that tint the current choice.
+  - **Bluetooth:** your devices are split from nearby ones. Battery level shows as a
+    reading, and disconnect appears on hover.
+  - **Sound:** outputs are called what they are ("Speakers", "HDMI 1"), with the sound card
+    underneath, instead of four rows that all began "Alder Lake PCH-P High Definition Aud…".
+  - **Battery:** says how long is left, or how long until full, and describes each power
+    profile.
+  - **Calendar:** opens on today's date and your next event.
+- **New default fonts: Inter and JetBrains Mono.** Inter is the interface font and
+  JetBrains Mono is used for numbers, code and the terminal. install.sh installs both. It
+  points fontconfig's `sans-serif` and `monospace` at them (from `conf.d`, so your own
+  fonts.conf still wins) and sets the GTK fonts when they were still on the stock Adwaita
+  or Cantarell. The shell's mono font was Roboto Mono, which was never installed.
+- **The bar's dropdowns follow your font.** 128 places in the bar (and 6 in the media
+  player) had "Adwaita Sans" written in, so they ignored the font chosen in Appearance.
+  They now use it.
+- **Arranging widgets is easier on the eye.** The "busy" parts of the wallpaper show as a
+  soft shadow instead of a grid of red squares. The shadow is one small image stretched
+  smoothly, where it used to be 5,184 rectangles. Each widget gets a light outline instead
+  of a solid frame, so glass and clear widgets still look like themselves while you move
+  them.
+- **The widgets handle is at the bottom.** It sits on the bottom edge, left of the dock,
+  where the drawer actually comes from. Hovering shows a "Widgets" pill; click it or drag
+  it up. It used to be a sliver on the left edge that you pulled sideways.
+- **New widgets land in spaces their own size.** The wallpaper map now works out calm
+  zones for the small, medium and large footprints, instead of three generic shapes.
 - **The global menu has room to breathe.** Menu titles have 10 px of padding on each side
   instead of 7, so "File Edit Selection" no longer runs together. The app's name cell no
   longer squeezes its icon against the edge.

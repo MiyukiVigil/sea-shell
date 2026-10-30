@@ -194,6 +194,7 @@ REPO_PKGS=(
   libnotify python fd ffmpeg imagemagick curl jq kdeconnect # notifications + helpers used by scripts
   zenity                                              # file picker behind KDE Connect "send file"
   ttf-nerd-fonts-symbols                              # brand/distro logo glyphs on the System page
+  inter-font ttf-jetbrains-mono                       # the interface font and the numbers/code font (fontconfig/60-sea-fonts.conf)
   python-hidapi                                       # Moondrop DAC EQ panel (USB-HID control)
   python-pykakasi pypinyin                            # lyrics pronunciation — kana/kanji→romaji, hanzi→pinyin (both offline)
   at-spi2-core python-gobject                         # global menu — the focused window's menu bar, read over accessibility
@@ -377,6 +378,16 @@ do_install() {
     #    Both are edited in place by the control center's lock settings, so they are kept.
     keep_file "$SCRIPT_DIR/hypr/hyprlock.conf" "$CFG/hypr/hyprlock.conf" "edited by Control center → Idle & power"
     keep_file "$SCRIPT_DIR/hypr/hypridle.conf" "$CFG/hypr/hypridle.conf" "edited by Control center → Idle & power"
+    # what "sans-serif" and "monospace" mean for apps that do not choose (conf.d, so a
+    # fonts.conf of the user's own still wins), and the same pair for GTK
+    copy_file "$SCRIPT_DIR/fontconfig/60-sea-fonts.conf" "$CFG/fontconfig/conf.d/60-sea-fonts.conf"
+    fc-cache -f >/dev/null 2>&1 || true
+    if command -v gsettings >/dev/null 2>&1 && gsettings get org.gnome.desktop.interface font-name 2>/dev/null | grep -qE "^'(Adwaita Sans|Cantarell) "; then
+      gsettings set org.gnome.desktop.interface font-name 'Inter 11'
+      gsettings set org.gnome.desktop.interface document-font-name 'Inter 11'
+      gsettings set org.gnome.desktop.interface monospace-font-name 'JetBrains Mono 11'
+      ok "GTK fonts set to Inter / JetBrains Mono"
+    fi
     # 7.0: idle locks go through sea-lock.sh (the Quickshell lock, hyprlock if it fails). A kept
     # hypridle.conf still carries the old default, which would quietly bypass it.
     if grep -q '^ *lock_cmd = pidof hyprlock || hyprlock' "$CFG/hypr/hypridle.conf" 2>/dev/null; then

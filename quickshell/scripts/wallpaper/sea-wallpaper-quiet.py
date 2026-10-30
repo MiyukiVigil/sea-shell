@@ -244,12 +244,22 @@ def main(argv):
     # bar would have to re-parse for a precision the map does not have.
     base["map"] = [max(0, min(255, int(round(v * 255)))) for v in m]
     base["mean"] = round(mean(I, 0, 0, GW, GH), 4)
+    # HOW LIGHT the picture is under each cell, 0-255. A widget with no tile of its own (the
+    # "clear" look, a bare clock) draws its text straight on the photo; this is what tells it
+    # whether that text should be dark or light.
+    base["luma"] = [max(0, min(255, int(round(v * 255)))) for v in
+                    grid(["magick", still, "-colorspace", "Gray", "-resize", "%dx%d!" % (GW, GH),
+                          "-depth", "8", "gray:-"])]
     # A few common widget footprints, pre-solved. 16x9 cells is roughly a 320x180 card on a
     # 1920x1080 screen; the others are a wide strip and a small square.
     base["zones"] = {
         "16x9": quietest(I, 16, 9),
         "24x6": quietest(I, 24, 6),
         "10x10": quietest(I, 10, 10),
+        # the widget size classes themselves (sea-desktop.py FOOTPRINTS on this 96x54 grid)
+        "small": quietest(I, 9, 9),
+        "medium": quietest(I, 18, 9),
+        "large": quietest(I, 18, 20),
     }
     write(base)
     print(json.dumps({"wallpaper": wp, "still": still, "mean": base["mean"],
