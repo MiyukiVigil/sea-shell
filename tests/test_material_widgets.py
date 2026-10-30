@@ -68,7 +68,7 @@ Window { width: 760; height: 680; visible: true; color: "#edeaf3"
 
     def test_calendar_and_batteries_render_in_all_sizes(self):
         uri=(Path(__file__).resolve().parents[1]/'quickshell/ui').as_uri()
-        for kind in ('calendar','batteries'):
+        for kind in ('calendar','battery'):
             for size,width,height in [('s',170,170),('m',360,170),('l',360,376)]:
                 with self.subTest(kind=kind,size=size):
                     engine=QQmlApplicationEngine();errors=[]

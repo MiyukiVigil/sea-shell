@@ -39,5 +39,5 @@ do_install
             self.assertTrue((cfg / 'fontconfig/conf.d/60-sea-fonts.conf').is_file())
             self.assertEqual((cfg / 'sea-shell/before-fonts/font-name').read_text(), "'Cantarell 11'\n")
             dest = cfg / 'quickshell/sea-shell'
-            for name in ['LockSurface.qml', 'PowerMenu.qml', 'PolkitDialog.qml', 'NotifGroup.qml', 'BatteryRing.qml', 'power-miku.gif', 'sea-whats-new.py']:
+            for name in ['LockSurface.qml', 'PowerMenu.qml', 'PolkitDialog.qml', 'NotifGroup.qml', 'BatteryRing.qml', 'sea-whats-new.py']:
                 self.assertTrue((dest / name).is_file(), name)

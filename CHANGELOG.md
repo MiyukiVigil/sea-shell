@@ -130,8 +130,9 @@ handle navigation and restoration more reliably.
 - **Clear widgets keep their text readable.** The wallpaper map now records how light the
   picture is under each cell. A widget drawn straight on the photo (the clear look, a bare
   clock) uses dark text on a light patch and light text on a dark one.
-- **Miku on the power menu.** An animated sticker sits on the card's corner and only plays
-  while the menu is open.
+- **Stickers.** Put a picture of your own on the corner of the power menu and the media
+  dropdown in Settings → Appearance → theme → stickers. None by default; a GIF moves while
+  its panel is open.
 
 ### Changed
 
@@ -182,6 +183,10 @@ handle navigation and restoration more reliably.
 - **The global menu has room to breathe.** Menu titles have 10 px of padding on each side
   instead of 7, so "File Edit Selection" no longer runs together. The app's name cell no
   longer squeezes its icon against the edge.
+- **A new logo.** A moon setting over the sea, drawn in your theme colours: the sea takes the
+  wallpaper accent and the sunset stays warm. It replaces the three waves everywhere sea-shell
+  draws its own mark.
+- **A shorter README**, led by pictures.
 
 ### Fixed
 
@@ -193,6 +198,19 @@ handle navigation and restoration more reliably.
   nothing.** Two IPC handlers both claimed the `shell` target. Quickshell keeps only one
   handler per target, and the one with just `reload` was the one it kept. They are now one
   handler.
+- **Settings opens and closes in one piece.** The panel was laid out against its one-pixel
+  closed size, so every open rebuilt all 24 pages in view; it now keeps its size while
+  closed. It also fades as one picture: before, each part faded on its own and the parts
+  behind showed through, and closing greyed out every control for the length of the fade.
+- **Settings tabs answer the first click.** A tap that moved by a pixel was read as scrolling
+  the sidebar.
+- **Reloading the shell no longer wipes notification history.** A notification arriving while
+  history was still loading saved an empty list over it.
+- **System and battery widgets update smoothly.** Gauges sweep to new readings instead of
+  flashing as they were rebuilt.
+- **`sea-bar-supervisor.sh --restart` brings the bar back.** It stopped the bar and then failed
+  to start the new one.
+- **Quickshell's "Config reloaded" card no longer sticks on screen.**
 
 ## [6.5.0] - 2026-08-26
 

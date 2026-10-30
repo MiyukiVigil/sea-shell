@@ -372,8 +372,11 @@ Rectangle {
         id: g
         property real amount: 0
         property real thickness: 8
+        // what is drawn: eases toward amount so a new reading sweeps rather than jumps
+        property real shown: amount
+        Behavior on shown { NumberAnimation { duration: 600; easing.type: Easing.OutCubic } }
         property color tone: amount >= 85 ? "#e5534b" : amount >= 65 ? "#d9a440" : card.accent
-        onAmountChanged: requestPaint(); onWidthChanged: requestPaint(); onToneChanged: requestPaint()
+        onShownChanged: requestPaint(); onWidthChanged: requestPaint(); onToneChanged: requestPaint()
         Connections { target: card; function onContainerChanged() { g.requestPaint() } }
         onPaint: {
             var c = getContext("2d"), r = width / 2 - thickness / 2 - 1, cx = width / 2, cy = height / 2;
@@ -382,7 +385,7 @@ Rectangle {
             if (r <= 0) return;             // not laid out yet
             c.lineWidth = thickness; c.lineCap = "round";
             c.beginPath(); c.arc(cx, cy, r, start, start + sweep); c.strokeStyle = card.container; c.stroke();
-            if (amount > 0.5) { c.beginPath(); c.arc(cx, cy, r, start, start + sweep * amount / 100); c.strokeStyle = g.tone; c.stroke() }
+            if (shown > 0.5) { c.beginPath(); c.arc(cx, cy, r, start, start + sweep * shown / 100); c.strokeStyle = g.tone; c.stroke() }
         }
     }
     Item {
@@ -396,7 +399,7 @@ Rectangle {
             Gauge { id: bigGauge; anchors.centerIn: parent; anchors.verticalCenterOffset: -6 * card.u
                 width: Math.min(parent.width, parent.height) * .92; height: width; thickness: 11 * card.u; amount: card.gauges[0].v
                 Column { anchors.centerIn: parent; spacing: 0
-                    Label { anchors.horizontalCenter: parent.horizontalCenter; text: Math.round(card.gauges[0].v) + "%"; font.pixelSize: 26 * card.u; font.weight: Font.DemiBold; font.features: { "tnum": 1 } }
+                    Label { anchors.horizontalCenter: parent.horizontalCenter; text: Math.round(bigGauge.shown) + "%"; font.pixelSize: 26 * card.u; font.weight: Font.DemiBold; font.features: { "tnum": 1 } }
                     Label { anchors.horizontalCenter: parent.horizontalCenter; text: "CPU"; color: card.secondary; font.pixelSize: 10 * card.u; font.weight: Font.DemiBold }
                 } }
             Label { anchors.horizontalCenter: parent.horizontalCenter; anchors.bottom: parent.bottom
@@ -411,16 +414,19 @@ Rectangle {
                 Layout.fillWidth: true; Layout.preferredHeight: card.cls === "l" ? 130 * card.u : -1; Layout.fillHeight: card.cls !== "l"
                 spacing: 8 * card.u
                 Repeater {
-                    model: card.gauges
+                    // a count, not the array: gauges is rebuilt on every reading, and an array model
+                    // would recreate each canvas (blank for a frame) instead of updating it
+                    model: card.gauges.length
                     delegate: Item {
-                        required property var modelData
+                        required property int index
+                        readonly property var reading: card.gauges[index] || { v: 0, l: "" }
                         Layout.fillWidth: true; Layout.fillHeight: true
                         Gauge { id: gg; anchors.centerIn: parent; width: Math.min(parent.width, parent.height); height: width
-                            thickness: 9 * card.u; amount: modelData.v
+                            thickness: 9 * card.u; amount: reading.v
                             Column { anchors.centerIn: parent; spacing: 0
-                                Label { anchors.horizontalCenter: parent.horizontalCenter; text: Math.round(modelData.v) + "%"
+                                Label { anchors.horizontalCenter: parent.horizontalCenter; text: Math.round(gg.shown) + "%"
                                     font.pixelSize: 19 * card.u; font.weight: Font.DemiBold; font.features: { "tnum": 1 } }
-                                Label { anchors.horizontalCenter: parent.horizontalCenter; text: modelData.l; color: card.secondary
+                                Label { anchors.horizontalCenter: parent.horizontalCenter; text: reading.l; color: card.secondary
                                     font.pixelSize: 9 * card.u; font.weight: Font.DemiBold }
                             } }
                     }
@@ -659,7 +665,8 @@ Rectangle {
             Repeater {
                 model: card.events.slice(0, card.cls === "l" ? 5 : 3)
                 delegate: Row {
-                    required property var modelData
+                    required property int index
+                    readonly property var modelData: card.batItems[index] || { p: 0, i: "", n: "" }
                     width: parent.width; spacing: 8 * card.u
                     Rectangle { width: 3 * card.u; height: 30 * card.u; radius: width / 2; color: card.accent }
                     Column {
@@ -701,9 +708,11 @@ Rectangle {
             visible: card.cls === "m" && card.batItems.length > 0
             anchors.centerIn: parent; spacing: 16 * card.u
             Repeater {
-                model: card.cls === "m" ? card.batItems.slice(0, 4) : []
+                // a count, not a slice: batItems is rebuilt on every reading, see the system gauges
+                model: card.cls === "m" ? Math.min(card.batItems.length, 4) : 0
                 delegate: Column {
-                    required property var modelData
+                    required property int index
+                    readonly property var modelData: card.batItems[index] || { p: 0, i: "", n: "" }
                     spacing: 8 * card.u
                     BatteryRing { anchors.horizontalCenter: parent.horizontalCenter; width: 62 * card.u; height: width; stroke: 5 * card.u; ink: card.ink; track: card.batTrack
                         value: modelData.p; icon: modelData.i; tint: card.batTone(modelData) }
@@ -719,9 +728,11 @@ Rectangle {
             Header { icon: "battery_full"; text: "Batteries" }
             Label { visible: text !== ""; text: card.batEta(); color: card.secondary; font.pixelSize: 12 * card.u }
             Repeater {
-                model: card.cls === "l" ? card.batItems.slice(0, 5) : []
+                // a count, not a slice: batItems is rebuilt on every reading, see the system gauges
+                model: card.cls === "l" ? Math.min(card.batItems.length, 5) : 0
                 delegate: Row {
-                    required property var modelData
+                    required property int index
+                    readonly property var modelData: card.batItems[index] || { p: 0, i: "", n: "" }
                     width: parent.width; spacing: 12 * card.u
                     BatteryRing { width: 40 * card.u; height: width; stroke: 4 * card.u; ink: card.ink; track: card.batTrack; value: modelData.p; icon: modelData.i; tint: card.batTone(modelData) }
                     Column {

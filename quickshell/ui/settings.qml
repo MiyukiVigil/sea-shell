@@ -1314,6 +1314,9 @@ Scope {
     ]
     property string apBarLogo:  "auto"      // auto | sea | cachy | <distro> | custom
     property string apBarLogoPath: ""
+    // optional pictures stuck on the power menu and the media dropdown; none unless chosen
+    property string apStickerPower: ""
+    property string apStickerMedia: ""
     readonly property var barLogoChoices: [
         { k: "auto",        l: "auto" },
         { k: "sea",         l: "sea-shell" },
@@ -2276,6 +2279,8 @@ Scope {
             if(j.wsLabel!==undefined && (""+j.wsLabel).length>0) root.apWsLabel=""+j.wsLabel;
             if(j.barLogo!==undefined && (""+j.barLogo).length>0) root.apBarLogo=""+j.barLogo;
             if(j.barLogoPath!==undefined) root.apBarLogoPath=""+j.barLogoPath;
+            root.apStickerPower = j.stickerPower ? ""+j.stickerPower : "";
+            root.apStickerMedia = j.stickerMedia ? ""+j.stickerMedia : "";
             if(j.welcomed!==undefined) root.apWelcomed=!!j.welcomed;
             if(j.autoHide!==undefined) root.apAutoHide=!!j.autoHide;
             if(j.hideFullscreen!==undefined) root.apHideFullscreen=!!j.hideFullscreen;
@@ -2526,6 +2531,8 @@ Scope {
             wsLabel:         root.apWsLabel,
             barLogo:         root.apBarLogo,
             barLogoPath:     root.apBarLogoPath,
+            stickerPower:    root.apStickerPower,
+            stickerMedia:    root.apStickerMedia,
             welcomed:        root.apWelcomed,
             autoHide:        root.apAutoHide,
             hideFullscreen:  root.apHideFullscreen,
@@ -3646,7 +3653,9 @@ Scope {
                 font.family: Tok.sans; font.weight: tb.sel ? 600 : 400
                 elide: Text.ElideRight; Layout.fillWidth: true }
         }
-        MouseArea { id: tbm; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.tab = tb.idx }
+        // preventStealing: the sidebar is a Flickable, and a tap that moved a pixel was taken as the
+        // start of a drag, so the click never arrived and a tab needed two or three tries
+        MouseArea { id: tbm; anchors.fill: parent; hoverEnabled: true; preventStealing: true; cursorShape: Qt.PointingHandCursor; onClicked: root.tab = tb.idx }
     }
 
     // macOS separates the sidebar's groups with space, not headings.
@@ -3741,17 +3750,29 @@ Scope {
             // sidebar and the content compete for a window that has been told not to grow.
             // Still clamped to fit, and still capped so it never becomes a full-screen wall
             // of controls on a 4K panel.
-            width: Math.min(parent.width / panel.ui - 60, 1240)
-            height: Math.min(parent.height / panel.ui - 60, 880)
+            //
+            // Sized from the SCREEN, not the window: closed, the window is one pixel, and a card
+            // sized from it collapsed to nothing, so every open laid all 24 pages out again from
+            // scratch while you watched them assemble. The screen does not change while closed.
+            width: Math.min((panel.screen ? panel.screen.width : parent.width) / panel.ui - 60, 1240)
+            height: Math.min((panel.screen ? panel.screen.height : parent.height) / panel.ui - 60, 880)
             radius: Tok.rCard
             // fade in once the saved palette is read — no default sea-cyan flash first
             opacity: settingsMotion.progress
-            enabled: root.shown
             scale: 0.975 + 0.025 * settingsMotion.progress
             transform: Translate { y: 18 * (1 - settingsMotion.progress) }
+            // Drawn as one picture while it fades. Without a layer Qt fades every item on its
+            // own, so mid-fade each background turns see-through and the parts stacked behind
+            // it show: the panel looked like it was assembling and coming apart. Only during
+            // the fade, so the open panel keeps drawing straight to the window.
+            layer.enabled: settingsMotion.progress > 0 && settingsMotion.progress < 1
+            layer.smooth: true
             color: Tok.surface
             border.width: 1; border.color: Tok.ruleHard
             MouseArea { anchors.fill: parent }
+            // Closing takes clicks away with a cover, not `enabled: false`: disabling the card
+            // flipped every switch, chip and slider to its greyed look the instant it closed.
+            MouseArea { anchors.fill: parent; z: 1000; visible: !root.shown; hoverEnabled: true; acceptedButtons: Qt.AllButtons }
 
             // ---------------- sidebar (anchored, fixed width) ----------------
             // The tab list SCROLLS. It used to be one fixed-height ColumnLayout anchored top and
@@ -3843,7 +3864,7 @@ Scope {
                         Behavior on color { ColorAnimation { duration: Tok.mFast } }
                         ProfileCard { id: meCard; width: parent.width; compact: true; flat: true
                             profile: root.userProfile; subtitle: "profile & lock screen" }
-                        MouseArea { id: meMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.tab = 23 }
+                        MouseArea { id: meMa; anchors.fill: parent; hoverEnabled: true; preventStealing: true; cursorShape: Qt.PointingHandCursor; onClicked: root.tab = 23 }
                     }
                 }
 
@@ -4835,7 +4856,7 @@ Scope {
                                             Sym { text: modelData.i; sz: 14; color: sel ? theme.bg : theme.frost }
                                             Text { text: modelData.l; color: sel ? theme.bg : theme.text; font.pixelSize: 11; font.family: root.apFont; font.bold: sel }
                                         }
-                                        MouseArea { id: subMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.apSubTab = modelData.k }
+                                        MouseArea { id: subMa; anchors.fill: parent; hoverEnabled: true; preventStealing: true; cursorShape: Qt.PointingHandCursor; onClicked: root.apSubTab = modelData.k }
                                     }
                                 }
                             }
@@ -4942,6 +4963,38 @@ Scope {
                                 }
                                 Text { Layout.leftMargin: 14; text: root.iconApplyState || "Some running applications need reopening to refresh their icons."
                                     color: root.iconApplyFailed ? theme.bad : theme.faint; font.pixelSize: 10; font.family: Tok.sans }
+
+                                // A picture of your choosing stuck on the corner of the power menu and the
+                                // media dropdown (a GIF moves while the panel is open). None by default.
+                                Section { title: "stickers"; icon: "add_reaction" }
+                                Repeater {
+                                    model: [{ k: "power", l: "power menu" }, { k: "media", l: "media" }]
+                                    delegate: RowLayout {
+                                        required property var modelData
+                                        readonly property string path: modelData.k === "power" ? root.apStickerPower : root.apStickerMedia
+                                        function setPath(f) {
+                                            if (modelData.k === "power") root.apStickerPower = f; else root.apStickerMedia = f;
+                                            root.saveAppearance();
+                                        }
+                                        Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; spacing: 10
+                                        Text { text: modelData.l; color: theme.sub; font.pixelSize: 12; font.family: Tok.mono; Layout.minimumWidth: 90 }
+                                        Rectangle {
+                                            Layout.fillWidth: true; implicitHeight: 34; radius: Tok.r
+                                            color: theme.a(theme.line, 0.4)
+                                            border.width: 1; border.color: theme.a(theme.iris, 0.16)
+                                            Text {
+                                                anchors { fill: parent; leftMargin: 12; rightMargin: 12 }
+                                                verticalAlignment: Text.AlignVCenter
+                                                text: parent.parent.path.length ? parent.parent.path : "none"
+                                                color: parent.parent.path.length ? theme.text : theme.faint
+                                                font.pixelSize: 11; font.family: Tok.mono; elide: Text.ElideLeft
+                                            }
+                                        }
+                                        Chip { label: "choose…"; icon: "folder_open"
+                                            onPicked: root.pickFile(modelData.l + " sticker", "*.gif *.png *.webp *.jpg *.jpeg", function (f) { parent.setPath(f) }) }
+                                        Chip { visible: parent.path.length > 0; label: "remove"; icon: "close"; onPicked: parent.setPath("") }
+                                    }
+                                }
                             }
 
                             // SUB-TAB 1: Colors

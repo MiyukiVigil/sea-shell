@@ -8,3 +8,11 @@ native/sea-fm-core/target/
 
 # local notes for whoever continues the release; not part of the project
 HANDOFF-7.0.md
+
+# Local Cloudflare deployment state
+website
+docs
+scripts
+# personal stickers (power menu / media) are chosen in Settings and live in ~/.config/sea-shell/stickers
+*miku*.gif
+quickshell/assets/*.gif

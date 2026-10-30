@@ -37,10 +37,10 @@ Window { width:620;height:300;visible:true;color:"#f5f3f8"
             self.assertIsNotNone(spectrum)
             QTest.qWait(100);self.assertGreater(spectrum.height(),2)
             frame.setProperty('active',False);QTest.qWait(120);self.assertEqual(spectrum.height(),2)
-            w.setWidth(748);frame.setProperty('active',True);frame.setProperty('mascotSource',QUrl.fromLocalFile(str(Path(__file__).resolve().parents[1]/'quickshell/assets/media-miku.gif')))
+            w.setWidth(748);frame.setProperty('active',True);frame.setProperty('mascotSource',QUrl.fromLocalFile(str(Path(__file__).resolve().parent/'fixtures'/'sticker.gif')))
             APP.processEvents();QTest.qWait(100)
             mascot=find(frame,'mediaMascot')
-            self.assertEqual(mascot.property('frameCount'),192)
+            self.assertEqual(mascot.property('frameCount'),4)
             for tab in range(3):
                 frame.setProperty('selectedTab',tab);APP.processEvents();self.assertTrue(mascot.isVisible())
             frame.setProperty('reducedMotion',True);APP.processEvents();self.assertFalse(mascot.property('playing'))

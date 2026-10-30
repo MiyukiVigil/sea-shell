@@ -33,7 +33,9 @@ if [ "$1" = "--restart" ]; then
             i=$((i + 1)); sleep 0.1
         done
     fi
-    exec "$0"
+    # through sh: the script is installed without the execute bit, and a failed exec here
+    # would leave the old bar stopped with nothing taking its place
+    exec sh "$0"
 fi
 
 # ---- single instance, keyed to THIS Hyprland session ------------------------

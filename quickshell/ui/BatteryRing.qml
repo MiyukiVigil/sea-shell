@@ -12,6 +12,9 @@ Item {
     property color track: Qt.rgba(0.5, 0.5, 0.5, 0.22)
     property color ink: "white"
     property real stroke: 5
+    // what is drawn: eases toward value so a new reading sweeps rather than jumps
+    property real shown: value
+    Behavior on shown { NumberAnimation { duration: 600; easing.type: Easing.OutCubic } }
     Shape {
         anchors.fill: parent
         preferredRendererType: Shape.CurveRenderer
@@ -24,7 +27,7 @@ Item {
             strokeColor: ring.tint; strokeWidth: ring.stroke
             fillColor: "transparent"; capStyle: ShapePath.RoundCap
             PathAngleArc { centerX: ring.width / 2; centerY: ring.height / 2; radiusX: ring.width / 2 - ring.stroke / 2; radiusY: radiusX
-                startAngle: -90; sweepAngle: 3.6 * Math.max(1, Math.min(100, ring.value)) }
+                startAngle: -90; sweepAngle: 3.6 * Math.max(1, Math.min(100, ring.shown)) }
         }
     }
     Text {

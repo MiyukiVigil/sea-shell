@@ -20,6 +20,10 @@ import QtQuick.Layouts
 ShellRoot {
     id: root
 
+    // Quickshell's own "Config reloaded" card: the shell reloads itself on every update and
+    // file sync, so the card only gets in the way (and can stick on screen). Failures still show.
+    Connections { target: Quickshell; function onReloadCompleted() { Quickshell.inhibitReloadPopup() } }
+
     property var userProfile: ({})
     FileView { path: Quickshell.env("HOME") + "/.config/sea-shell/profile.json"; watchChanges: true
         onLoaded: { try { root.userProfile = JSON.parse(text()) } catch(e){} }
@@ -107,7 +111,7 @@ ShellRoot {
     Launcher { id: launcher }
     // The power menu lives here so SUPER+ESC opens it at once (sea-toggle.sh power → this IPC);
     // power.qml runs the same component on its own only when the shell is down.
-    PowerMenu { id: powerMenu }
+    PowerMenu { id: powerMenu; sticker: root.stickerUrl(root.cfgStickerPower) }
 
     // ---------- polkit: the shell answers "allow this change?" itself ----------
     // Only one agent can serve a session. hyprpolkitagent is no longer started at login; if
@@ -1002,6 +1006,10 @@ ShellRoot {
     property string cfgWsLabel:  "arabic"   // what the workspace is CALLED on the bar
     property string cfgBarLogo:  "auto"     // auto | sea | cachy | <distro glyph> | custom
     property string cfgBarLogoPath: ""
+    // pictures chosen in Settings → Appearance → stickers; empty means none
+    property string cfgStickerPower: ""
+    property string cfgStickerMedia: ""
+    function stickerUrl(path) { return path.length ? (path.indexOf("://") > 0 ? path : "file://" + path) : "" }
 
     // /etc/os-release, read synchronously — the mark is on the first frame or it is a flash.
     // Same reasoning as the palette; see the FileView above.
@@ -1278,6 +1286,8 @@ ShellRoot {
             if (j.wsLabel !== undefined && (""+j.wsLabel).length > 0) root.cfgWsLabel = ""+j.wsLabel;
             if (j.barLogo !== undefined && (""+j.barLogo).length > 0) root.cfgBarLogo = ""+j.barLogo;
             if (j.barLogoPath !== undefined) root.cfgBarLogoPath = ""+j.barLogoPath;
+            root.cfgStickerPower = j.stickerPower ? ""+j.stickerPower : "";
+            root.cfgStickerMedia = j.stickerMedia ? ""+j.stickerMedia : "";
             if (j.autoHide !== undefined) root.cfgAutoHide = !!j.autoHide;
             if (j.hideFullscreen !== undefined) root.cfgHideFullscreen = !!j.hideFullscreen;
             if (j.night !== undefined) root.cfgNight = !!j.night;
@@ -2648,7 +2658,11 @@ ShellRoot {
             "import sys,os,pathlib; p=pathlib.Path(os.path.expanduser('~/.config/sea-shell'))/sys.argv[1]; p.parent.mkdir(parents=True,exist_ok=True); p.write_text(sys.argv[2])",
             name, content]);
     }
-    function saveNotes() { root.writeCfg("notif-history.json", JSON.stringify(root.notes)); }
+    // History starts empty and is read from disk a moment later. Anything that saves in that
+    // window (a popup expiring during a reload) would write the empty list over the file, so
+    // saving waits until the read has finished.
+    property bool notesLoaded: false
+    function saveNotes() { if (root.notesLoaded) root.writeCfg("notif-history.json", JSON.stringify(root.notes)); }
     function saveMutes() { root.writeCfg("notif-mutes.json", JSON.stringify(root.mutedApps)); }
     function isMuted(app) { return root.mutedApps.indexOf(app) >= 0; }
     function toggleMute(app) {
@@ -2661,8 +2675,11 @@ ShellRoot {
     Process { running: true; command: ["sh","-c","cat ~/.config/sea-shell/notif-history.json 2>/dev/null || echo '[]'"]
         stdout: StdioCollector { id: histOut; onStreamFinished: {
             try { var a = JSON.parse(histOut.text.trim()||"[]");
-                if (Array.isArray(a)) { root.notes = a.slice(0,40);
-                    var mx = 0; for (var i=0;i<a.length;i++) if ((a[i].key||0) > mx) mx = a[i].key; root.noteSeq = mx; } } catch(e) {} } } }
+                if (Array.isArray(a)) {
+                    // keep anything that arrived before the read finished, newest first
+                    root.notes = root.notes.concat(a).slice(0,40);
+                    var mx = 0; for (var i=0;i<root.notes.length;i++) if ((root.notes[i].key||0) > mx) mx = root.notes[i].key; root.noteSeq = Math.max(root.noteSeq, mx); } } catch(e) {}
+            root.notesLoaded = true; root.saveNotes() } } }
     Process { running: true; command: ["sh","-c","cat ~/.config/sea-shell/notif-mutes.json 2>/dev/null || echo '[]'"]
         stdout: StdioCollector { id: muteOut; onStreamFinished: {
             try { var a = JSON.parse(muteOut.text.trim()||"[]"); if (Array.isArray(a)) root.mutedApps = a; } catch(e) {} } } }
@@ -4262,7 +4279,7 @@ ShellRoot {
                     MediaPlayerFrame {
                         uiFont: Tok.sans
                         id: mediaFrame; anchors.fill: mprisDrop.card
-                        player: root.player; mascotSource: Qt.resolvedUrl("media-miku.gif"); selectedTab: root.mediaTab; viz: root.vizBars; active: mprisDrop.shown; reducedMotion: Tok.reducedMotion
+                        player: root.player; mascotSource: root.stickerUrl(root.cfgStickerMedia); selectedTab: root.mediaTab; viz: root.vizBars; active: mprisDrop.shown; reducedMotion: Tok.reducedMotion
                         ink: Tok.ink; secondary: Tok.ink2; accent: Tok.accent; wash: Tok.accentWash; rule: Tok.rule
                         onSelected: tab => root.mediaTab = tab
                     }

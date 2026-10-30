@@ -18,6 +18,8 @@ Scope {
     // Kept in the shell (shell.qml) so it opens at once; power.qml wraps it for when the shell
     // is not running. open() re-reads everything it shows, since it stays loaded between uses.
     property bool shown: false
+    // a picture stuck on the card's corner, chosen in Settings → Appearance → stickers
+    property url sticker: ""
     signal closed()
     function open() {
         // Select the active output each time; the warm surface otherwise stays on its first output.
@@ -399,12 +401,13 @@ Scope {
                 color: Qt.rgba(1, 1, 1, 0.55)
                 font.pixelSize: 12; font.family: Tok.sans
             }
-            // Miku, stuck on the card's corner like a sticker; she only moves while the menu is up
+            // the chosen sticker on the card's corner; a GIF only moves while the menu is up
             AnimatedImage {
+                visible: root.sticker.toString().length > 0
                 anchors.right: card.right; anchors.rightMargin: -30
                 anchors.top: card.top; anchors.topMargin: -38
                 width: 96; height: 96; rotation: 8
-                source: Qt.resolvedUrl("power-miku.gif")
+                source: root.sticker
                 playing: root.shown && !Tok.reducedMotion
                 fillMode: Image.PreserveAspectFit; smooth: true
                 layer.enabled: true
