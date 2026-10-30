@@ -10,7 +10,9 @@ hl.env("QT_QPA_PLATFORMTHEME", "gtk3")
 hl.config({ render = { direct_scanout = 0 } })
 
 -- Never expose Hyprland's built-in image while the wallpaper service starts.
-hl.config({ misc = { disable_hyprland_logo = true, disable_splash_rendering = true } })
+-- allow_session_lock_restore: if the lock screen (lock.qml) dies, the session stays locked and
+-- sea-lock.sh starts hyprlock on it; without this Hyprland refuses the second locker.
+hl.config({ misc = { disable_hyprland_logo = true, disable_splash_rendering = true, allow_session_lock_restore = true } })
 
 hl.config({
     general = {
@@ -96,6 +98,7 @@ hl.layer_rule({ match = { namespace = "sea-shell:launcher" }, blur = false, igno
 hl.layer_rule({ match = { namespace = "sea-shell:drop" },     no_anim = true })
 hl.layer_rule({ match = { namespace = "sea-shell:launcher" }, no_anim = true })
 hl.layer_rule({ match = { namespace = "sea-shell:settings" }, no_anim = true })
+hl.layer_rule({ match = { namespace = "sea-shell:power" },    no_anim = true })
 
 -- float the little wifi-password terminal in the centre
 hl.window_rule({ match = { class = "^(sea-wifi)$" }, float = true, size = { 560, 240 }, center = true })

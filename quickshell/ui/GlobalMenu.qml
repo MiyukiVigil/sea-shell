@@ -555,7 +555,9 @@ Item {
         return ("" + k).replace(/(^|\+)([a-z])$/,
                                 function (m, p, c) { return p + c.toUpperCase() });
     }
-    function cellW(label) { return Math.ceil(root.textW(label)) + 14 }
+    // 10 px a side: at 7 the labels ran into each other ("File Edit Selection View") and
+    // read as one string rather than separate menus
+    function cellW(label) { return Math.ceil(root.textW(label)) + 20 }
 
     // The name's own cell: a touch more room after it than between two menus, because it is
     // a different kind of thing and the gap is what says so.
@@ -563,7 +565,7 @@ Item {
     // width -- the old figure covered the text and two pixels, which was already
     // tight and would have clipped a real icon.
     readonly property real nameW: root.appName.length
-                                  ? Math.ceil(fmName.advanceWidth(root.appName)) + 26 : 0
+                                  ? Math.ceil(fmName.advanceWidth(root.appName)) + 15 + 6 + 20 : 0   // icon + gap + 10 px a side
 
     // Rows breathe a little more than they used to (22 → 24) and the card is padded to
     // match. A menu is a list you scan, and the thing that makes a list scannable is the
@@ -783,7 +785,7 @@ Item {
 
             Row {
                 anchors.centerIn: parent
-                spacing: 5
+                spacing: 6
                 IconImage {
                     id: appPixmap
                     anchors.verticalCenter: parent.verticalCenter

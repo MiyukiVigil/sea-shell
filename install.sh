@@ -377,6 +377,12 @@ do_install() {
     #    Both are edited in place by the control center's lock settings, so they are kept.
     keep_file "$SCRIPT_DIR/hypr/hyprlock.conf" "$CFG/hypr/hyprlock.conf" "edited by Control center → Idle & power"
     keep_file "$SCRIPT_DIR/hypr/hypridle.conf" "$CFG/hypr/hypridle.conf" "edited by Control center → Idle & power"
+    # 7.0: idle locks go through sea-lock.sh (the Quickshell lock, hyprlock if it fails). A kept
+    # hypridle.conf still carries the old default, which would quietly bypass it.
+    if grep -q '^ *lock_cmd = pidof hyprlock || hyprlock' "$CFG/hypr/hypridle.conf" 2>/dev/null; then
+      sed -i 's@^\( *\)lock_cmd = pidof hyprlock || hyprlock.*$@\1lock_cmd = ~/.config/quickshell/sea-shell/sea-lock.sh --now     # one locker only; hyprlock if it fails@' "$CFG/hypr/hypridle.conf"
+      ok "hypridle now locks with the sea-shell lock screen"
+    fi
   fi
 
   # 3) wallpaper: install the repo one if present; --wallpaper regenerates it

@@ -3684,11 +3684,22 @@ Scope {
     onApSubTabChanged: if (root.shown) pageArrival.restart()
 
     // ============ window ============
+    // KEPT WARM. Hiding the window threw away its surface and graphics, and making them again
+    // took 160-220 ms before the first frame on every open (measured), which is the lag you
+    // felt. So closed, the window stays mapped but shrinks to one transparent pixel in the
+    // corner that takes no input or keys; opening only grows it back. (This also ends the
+    // remap that SddmPreview.qml had to unload its theme around.)
     PanelWindow {
         id: panel
-        visible: !root.authenticationPending && (root.shown || settingsMotion.presenting)
+        readonly property bool live: root.shown || settingsMotion.presenting
+        visible: !root.authenticationPending
         WlrLayershell.namespace: "sea-shell:settings"
-        anchors { top: true; bottom: true; left: true; right: true }
+        anchors { top: true; left: true; bottom: panel.live; right: panel.live }
+        implicitWidth: 1; implicitHeight: 1
+        // two regions, not null: a null mask cannot be assigned back, so the window stayed click-through once opened
+        mask: panel.live ? allInput : noInput
+        Region { id: noInput }
+        Region { id: allInput; item: panel.contentItem }
         color: "transparent"
         WlrLayershell.layer: WlrLayer.Overlay
         WlrLayershell.keyboardFocus: root.shown ? WlrKeyboardFocus.Exclusive : WlrKeyboardFocus.None
@@ -3700,7 +3711,7 @@ Scope {
         // was shrunk with everything else: at a UI scale below 1× the dim only covered the
         // middle of the screen and left a bright frame round it (and clicks on that frame
         // fell through instead of closing).
-        Rectangle { anchors.centerIn: parent; width: panel.width / panel.ui; height: panel.height / panel.ui
+        Rectangle { anchors.centerIn: parent; width: panel.contentItem.width / panel.ui; height: panel.contentItem.height / panel.ui
             opacity: settingsMotion.progress
             color: Qt.rgba(0, 0, 0, 0.5); MouseArea { anchors.fill: parent; onClicked: root.closePanel() } }
         Item { anchors.fill: parent; focus: root.shown; Keys.onEscapePressed: root.closePanel() }

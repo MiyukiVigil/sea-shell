@@ -9,6 +9,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A new lock screen, built into sea-shell.** The lock is now `lock.qml`, a Quickshell
+  session lock that looks like the login screen it hands back to. It has two states:
+  - **Clock.** Your clock in your profile font, the date, and the notifications that
+    arrived while you were away, grouped by app. Each group shows the newest message and a
+    count of the rest.
+  - **Unlocking.** Any key or click switches to it. The wallpaper blurs and your picture,
+    name and password field come up. Shown under the field, most urgent first: a wrong
+    try (which also shakes the field and counts your tries), Caps Lock, PAM messages
+    such as fingerprint prompts, and the keyboard layout when you have more than one.
+
+  Now playing, battery, and a power menu (suspend, restart, shut down) stay along the
+  bottom in both states. Restart and shut down need a second click.
+
+  Settings → Profile shows a live preview of the lock with sample notifications. It also
+  lets you choose how much of a notification the lock shows (all of it, only app names, or
+  nothing) and switch back to hyprlock.
+
+  The lock checks your password with the same PAM stack hyprlock used, so faillock and
+  fingerprint readers behave as before.
+- **A redesigned power menu.**
+  - **Hold to confirm.** Log out, restart and shut down are now held instead of pressed
+    twice: a ring fills around the icon, and letting go early cancels. This works with the
+    mouse or the letter key (hold R). Lock and suspend still act at once.
+  - **What will close.** For the three actions that end your work, the menu lists the
+    apps that would close.
+  - **Smaller header.** Your profile is a single row, with uptime and battery beside it.
+  - **Two new options along the bottom.**
+    - *Firmware setup*: hold F, or hold the button. Shown on UEFI machines only.
+    - *Shut down later*: in 15 min, 30 min or 1 h, using a systemd user timer. The menu
+      shows the scheduled time and can cancel it.
+- **The lock cannot strand you.** The lock runs as its own process, so reloading or
+  crashing the shell never touches it. `sea-lock.sh` waits for the compositor to confirm
+  the lock. If the lock does not come up, or exits without a real unlock, hyprlock takes
+  over the still-locked session. Two things make that work:
+  - `misc:allow_session_lock_restore` is now on, so Hyprland accepts the second locker.
+  - The lock records the unlock only *after* unlocking, so a crash at the worst moment
+    costs a second password, never an open session.
+
+  hypridle's `lock_cmd` now goes through `sea-lock.sh`, and install.sh updates a kept
+  hypridle.conf that still has the old default.
+
 - **Gaming fans in quick settings.** An Auto / Quiet / Max row under the power profile
   sets the profile and the fans together (`sea-perf.sh auto|quiet|max`). Auto hands the
   fans back to the firmware, Quiet runs a low lm_sensors fancontrol curve, and Max pins
@@ -28,6 +69,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and restores the previous one afterwards, and it stops hypridle while you play, since a
   controller does not count as input and the screen would otherwise dim and lock mid-game.
   Picking a fan preset while game mode is on keeps the performance profile.
+- **sea-shell answers password prompts itself.** The "allow this change?" dialog for
+  pkexec, package managers, mounting and similar requests is now drawn by the shell.
+  - **Who:** your picture with a lock badge, or a shield when the password is for another
+    account.
+  - **What:** a command is shown whole, in mono, instead of cut off mid-path.
+  - **The field:** works like the lock screen's. It shakes on a wrong try and counts tries,
+    and it also allows paste and has a show-password toggle.
+  - **Details:** shows the polkit action and the account.
+  - **Placement:** the dialog opens on the screen you are using.
+
+  hyprpolkitagent no longer starts at login. The shell starts it as a fallback if it cannot
+  register as the agent itself.
+- **Miku on the power menu.** An animated sticker sits on the card's corner and only plays
+  while the menu is open.
+
+### Changed
+
+- **The power menu and Settings open at once.** Both are now kept "warm".
+  - **Settings** used to drop its window on close and rebuild it on every open, which was
+    160–220 ms before the first frame. It now draws within about 10 ms and is fully up by
+    about 65 ms.
+  - **The power menu** started a fresh Quickshell process on every SUPER+ESC, about 310 ms
+    plus Hyprland's open animation. It now lives in the shell and opens in about 40 ms.
+    `power.qml` still runs on its own when the shell is not running.
+
+  "Warm" means a closed window stays mapped as a single transparent pixel that takes no
+  input, so opening it only grows it back.
+- **The bar's power dropdown follows the new power menu.**
+  - Lock and Suspend are two quick buttons.
+  - Log out, Restart and Shut down are held rows: a fill sweeps across the row while you
+    hold, replacing "click again".
+  - A pending timed shutdown shows here and can be cancelled.
+  - "More options" opens the full menu.
+- **The global menu has room to breathe.** Menu titles have 10 px of padding on each side
+  instead of 7, so "File Edit Selection" no longer runs together. The app's name cell no
+  longer squeezes its icon against the edge.
+
+### Fixed
+
+- **With two monitors, the global menu showed on the wrong bar.** Moving the pointer onto
+  an empty screen focused that screen while the window kept the keyboard. The window's menu
+  and title then jumped to the empty screen's bar, and the screen it was actually on went
+  back to workspaces. Both now follow the monitor the active window is on.
+- **SUPER+W, the screenshot pin, the launcher's Caffeine toggle and `openWidget` did
+  nothing.** Two IPC handlers both claimed the `shell` target. Quickshell keeps only one
+  handler per target, and the one with just `reload` was the one it kept. They are now one
+  handler.
 
 ## [6.5.0] - 2026-08-26
 

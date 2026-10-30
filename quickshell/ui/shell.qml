@@ -11,6 +11,7 @@ import Quickshell.Services.UPower
 import Quickshell.Services.SystemTray
 import Quickshell.Services.Mpris
 import Quickshell.Services.Notifications
+import Quickshell.Services.Polkit
 import Quickshell.Bluetooth
 import QtQuick
 import QtQuick.Effects
@@ -104,6 +105,40 @@ ShellRoot {
 
     // resident launcher — no process-spawn delay; open via `qs -c sea-shell ipc call launcher …`
     Launcher { id: launcher }
+    // The power menu lives here so SUPER+ESC opens it at once (sea-toggle.sh power → this IPC);
+    // power.qml runs the same component on its own only when the shell is down.
+    PowerMenu { id: powerMenu }
+
+    // ---------- polkit: the shell answers "allow this change?" itself ----------
+    // Only one agent can serve a session. hyprpolkitagent is no longer started at login; if
+    // registering here fails anyway (something else already holds the session), it is started
+    // as before so a prompt is never left with nobody to answer it.
+    PolkitAgent { id: polkitAgent }
+    PolkitDialog { flow: polkitAgent.flow; profile: root.userProfile }
+    Timer { interval: 4000; running: true
+        onTriggered: if (!polkitAgent.isRegistered)
+            Quickshell.execDetached(["sh", "-c", "pgrep -x hyprpolkitagent >/dev/null || { [ -x /usr/lib/hyprpolkitagent/hyprpolkitagent ] && exec /usr/lib/hyprpolkitagent/hyprpolkitagent; }"]) }
+    IpcHandler { target: "polkit"
+        function registered(): bool { return polkitAgent.isRegistered }
+        function cancel(): void { if (polkitAgent.flow) polkitAgent.flow.cancelAuthenticationRequest() } }
+    // Which screen the window with the keyboard is on; the bars use it to decide which one shows
+    // that window's title and menu. Falls back to the focused monitor when it cannot be told.
+    readonly property string activeWinMonitor: {
+        try {
+            var t = Hyprland.activeToplevel;
+            if (t && t.workspace && t.workspace.monitor && t.workspace.monitor.name) return "" + t.workspace.monitor.name;
+            var o = t ? t.lastIpcObject : null;
+            if (o && o.monitor !== undefined) {
+                var ms = Hyprland.monitors.values;
+                for (var i = 0; i < ms.length; i++) if (ms[i].id === o.monitor) return "" + ms[i].name;
+            }
+        } catch (e) {}
+        return Hyprland.focusedMonitor ? "" + Hyprland.focusedMonitor.name : "";
+    }
+    IpcHandler { target: "power"
+        function toggle(): void { powerMenu.toggle() }
+        function open(): void { powerMenu.open() }
+        function close(): void { powerMenu.close() } }
     // ---------- the desktop ----------
     // Bottom layer, one per monitor, above the wallpaper and below every window. Empty
     // until something is put on it, which is why it can simply be on: an empty desktop
@@ -325,6 +360,10 @@ ShellRoot {
         function unpin(): void { root.grabHold = false }
         function toggleExpose(): void { root.toggleExpose() }
         function toggleIdle(): void { root.toggleIdle() }
+        // Rebuilds everything in place (see below for why never a restart). This used to be a
+        // second handler for "shell", and Quickshell keeps only one per target: that one won,
+        // so pin, toggleExpose (SUPER+W), toggleIdle and openWidget all silently did nothing.
+        function reload(): void { Quickshell.reload(true) }
     }
 
     // ---------- alt-tab window switcher (resident, driven by ALT+Tab binds) ----------
@@ -1914,7 +1953,7 @@ ShellRoot {
     // RELOAD WITHOUT QUITTING. `qs kill` and starting again made Quickshell crash on its way
     // out (a Wayland teardown segfault) and put up its crash reporter every time. Reloading
     // the configuration in place rebuilds everything without ever exiting.
-    IpcHandler { target: "shell"; function reload(): void { Quickshell.reload(true) } }
+    // (the reload IPC is on the "shell" handler above)
     readonly property string wxLoc: (wxLocFile.text() || "Kuching").trim()
     Process {
         id: wxfProc; running: true
@@ -3040,8 +3079,9 @@ ShellRoot {
             var k = ++root.noteSeq;
             var app = (n.appName||"notification");
             var entry = { key: k, summary: (n.summary||""), body: (n.body||""),
-                          appName: app, urgency: n.urgency,
-                          time: Qt.formatDateTime(new Date(), "HH:mm") };
+                          appName: app, appIcon: (n.appIcon||""), urgency: n.urgency,
+                          time: Qt.formatDateTime(new Date(), "HH:mm"),
+                          ts: Date.now() };   // the lock screen shows what arrived while locked
             // Actions live on the Notification object, and an UNTRACKED notification is released
             // by the server the moment this handler returns — so the buttons would be dead by the
             // time you could click one. Track ONLY notifications that actually have actions, and
@@ -4036,7 +4076,11 @@ ShellRoot {
                         uiFont: root.cfgFont
                         script: root.appmenuScript
                         screenName: bar.modelData ? bar.modelData.name : ""
-                        focusedMonitor: Hyprland.focusedMonitor ? Hyprland.focusedMonitor.name : ""
+                        // the ACTIVE WINDOW's monitor, not the focused one: with follow_mouse,
+                        // moving the pointer onto an empty screen focuses that screen while the
+                        // window keeps the keyboard, and its menu then jumped to the empty screen's
+                        // bar while the screen it is on fell back to the workspaces
+                        focusedMonitor: root.activeWinMonitor
                         ui: root.uiFor(bar.screen)
                         barEdgeY: root.cfgHeight
                         barEdge: root.cfgEdge
@@ -4084,6 +4128,8 @@ ShellRoot {
                             // sat here labelled "code". The daemon's snapshot is the one thing
                             // that can say nothing is focused.
                             if (gmenu.snapSaysNoWindow) return "";
+                            // only on the bar of the screen the window is on (see focusedMonitor above)
+                            if (bar.modelData && root.activeWinMonitor && bar.modelData.name !== root.activeWinMonitor) return "";
                             try {
                                 var t = Hyprland.activeToplevel;
                                 if (!t) return "";
@@ -5697,40 +5743,80 @@ ShellRoot {
                                                 Sym { anchors.verticalCenter: parent.verticalCenter; text: "add"; sz: 11; color: theme.frost }
                                                 Text { anchors.verticalCenter: parent.verticalCenter; text: modelData.l; color: theme.text; font.pixelSize: 9; font.family: "Adwaita Sans" } }
                                             MouseArea { id: wcaMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.wcAdd(modelData.z) } } } } } } } }
+                    // Same rules as the full power menu (PowerMenu.qml): lock and suspend lose nothing
+                    // and act at once; log out, restart and shut down are HELD, a fill sweeping the row
+                    // while you keep the button down. "More" opens the full menu.
                     Drop { screen: bar.screen
                         id: pwrDrop; host: root.barVertical ? pwrPillVert : pwrPill; shown: root.openPop ==="pwr" && root.openBar === bar
-                        cardW: 230; cardH: pwrCol.implicitHeight + 24
-                        property string confirmL: ""          // reboot/shutdown ask for a second click
-                        property string who: ""
+                        cardW: 280; cardH: pwrCol.implicitHeight + 24
                         property string up: ""
-                        onVisibleChanged: { pwrDrop.confirmL = ""; if (visible) upProc.running = true }
-                        Process { id: upProc; command: ["sh","-c","printf '%s@%s|' \"$USER\" \"$(hostnamectl hostname 2>/dev/null || hostname)\"; awk '{s=int($1); printf \"up %dh %02dm\", s/3600, (s%3600)/60}' /proc/uptime"]
-                            stdout: StdioCollector { id: upOut; onStreamFinished: { var p = upOut.text.split("|"); pwrDrop.who = p[0]||""; pwrDrop.up = p[1]||"" } } }
-                        Column { id: pwrCol; anchors.fill: pwrDrop.card; anchors.margins: 10; spacing: 3
-                            ProfileCard { width: parent.width; height: Math.max(64, implicitHeight - 12); compact: true; flat: true
-                                profile: root.userProfile; subtitle: pwrDrop.up
+                        property string laterAt: ""
+                        property string holdL: ""
+                        property real holdP: 0
+                        function go(c) { root.openPop = ""; Quickshell.execDetached(["sh","-c",c]) }
+                        function release() { if (holdP >= 0.999) return; pwrHold.stop(); holdL = ""; holdP = 0 }
+                        NumberAnimation { id: pwrHold; target: pwrDrop; property: "holdP"; from: 0; to: 1; duration: 750; easing.type: Easing.InOutQuad
+                            property string cmd: ""
+                            onFinished: if (pwrDrop.holdL !== "" && pwrDrop.holdP >= 0.999) { pwrDrop.holdL = ""; pwrDrop.holdP = 0; pwrDrop.go(cmd) } }
+                        onVisibleChanged: { pwrDrop.release(); if (visible) { upProc.running = true; pwrLater.running = true } }
+                        Process { id: upProc; command: ["awk", "{s=int($1); printf \"%dh %02dm\", s/3600, (s%3600)/60}", "/proc/uptime"]
+                            stdout: StdioCollector { onStreamFinished: pwrDrop.up = text.trim() } }
+                        Process { id: pwrLater; command: ["systemctl", "--user", "show", "sea-shutdown.timer", "-p", "ActiveState", "-p", "NextElapseUSecRealtime", "--value"]
+                            stdout: StdioCollector { onStreamFinished: { var l = text.trim().split("\n"), m = (l[1] || "").match(/(\d\d:\d\d):\d\d/); pwrDrop.laterAt = l[0] === "active" && m ? m[1] : "" } } }
+                        Column { id: pwrCol; anchors.fill: pwrDrop.card; anchors.margins: 12; spacing: 8
+                            ProfileCard { width: parent.width; height: Math.max(60, implicitHeight - 14); compact: true; flat: true
+                                profile: root.userProfile
+                                subtitle: "Up " + pwrDrop.up + (UPower.displayDevice && UPower.displayDevice.isLaptopBattery
+                                    ? "  ·  " + Math.round((UPower.displayDevice.percentage || 0) * 100) + "%" : "")
                             }
-                            Rectangle { width: parent.width; height: 1; color: theme.a(theme.iris,0.2) }
-                            Item { width: 1; height: 2 }
-                            Repeater { model: [{i:"lock",l:"lock",c:"~/.config/quickshell/sea-shell/sea-lock.sh",col:theme.frost},
-                                               {i:"bedtime",l:"suspend",c:"systemctl suspend",col:theme.frost},
-                                               {i:"logout",l:"log out",c:"systemctl --user is-active -q 'wayland-wm@*.service' && uwsm stop || { hyprctl dispatch 'hl.dsp.exit()'; sleep 3; loginctl terminate-session self; }",col:theme.frost},
-                                               {i:"restart_alt",l:"reboot",c:"systemctl reboot",col:theme.warn,danger:true},
-                                               {i:"power_settings_new",l:"shut down",c:"systemctl poweroff",col:theme.bad,danger:true}]
+                            // the two that lose nothing, side by side
+                            Row { width: parent.width; spacing: 8
+                                Repeater { model: [{i:"lock",l:"Lock",c:root.seaScripts + "sea-lock.sh"}, {i:"bedtime",l:"Suspend",c:"systemctl suspend"}]
+                                    delegate: Rectangle { required property var modelData
+                                        width: (pwrCol.width - 8) / 2; height: 58; radius: Tok.rCard
+                                        color: qma.pressed ? Tok.accentWash : qma.containsMouse ? Tok.sunken : Tok.surface
+                                        border.width: 1; border.color: qma.containsMouse ? Tok.accent : Tok.rule
+                                        Column { anchors.centerIn: parent; spacing: 4
+                                            Sym { anchors.horizontalCenter: parent.horizontalCenter; text: modelData.i; sz: 20; color: qma.containsMouse ? Tok.accent : Tok.ink2 }
+                                            Text { anchors.horizontalCenter: parent.horizontalCenter; text: modelData.l; color: Tok.ink; font.pixelSize: 12; font.family: Tok.sans } }
+                                        MouseArea { id: qma; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                            onClicked: pwrDrop.go(modelData.c) } } } }
+                            // the three that end your work: hold
+                            Repeater { model: [{i:"logout",l:"Log out",c:"systemctl --user is-active -q 'wayland-wm@*.service' && uwsm stop || { hyprctl dispatch 'hl.dsp.exit()'; sleep 3; loginctl terminate-session self; }",col:Tok.warn},
+                                               {i:"restart_alt",l:"Restart",c:"systemctl reboot",col:Tok.warn},
+                                               {i:"power_settings_new",l:"Shut down",c:"systemctl poweroff",col:Tok.crit}]
                                 delegate: Rectangle { required property var modelData
-                                    readonly property bool arming: pwrDrop.confirmL === modelData.l
-                                    width: parent.width; height: 34; radius: Tok.r
-                                    color: arming ? theme.a(theme.bad,0.18) : (pw.containsMouse ? theme.a(theme.iris,0.16) : "transparent")
-                                    border.width: arming ? 1 : 0; border.color: theme.a(theme.bad,0.6)
-                                    Row { anchors.fill: parent; anchors.leftMargin: 10; spacing: 10
-                                        Sym { anchors.verticalCenter: parent.verticalCenter; text: modelData.i; sz: 17; color: modelData.col }
+                                    readonly property bool held: pwrDrop.holdL === modelData.l
+                                    width: parent.width; height: 38; radius: Tok.r; clip: true
+                                    color: pw.containsMouse ? Tok.sunken : "transparent"
+                                    border.width: held ? 1 : 0; border.color: modelData.col
+                                    Rectangle { width: parent.width * (held ? pwrDrop.holdP : 0); height: parent.height
+                                        color: Qt.rgba(modelData.col.r, modelData.col.g, modelData.col.b, 0.22) }
+                                    Row { anchors.left: parent.left; anchors.leftMargin: 12; anchors.verticalCenter: parent.verticalCenter; spacing: 12
+                                        Sym { anchors.verticalCenter: parent.verticalCenter; text: modelData.i; sz: 18; color: held || pw.containsMouse ? modelData.col : Tok.ink2 }
                                         Text { anchors.verticalCenter: parent.verticalCenter
-                                            text: arming ? "click again to " + modelData.l : modelData.l
-                                            color: arming ? theme.bad : theme.text; font.pixelSize: 13; font.family: "Adwaita Sans" } }
+                                            text: held ? "Keep holding to " + modelData.l.toLowerCase() : modelData.l
+                                            color: held ? modelData.col : Tok.ink; font.pixelSize: 13; font.family: Tok.sans } }
+                                    Text { anchors.right: parent.right; anchors.rightMargin: 12; anchors.verticalCenter: parent.verticalCenter
+                                        visible: pw.containsMouse && !held; text: "hold"; color: Tok.ink3; font.pixelSize: 10; font.family: Tok.sans }
                                     MouseArea { id: pw; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
-                                        onClicked: {
-                                            if (modelData.danger && !arming) { pwrDrop.confirmL = modelData.l; return }
-                                            root.openPop=""; Quickshell.execDetached(["sh","-c",modelData.c]) } } } } } }
+                                        onPressed: { pwrDrop.holdL = modelData.l; pwrHold.cmd = modelData.c; pwrHold.restart() }
+                                        onReleased: pwrDrop.release(); onCanceled: pwrDrop.release() } } }
+                            Rectangle { width: parent.width; height: 1; color: Tok.rule }
+                            Item { width: parent.width; height: 26
+                                Text { anchors.left: parent.left; anchors.verticalCenter: parent.verticalCenter
+                                    text: pwrDrop.laterAt ? "Shutting down at " + pwrDrop.laterAt : ""
+                                    color: Tok.warn; font.pixelSize: 11; font.family: Tok.sans }
+                                Rectangle { anchors.left: parent.left; anchors.leftMargin: 120; anchors.verticalCenter: parent.verticalCenter
+                                    visible: pwrDrop.laterAt !== ""; width: cxT.implicitWidth + 16; height: 24; radius: 12
+                                    color: cxMa.containsMouse ? Tok.sunken : "transparent"; border.width: 1; border.color: Tok.rule
+                                    Text { id: cxT; anchors.centerIn: parent; text: "Cancel"; color: Tok.ink; font.pixelSize: 11; font.family: Tok.sans }
+                                    MouseArea { id: cxMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                        onClicked: { Quickshell.execDetached(["sh","-c","systemctl --user stop sea-shutdown.timer && notify-send -i system-shutdown 'Shutdown cancelled'"]); pwrDrop.laterAt = "" } } }
+                                Text { anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
+                                    text: "More options  ›"; color: moreMa.containsMouse ? Tok.accent : Tok.ink2; font.pixelSize: 11; font.family: Tok.sans
+                                    MouseArea { id: moreMa; anchors.fill: parent; anchors.margins: -6; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                        onClicked: { root.openPop = ""; powerMenu.open() } } } } } }
                 } // closes rightGroupDrops
                 } // closes horizontalBarLayout
 

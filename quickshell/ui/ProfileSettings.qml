@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Layouts
 import QtQuick.Controls as C
+import Quickshell
 import Quickshell.Io
 
 ColumnLayout {
@@ -124,6 +125,69 @@ ColumnLayout {
         Switch { id: glow; text: "Name glow" }
     }
     Label { text: "Lock screen"; font.pixelSize: 15; font.weight: Font.DemiBold }
+    // The real lock screen, drawn small with sample notifications; Unlocking shows the state
+    // a key press brings up. It follows the fields above before they are saved.
+    property bool previewLogin: false
+    FontLoader { id: rhPreview; source: "file:///usr/share/sddm/themes/sea-silent/fonts/redhat/RedHatDisplay-SemiBold.otf" }
+    Rectangle {
+        id: lockFrame
+        Layout.fillWidth: true; Layout.preferredHeight: width * 9 / 16
+        radius: 14; color: "#0a0d14"; clip: true
+        visible: panel.lockCfg.engine !== "hyprlock"
+        LockSurface {
+            width: 1920; height: 1080
+            scale: lockFrame.width / 1920; transformOrigin: Item.TopLeft
+            preview: true
+            profile: panel.draft()
+            wallpaper: Quickshell.env("HOME") + "/.config/sea-shell/sea-lockwall.png"
+            clockFont: panel.draft().font || Tok.sans
+            clockWeight: Font.Normal
+            textFont: rhPreview.status === FontLoader.Ready ? rhPreview.name : Tok.sans
+            dateFormat: "dddd, MMMM dd, yyyy"
+            state_: panel.previewLogin ? "login" : "idle"
+            typed: panel.previewLogin ? 6 : 0
+            notes: panel.lockCfg.notifications === "off" ? [] : panel.sampleNotes
+            showContent: panel.lockCfg.notifications !== "names"
+            battery: ({ pct: 76, charging: false })
+        }
+        Rectangle {
+            anchors.right: parent.right; anchors.top: parent.top; anchors.margins: 10
+            width: stateT.implicitWidth + 22; height: 28; radius: 14; color: Qt.rgba(0, 0, 0, 0.55)
+            Text { id: stateT; anchors.centerIn: parent; text: panel.previewLogin ? "Show the clock" : "Show unlocking"
+                color: "white"; font.family: Tok.sans; font.pixelSize: 11 }
+            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: panel.previewLogin = !panel.previewLogin }
+        }
+    }
+    readonly property var sampleNotes: [
+        { appName: "Messages", appIcon: "internet-chat", summary: "Alex", body: "Are we still on for tonight? I can bring the cables.", time: "21:42", urgency: 1 },
+        { appName: "Messages", appIcon: "internet-chat", summary: "Sam", body: "ok", time: "21:40", urgency: 1 },
+        { appName: "Firefox", appIcon: "firefox", summary: "Download complete", body: "cachyos-desktop-linux.iso", time: "21:20", urgency: 1 } ]
+
+    // lock.json: which lock runs and how much of a notification it shows
+    property var lockCfg: ({})
+    FileView { id: lockFile; path: Quickshell.env("HOME") + "/.config/sea-shell/lock.json"; watchChanges: true
+        onLoaded: { try { panel.lockCfg = JSON.parse(text()) } catch (e) { panel.lockCfg = {} } }
+        onLoadFailed: panel.lockCfg = {}
+        onFileChanged: reload() }
+    function setLock(k, v) {
+        var c = Object.assign({}, panel.lockCfg); c[k] = v; panel.lockCfg = c;
+        Quickshell.execDetached(["python3", "-c",
+            "import sys,os,pathlib; p=pathlib.Path(os.path.expanduser('~/.config/sea-shell/lock.json')); p.parent.mkdir(parents=True,exist_ok=True); p.write_text(sys.argv[1])",
+            JSON.stringify(c)]);
+    }
+    RowLayout { Layout.fillWidth: true; spacing: 14
+        ColumnLayout { Layout.fillWidth: true
+            Label { text: "Lock screen" }
+            Choice { Layout.fillWidth: true; model: ["sea-shell", "hyprlock (classic)"]
+                currentIndex: panel.lockCfg.engine === "hyprlock" ? 1 : 0
+                onActivated: i => panel.setLock("engine", i === 1 ? "hyprlock" : "sea") } }
+        ColumnLayout { Layout.fillWidth: true
+            visible: panel.lockCfg.engine !== "hyprlock"
+            Label { text: "Notifications while locked" }
+            Choice { Layout.fillWidth: true; model: ["Show what they say", "App names only", "Hide them"]
+                currentIndex: panel.lockCfg.notifications === "names" ? 1 : panel.lockCfg.notifications === "off" ? 2 : 0
+                onActivated: i => panel.setLock("notifications", ["full", "names", "off"][i]) } }
+    }
     RowLayout { spacing: 24
         Switch { id: avatar; text: "Picture" }
         Switch { id: clock24; text: "24-hour clock" }
