@@ -10,4 +10,4 @@ here="$(dirname "$0")"
 # cheaply when off, so starting it unconditionally at login costs nothing.
 sh "$here/sea-wallpaper-rotate.sh" >/dev/null 2>&1 &
 
-exec sh "$here/sea-wallpaper-apply.sh"
+SEA_WALLPAPER_LOGIN=1 exec sh "$here/sea-wallpaper-apply.sh"

@@ -10,6 +10,7 @@ arrange with a mouse.
     --list                          print the arrangement
     --ensure                        create an empty arrangement if absent
     --add-clock | --add-weather | --add-media | --add-system
+                 [--x F --y F] [--size small|medium|large] [--face F] [--look card|glass|clear|classic]
                                     add a widget
     --add-entry ID [--label L] [--icon I]
                                     add a shortcut to an installed application
@@ -20,6 +21,7 @@ arrange with a mouse.
     --restore                       put desktop.json.bak back
     --move ID --x F --y F           put one widget somewhere (fractions)
     --set ID [--ground bare|rule|panel] [--tone accent|frost|green|amber|red|plain]
+             [--look card|glass|clear|classic] [--face dial|cookie|digital|stacked]
             [--align left|centre|right] [--size small|medium|large]
     --resettle                      move whatever the new wallpaper covers
     --auto off|rescue|arrange       how hard the desktop follows the wallpaper
@@ -40,21 +42,28 @@ CONF = os.path.join(HOME, ".config", "sea-shell", "desktop.json")
 QUIET = os.path.join(os.environ.get("XDG_CACHE_HOME", os.path.join(HOME, ".cache")),
                      "sea-shell", "wallquiet.json")
 
+# Widgets come in macOS's three size classes, and each class is a different layout, not a
+# different zoom: small is a square, medium is two smalls wide, large is two wide and two high.
+# On a 1080p field these are about 170x170, 360x170 and 360x376.
+FOOTPRINTS = {"small": {"w": 0.0885, "h": 0.17}, "medium": {"w": 0.1875, "h": 0.17},
+              "large": {"w": 0.1875, "h": 0.376}}
+DEFAULT_SIZE = {"clock": "small", "weather": "medium", "media": "medium", "system": "medium"}
 DEFAULTS = {
-    "clock":   {"w": 0.17,  "h": 0.11},
-    "weather": {"w": 0.15,  "h": 0.10},
-    "media":   {"w": 0.22,  "h": 0.105},   # room for the visualiser under the track
-    "system":  {"w": 0.205, "h": 0.19},    # room for three traces and five readings
+    "clock":   FOOTPRINTS["small"],
+    "weather": FOOTPRINTS["medium"],
+    "media":   FOOTPRINTS["medium"],
+    "system":  FOOTPRINTS["medium"],
     "launch":  {"w": 0.055, "h": 0.085},
 }
 # Which pre-solved zone list in wallquiet.json best matches each footprint.
-ZONE_FOR = {"clock": "16x9", "weather": "16x9", "media": "24x6",
+ZONE_FOR = {"clock": "16x9", "weather": "16x9", "media": "16x9",
             "system": "10x10", "launch": "10x10"}
 KINDS = ("clock", "weather", "media", "system")
 SIZES = {"small": 0.75, "medium": 1.0, "large": 1.4}
 
 
 AUTO_MODES = ("off", "rescue", "arrange")
+FOOTPRINTS_KINDS = ("clock", "weather", "media", "system")
 
 
 def auto_arrange():
@@ -187,18 +196,19 @@ def quiet_map():
 
 
 def busy_at(q, x, y, w, h):
+    """How busy the wallpaper is under a rectangle: the BUSIEST third of it, not the average.
+
+    An average let a widget sit half over a face, because the other half was empty sky and
+    the two cancelled out. A widget covering part of the subject is covering the subject.
+    """
     gw, gh, m = q
     x0, y0 = max(0, int(x * gw)), max(0, int(y * gh))
     x1, y1 = min(gw, int((x + w) * gw) + 1), min(gh, int((y + h) * gh) + 1)
-    if x1 <= x0 or y1 <= y0:
-        return 0.0
-    tot = n = 0
-    for yy in range(y0, y1):
-        row = yy * gw
-        for xx in range(x0, x1):
-            tot += m[row + xx]
-            n += 1
-    return (tot / n) / 255.0 if n else 0.0
+    if x1 > x0 and y1 > y0:
+        cells = sorted((m[j * gw + i] for j in range(y0, y1) for i in range(x0, x1)), reverse=True)
+        k = max(1, int(len(cells) * 0.3))
+        return sum(cells[:k]) / k / 255.0
+    return 0.0
 
 
 def zone_for(q, it, others):
@@ -295,6 +305,8 @@ def add(kind, extra=None):
     size = DEFAULTS.get(kind, DEFAULTS["clock"])
     it = {"id": next_id(items, kind), "kind": kind,
           "x": round(x, 4), "y": round(y, 4), "w": size["w"], "h": size["h"]}
+    if kind in DEFAULT_SIZE:
+        it["size"] = DEFAULT_SIZE[kind]
     it.update(extra or {})
     items.append(it)
     save(items)
@@ -344,7 +356,7 @@ def main(argv):
             if it.get("id") != wid:
                 continue
             hit = True
-            for key in ("ground", "tone", "align"):
+            for key in ("ground", "tone", "align", "look", "face"):
                 v = arg(argv, "--" + key)
                 if v:
                     it[key] = v
@@ -352,10 +364,15 @@ def main(argv):
             if sz in SIZES:
                 # Geometry has ONE home. Size changes the footprint here rather than being a
                 # font multiplier in QML, so the placement search, the overlap test and what
-                # is drawn are all reasoning about the same rectangle.
-                base = DEFAULTS.get(it.get("kind"), DEFAULTS["clock"])
-                it["w"] = round(base["w"] * SIZES[sz], 4)
-                it["h"] = round(base["h"] * SIZES[sz], 4)
+                # is drawn are all reasoning about the same rectangle. A widget's size is its
+                # size class; anything else (a shortcut) still scales.
+                if it.get("kind") in FOOTPRINTS_KINDS:
+                    base = FOOTPRINTS[sz]
+                    it["w"], it["h"] = base["w"], base["h"]
+                else:
+                    base = DEFAULTS.get(it.get("kind"), DEFAULTS["clock"])
+                    it["w"] = round(base["w"] * SIZES[sz], 4)
+                    it["h"] = round(base["h"] * SIZES[sz], 4)
                 it["size"] = sz
         if not hit:
             sys.stderr.write("sea-desktop: no such widget: %s\n" % wid)
@@ -413,13 +430,38 @@ def main(argv):
         return 0
     if "--remove" in argv:
         want = arg(argv, "--remove")
-        items = [i for i in load() if i.get("id") != want]
-        save(items)
+        before = load()
+        items = [i for i in before if i.get("id") != want]
+        if len(items) == len(before):
+            sys.stderr.write("sea-desktop: no item %s\n" % want)
+            return 1
+        # Removing one named item is as deliberate as --clear, so it may leave the desktop
+        # empty: without this, the last widget refused to go and said "removed" anyway.
+        save(items, allow_empty=True)
         print("removed %s" % want)
         return 0
     for k in KINDS:
         if "--add-" + k in argv:
-            print(json.dumps(add(k)))
+            # The widget gallery drops a widget where it was let go: --x/--y are the CENTRE
+            # of the drop as fractions of the field, and --size/--face/--look carry what was
+            # picked. Without them it is placed in the calmest free spot, as before.
+            extra = {}
+            sz = arg(argv, "--size")
+            if sz in FOOTPRINTS:
+                extra.update({"size": sz, "w": FOOTPRINTS[sz]["w"], "h": FOOTPRINTS[sz]["h"]})
+            for key in ("face", "look"):
+                v = arg(argv, "--" + key)
+                if v:
+                    extra[key] = v
+            if "--x" in argv and "--y" in argv:
+                w = extra.get("w", DEFAULTS[k]["w"])
+                h = extra.get("h", DEFAULTS[k]["h"])
+                try:
+                    extra["x"] = round(clamp(float(arg(argv, "--x")) - w / 2, w), 4)
+                    extra["y"] = round(clamp(float(arg(argv, "--y")) - h / 2, h), 4)
+                except ValueError:
+                    pass
+            print(json.dumps(add(k, extra)))
             return 0
     if "--add-entry" in argv:
         eid = arg(argv, "--add-entry")

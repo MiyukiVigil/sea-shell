@@ -64,7 +64,7 @@ def parse_hypridle():
             settings["idle_dim"] = timeout_val
         elif "loginctl lock-session" in block:
             settings["idle_lock"] = timeout_val
-        elif "hyprctl dispatch dpms" in block:
+        elif "dpms" in block:   # legacy `dispatch dpms` or Lua `hl.dsp.dpms(...)`
             settings["idle_dpms"] = timeout_val
         elif "systemctl suspend" in block:
             settings["idle_suspend"] = timeout_val
@@ -86,7 +86,7 @@ def update_hypridle(new_settings):
         elif "loginctl lock-session" in block:
             if "idle_lock" in new_settings:
                 block = re.sub(r'timeout\s*=\s*\d+', f'timeout = {new_settings["idle_lock"]}', block)
-        elif "hyprctl dispatch dpms" in block:
+        elif "dpms" in block:   # legacy `dispatch dpms` or Lua `hl.dsp.dpms(...)`
             if "idle_dpms" in new_settings:
                 block = re.sub(r'timeout\s*=\s*\d+', f'timeout = {new_settings["idle_dpms"]}', block)
         elif "systemctl suspend" in block:

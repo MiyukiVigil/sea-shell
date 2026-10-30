@@ -60,10 +60,10 @@ ApplicationWindow {
     readonly property color borderHard: light ? Qt.hsla(_h, 0.11 * _sm, 0.720, 1) : Qt.hsla(_h, 0.12 * _sm, 0.282, 1)
 
     // Semantic.
-    readonly property color dangerInk: light ? "#ad2020" : dangerInk
-    readonly property color dangerWash: light ? dangerWash : "#3a1717"
+    readonly property color dangerInk: light ? "#ad2020" : "#ff8d91"
+    readonly property color dangerWash: light ? "#fce7e8" : "#3a1717"
     readonly property color okInk: light ? "#1b7a4b" : "#4fbf85"
-    readonly property color warnInk: light ? "#8f6300" : warnInk
+    readonly property color warnInk: light ? "#8f6300" : "#e7bd74"
 
     // accentInk is accent-COLOURED TEXT; onAccent is what goes on top of an
     // accent fill. Two different jobs that a single token kept confusing.
@@ -754,8 +754,12 @@ ApplicationWindow {
     Shortcut { enabled: !isModalOpen(); sequence: "Alt+Return"; onActivated: openProperties() }
     Shortcut { enabled: !isModalOpen(); sequence: "Ctrl+Shift+N"; onActivated: newFolderDialog.openDialog() }
     Shortcut { enabled: !isModalOpen(); sequence: "Ctrl+N"; onActivated: newFileDialog.openDialog() }
+    function editingText() {
+        var item = window.activeFocusItem
+        return item && typeof item.insert === "function" && typeof item.selectAll === "function"
+    }
     Shortcut {
-        enabled: !isModalOpen()
+        enabled: !isModalOpen() && !editingText()
         sequence: "Ctrl+C"
         onActivated: {
             var paths = selectedPaths.length > 0 ? selectedPaths : (selectedPath ? [selectedPath] : [])
@@ -763,7 +767,7 @@ ApplicationWindow {
         }
     }
     Shortcut {
-        enabled: !isModalOpen()
+        enabled: !isModalOpen() && !editingText()
         sequence: "Ctrl+X"
         onActivated: {
             var paths = selectedPaths.length > 0 ? selectedPaths : (selectedPath ? [selectedPath] : [])
@@ -771,7 +775,7 @@ ApplicationWindow {
         }
     }
     Shortcut {
-        enabled: !isModalOpen()
+        enabled: !isModalOpen() && !editingText()
         sequence: "Ctrl+V"
         onActivated: {
             if (backend) backend.pasteFiles()
@@ -1673,7 +1677,7 @@ ApplicationWindow {
             Text { text: "•"; color: textMuted; font.pixelSize: 10 }
 
             Text {
-                text: backend ? backend.statusMessage : "Ready"
+                text: backend ? (backend.listingBusy ? (backend.searchQuery ? "Searching…" : "Loading folder…") : backend.statusMessage) : "Ready"
                 color: textPrimary
                 font.pixelSize: 11
                 Layout.fillWidth: true
@@ -2894,33 +2898,86 @@ ApplicationWindow {
             }
         }
 
-        // Empty Directory Placeholder
+        // Selection actions stay close to the files instead of requiring a context menu.
+        Rectangle {
+            id: selectionBar
+            anchors.horizontalCenter: parent.horizontalCenter
+            anchors.bottom: parent.bottom
+            anchors.bottomMargin: 20
+            z: 25
+            width: selectionActions.implicitWidth + 24; height: 44
+            radius: Math.min(18, window.rCard)
+            color: window.bgCard
+            border.width: 1; border.color: window.borderSoft
+            opacity: pane.active && pane.selCount > 0 ? 1 : 0
+            visible: opacity > 0
+            enabled: pane.active && pane.selCount > 0
+            Behavior on opacity { NumberAnimation { duration: window.mFast } }
+            transform: Translate { y: selectionBar.opacity < 1 ? 8 * (1 - selectionBar.opacity) : 0 }
+            Row {
+                id: selectionActions
+                anchors.centerIn: parent; spacing: 8
+                Text { anchors.verticalCenter: parent.verticalCenter; text: pane.selCount + " selected"
+                    color: window.textPrimary; font.pixelSize: 12; font.bold: true; rightPadding: 8 }
+                ToolBtn { glyph: "content_copy"; tip: "Copy · Ctrl+C"; on: pane.be && !pane.be.inArchive && !pane.be.inTrash
+                    onActivated: pane.be.setClipboard(window.selectionPaths(), "copy") }
+                ToolBtn { glyph: "content_cut"; tip: "Cut · Ctrl+X"; on: pane.be && !pane.be.inArchive && !pane.be.inTrash
+                    onActivated: pane.be.setClipboard(window.selectionPaths(), "cut") }
+                ToolBtn { glyph: "delete_outline"; tip: "Move to trash · Delete"; on: pane.be && !pane.be.inArchive
+                    onActivated: window.deleteSelection() }
+                ToolBtn { glyph: "close"; tip: "Clear selection"
+                    onActivated: { window.selectedPaths = []; window.selectedPath = ""; if (pane.be) pane.be.selectFile("") } }
+            }
+        }
+
+        // Calm loading and actionable empty/search states, shared by both panes.
         ColumnLayout {
             anchors.centerIn: parent
             visible: pane.itemCount === 0
-            spacing: 10
-
-            Text {
+            spacing: 12
+            BusyIndicator {
                 Layout.alignment: Qt.AlignHCenter
-                text: "folder_open"
-                font.family: iconFont
-                font.pixelSize: 64
-                color: textMuted
+                running: pane.be && pane.be.listingBusy
+                visible: running
+                implicitWidth: 36; implicitHeight: 36
             }
-
-            Text {
+            Rectangle {
                 Layout.alignment: Qt.AlignHCenter
-                text: "This folder is empty"
-                font.pixelSize: 15
-                font.bold: true
-                color: textSecondary
+                visible: !(pane.be && pane.be.listingBusy)
+                width: 76; height: 76; radius: 24
+                color: accentWash
+                Text { anchors.centerIn: parent
+                    text: pane.be && pane.be.searchQuery ? "search_off" : "folder_open"
+                    font.family: iconFont; font.pixelSize: 36; color: accentInk }
             }
-
             Text {
                 Layout.alignment: Qt.AlignHCenter
-                text: "Right-click or press Ctrl+Shift+N to create a folder"
-                font.pixelSize: 12
-                color: textMuted
+                text: pane.be && pane.be.listingBusy ? (pane.be.searchQuery ? "Finding your files" : "Opening folder")
+                    : (pane.be && pane.be.searchQuery ? "No matching files" : "This folder is empty")
+                font.pixelSize: 17; font.bold: true; color: textPrimary
+            }
+            Text {
+                Layout.alignment: Qt.AlignHCenter
+                text: pane.be && pane.be.listingBusy ? "You can keep browsing while this loads."
+                    : (pane.be && pane.be.searchQuery ? "Try another name or clear your search."
+                       : "Create a folder, or paste files here to get started.")
+                font.pixelSize: 12; color: textSecondary
+            }
+            Button {
+                Layout.alignment: Qt.AlignHCenter
+                visible: pane.be && !pane.be.listingBusy && !pane.be.inTrash && !pane.be.inArchive
+                id: emptyAction
+                text: pane.be && pane.be.searchQuery ? "Clear search" : "New folder"
+                implicitHeight: 36; implicitWidth: 132
+                background: Rectangle { radius: window.rBase; color: emptyAction.hovered ? Qt.lighter(window.accentColor, 1.08) : window.accentColor
+                    Behavior on color { ColorAnimation { duration: window.mFast } } }
+                contentItem: Text { text: emptyAction.text; color: window.onAccent; font.pixelSize: 12; font.bold: true
+                    horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
+                onClicked: {
+                    window.activePane = pane.paneIndex
+                    if (pane.be.searchQuery) { searchInput.text = ""; pane.be.setSearchQuery("") }
+                    else newFolderDialog.openDialog()
+                }
             }
         }
 
@@ -2966,7 +3023,9 @@ ApplicationWindow {
             delegate: Rectangle {
                 id: itemCard
                 required property var modelData
-                required property int index      // shift-click measures in rows
+                required property int index
+                Component.onCompleted: if (pane.be && modelData) pane.be.requestListingThumbnail(modelData.path)
+                onModelDataChanged: if (pane.be && modelData) pane.be.requestListingThumbnail(modelData.path)      // shift-click measures in rows
                 width: gridView.cellWidth - 6
                 height: gridView.cellHeight - 6
                 radius: rCard
@@ -2976,6 +3035,9 @@ ApplicationWindow {
                      : (itemSelected ? bgCardSelected : (itemMa.containsMouse ? bgCard : "transparent"))
                 border.width: (folderDropArea.containsDrag || itemSelected) ? 1.5 : (itemMa.containsMouse ? 1 : 0)
                 border.color: (folderDropArea.containsDrag || itemSelected) ? accentColor : borderSoft
+
+                Behavior on color { ColorAnimation { duration: window.mFast } }
+                Behavior on border.color { ColorAnimation { duration: window.mFast } }
 
                 Rectangle {
                     visible: !!itemCard.modelData.tag
@@ -3117,7 +3179,7 @@ ApplicationWindow {
                                 height: 14
                                 width: badgeText.implicitWidth + 8
                                 radius: rBase
-                                color: isDark ? Qt.rgba(0, 0, 0, 0.78) : Qt.rgba(255, 255, 255, 0.9)
+                                color: isDark ? "#000000" : "#ffffff"
                                 visible: modelData.category !== "image"
 
                                 Text {
@@ -3238,6 +3300,8 @@ ApplicationWindow {
             delegate: Rectangle {
                 required property var modelData
                 required property int index
+                Component.onCompleted: if (pane.be && modelData) pane.be.requestListingThumbnail(modelData.path)
+                onModelDataChanged: if (pane.be && modelData) pane.be.requestListingThumbnail(modelData.path)
                 width: compactView.cellWidth - 4
                 height: compactView.cellHeight - 2
                 radius: rBase
@@ -3361,6 +3425,8 @@ ApplicationWindow {
                 id: listRowCard
                 required property var modelData
                 required property int index
+                Component.onCompleted: if (pane.be && modelData) pane.be.requestListingThumbnail(modelData.path)
+                onModelDataChanged: if (pane.be && modelData) pane.be.requestListingThumbnail(modelData.path)
                 width: listView.width - 24
                 height: 36
                 radius: rBase
@@ -3369,6 +3435,9 @@ ApplicationWindow {
                      : (itemSelected ? bgCardSelected : (listMa.containsMouse ? bgCard : "transparent"))
                 border.width: (listDropArea.containsDrag || itemSelected) ? 1.5 : (listMa.containsMouse ? 1 : 0)
                 border.color: (listDropArea.containsDrag || itemSelected) ? accentColor : borderSoft
+
+                Behavior on color { ColorAnimation { duration: window.mFast } }
+                Behavior on border.color { ColorAnimation { duration: window.mFast } }
 
                 Rectangle {
                     visible: !!listRowCard.modelData.tag
@@ -3894,7 +3963,7 @@ ApplicationWindow {
                                 Rectangle {
                                     anchors.bottom: parent.bottom; anchors.right: parent.right; anchors.margins: 8
                                     height: 20; width: qlBadgeT.implicitWidth + 10; radius: rBase
-                                    color: Qt.rgba(0, 0, 0, 0.75)
+                                    color: "#000000"
                                     Text { id: qlBadgeT; anchors.centerIn: parent; text: "Page " + (index + 1); font.pixelSize: 10; font.bold: true; color: "#f2f2f5" }
                                 }
                             }
@@ -4760,6 +4829,8 @@ ApplicationWindow {
 
     Rectangle {
         id: newFolderDialog
+        opacity: visible ? 1 : 0
+        Behavior on opacity { NumberAnimation { duration: window.mFast; easing.type: Easing.OutCubic } }
         anchors.fill: parent
         color: Qt.rgba(0, 0, 0, 0.75)
         visible: false
@@ -4800,7 +4871,7 @@ ApplicationWindow {
 
                 TextField {
                     id: folderNameField
-                    Layout.fillWidth: true; height: 42
+                    Layout.fillWidth: true; Layout.preferredHeight: 42
                     color: textPrimary; font.pixelSize: 13
                     placeholderText: "Enter folder name..."
                     placeholderTextColor: textMuted
@@ -4846,6 +4917,8 @@ ApplicationWindow {
 
     Rectangle {
         id: newFileDialog
+        opacity: visible ? 1 : 0
+        Behavior on opacity { NumberAnimation { duration: window.mFast; easing.type: Easing.OutCubic } }
         anchors.fill: parent
         color: Qt.rgba(0, 0, 0, 0.75)
         visible: false
@@ -4886,7 +4959,7 @@ ApplicationWindow {
 
                 TextField {
                     id: fileNameField
-                    Layout.fillWidth: true; height: 42
+                    Layout.fillWidth: true; Layout.preferredHeight: 42
                     color: textPrimary; font.pixelSize: 13
                     placeholderText: "Enter file name..."
                     placeholderTextColor: textMuted
@@ -4932,6 +5005,8 @@ ApplicationWindow {
 
     Rectangle {
         id: renameDialog
+        opacity: visible ? 1 : 0
+        Behavior on opacity { NumberAnimation { duration: window.mFast; easing.type: Easing.OutCubic } }
         anchors.fill: parent
         color: Qt.rgba(0, 0, 0, 0.75)
         visible: false
@@ -4974,7 +5049,7 @@ ApplicationWindow {
 
                 TextField {
                     id: renameField
-                    Layout.fillWidth: true; height: 42
+                    Layout.fillWidth: true; Layout.preferredHeight: 42
                     color: textPrimary; font.pixelSize: 13
                     selectByMouse: true
                     background: Rectangle {
@@ -5018,6 +5093,8 @@ ApplicationWindow {
 
     Rectangle {
         id: compressDialog
+        opacity: visible ? 1 : 0
+        Behavior on opacity { NumberAnimation { duration: window.mFast; easing.type: Easing.OutCubic } }
         anchors.fill: parent
         color: Qt.rgba(0, 0, 0, 0.75)
         visible: false
@@ -5073,7 +5150,7 @@ ApplicationWindow {
 
                 TextField {
                     id: archiveNameField
-                    Layout.fillWidth: true; height: 42
+                    Layout.fillWidth: true; Layout.preferredHeight: 42
                     color: textPrimary; font.pixelSize: 13
                     placeholderText: "Enter archive name..."
                     placeholderTextColor: textMuted
@@ -5363,6 +5440,8 @@ ApplicationWindow {
 
     Rectangle {
         id: propertiesDialog
+        opacity: visible ? 1 : 0
+        Behavior on opacity { NumberAnimation { duration: window.mFast; easing.type: Easing.OutCubic } }
         anchors.fill: parent
         color: Qt.rgba(0, 0, 0, 0.75)
         visible: false
@@ -7133,6 +7212,8 @@ ApplicationWindow {
     // letting that be a surprise. Everything below it is this window only.
     Rectangle {
         id: prefsDialog
+        opacity: visible ? 1 : 0
+        Behavior on opacity { NumberAnimation { duration: window.mFast; easing.type: Easing.OutCubic } }
         anchors.fill: parent
         color: Qt.rgba(0, 0, 0, 0.55)
         visible: false

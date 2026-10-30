@@ -193,12 +193,8 @@ class AppMenu(QObject):
         if not HAVE_GI:
             return False
         threading.Thread(target=self._run, name="sea-fm-menu", daemon=True).start()
-        # The first setMenu() usually lands within a frame or two of this, and a
-        # push that arrives before the connection exists is simply kept as the
-        # snapshot — so there is no need to block on acquisition here beyond
-        # giving it the moment it takes, which keeps startup honest in the log.
-        self._owned.wait(0.6)
-        return self._conn is not None
+        # Export asynchronously. setMenu stores the snapshot until the bus is ready.
+        return True
 
     def _run(self):
         try:

@@ -843,7 +843,7 @@ Item {
                         anchors.verticalCenter: parent.verticalCenter
                         visible: root.collections.length > 0
                         width: cRow.implicitWidth + Tok.s4; height: 28; radius: Tok.r
-                        color: Tok.alpha(Tok.surface, 0.9)
+                        color: Tok.surface
                         border.width: 1; border.color: Tok.ruleHard
                         Row {
                             id: cRow; anchors.centerIn: parent; spacing: Tok.s3
@@ -891,7 +891,7 @@ Item {
                     Rectangle {
                         anchors.verticalCenter: parent.verticalCenter
                         width: fRow.implicitWidth + Tok.s4; height: 28; radius: Tok.r
-                        color: Tok.alpha(Tok.surface, 0.9)
+                        color: Tok.surface
                         border.width: 1; border.color: Tok.ruleHard
                         Row {
                             id: fRow; anchors.centerIn: parent; spacing: Tok.s3
@@ -922,7 +922,7 @@ Item {
                     Rectangle {
                         anchors.verticalCenter: parent.verticalCenter
                         width: sRow.implicitWidth + Tok.s4; height: 28; radius: Tok.r
-                        color: Tok.alpha(Tok.surface, 0.9)
+                        color: Tok.surface
                         border.width: 1
                         border.color: root.sort === "new" ? Tok.accent : Tok.ruleHard
                         Behavior on border.color { ColorAnimation { duration: Tok.mFast } }
@@ -950,7 +950,7 @@ Item {
                     Rectangle {
                         anchors.verticalCenter: parent.verticalCenter
                         width: mcRow.implicitWidth + Tok.s4; height: 28; radius: Tok.r
-                        color: root.matchColors ? Tok.accentWash : Tok.alpha(Tok.surface, 0.9)
+                        color: root.matchColors ? Tok.accentWash : Tok.surface
                         border.width: 1
                         border.color: root.matchColors ? Tok.accent : Tok.ruleHard
                         Behavior on color { ColorAnimation { duration: Tok.mFast; easing.type: Tok.mEase } }

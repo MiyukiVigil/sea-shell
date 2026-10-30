@@ -13,6 +13,9 @@
 mode="$1"
 [ "$mode" = "light" ] || mode="dark"
 
+# Keep icon variants in step with the desktop mode.
+python3 "$(dirname "$0")/sea-icons.py" --mode "$mode" >/dev/null 2>&1 || true
+
 d="$HOME/.config/sea-shell"
 kmode="$d/kitty-mode.conf"
 mkdir -p "$d"

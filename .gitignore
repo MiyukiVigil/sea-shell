@@ -2,3 +2,6 @@
 # (the tool runs fine against the system `python-hidapi`; the venv is optional/dev-only)
 moondrophub_reverse
 __pycache__/
+
+# Rust build output
+native/sea-fm-core/target/

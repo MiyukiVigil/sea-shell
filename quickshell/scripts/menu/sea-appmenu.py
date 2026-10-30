@@ -883,47 +883,13 @@ def prime_all():
         if menus:
             mem_remember_tree(cls, menus)
             return {"ok": True, "menus": len(menus), "opened": 0, "source": "dbusmenu"}
-    app = app_for_pid(win["pid"])
-    if app is None:
-        return {"ok": False, "why": "not on the accessibility bus"}
-    got = prime_app(app, int(win["pid"]), time.monotonic() + 30, cls, force=True)
-    if got is None:
-        return {"ok": False, "why": "this window has no menu bar"}
-    menus, why, hint = read_menus(app)
-    if menus:
-        fill_remembered(menus, mem_load().get(cls, {}))
-        mem_remember_tree(cls, menus)
-    return {"ok": True, "menus": len(menus or []), "opened": len(got), "source": "atspi"}
+    return {"ok": False, "why": "this application does not export menu contents",
+            "opened": 0}
 
 
 def prime_hidden(budget=1):
-    """Prime at most `budget` off-screen apps. Only ever called when cfg["prime"]."""
-    deadline = time.monotonic() + (CFG.get("prime_budget_ms", 1500) / 1000.0)
-    vis = visible_workspaces()
-    if not vis:
-        return
-    done = 0
-    for c in (hyprctl("clients") or []):
-        if done >= budget or time.monotonic() > deadline:
-            return
-        if not isinstance(c, dict):
-            continue
-        pid = c.get("pid")
-        ws = (c.get("workspace") or {}).get("id")
-        if not pid or pid in PRIMED or ws in vis:
-            continue
-        if dbm_for_pid(int(pid)) is not None:
-            PRIMED[int(pid)] = {}          # exports its menu; nothing to open
-            continue
-        app = app_for_pid(int(pid))
-        if app is None:
-            continue
-        got = prime_app(app, int(pid), deadline, c.get("class") or "")
-        # REMEMBER THE MISSES TOO. Storing only successes meant every window without
-        # a menu bar — which is most of them — was re-walked on every focus event and
-        # ate the budget, so the windows that DID have menus were never reached.
-        PRIMED[int(pid)] = got if got is not None else {}
-        done += 1
+    """Quiet mode never opens application menus during workspace transitions."""
+    return
 
 
 def forget_dead():
@@ -967,17 +933,6 @@ def resolve(path, app=None, opening=False, opened=None):
         return None
     for want in path.split("/"):
         kids = children(node)
-        if not kids and opening and opens_a_menu(node):
-            before = set(popup_sig(x) for x in open_popups(app))
-            do(node, "open", "click", "doDefault")
-            if opened is not None:
-                opened.append(node)
-            time.sleep(0.3)
-            kids = children(node)
-            if not kids:
-                pop = find_open_popup(app, before)
-                if pop is not None:
-                    kids = children(pop)
         nxt = None
         for c in kids:
             if name_matches(c, want):
@@ -989,7 +944,7 @@ def resolve(path, app=None, opening=False, opened=None):
     return node
 
 
-def invoke(path):
+def invoke(path, pid=None):
     """Fire a menu item, opening whatever has to be open to reach it.
 
     A dbusmenu Event needs nothing opened at all, so that is tried first.
@@ -999,21 +954,25 @@ def invoke(path):
     application had already put away.
     """
     win = focused()
+    if pid is not None:
+        clients = hyprctl("clients") or []
+        match = next((c for c in clients if c.get("pid") == pid), None)
+        if match is None:
+            return False
+        win = {"pid": pid, "class": match.get("class", "")}
     if win is None:
         return False
-    dm = dbm_for_pid(win["pid"], x11_active_window())
+    dm = dbm_for_pid(win["pid"], None if pid is not None else x11_active_window())
     if dm is not None and dbm_invoke(dm, path):
         return True
     app = app_for_pid(win["pid"])
     if app is None:
         return False
-    opened = []
-    node = resolve(path, app, opening=True, opened=opened)
-    ok = do(node, "click", "doDefault", "press", "activate") if node else False
-    if not ok:
-        for n in reversed(opened):
-            do(n, "close", "open", "click")
-    return ok
+    # Only activate an already exposed leaf. Resolving must never open parents.
+    node = resolve(path, app, opening=False)
+    if node is None or opens_a_menu(node) or children(node):
+        return False
+    return do(node, "click", "doDefault", "press", "activate")
 
 
 def popup_sig(n):
@@ -1073,7 +1032,7 @@ def find_open_popup(app, exclude):
     return None
 
 
-def submenu(path):
+def submenu(path, pid=None):
     """Open a lazily-built menu just far enough to read it, then close it again.
 
     This is the ONLY place that opens anything, and it runs on the click that asked
@@ -1085,60 +1044,32 @@ def submenu(path):
     expected to remember them and never ask twice.
     """
     win = focused()
+    if pid is not None:
+        clients = hyprctl("clients") or []
+        match = next((c for c in clients if c.get("pid") == pid), None)
+        if match is None:
+            return {"path": path, "items": [], "ok": False}
+        win = {"pid": pid, "class": match.get("class", "")}
     if win is None:
         return {"path": path, "items": [], "primed": False, "ok": False}
-    dm = dbm_for_pid(win["pid"], x11_active_window())
+    dm = dbm_for_pid(win["pid"], None if pid is not None else x11_active_window())
     if dm is not None:
         items = dbm_submenu(dm, path)
         if items:
             return {"path": path, "items": items, "primed": False, "ok": True}
-    app = app_for_pid(win["pid"])
-    if app is None:
-        return {"path": path, "items": [], "primed": False, "ok": False}
-    # A nested path ("File/Recent") cannot be resolved against a closed menu bar:
-    # in Chromium the inner item does not exist as an object until its parent popup
-    # is open. So the walk is allowed to open as it descends, and whatever it opened
-    # is closed again below.
-    opened = []
-    node = resolve(path, app, opening="/" in path, opened=opened)
-    if node is None:
-        for n in reversed(opened):
-            do(n, "close", "open", "click", "doDefault")
-        return {"path": path, "items": [], "primed": False, "ok": False}
-    kids = children(node)
-    items = []
-    primed = False
-    if kids:
-        items = [i for i in (describe(c, 1) for c in kids) if i]
-    elif opens_a_menu(node):
-        try:
-            before = set(popup_sig(x) for x in open_popups(app))
-            do(node, "open", "click", "doDefault")
-            primed = True
-            time.sleep(0.35)
-            kids = children(node)
-            if not kids:
-                # GTK and Qt hang the popup off the item that opened it. Chromium
-                # does not — it builds a whole second frame for the popup and
-                # leaves the item childless — so it has to be gone and found, and
-                # told apart from the popup it came out of.
-                pop = find_open_popup(app, before)
-                if pop is not None:
-                    kids = children(pop)
-            # READ IT BEFORE CLOSING IT. These are live references into a popup
-            # that the next line destroys; describing them afterwards returned a
-            # list of Nones and looked exactly like "this menu is empty", which is
-            # how Electron menus came back blank even once they were being found.
-            items = [i for i in (describe(c, 1) for c in kids) if i]
-            do(node, "close", "open", "click", "doDefault")   # toggle it shut again
-        except Exception:
-            pass
-    for n in reversed(opened):
-        do(n, "close", "open", "click", "doDefault")
-    if items and win:
-        PRIMED.setdefault(win["pid"], {})[path.split("/")[0]] = items
-        mem_save(win.get("class") or "", path, items)
-    return {"path": path, "items": items, "primed": primed, "ok": bool(items)}
+    remembered = mem_load().get(win.get("class") or "", {}).get(path)
+    if remembered:
+        return {"path": path, "items": remembered, "primed": False, "ok": True}
+    # Never open application popups on a visible workspace just to inspect them.
+    # Native exports above are live; hidden-window priming fills the cache later.
+    if not still_hidden(win["pid"]):
+        return {"path": path, "items": [], "primed": False, "ok": False,
+                "why": "menu contents are not available quietly yet"}
+    # Quiet discovery must never activate an application's popup, including when
+    # the compositor reports a window hidden during a workspace transition.
+    return {"path": path, "items": [], "primed": False, "ok": False,
+            "why": "this application does not export menu contents"}
+
 
 
 # ------------------------------------------------------------------ doctor ----
@@ -1442,17 +1373,22 @@ def dbm_find(target, path):
     if not lay:
         return None
     node = lay[1]
-    for want in path.split("/"):
+    remaining = path
+    while remaining:
         found = None
+        candidates = []
         for kid in node[2]:
             try:
-                if demnemonic(kid[1].get("label", "") or "") == want:
-                    found = kid
-                    break
+                label = demnemonic(kid[1].get("label", "") or "")
+                if label and (remaining == label or remaining.startswith(label + "/")):
+                    candidates.append((len(label), label, kid))
             except Exception:
                 continue
-        if found is None:
+        if not candidates:
             return None
+        _, label, found = max(candidates, key=lambda c: c[0])
+        remaining = remaining[len(label):]
+        if remaining.startswith("/"): remaining = remaining[1:]
         node = found
     try:
         return int(node[0])
@@ -2450,30 +2386,29 @@ def daemon():
                     retries = RETRY_LIMIT if again.get("menus") else 0
                     published = again.get("pid")
                     write(again)
-            if not CFG.get("prime"):
-                continue
-            # COALESCE. Priming blocks, and a burst of focus events (which is what
-            # a workspace switch is) would otherwise queue up one blocking pass per
-            # event. Drain whatever arrived while we were not looking and prime once.
-            if select.select([s], [], [], 0)[0]:
-                continue
-            try:
-                prime_hidden()
-            except Exception:
-                pass
-            write(snapshot())
 
 
 def main(argv):
+    # GTK applications only publish their menus when accessibility is enabled.
+    # Restore it on startup so a session reset does not silently disable menus.
+    try:
+        bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+        bus.call_sync("org.a11y.Bus", "/org/a11y/bus",
+                      "org.freedesktop.DBus.Properties", "Set",
+                      GLib.Variant("(ssv)", ("org.a11y.Status", "IsEnabled",
+                                            GLib.Variant("b", True))),
+                      None, Gio.DBusCallFlags.NONE, 2000, None)
+    except Exception:
+        pass
     Atspi.init()
     CFG.update(config())
     if "--daemon" in argv:
         return daemon()
     if "--invoke" in argv:
-        print(json.dumps({"ok": invoke(argv[argv.index("--invoke") + 1])}))
+        print(json.dumps({"ok": invoke(argv[argv.index("--invoke") + 1], int(argv[argv.index("--pid") + 1]) if "--pid" in argv else None)}))
         return 0
     if "--submenu" in argv:
-        print(json.dumps(submenu(argv[argv.index("--submenu") + 1])))
+        print(json.dumps(submenu(argv[argv.index("--submenu") + 1], int(argv[argv.index("--pid") + 1]) if "--pid" in argv else None)))
         return 0
     if "--prime-all" in argv:
         print(json.dumps(prime_all()))

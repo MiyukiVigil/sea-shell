@@ -135,6 +135,8 @@ PY
 [ -z "$TR" ]  && TR=grow
 [ -z "$FPS" ] && FPS=60
 [ -z "$DUR" ] && DUR=1
+# Login restoration should present the saved wallpaper without a reveal animation.
+[ "${SEA_WALLPAPER_LOGIN:-0}" = "1" ] && TR=none
 
 if is_motion "$wp"; then
     # fullscreen auto-pause / freeze listener (single-instance; safe to re-run)

@@ -36,8 +36,10 @@ elif have yay; then
 fi
 
 # `grep -c .` rather than `wc -l`: an empty string still counts as one line under wc.
-rc=$(printf '%s' "$repo" | grep -c . 2>/dev/null || echo 0)
-ac=$(printf '%s' "$aur"  | grep -c . 2>/dev/null || echo 0)
+# No `|| echo 0`: grep -c already prints 0 on no match (then exits 1), so that printed "0\n0"
+# and broke the first line of the output whenever a source had nothing pending.
+rc=$(printf '%s' "$repo" | grep -c . 2>/dev/null); rc=${rc:-0}
+ac=$(printf '%s' "$aur"  | grep -c . 2>/dev/null); ac=${ac:-0}
 
 [ "${1:-}" = "count" ] && { printf '%s %s\n' "$rc" "$ac"; exit 0; }
 

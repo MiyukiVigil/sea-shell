@@ -15,7 +15,10 @@ ShellRoot {
     property string accent: "#63c7dd"
     property bool cfgLight: false
     property real cfgScale: 0     // 0 = auto (per-monitor), >0 = manual UI-scale multiplier
+    property var  cfgMonitors: ({})   // per-monitor overrides from appearance.json
     function uiFor(scr) {          // matches shell.qml: ≤1440p → 1×, grows past it, capped 2.5×
+        var mo = (scr && scr.name && root.cfgMonitors[scr.name]) ? root.cfgMonitors[scr.name].scale : 0;
+        if (mo > 0) return mo;                // per-monitor override wins (same rule as the bar)
         if (root.cfgScale > 0) return root.cfgScale;
         var h = (scr && scr.height) ? scr.height : 0;
         if (h <= 1440) return 1.0;
@@ -29,7 +32,7 @@ ShellRoot {
 
     // follow the shell's accent + light/dark (same appearance.json every other surface reads)
     Process { running: true; command: ["sh","-c","cat \"$HOME/.config/sea-shell/appearance.json\" 2>/dev/null"]
-        stdout: StdioCollector { id: apOut; onStreamFinished: { try { var j=JSON.parse(apOut.text); if(j.accent) root.accent=j.accent; if(j.scale!==undefined) root.cfgScale=j.scale; if(j.mode!==undefined) root.cfgLight=(""+j.mode==="light") } catch(e){} } } }
+        stdout: StdioCollector { id: apOut; onStreamFinished: { try { var j=JSON.parse(apOut.text); if(j.accent) root.accent=j.accent; if(j.scale!==undefined) root.cfgScale=j.scale; if(j.monitors) root.cfgMonitors=j.monitors; if(j.mode!==undefined) root.cfgLight=(""+j.mode==="light") } catch(e){} } } }
 
     // ---------- industrial token shim ----------
     // Colours come from the shared Tok singleton (see shell.qml). This surface used to carry its
@@ -83,7 +86,7 @@ ShellRoot {
         property string hotkey: ""
         signal fire()
         width: 118; height: 96; radius: Tok.rCard
-        color: sm.containsMouse ? theme.a(theme.iris, 0.18) : theme.a(theme.bg, 0.96)
+        color: sm.containsMouse ? Tok.accentWash : theme.bg
         border.width: 1; border.color: sm.containsMouse ? theme.iris : theme.a(theme.iris, 0.24)
         Behavior on color { ColorAnimation { duration: 100 } }
         Column {
@@ -112,7 +115,9 @@ ShellRoot {
         // scale the centred picker up on big displays (content stays centred)
         Binding { target: win.contentItem; property: "scale"; value: win.ui }
 
-        Rectangle { anchors.fill: parent; color: Qt.rgba(0,0,0,0.45); MouseArea { anchors.fill: parent; onClicked: root.cancel() } }
+        // scrim in native units so it still reaches the screen edges after the scale
+        Rectangle { anchors.centerIn: parent; width: win.width / win.ui; height: win.height / win.ui
+            color: Qt.rgba(0,0,0,0.45); MouseArea { anchors.fill: parent; onClicked: root.cancel() } }
         Item {
             anchors.fill: parent; focus: true
             Keys.onPressed: (e)=> {
@@ -133,7 +138,7 @@ ShellRoot {
             width: buttons.width + 44
             height: buttons.height + 96
             radius: Tok.rCard
-            color: theme.a(theme.bg, 0.97)
+            color: theme.bg
             border.width: 1; border.color: theme.a(theme.iris, 0.34)
             MouseArea { anchors.fill: parent }
 

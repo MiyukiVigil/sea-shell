@@ -25,6 +25,8 @@ import hashlib
 import stat
 import re
 import threading
+import tempfile
+import select
 import colorsys
 import datetime
 from urllib.parse import quote, unquote
@@ -244,7 +246,7 @@ class ThumbnailWorker(QRunnable):
         try:
             if self._stale() or not self.file_path.exists():
                 return
-            h = hashlib.md5(f"{self.file_path.resolve()}_{self.file_path.stat().st_mtime}".encode()).hexdigest()
+            h = hashlib.md5(f"{self.file_path}_{self.file_path.stat().st_mtime}".encode()).hexdigest()
 
             if self.category == "video":
                 thumb = video_thumb_path(h)
@@ -516,20 +518,47 @@ class DocPreviewWorker(QRunnable):
 # file system, and an undo that only reached the half of the window you happened
 # to be looking at would be a coin toss.
 
+class UndoWorker(QRunnable):
+    def __init__(self, journal, plan):
+        super().__init__()
+        self.journal, self.plan = journal, plan
+
+    def run(self):
+        try:
+            message = self.journal._execute(self.plan)
+        except Exception as exc:
+            message = f"Could not undo: {exc}"
+        self.journal.completed.emit(message)
+
+
 class UndoJournal(QObject):
     changed = Signal()
+    completed = Signal(str)
+    finished = Signal(str)
 
     LIMIT = 40
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._stack = []
+        self._busy = False
+        self.completed.connect(self._complete, Qt.QueuedConnection)
+
+    @Property(bool, notify=changed)
+    def busy(self):
+        return self._busy
+
+    @Slot(str)
+    def _complete(self, message):
+        self._busy = False
+        self.changed.emit()
+        self.finished.emit(message)
 
     # ---- reading ----
 
     @Property(bool, notify=changed)
     def canUndo(self):
-        return len(self._stack) > 0
+        return bool(self._stack) and not self._busy
 
     @Property(int, notify=changed)
     def depth(self):
@@ -568,10 +597,25 @@ class UndoJournal(QObject):
         be, and leaving it on the stack would offer to do the recoverable half a
         second time.
         """
+        if self._busy:
+            return "Undo is already running"
+        if OPS().busy:
+            return "Wait for the file operation to finish before undoing"
         if not self._stack:
             return "Nothing to undo"
         top = self._stack.pop()
+        # Tags modify a UI-owned store and are cheap; keep those on this thread.
+        is_tag = top["kind"] == "tag" or (top["kind"] == "batch" and
+                   any(item.get("op") == "tag" for item in top["items"]))
+        if is_tag:
+            self.changed.emit()
+            return self._execute(top)
+        self._busy = True
         self.changed.emit()
+        OPS()._pool.start(UndoWorker(self, top))
+        return f"Undoing {top['verb'].lower()}…"
+
+    def _execute(self, top):
         done, failed = 0, []
         if top["kind"] == "rename":
             # Renames reverse as a SET, not one at a time — see _reverse_renames.
@@ -643,10 +687,10 @@ class UndoJournal(QObject):
             # in the trash listing as an entry pointing at nothing.
             src = Path(it["trash"])
             dest = Path(it["orig"])
-            if not src.exists():
+            if not (src.exists() or src.is_symlink()):
                 raise RuntimeError(f"{dest.name} is no longer in the trash")
             dest.parent.mkdir(parents=True, exist_ok=True)
-            if dest.exists():
+            if dest.exists() or dest.is_symlink():
                 dest = _free_name(dest)
             shutil.move(str(src), str(dest))
             info = Path(it.get("info", ""))
@@ -657,26 +701,34 @@ class UndoJournal(QObject):
         if kind == "move":
             src = Path(it["dst"])
             dest = Path(it["src"])
-            if not src.exists():
+            if not (src.exists() or src.is_symlink()):
                 raise RuntimeError(f"{src.name} has moved again")
             dest.parent.mkdir(parents=True, exist_ok=True)
-            if dest.exists():
+            if dest.exists() or dest.is_symlink():
                 dest = _free_name(dest)
             shutil.move(str(src), str(dest))
+            return True
+
+        if kind == "mkdir":
+            p = Path(it["path"])
+            if not (p.exists() or p.is_symlink()):
+                return False
+            # Preserve anything the user added after this operation.
+            p.rmdir()
             return True
 
         if kind == "create":
             # Includes pasted copies, duplicates and extractions. Trashed, never
             # deleted — see the note at the top.
             p = Path(it["path"])
-            if not p.exists():
+            if not (p.exists() or p.is_symlink()):
                 return False
             _trash_to_spec(p)
             return True
 
         if kind == "chmod":
             p = Path(it["path"])
-            if not p.exists():
+            if not (p.exists() or p.is_symlink()):
                 return False
             os.chmod(str(p), it["old"])
             return True
@@ -693,7 +745,7 @@ def _free_name(dest):
     stem, suffix = dest.stem, dest.suffix
     i = 2
     cand = dest.with_name(f"{stem}_{i}{suffix}")
-    while cand.exists():
+    while cand.exists() or cand.is_symlink():
         i += 1
         cand = dest.with_name(f"{stem}_{i}{suffix}")
     return cand
@@ -1261,13 +1313,8 @@ PREF_DEFAULTS = {
     "ownSeeded": False,          # has the first-run adoption happened yet
     "useThemeIcons": True,
     "tintFolders": True,         # folders follow the accent where the theme allows
-    # Papirus by default where it is installed: it carries a distinct icon for
-    # several hundred MIME types, where a theme like Adwaita collapses .py, .txt,
-    # .c and .qml all onto the same generic page. A theme that is not installed is
-    # ignored rather than leaving the grid blank — see _apply_icon_theme — so this
-    # is safe to ship as a default on a machine that does not have it. Set it to
-    # "" in the preferences to follow the desktop's own theme instead.
-    "iconTheme": "Papirus",
+    # Follow the desktop's shared icon theme unless explicitly overridden.
+    "iconTheme": "",
 }
 
 
@@ -1984,6 +2031,40 @@ PREVIEW_TEXT_LINES = 250
 PREVIEW_CACHE_BUDGET = 512 * 1024 * 1024      # bytes of rendered pages to keep
 
 
+class ArchiveScanWorker(QRunnable):
+    def __init__(self, backend, archive, inner, query, token):
+        super().__init__()
+        self.backend, self.archive, self.inner = backend, archive, inner
+        self.query, self.token = query.lower(), token
+
+    def run(self):
+        try:
+            tree = self.backend._archive_index(self.archive)
+            rows = [(entry["name"], str(Path(self.archive) / entry["inner"]),
+                     entry["isDir"], entry["size"], entry["mtime"])
+                    for entry in tree.get(self.inner.strip("/"), {}).values()
+                    if not self.query or self.query in entry["name"].lower()]
+            self.backend.scanFinished.emit(self.token, rows, "")
+        except Exception as exc:
+            self.backend.scanFinished.emit(self.token, [], str(exc))
+
+
+class ArchivePreviewWorker(QRunnable):
+    def __init__(self, backend, archive, inner, display_path, token, purpose):
+        super().__init__()
+        self.backend, self.archive, self.inner = backend, archive, inner
+        self.display_path, self.token, self.purpose = display_path, token, purpose
+
+    def run(self):
+        if self.backend._archive_token != self.token:
+            return
+        try:
+            real = self.backend._extract_member(self.archive, self.inner)
+        except Exception:
+            real = ""
+        self.backend.archiveExtracted.emit(self.display_path, self.token, real, self.purpose)
+
+
 class PreviewWorker(QRunnable):
     """The expensive half of one file's preview."""
 
@@ -2549,6 +2630,8 @@ OP_VERBS = {
     "copy":     ("Copying",          "Copied"),
     "move":     ("Moving",           "Moved"),
     "trash":    ("Moving to Trash",  "Moved to Trash"),
+    "restore":  ("Restoring",        "Restored"),
+    "chmod":    ("Changing permissions", "Changed permissions for"),
     "delete":   ("Deleting",         "Deleted"),
     "compress": ("Compressing",      "Compressed"),
     "extract":  ("Extracting",       "Extracted"),
@@ -2699,6 +2782,81 @@ class _OpBase(QRunnable):
     def _report(self, cancelled):
         self.e.finish(self.op_id, self.kind, self.records, self.done_files,
                       self.skipped, self.failed, cancelled)
+
+
+class PermissionWorker(_OpBase):
+    def __init__(self, engine, op_id, path, mode, recursive):
+        super().__init__(engine, op_id, "chmod")
+        self.path, self.mode, self.recursive = Path(path), mode & 0o7777, recursive
+
+    def run(self):
+        cancelled = False
+        try:
+            targets = [self.path]
+            if self.recursive and self.path.is_dir() and not self.path.is_symlink():
+                for root, dirs, files in os.walk(self.path, followlinks=False):
+                    self._check()
+                    targets.extend(Path(root) / name for name in dirs + files)
+            self.total_files = len(targets)
+            for path in targets:
+                self._check()
+                try:
+                    info = path.lstat()
+                    if stat.S_ISLNK(info.st_mode):
+                        self.skipped += 1
+                        continue
+                    old = stat.S_IMODE(info.st_mode)
+                    want = self.mode | ((self.mode & 0o444) >> 2) if stat.S_ISDIR(info.st_mode) else self.mode
+                    if old != want:
+                        os.chmod(path, want, follow_symlinks=False)
+                        self.records.append({"op": "chmod", "path": str(path), "old": old})
+                    self.done_files += 1
+                except (OSError, NotImplementedError) as exc:
+                    self.failed.append(f"{path.name}: {exc}")
+                self._emit(path.name)
+        except _Cancelled:
+            cancelled = True
+        except Exception as exc:
+            self.failed.append(str(exc))
+        self._emit(force=True)
+        self._report(cancelled)
+
+
+class RestoreWorker(_OpBase):
+    """Restore off the UI thread, preserving collisions and broken symlinks."""
+    def __init__(self, engine, op_id, paths):
+        super().__init__(engine, op_id, "restore")
+        self.paths = paths
+
+    def run(self):
+        cancelled = False
+        self.total_files = len(self.paths)
+        try:
+            for raw in self.paths:
+                self._check()
+                path = Path(raw)
+                if not (path.exists() or path.is_symlink()):
+                    continue
+                try:
+                    info, top = FileManagerBackend._trash_home_of(path)
+                    origin = FileManagerBackend._trash_origin(info, top) if info and info.exists() else None
+                    if origin is None:
+                        raise RuntimeError("no record of where it came from")
+                    origin.parent.mkdir(parents=True, exist_ok=True)
+                    destination = _free_name(origin) if origin.exists() or origin.is_symlink() else origin
+                    shutil.move(str(path), str(destination))
+                    # Record the successful move even if removing metadata fails.
+                    self.records.append({"op": "create", "path": str(destination)})
+                    if info.exists():
+                        info.unlink()
+                    self.done_files += 1
+                except Exception as exc:
+                    self.failed.append(f"{path.name}: {exc}")
+                self._emit(path.name)
+        except _Cancelled:
+            cancelled = True
+        self._emit(force=True)
+        self._report(cancelled)
 
 
 class TrashWorker(_OpBase):
@@ -2916,84 +3074,104 @@ class ExtractWorker(_OpBase):
             return ["bsdtar", "-x", "-f", str(self.archive), "-C", str(self.target)]
         return []
 
+    def _selected_members(self, names):
+        if self.members is None:
+            return list(names)
+        selected = [name.rstrip("/") for name in self.members]
+        return [name for name in names if any(
+            name.rstrip("/") == item or name.startswith(item + "/")
+            for item in selected)]
+
     def run(self):
         cancelled = False
-        before = set()
+        destination = self.target
+        placer = None
         try:
-            self.target.mkdir(parents=True, exist_ok=True)
-            before = set(os.listdir(self.target))
-
-            ext_cmd = self._external()
-            if ext_cmd is not None:
-                if not ext_cmd:
-                    self.failed.append(
-                        f"{self.archive.suffix} needs 7z or bsdtar installed")
-                else:
-                    self.total_files = 1
-                    self._emit(self.archive.name, force=True)
-                    res = subprocess.run(ext_cmd, capture_output=True, text=True)
-                    if res.returncode != 0:
-                        self.failed.append(
-                            (res.stderr or res.stdout or "extraction failed"
-                             ).strip().splitlines()[0])
-                    else:
-                        self.done_files = 1
-            else:
-                low = self.archive.name.lower()
-                if low.endswith((".zip", ".jar", ".whl", ".apk", ".cbz", ".epub")):
-                    with zipfile.ZipFile(self.archive) as zf:
-                        names = self.members or zf.namelist()
-                        self.total_files = len(names)
-                        self.total_bytes = sum(
-                            i.file_size for i in zf.infolist()
-                            if not self.members or i.filename in set(names))
-                        self._emit(force=True)
-                        for n in names:
+            destination.mkdir(parents=True, exist_ok=True)
+            with tempfile.TemporaryDirectory(prefix=".sea-extract-", dir=str(destination.parent)) as staging:
+                self.target = Path(staging)
+                ext_cmd = self._external()
+                if ext_cmd is not None:
+                    if not ext_cmd:
+                        raise RuntimeError(f"{self.archive.suffix} needs 7z or bsdtar installed")
+                    if self.members:
+                        ext_cmd += list(self.members)
+                    process = subprocess.Popen(ext_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                    try:
+                        while True:
                             self._check()
                             try:
-                                zf.extract(n, self.target)
-                                info = zf.getinfo(n)
-                                self.done_bytes += info.file_size
-                            except (KeyError, OSError) as exc:
-                                self.failed.append(f"{n}: {exc}")
+                                output, error = process.communicate(timeout=0.1)
+                                break
+                            except subprocess.TimeoutExpired:
+                                continue
+                        if process.returncode:
+                            raise RuntimeError((error or output).decode("utf-8", "replace").strip() or "Extraction failed")
+                    finally:
+                        if process.poll() is None:
+                            process.kill()
+                            process.communicate()
+                elif zipfile.is_zipfile(self.archive):
+                    with zipfile.ZipFile(self.archive) as archive:
+                        names = self._selected_members(archive.namelist())
+                        self.total_files = len(names)
+                        for name in names:
+                            self._check()
+                            info = archive.getinfo(name)
+                            target = self.target / name
+                            if not target.resolve().is_relative_to(self.target.resolve()):
+                                raise ValueError(f"Unsafe archive path: {name}")
+                            if info.is_dir():
+                                target.mkdir(parents=True, exist_ok=True)
+                            else:
+                                target.parent.mkdir(parents=True, exist_ok=True)
+                                with archive.open(info) as source, target.open("wb") as out:
+                                    while True:
+                                        self._check()
+                                        data = source.read(FILEOP_CHUNK)
+                                        if not data:
+                                            break
+                                        out.write(data)
+                                        self.done_bytes += len(data)
+                                        self._emit(name)
                             self.done_files += 1
-                            self._emit(os.path.basename(n.rstrip("/")))
                 else:
-                    with tarfile.open(self.archive) as tf:
-                        infos = (tf.getmembers() if not self.members
-                                 else [tf.getmember(n) for n in self.members])
+                    with tarfile.open(self.archive) as archive:
+                        names = self._selected_members(archive.getnames())
+                        infos = [archive.getmember(name) for name in names]
                         self.total_files = len(infos)
-                        self.total_bytes = sum(i.size for i in infos)
-                        self._emit(force=True)
                         for info in infos:
                             self._check()
-                            try:
-                                # Python 3.14 filters to the "data" profile by
-                                # default, which refuses members that would land
-                                # outside the destination.
-                                tf.extract(info, self.target)
-                                self.done_bytes += info.size
-                            except Exception as exc:
-                                self.failed.append(f"{info.name}: {exc}")
+                            archive.extract(info, self.target, filter="data")
                             self.done_files += 1
-                            self._emit(os.path.basename(info.name.rstrip("/")))
+                            self.done_bytes += info.size
+                            self._emit(info.name)
+                self._check()
+                placer = FileOpWorker(self.e, self.op_id, "copy", [], destination)
+                placer._measure = lambda: None
+                # Conflict decisions are shared with the operation engine; extraction
+                # never overwrites a user's file without the same choice as a paste.
+                for child in sorted(self.target.iterdir(), key=lambda p: p.name):
+                    placer._place(child, destination / child.name)
+                self.records = placer.records
+                self.failed.extend(placer.failed)
+                self.skipped = placer.skipped
         except _Cancelled:
             cancelled = True
         except Exception as exc:
             self.failed.append(str(exc))
+        finally:
+            self.target = destination
+            if placer is not None:
+                self.records = placer.records
+            self._emit(force=True)
+            self._report(cancelled)
 
-        # What the archive ADDED is whatever is there now that was not before.
-        # Reading the member list instead would name files that already existed
-        # and were overwritten, and trashing one of those on undo would take the
-        # user's own file with it.
-        try:
-            added = sorted(set(os.listdir(self.target)) - before)
-        except OSError:
-            added = []
-        for n in added:
-            self.records.append({"op": "create", "path": str(self.target / n)})
-        self._emit(force=True)
-        self._report(cancelled)
+
+def native_core():
+    candidates = [Path(__file__).with_name("sea-fm-core"),
+                  Path(__file__).resolve().parents[3] / "native/sea-fm-core/target/release/sea-fm-core"]
+    return next((p for p in candidates if p.is_file() and os.access(p, os.X_OK)), None)
 
 
 class FileOpWorker(_OpBase):
@@ -3039,16 +3217,64 @@ class FileOpWorker(_OpBase):
 
     def _copy_file(self, src, dst):
         """Chunked so a big file still reports progress and can still be stopped."""
-        with open(src, "rb") as fh, open(dst, "wb") as out:
+        # Publish only a complete copy. Cancellation, disk-full and IO errors
+        # must not leave an apparently valid destination containing partial data.
+        core = native_core() if src.stat().st_size >= FILEOP_CHUNK else None
+        fd, temporary = tempfile.mkstemp(prefix=".sea-copy-", dir=str(dst.parent))
+        try:
+            # Avoid process overhead for small files; Rust streams larger data
+            # with progress while Python retains conflict/undo/atomic commit policy.
+            if core is not None:
+                os.close(fd)
+                self._native_copy(core, src, temporary)
+            else:
+                with os.fdopen(fd, "wb") as out, open(src, "rb") as fh:
+                    while True:
+                        self._check()
+                        block = fh.read(FILEOP_CHUNK)
+                        if not block:
+                            break
+                        out.write(block)
+                        self.done_bytes += len(block)
+                        self._emit(src.name)
+            shutil.copystat(str(src), temporary, follow_symlinks=False)
+            self._check()
+            os.replace(temporary, str(dst))
+        finally:
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
+
+    def _native_copy(self, core, src, temporary):
+        process = subprocess.Popen([str(core), "copy-data", str(src), temporary],
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
+        pending = b""
+        previous = 0
+        try:
             while True:
                 self._check()
-                block = fh.read(FILEOP_CHUNK)
-                if not block:
+                if not select.select([process.stdout], [], [], 0.05)[0]:
+                    continue
+                chunk = os.read(process.stdout.fileno(), 65536)
+                if not chunk:
                     break
-                out.write(block)
-                self.done_bytes += len(block)
-                self._emit(src.name)
-        shutil.copystat(str(src), str(dst), follow_symlinks=False)
+                pending += chunk
+                while b"\n" in pending:
+                    line, pending = pending.split(b"\n", 1)
+                    current = int(json.loads(line)["bytes"])
+                    self.done_bytes += max(0, current - previous)
+                    previous = current
+                    self._emit(src.name)
+            process.wait()
+            if process.returncode:
+                raise OSError(process.stderr.read().decode("utf-8", "replace").strip() or "Native copy failed")
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+            process.stdout.close()
+            process.stderr.close()
 
     def _retire(self, victim):
         """Move what is being replaced to the trash, and say where it went."""
@@ -3065,7 +3291,7 @@ class FileOpWorker(_OpBase):
             return self._place_leaf(src, dst, link=True)
 
         if src.is_dir():
-            if dst.exists() and not dst.is_dir():
+            if (dst.exists() or dst.is_symlink()) and (not dst.is_dir() or dst.is_symlink()):
                 choice = self._ask(src, dst)
                 if choice == CONFLICT_CANCEL:
                     raise _Cancelled()
@@ -3103,8 +3329,12 @@ class FileOpWorker(_OpBase):
                     self._emit(src.name, force=True)
                     return
 
+            created_here = not dst.exists()
             dst.mkdir(parents=True, exist_ok=True)
-            created_here = not any(r.get("path") == str(dst) for r in self.records)
+            if created_here:
+                # Record before children so undo reverses children first. An
+                # existing merge destination must never be recorded as created.
+                self.records.append({"op": "mkdir", "path": str(dst)})
             for child in sorted(src.iterdir(), key=lambda c: c.name):
                 self._place(child, dst / child.name)
             shutil.copystat(str(src), str(dst))
@@ -3113,8 +3343,6 @@ class FileOpWorker(_OpBase):
                     src.rmdir()
                 except OSError:
                     pass          # something inside was skipped; leave it be
-            if created_here and self.kind == "copy":
-                self.records.append({"op": "create", "path": str(dst)})
             return
 
         self._place_leaf(src, dst)
@@ -3191,15 +3419,16 @@ class FileOpWorker(_OpBase):
                     continue
                 # Pasting a folder into itself, or into its own descendant, is a
                 # loop that fills the disk. Refuse it rather than start it.
-                if src.is_dir() and (src == self.dest
-                                     or self.dest.is_relative_to(src)):
+                if not src.is_symlink() and src.is_dir() and (
+                        src.resolve() == self.dest.resolve()
+                        or self.dest.resolve().is_relative_to(src.resolve())):
                     self.failed.append(f"{src.name}: cannot be placed inside itself")
                     continue
                 dst = self.dest / src.name
-                if self.kind == "move" and src == dst:
+                if self.kind == "move" and src.resolve() == dst.resolve():
                     continue
                 # Copying a file onto itself means "make a copy", not "ask".
-                if self.kind == "copy" and src == dst:
+                if self.kind == "copy" and src.resolve() == dst.resolve():
                     dst = _free_name(dst)
                 self._place(src, dst)
         except _Cancelled:
@@ -3305,6 +3534,7 @@ class FileOpEngine(QObject):
     half of the window.
     """
 
+    completionRequested = Signal(object)
     progress = Signal(str, "QVariant")
     conflict = Signal("QVariant")
     resolved = Signal(str)
@@ -3313,7 +3543,8 @@ class FileOpEngine(QObject):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._pool = QThreadPool()
+        self.completionRequested.connect(self._finish_on_ui, Qt.QueuedConnection)
+        self._pool = QThreadPool(self)
         # One at a time. Two concurrent copies to the same disk are slower than
         # the same two in sequence, and two conflict dialogs at once is not a
         # question anyone can answer.
@@ -3352,6 +3583,15 @@ class FileOpEngine(QObject):
     @Slot(list, str, result=str)
     def moveTo(self, sources, dest_dir):
         return self._start("move", sources, dest_dir)
+
+    def changePermissions(self, path, mode, recursive=False):
+        return self._launch("chmod", lambda oid: PermissionWorker(self, oid, path, mode, recursive))
+
+    def restorePaths(self, paths):
+        clean = [str(p) for p in paths if p]
+        if not clean:
+            return ""
+        return self._launch("restore", lambda oid: RestoreWorker(self, oid, clean))
 
     def trashPaths(self, paths, trash_one):
         clean = [str(p) for p in paths if p]
@@ -3450,9 +3690,16 @@ class FileOpEngine(QObject):
     # ---- finishing ----
 
     UNDO_VERBS = {"copy": "Paste", "move": "Move", "trash": "Move to Trash",
-                  "compress": "Compress", "extract": "Extract"}
+                  "compress": "Compress", "extract": "Extract", "restore": "Restore", "chmod": "Change Permissions"}
 
     def finish(self, op_id, kind, records, done, skipped, failed, cancelled):
+        # Worker completion must not mutate the Qt-owned undo journal or model.
+        self.completionRequested.emit((op_id, kind, list(records), done, skipped,
+                                       list(failed), cancelled))
+
+    @Slot(object)
+    def _finish_on_ui(self, result):
+        op_id, kind, records, done, skipped, failed, cancelled = result
         self._live.pop(op_id, None)
         if records:
             # One entry for the whole operation, reversed newest-first. A paste
@@ -3487,7 +3734,77 @@ def OPS():
     return _OPS
 
 
+class DirectoryScanWorker(QRunnable):
+    """Filesystem IO only; Qt models, icons and tags stay on the UI thread."""
+    def __init__(self, path, query, hidden, cancel, token, done):
+        super().__init__()
+        self.path, self.query, self.hidden = path, query.lower(), hidden
+        self.cancel, self.token, self.done = cancel, token, done
+
+    def run(self):
+        core = native_core()
+        if core is not None:
+            process = None
+            try:
+                process = subprocess.Popen([str(core), "scan", self.path, self.query,
+                                            "1" if self.hidden else "0"],
+                                           stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                while True:
+                    if self.cancel.is_set():
+                        process.kill()
+                        process.communicate()
+                        return
+                    try:
+                        output, _ = process.communicate(timeout=0.05)
+                        break
+                    except subprocess.TimeoutExpired:
+                        continue
+                if process.returncode == 0:
+                    result = json.loads(output)
+                    if not result.get("fallback"):
+                        if not self.cancel.is_set():
+                            self.done.emit(self.token, result["rows"], result.get("error", ""))
+                        return
+            except (OSError, ValueError, KeyError):
+                if process is not None and process.poll() is None:
+                    process.kill()
+                    process.communicate()
+            # A missing/incompatible native helper must not prevent browsing.
+        rows = []
+        error = ""
+        def walk(folder, depth):
+            if self.cancel.is_set():
+                return
+            try:
+                with os.scandir(folder) as entries:
+                    for entry in entries:
+                        if self.cancel.is_set() or (self.query and len(rows) >= 150):
+                            return
+                        if not self.hidden and entry.name.startswith("."):
+                            continue
+                        try:
+                            directory = entry.is_dir(follow_symlinks=True)
+                            if not self.query or self.query in entry.name.lower():
+                                info = entry.stat(follow_symlinks=False)
+                                rows.append((entry.name, entry.path, directory,
+                                             0 if directory else info.st_size, info.st_mtime))
+                            if self.query and depth < 3 and entry.is_dir(follow_symlinks=False):
+                                walk(entry.path, depth + 1)
+                        except OSError:
+                            continue
+            except OSError as exc:
+                if depth == 0:
+                    nonlocal_error.append(str(exc))
+        nonlocal_error = []
+        walk(self.path, 0)
+        if not self.cancel.is_set():
+            self.done.emit(self.token, rows, nonlocal_error[0] if nonlocal_error else error)
+
+
 class FileManagerBackend(QObject):
+    archiveExtracted = Signal(str, int, str, str)
+    listingBusyChanged = Signal()
+    scanFinished = Signal(int, list, str)
     currentPathChanged = Signal(str)
     directoryChanged = Signal()
     showHiddenChanged = Signal(bool)
@@ -3556,8 +3873,20 @@ class FileManagerBackend(QObject):
         self._dupe_token = 0
         self._model = DirModel(self)
         self._refresh_pending = False
+        self._listing_busy = False
+        self._scan_token = 0
+        self._scan_cancel = threading.Event()
+        self.scanFinished.connect(self._scan_finished)
+        self._scan_pool = QThreadPool(self)
+        self._scan_pool.setMaxThreadCount(2)
+        self._search_debounce = QTimer(self)
+        self._search_debounce.setSingleShot(True)
+        self._search_debounce.setInterval(120)
+        self._search_debounce.timeout.connect(self.refresh)
         # Bumped on every selection, so a preview that finishes after you have
         # already moved on is discarded instead of overwriting the current one.
+        self._archive_token = 0
+        self.archiveExtracted.connect(self._on_archive_extracted)
         self._preview_token = 0
         self._preview_source = ""    # what the pending preview is being read from
         self._dragging = False
@@ -3636,6 +3965,7 @@ class FileManagerBackend(QObject):
         # the work actually reports itself done.
         OPS().progress.connect(self._on_op_progress)
         OPS().finished.connect(self._on_op_finished)
+        UNDO().finished.connect(self._on_undo_finished)
 
         # THE MODEL KEEPS ITSELF CURRENT. Every signal that invalidates a listing
         # is wired to the same coalesced refresh, so no caller anywhere has to
@@ -3644,18 +3974,24 @@ class FileManagerBackend(QObject):
         # others quietly did not until you navigated away and back.
         for sig in (self.currentPathChanged, self.directoryChanged,
                     self.showHiddenChanged, self.sortFieldChanged,
-                    self.sortDescendingChanged, self.searchQueryChanged,
+                    self.sortDescendingChanged,
                     self.filterTextChanged, self.themeChanged):
             sig.connect(lambda *_a: self.refresh())
+        self.searchQueryChanged.connect(lambda *_: self._search_debounce.start())
         TAGS().changed.connect(self.refresh)
         STARS().changed.connect(self.refresh)
         self.refresh()
 
     def _on_op_progress(self, _op_id, info):
-        verb = "Moving" if info.get("kind") == "move" else "Copying"
+        verb = info.get("verb") or OP_VERBS.get(info.get("kind"), ("Working", "Done"))[0]
         name = info.get("current") or ""
         self.setStatus(f"{verb} {name} — {info.get('percent', 0)}% "
                        f"({info.get('doneStr')} of {info.get('totalStr')})")
+
+    @Slot(str)
+    def _on_undo_finished(self, message):
+        self.setStatus(message)
+        self.directoryChanged.emit()
 
     def _on_op_finished(self, _op_id, info):
         self.setStatus(info.get("summary", "Done"))
@@ -3773,7 +4109,7 @@ class FileManagerBackend(QObject):
         if not want:
             # Nothing chosen, or the choice is gone: keep whatever the desktop is
             # set to, and only invent one if that left us with nothing at all.
-            want = QIcon.themeName() or ICON_THEME_FALLBACK
+            want = QIcon.themeName() or next((name for name in ("Papirus", "breeze", "Adwaita") if name in installed), ICON_THEME_FALLBACK)
         ICONS().set_theme(want)
         # Whether the folder tint moved matters as much as whether the theme did.
         # Turning the tint off leaves every name resolving somewhere new while the
@@ -4080,6 +4416,15 @@ class FileManagerBackend(QObject):
         contents do, which is the entire point of it being a model."""
         return self._model
 
+    @Property(bool, notify=listingBusyChanged)
+    def listingBusy(self):
+        return self._listing_busy
+
+    def _set_listing_busy(self, value):
+        if self._listing_busy != value:
+            self._listing_busy = value
+            self.listingBusyChanged.emit()
+
     @Slot()
     def refresh(self):
         """Re-read the folder and move the model to it, at most once per turn.
@@ -4093,6 +4438,8 @@ class FileManagerBackend(QObject):
         flag and doing the work once the current batch of signals has been
         delivered collapses all of that into one pass.
         """
+        self._scan_cancel.set()
+        self._scan_token += 1
         if self._refresh_pending:
             return
         self._refresh_pending = True
@@ -4100,7 +4447,62 @@ class FileManagerBackend(QObject):
 
     def _do_refresh(self):
         self._refresh_pending = False
-        self._model.setEntries(self.getDirectoryContents())
+        self._search_debounce.stop()
+        self._scan_cancel.set()
+        self._scan_token += 1
+        self._set_listing_busy(True)
+        if self._archive is not None:
+            self._scan_pool.clear()
+            self._scan_pool.start(ArchiveScanWorker(self, self._archive[0], self._archive[1],
+                                                  self._search_query, self._scan_token))
+            return
+        if (self._tag_view is not None
+                or self._place is not None or self.inTrash):
+            try:
+                self._model.setEntries(self.getDirectoryContents())
+            finally:
+                self._set_listing_busy(False)
+            return
+        self._scan_cancel = threading.Event()
+        self._scan_pool.clear()
+        self._scan_pool.start(DirectoryScanWorker(
+            self._current_path, self._search_query, self._show_hidden,
+            self._scan_cancel, self._scan_token, self.scanFinished))
+
+    @Slot(int, list, str)
+    def _scan_finished(self, token, rows, error):
+        if token != self._scan_token:
+            return
+        if error:
+            self.setStatus("Error reading directory: " + error)
+        entries = []
+        def consume(offset=0):
+            if token != self._scan_token:
+                return
+            # Bound each UI turn so large folders do not freeze input while icons resolve.
+            for name, path, directory, size, mtime in rows[offset:offset + 96]:
+                ext = Path(name).suffix.lower()
+                icon, category, color, badge = self._categorize_file(name, directory, ext, path)
+                entries.append({
+                    "name": name, "path": path, "isDir": directory, "size": size,
+                    "sizeStr": "--" if directory else self._format_size(size),
+                    "mtime": mtime,
+                    "mtimeStr": QDateTime.fromSecsSinceEpoch(int(mtime)).toString("yyyy-MM-dd hh:mm"),
+                    "extension": ext, "extBadge": badge,
+                    "mimeType": mimetypes.guess_type(name)[0] or ("folder" if directory else "file"),
+                    "iconName": icon, "category": category, "accentColor": color,
+                    "themeIcon": self.theme_icon(name, directory, path),
+                    "thumbnailPath": self._resolve_thumb(path, category, mtime, queue=False),
+                    "tag": TAGS().get(path)})
+            if offset + 96 < len(rows):
+                QTimer.singleShot(0, lambda: consume(offset + 96))
+                return
+            entries.sort(key=lambda row: str(row["name"]).lower() if self._sort_field == "name"
+                         else row.get(self._sort_field, ""), reverse=self._sort_descending)
+            entries.sort(key=lambda row: not row["isDir"])
+            self._model.setEntries(self._apply_filter(entries))
+            self._set_listing_busy(False)
+        consume()
 
     @Property("QVariantMap", notify=themeChanged)
     def categoryColors(self):
@@ -4177,6 +4579,12 @@ class FileManagerBackend(QObject):
         Shared by cd and the history buttons so a tag view arrived at by going Back
         is the same thing as one arrived at by clicking the tag.
         """
+        self._archive_token += 1
+        self._preview_token += 1
+        self._scan_cancel.set()
+        self._scan_token += 1
+        if new_path != self._current_path:
+            self._model.setEntries([])
         self._current_path = new_path
         if push:
             if self._history_idx == len(self._history) - 1:
@@ -4322,7 +4730,12 @@ class FileManagerBackend(QObject):
 
     @Slot(str)
     def setSearchQuery(self, query):
-        self._search_query = query.strip()
+        query = (query or "").strip()
+        if query == self._search_query:
+            return
+        self._scan_cancel.set()
+        self._scan_token += 1
+        self._search_query = query
         self.searchQueryChanged.emit(self._search_query)
 
     @Slot(str)
@@ -4424,7 +4837,7 @@ class FileManagerBackend(QObject):
 
                             icon_name, category, color, badge = self._categorize_file(name, is_dir, ext, entry.path)
 
-                            thumb_path = self._resolve_thumb(entry.path, category, mtime)
+                            thumb_path = self._resolve_thumb(entry.path, category, mtime, queue=False)
 
                             entries.append({
                                 "name": name,
@@ -4608,6 +5021,8 @@ class FileManagerBackend(QObject):
     # ---- Fast Zero-Lag Inspector & File Preview ----
     @Slot(str)
     def selectFile(self, file_path):
+        self._archive_token += 1
+        self._preview_token += 1
         self._selected_file = file_path
         self.selectedFileChanged.emit(file_path)
         if file_path:
@@ -4616,28 +5031,38 @@ class FileManagerBackend(QObject):
             # and the location inside the archive, not the cache file's.
             arc = self._archive_split(file_path) if self._archive else None
             if arc and arc[1]:
-                real = self._extract_member(arc[0], arc[1])
-                if real:
-                    self.generatePreview(real)
-                    if self._preview_data:
-                        self._preview_data["name"] = Path(file_path).name
-                        self._preview_data["path"] = file_path
-                        self.previewDataChanged.emit(self._preview_data)
-                else:
-                    self._preview_data = {
-                        "name": Path(file_path).name, "path": file_path,
-                        "isDir": False, "category": "archive",
-                        "iconName": "folder_zip", "sizeStr": "--",
-                        "text": "", "html": "", "thumbnailPath": "",
-                        "pdfPages": [], "pageCount": 0,
-                        "meta": {"In archive": Path(arc[0]).name,
-                                 "Note": "Too large to preview — extract it first"},
-                    }
-                    self.previewDataChanged.emit(self._preview_data)
+                self._preview_data = {
+                    "name": Path(file_path).name, "path": file_path,
+                    "isDir": False, "category": "archive", "iconName": "folder_zip",
+                    "text": "", "html": "", "thumbnailPath": "", "pdfPages": [],
+                    "loading": True, "meta": {"In archive": Path(arc[0]).name}}
+                self.previewDataChanged.emit(self._preview_data)
+                self._thread_pool.start(ArchivePreviewWorker(self, arc[0], arc[1],
+                                        file_path, self._archive_token, "preview"))
                 return
             self.generatePreview(file_path)
         else:
             self._update_default_dir_preview()
+
+    @Slot(str, int, str, str)
+    def _on_archive_extracted(self, display_path, token, real, purpose):
+        if token != self._archive_token:
+            return
+        if not real:
+            self.setStatus("Archive member could not be opened — extract it first")
+            if purpose == "preview":
+                self._preview_data["loading"] = False
+                self.previewDataChanged.emit(self._preview_data)
+            return
+        if purpose == "open":
+            self.openFile(real)
+            return
+        if self._selected_file != display_path:
+            return
+        self.generatePreview(real)
+        self._preview_data["name"] = Path(display_path).name
+        self._preview_data["path"] = display_path
+        self.previewDataChanged.emit(self._preview_data)
 
     def _update_default_dir_preview(self):
         p = Path(self._current_path)
@@ -4894,7 +5319,7 @@ class FileManagerBackend(QObject):
         """
         if self._dragging:
             return
-        clean_paths = [str(p) for p in file_paths if p and Path(p).exists()]
+        clean_paths = [str(p) for p in file_paths if p and (Path(p).exists() or Path(p).is_symlink())]
         if not clean_paths and self._selected_file and Path(self._selected_file).exists():
             clean_paths = [self._selected_file]
         if not clean_paths:
@@ -5146,11 +5571,11 @@ class FileManagerBackend(QObject):
             if arc[1] in tree:
                 self.cd(path_str)
                 return
-            real = self._extract_member(arc[0], arc[1])
-            if not real:
-                self.setStatus("Too large to open from inside the archive — extract it first")
-                return
-            path_str = real
+            self._archive_token += 1
+            self._thread_pool.start(ArchivePreviewWorker(self, arc[0], arc[1],
+                                    path_str, self._archive_token, "open"))
+            self.setStatus("Opening archive member…")
+            return
 
         p = Path(path_str)
         if not p.exists():
@@ -5200,8 +5625,8 @@ class FileManagerBackend(QObject):
     @Slot(list)
     @Slot(list, str)
     def setClipboard(self, file_paths, mode="copy"):
-        clean_paths = [str(p) for p in file_paths if p and Path(p).exists()]
-        if not clean_paths and self._selected_file and Path(self._selected_file).exists():
+        clean_paths = [str(p) for p in file_paths if p and (Path(p).exists() or Path(p).is_symlink())]
+        if not clean_paths and self._selected_file and (Path(self._selected_file).exists() or Path(self._selected_file).is_symlink()):
             clean_paths = [self._selected_file]
         if not clean_paths:
             return
@@ -5217,17 +5642,15 @@ class FileManagerBackend(QObject):
             urls = [QUrl.fromLocalFile(p) for p in clean_paths]
             mime.setUrls(urls)
             mime.setText("\n".join(clean_paths))
+            action = "cut" if mode == "cut" else "copy"
+            mime.setData("x-special/gnome-copied-files", QByteArray(
+                (action + "\n" + "\n".join(u.toString() for u in urls)).encode()))
+            mime.setData("application/x-kde-cutselection", QByteArray(b"1" if action == "cut" else b"0"))
             cb.setMimeData(mime)
         except Exception:
             pass
 
-        # 2. Wayland Native Clipboard
-        try:
-            subprocess.run(["wl-copy", "\n".join(clean_paths)], check=False)
-        except Exception:
-            pass
-
-        self.setStatus(f"Copied {len(clean_paths)} item(s) to clipboard")
+        self.setStatus(f"{'Cut' if mode == 'cut' else 'Copied'} {len(clean_paths)} item(s) to clipboard")
 
     # ---- answering other applications ----------------------------------
     #
@@ -5342,24 +5765,30 @@ class FileManagerBackend(QObject):
         if not dest_dir.exists() or not dest_dir.is_dir():
             return
 
-        paths_to_paste = [p for p in self._clipboard_paths if Path(p).exists()]
-
-        # Nothing of our own on the clipboard means it came from another
-        # application, so read it back out — Wayland first, Qt second.
+        # The system clipboard is shared by panes/windows and is authoritative.
+        paths_to_paste = []
+        mode = "copy"
+        mime = QApplication.clipboard().mimeData()
+        if mime:
+            if mime.hasFormat("x-special/gnome-copied-files"):
+                lines = bytes(mime.data("x-special/gnome-copied-files")).decode("utf-8", "replace").splitlines()
+                if lines and lines[0] in ("cut", "copy"):
+                    mode = lines[0]
+                    paths_to_paste = [self._uri_to_path(line) for line in lines[1:]]
+            if not paths_to_paste and mime.hasUrls():
+                paths_to_paste = [u.toLocalFile() for u in mime.urls() if u.isLocalFile()]
+                if bytes(mime.data("application/x-kde-cutselection")) == b"1":
+                    mode = "cut"
         if not paths_to_paste:
-            for line in self._foreign_clipboard():
-                if line and Path(line).exists():
-                    paths_to_paste.append(line)
+            paths_to_paste = self._foreign_clipboard()
+        paths_to_paste = [p for p in paths_to_paste if p and (Path(p).exists() or Path(p).is_symlink())]
 
         if not paths_to_paste:
             self.setStatus("Clipboard is empty")
             return
 
-        mode = self._clipboard_mode
         if mode == "cut":
             OPS().moveTo(paths_to_paste, str(dest_dir))
-            self._clipboard_paths = []
-            self.clipboardChanged.emit([], "copy")
         else:
             OPS().copyTo(paths_to_paste, str(dest_dir))
 
@@ -5574,41 +6003,9 @@ class FileManagerBackend(QObject):
 
     @Slot(list)
     def restoreFromTrash(self, file_paths):
-        restored, failed, records = 0, [], []
-        for path_str in file_paths:
-            p = Path(path_str)
-            if not p.exists():
-                continue
-            info, top = self._trash_home_of(p)
-            origin = self._trash_origin(info, top) if info and info.exists() else None
-
-            if origin is None:
-                failed.append(f"{p.name}: no record of where it came from")
-                continue
-            try:
-                origin.parent.mkdir(parents=True, exist_ok=True)
-                dest = origin
-                if dest.exists():
-                    dest = origin.with_name(
-                        f"{origin.stem}_restored_{int(time.time())}{origin.suffix}")
-                shutil.move(str(p), str(dest))
-                if info.exists():
-                    info.unlink()
-                # Reversed by trashing it again, which writes a fresh .trashinfo
-                # pointing back at the origin — so undoing a restore leaves the
-                # trash in the state it was in before, not an orphan entry.
-                records.append({"path": str(dest)})
-                restored += 1
-            except Exception as e:
-                failed.append(f"{p.name}: {e}")
-
-        if records:
-            UNDO().record("create", "Restore", records)
-        if failed:
-            self.setStatus(f"Restored {restored}, {len(failed)} failed — {failed[0]}")
-        else:
-            self.setStatus(f"Restored {restored} item(s)")
-        self.directoryChanged.emit()
+        paths = [str(p) for p in file_paths if p and (Path(p).exists() or Path(p).is_symlink())]
+        if paths:
+            OPS().restorePaths(paths)
 
     @Slot()
     def emptyTrash(self):
@@ -5965,6 +6362,7 @@ class FileManagerBackend(QObject):
         out = ARCHIVE_CACHE_DIR / f"{digest}_{Path(inner).name}"
         if out.exists():
             return str(out)
+        temporary = out.with_name(out.name + f".{threading.get_ident()}.tmp")
         try:
             low = archive_path.lower()
             ARCHIVE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -5979,20 +6377,39 @@ class FileManagerBackend(QObject):
                     cmd = ["bsdtar", "-xOf", archive_path, inner]
                 else:
                     return ""
-                res = subprocess.run(cmd, capture_output=True, timeout=60)
-                if res.returncode != 0 or not res.stdout:
-                    return ""
-                if len(res.stdout) > ARCHIVE_PREVIEW_MAX:
-                    return ""
-                with open(out, "wb") as dst:
-                    dst.write(res.stdout)
+                process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=0)
+                total = 0
+                deadline = time.monotonic() + 60
+                try:
+                    with open(temporary, "wb") as destination:
+                        while True:
+                            if time.monotonic() > deadline:
+                                raise TimeoutError("Archive preview timed out")
+                            if not select.select([process.stdout], [], [], 0.1)[0]:
+                                continue
+                            chunk = os.read(process.stdout.fileno(), 65536)
+                            if not chunk:
+                                break
+                            total += len(chunk)
+                            if total > ARCHIVE_PREVIEW_MAX:
+                                raise ValueError("Archive member exceeds preview limit")
+                            destination.write(chunk)
+                    process.wait(timeout=max(0.1, deadline - time.monotonic()))
+                    if process.returncode != 0 or not total:
+                        return ""
+                finally:
+                    if process.poll() is None:
+                        process.kill()
+                        process.wait()
+                    process.stdout.close()
+                os.replace(temporary, out)
                 return str(out)
             if low.endswith((".zip", ".jar", ".whl", ".apk", ".cbz", ".epub")):
                 with zipfile.ZipFile(archive_path) as zf:
                     info = zf.getinfo(inner)
                     if info.file_size > ARCHIVE_PREVIEW_MAX:
                         return ""
-                    with zf.open(info) as src, open(out, "wb") as dst:
+                    with zf.open(info) as src, open(temporary, "wb") as dst:
                         shutil.copyfileobj(src, dst)
             else:
                 with tarfile.open(archive_path) as tf:
@@ -6002,10 +6419,16 @@ class FileManagerBackend(QObject):
                     src = tf.extractfile(info)
                     if src is None:
                         return ""
-                    with open(out, "wb") as dst:
+                    with open(temporary, "wb") as dst:
                         shutil.copyfileobj(src, dst)
+            os.replace(temporary, out)
         except Exception:
             return ""
+        finally:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
         return str(out)
 
     @Slot(list)
@@ -6032,52 +6455,11 @@ class FileManagerBackend(QObject):
 
         target = Path(dest_dir) if dest_dir else (
             Path(archive_path).parent / _archive_stem(archive_path))
-        try:
-            target.mkdir(parents=True, exist_ok=True)
-        except Exception as exc:
-            self.setStatus(f"Could not create {target.name}: {exc}")
-            return
-
-        tree = self._archive_index(archive_path)
-
-        def expand(inner):
-            """A chosen folder means everything under it."""
-            if inner in tree:
-                out = []
-                for entry in tree[inner].values():
-                    out.extend(expand(entry["inner"]) if entry["isDir"]
-                               else [entry.get("member") or entry["inner"]])
-                return out
-            return [self._member_name(tree, inner)]
-
-        members = []
-        for inner in wanted:
-            members.extend(expand(inner))
-
-        before = set(os.listdir(target))
-        count = 0
-        try:
-            low = archive_path.lower()
-            if low.endswith((".zip", ".jar", ".whl", ".apk", ".cbz", ".epub")):
-                with zipfile.ZipFile(archive_path) as zf:
-                    for m in members:
-                        zf.extract(m, target)
-                        count += 1
-            else:
-                with tarfile.open(archive_path) as tf:
-                    for m in members:
-                        tf.extract(m, target)
-                        count += 1
-        except Exception as exc:
-            self.setStatus(f"Extraction failed after {count}: {exc}")
-            return
-
-        added = [{"path": str(target / n)}
-                 for n in sorted(set(os.listdir(target)) - before)]
-        if added:
-            UNDO().record("create", "Extract", added)
-        self.setStatus(f"Extracted {count} item(s) into '{target.name}'")
-        self.directoryChanged.emit()
+        # Expand folder selections inside the worker, never by opening or walking
+        # an archive on the UI thread. Empty folders remain part of the selection.
+        OPS().extractArchiveTo(archive_path, str(target),
+                               None if "" in wanted else list(dict.fromkeys(wanted)))
+        self.setStatus(f"Extracting into '{target.name}'")
 
     # ---- Colour tag views ----
 
@@ -6265,43 +6647,8 @@ class FileManagerBackend(QObject):
     @Slot(str, int)
     @Slot(str, int, bool)
     def setPermissions(self, path_str, mode, recursive=False):
-        p = Path(path_str)
-        if not p.exists():
-            return
-        mode &= 0o7777
-        targets = [p]
-        if recursive and p.is_dir():
-            for root, dirnames, filenames in os.walk(str(p)):
-                targets.extend(Path(root) / n for n in dirnames)
-                targets.extend(Path(root) / n for n in filenames)
-
-        records, failed = [], []
-        for t in targets:
-            try:
-                old = stat.S_IMODE(t.lstat().st_mode)
-                want = mode
-                # A directory without its execute bit cannot be entered — not even
-                # by its owner, and not even to read a file inside it whose own
-                # permissions are fine. Applying a file's mode recursively would
-                # otherwise seal the whole tree shut, so on directories execute
-                # follows read.
-                if t.is_dir():
-                    want = mode | ((mode & 0o444) >> 2)
-                if old == want:
-                    continue
-                os.chmod(str(t), want)
-                records.append({"path": str(t), "old": old})
-            except OSError as exc:
-                failed.append(str(exc))
-
-        if records:
-            UNDO().record("chmod", "Change Permissions", records)
-        if failed:
-            self.setStatus(f"Changed {len(records)}, {len(failed)} failed — {failed[0]}")
-        else:
-            self.setStatus(f"Permissions set to {format(mode, '04o')}"
-                           + (f" on {len(records)} items" if len(records) > 1 else ""))
-        self.directoryChanged.emit()
+        if path_str and Path(path_str).exists():
+            OPS().changePermissions(path_str, mode, recursive)
 
     # ---- Batch rename ----
 
@@ -6729,6 +7076,19 @@ class FileManagerBackend(QObject):
             self._mounts_notifier = None
 
     # ---- Helpers ----
+    @Slot(str)
+    def requestListingThumbnail(self, path):
+        if self._archive is not None:
+            return
+        index = self._model.indexOfPath(path)
+        if index < 0:
+            return
+        row = self._model.at(index)
+        thumbnail = self._resolve_thumb(path, row.get("category", ""),
+                                        row.get("mtime", 0), queue=True)
+        if thumbnail:
+            self._model.patch_thumb(path, thumbnail)
+
     def _resolve_thumb(self, path, category, mtime, queue=True):
         """Thumbnail for a listing row: the file itself for images, a cached
         render for video/pdf, queued in the background the first time."""

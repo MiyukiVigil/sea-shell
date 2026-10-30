@@ -31,6 +31,8 @@ Singleton {
     // raw "roundness" from appearance.json — drives the whole radius scale below
     property real   radiusCfg: 14
     property real   cfgScale: 0
+    property var    cfgMonitors: ({})   // per-monitor overrides — { name: { scale } }
+    property bool   reducedMotion: false
     property bool   loaded: false
 
     signal changed()
@@ -90,9 +92,11 @@ Singleton {
             if (j.accent) tok.accentRaw = j.accent;
             if (j.mode !== undefined) tok.light = (""+j.mode === "light");
             if (j.scale !== undefined) tok.cfgScale = j.scale;
+            if (j.monitors) tok.cfgMonitors = j.monitors;
             // A display face (the old `font` key) is fine for prose but destroys data
             // legibility, so it is accepted as the SANS role only — mono is ours.
             if (j.font !== undefined && (""+j.font).length) tok.sans = j.font;
+            tok.reducedMotion = !!j.reducedMotion;
             if (j.radius !== undefined) tok.radiusCfg = Math.max(0, j.radius);
         } catch(e) {}
         tok.loaded = true;
@@ -189,10 +193,10 @@ Singleton {
     // 130 here, 150 there, 200 somewhere else — which reads as three different products
     // when two of them animate at once. Anything slower than mSlow is not a transition,
     // it is a wait, and should show progress instead.
-    readonly property int mMicro: 90     // a press answering, a highlight stepping one row
-    readonly property int mFast: 130     // hover, press, chip state — must feel instant
-    readonly property int mBase: 200     // focus moves, panels opening
-    readonly property int mSlow: 320     // a whole surface changing what it shows
+    readonly property int mMicro: reducedMotion ? 0 : 90     // a press answering, a highlight stepping one row
+    readonly property int mFast: reducedMotion ? 0 : 130     // hover, press, chip state — must feel instant
+    readonly property int mBase: reducedMotion ? 0 : 200     // focus moves, panels opening
+    readonly property int mSlow: reducedMotion ? 0 : 320     // a whole surface changing what it shows
     readonly property int mEase: Easing.OutCubic
 
     // ---- direction-aware curves ----
@@ -212,6 +216,8 @@ Singleton {
 
     // per-monitor UI scale — matches the rule shell.qml and Dashboard.qml both hand-rolled
     function uiFor(scr) {
+        var mo = (scr && scr.name && tok.cfgMonitors[scr.name]) ? tok.cfgMonitors[scr.name].scale : 0;
+        if (mo > 0) return mo;
         if (tok.cfgScale > 0) return tok.cfgScale;
         var h = (scr && scr.height) ? scr.height : 0;
         if (h <= 1440) return 1.0;

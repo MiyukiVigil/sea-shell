@@ -40,9 +40,9 @@ end)
 dofile(os.getenv("HOME") .. "/.config/hypr/sea-shell/sea.lua")
 dofile(os.getenv("HOME") .. "/.config/hypr/sea-shell/keybinds.lua")
 hl.on("hyprland.start", function()
+    hl.exec_cmd("exec ~/.config/quickshell/sea-shell/sea-wallpaper-restore.sh")
     hl.exec_cmd("sh ~/.config/quickshell/sea-shell/sea-bar-supervisor.sh")   -- supervisor: respawns the bar if its wayland connection dies
     hl.exec_cmd("command -v hypridle >/dev/null && exec hypridle")
     hl.exec_cmd("[ -x /usr/lib/hyprpolkitagent/hyprpolkitagent ] && exec /usr/lib/hyprpolkitagent/hyprpolkitagent")
-    hl.exec_cmd("sleep 0.5; exec ~/.config/quickshell/sea-shell/sea-wallpaper-restore.sh")
 end)
 -- <<< sea-shell <<<

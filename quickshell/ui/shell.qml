@@ -19,6 +19,11 @@ import QtQuick.Layouts
 ShellRoot {
     id: root
 
+    property var userProfile: ({})
+    FileView { path: Quickshell.env("HOME") + "/.config/sea-shell/profile.json"; watchChanges: true
+        onLoaded: { try { root.userProfile = JSON.parse(text()) } catch(e){} }
+        onFileChanged: reload()
+    }
     // Auto-detect HDMI monitor plugin to switch audio to HDMI (TV)
     readonly property int screenCount: Quickshell.screens.length
     onScreenCountChanged: {
@@ -122,14 +127,17 @@ ShellRoot {
             required property var modelData
             screen: modelData
             pal: theme
-            uiFont: root.cfgFont
+            uiFont: "Adwaita Sans"
             ui: root.uiFor(modelData)
             editing: root.desktopEditing
+            // right-click on the desktop while arranging: finish, and close the gallery with it
+            onDoneRequested: { root.desktopEditing = false; root.widgetsScreen = "" }
             // One bound object rather than a property per reading: the desktop is a viewer,
             // and every widget that lands here later should be a change to Desktop.qml, not
             // another wire through the bar.
             readings: ({
-                "wxTemp": root.wxTemp, "wxCond": root.wxCond,
+                "wxTemp": root.wxTemp, "wxCond": root.wxCond, "wxFeels": root.wxFeels, "wxHumid": root.wxHumid,
+                "wxWind": root.wxWind, "wxForecast": root.wxForecast, "wxLoc": root.wxLoc,
                 "cpu": root.cpuUsage, "cpuTemp": root.cpuTemp,
                 "memPct": root.memPct, "memUsed": root.memUsed, "memTotal": root.memTotal,
                 "gpuName": root.gpuName, "gpu": root.gpuUsage, "gpuTemp": root.gpuTemp,
@@ -143,6 +151,37 @@ ShellRoot {
             // Nothing is ever parked under the bar, or under where the dock appears.
             insetTop: root.cfgEdge === "top" ? root.cfgHeight + 6 : 6
             insetBottom: root.cfgEdge === "bottom" ? root.cfgHeight + 6 : (root.cfgDock ? 78 : 6)
+        }
+    }
+    property string widgetsScreen: ""
+    // the gallery is where widgets are arranged, so the desktop arranges while it is open
+    onWidgetsScreenChanged: root.desktopEditing = root.widgetsScreen !== ""
+    function toggleWidgets() {
+        var focused = Hyprland.focusedMonitor;
+        var name = focused ? focused.name : (Quickshell.screens.length ? Quickshell.screens[0].name : "");
+        root.widgetsScreen = root.widgetsScreen === name ? "" : name;
+    }
+    IpcHandler { target: "widgets"; function toggle(): void { root.toggleWidgets() } function close(): void { root.widgetsScreen = "" } }
+    Variants {
+        model: Quickshell.screens
+        WidgetsDrawer {
+            required property var modelData
+            screen: modelData; ui: root.uiFor(modelData)
+            opened: root.widgetsScreen === modelData.name
+            edgeEnabled: {
+                var win = Hyprland.activeToplevel;
+                var obj = win ? win.lastIpcObject : null;
+                return !(obj && obj.fullscreen > 0);
+            }
+            readings: ({ wxTemp: root.wxTemp, wxCond: root.wxCond, wxFeels: root.wxFeels, wxHumid: root.wxHumid, wxWind: root.wxWind,
+                         wxForecast: root.wxForecast, wxLoc: root.wxLoc, cpu: root.cpuUsage, cpuTemp: root.cpuTemp,
+                         memPct: root.memPct, memUsed: root.memUsed, memTotal: root.memTotal,
+                         gpuName: root.gpuName, gpu: root.gpuUsage, gpuTemp: root.gpuTemp, netRx: root.netRx })
+            player: root.player; viz: root.vizBars
+            insetTop: root.cfgEdge === "top" ? root.cfgHeight + 6 : 6
+            insetBottom: root.cfgEdge === "bottom" ? root.cfgHeight + 6 : (root.cfgDock ? 78 : 6)
+            onRequested: open => { root.widgetsScreen = open ? modelData.name : ""; if (open) root.openPop = "" }
+            onSettingsRequested: root.openSettings(21)
         }
     }
     IpcHandler {
@@ -272,6 +311,16 @@ ShellRoot {
     property bool grabHold: false
     IpcHandler {
         target: "shell"
+        // Public keyboard/automation entry point uses the same per-monitor menu state as pills.
+        function openWidget(name: string): void {
+            if (name === "") { root.openPop = ""; return; }
+            if (["wifi","bt","vol","bat","cal","pwr","notif","cc","wx","sys","upd","kde","mpris"].indexOf(name) < 0) return;
+            var bars = root.grabWins.filter(function(w) { return w && w.widgetBar === true && w.visible; });
+            var focused = Hyprland.focusedMonitor;
+            var chosen = bars.find(function(w) { return focused && w.screen && w.screen.name === focused.name; }) || bars[0];
+            if (chosen) { root.openBar = chosen; root.openPop = name; }
+        }
+        function mediaTab(index: int): void { if (index >= 0 && index <= 2) root.mediaTab = index }
         function pin(): void { root.grabHold = true }
         function unpin(): void { root.grabHold = false }
         function toggleExpose(): void { root.toggleExpose() }
@@ -732,7 +781,7 @@ ShellRoot {
                 anchors.centerIn: parent
                 scale: swWin.ui                 // match the shell's per-monitor UI scale
                 radius: Tok.rCard
-                color: theme.a(theme.panel, 0.98)
+                color: theme.panel
                 border.width: 1; border.color: theme.a(theme.iris, 0.28)
                 clip: true
                 // Composite the WHOLE card (all live captures) into one offscreen buffer.
@@ -775,7 +824,7 @@ ShellRoot {
                             // frame arrives, or if the window has no capturable wayland handle)
                             Rectangle {
                                 anchors { top: parent.top; left: parent.left; right: parent.right; margins: 6 }
-                                height: 96; radius: Tok.r; clip: true; color: theme.a(theme.bg, 0.55)
+                                height: 96; radius: Tok.r; clip: true; color: theme.bg
                                 ScreencopyView {
                                     id: thumbScv
                                     anchors.fill: parent
@@ -844,6 +893,8 @@ ShellRoot {
     // ---------- appearance (live-reloaded from ~/.config/sea-shell/appearance.json) ----------
     property real cfgRadius: 14
     property real cfgOpacity: 0.80
+    property bool cfgBarOpaque: true
+    readonly property real barSurfaceOpacity: 1.0
     property int  cfgHeight: 42
     // global UI scale — makes the whole shell legible on big/far displays (4K TVs, projectors).
     // 0 = auto (derived per-monitor from its height, so a laptop stays 1× while a 4K TV scales up);
@@ -1123,13 +1174,8 @@ ShellRoot {
     }
     Process { id: modeProc }
 
-    // Dropdowns stay glassy (semi-transparent + blur). The bright-background washout
-    // is solved by the `xray` layer rule (sea.conf) — the blur samples the wallpaper,
-    // not whatever bright window is behind — so a low opacity reads fine over the dark
-    // wallpaper. Light mode needs more body (a translucent light card over the dark
-    // wallpaper would go muddy), so it sits higher.
-    readonly property real dropOpacity: root.cfgLight ? Math.max(0.55, root.cfgOpacity)
-                                                      : Math.max(0.35, root.cfgOpacity)
+    // Popup readability is independent of bar transparency and the window behind it.
+    readonly property real dropOpacity: 1.0
     Process { running: true; command: ["sh","-c","d=\"$HOME/.config/sea-shell\"; mkdir -p \"$d\"; touch \"$d/kitty-matugen.conf\"; [ -f \"$d/appearance.json\" ] || printf '{\"radius\":14,\"opacity\":0.80,\"height\":42,\"accent\":\"#63c7dd\",\"font\":\"monospace\"}' > \"$d/appearance.json\"; echo \"$d/appearance.json\""]
         // Seeding only. It used to also be what TOLD the FileView below where the file is,
         // which meant the bar's own colours waited on a shell fork before they could even
@@ -1149,6 +1195,7 @@ ShellRoot {
             var t = text(); if(!t || !t.trim()) return; var j = JSON.parse(t);
             if (j.radius  !== undefined) root.cfgRadius  = j.radius;
             if (j.opacity !== undefined) root.cfgOpacity = j.opacity;
+            if (j.barOpaque !== undefined) root.cfgBarOpaque = !!j.barOpaque;
             if (j.wpTransitionDur !== undefined) root.cfgWpTransitionDur = j.wpTransitionDur;
             if (j.barFill !== undefined && (""+j.barFill).length>0) root.cfgBarFill = j.barFill;
             // top / bottom only — this shell is a horizontal bar; left/right were dropped.
@@ -1639,7 +1686,7 @@ ShellRoot {
                 else if (e.signal > best[sid].signal) { e.active = e.active || best[sid].active; best[sid]=e }
                 else if (e.active) best[sid].active = true; }
             var out = order.map(function(s){ return best[s] });
-            out.sort(function(a,b){ return b.signal - a.signal });
+            out.sort(function(a,b){ return Number(b.active) - Number(a.active) || b.signal - a.signal });
             root.wifiSeen = out.length;
             root.wifiList = out.slice(0,8);
         } }
@@ -1662,7 +1709,28 @@ ShellRoot {
     // re-probing, so signal bars move and vanished APs drop off without a manual poke.
     Timer { interval: 8000; running: root.openPop === "wifi"; repeat: true; triggeredOnStart: true
         onTriggered: root.wifiRescan(true) }
-    property string wifiPwFor: ""     // ssid awaiting an inline password
+    property string wifiPwFor: ""     // edited independently from the volatile scan list
+    property string wifiDraft: ""
+    property string wifiJoinMessage: ""
+    property bool wifiJoinFailed: false
+    readonly property bool wifiJoining: wifiJoinProc.running || wifiUp.running
+    onWifiPwForChanged: { root.wifiDraft = ""; root.wifiJoinMessage = ""; root.wifiJoinFailed = false }
+    function wifiCancelDraft() { if (!root.wifiJoining) root.wifiPwFor = "" }
+    Process {
+        id: wifiJoinProc
+        onExited: (exitCode, exitStatus) => {
+            if (exitCode === 0) {
+                root.wifiPwFor = "";
+                root.wifiJoinMessage = "Connected";
+                root.wifiJoinFailed = false;
+            } else {
+                root.wifiJoinFailed = true;
+                root.wifiJoinMessage = "Could not connect. Check the password and try again.";
+            }
+            wifiJoinProc.command = [];
+            root.wifiRescan(false);
+        }
+    }
     property string wifiRetry: ""     // ssid whose saved profile we're trying first
     // Saved (known) networks — the settings panel has always tracked these; the bar did not, and
     // that was the whole bug below. Also drives the "saved" tag and the forget action.
@@ -1681,13 +1749,17 @@ ShellRoot {
     // known networks reconnect with their STORED password (`nmcli con up`); the
     // inline field only appears for new networks or when the saved secret fails.
     Process { id: wifiUp
-        stdout: StdioCollector { id: wupOut; onStreamFinished: {
-            var ok = wupOut.text.indexOf("successfully") >= 0;
-            if (!ok && root.wifiRetry !== "") root.wifiPwFor = root.wifiRetry;   // no/bad profile → ask
-            else root.wifiPwFor = "";
-            root.wifiRetry = ""; wifiRefresh.start();
-        } } }
+        onExited: (exitCode, exitStatus) => {
+            if (exitCode !== 0 && root.wifiRetry !== "") {
+                root.wifiPwFor = root.wifiRetry;
+                root.wifiJoinMessage = "Saved credentials did not connect. Enter the password to retry.";
+            } else root.wifiPwFor = "";
+            root.wifiRetry = "";
+            wifiRefresh.start();
+        }
+    }
     function wifiConnect(s, secure) {
+        if (root.wifiJoining) return;
         var e = s.replace(/'/g,"");
         if (secure) {
             // Only try the stored profile if one actually EXISTS. This used to fire `con up` at
@@ -1696,7 +1768,7 @@ ShellRoot {
             // password field appeared. settings.qml had the savedCons check; the bar didn't.
             if (root.wifiSaved.indexOf(s) >= 0) {
                 root.wifiRetry = s;
-                wifiUp.command = ["sh","-c","nmcli con up id '"+e+"' 2>&1"];
+                wifiUp.command = ["nmcli", "--wait", "25", "con", "up", "id", s];
                 wifiUp.running = true; return;
             }
             root.wifiPwFor = s; return;       // never seen → ask straight away
@@ -1704,14 +1776,13 @@ ShellRoot {
         Quickshell.execDetached(["sh","-c","nmcli dev wifi connect '"+e+"' || notify-send 'sea-shell' 'Could not join "+e+"'"]);
         root.wifiPwFor = ""; wifiRefresh.start();
     }
-    // join with the typed password; blank password falls back to any saved credentials
+    // Argument arrays preserve SSIDs/passwords exactly; completion comes from nmcli's exit code.
     function wifiJoin(s, pw) {
-        var e = s.replace(/'/g,""); var p = (pw||"");
-        var cmd = p.length>0
-            ? "nmcli dev wifi connect '"+e+"' password '"+p.replace(/'/g,"'\\''")+"'"
-            : "nmcli dev wifi connect '"+e+"'";
-        Quickshell.execDetached(["sh","-c",cmd+" && notify-send 'sea-shell' 'Connected to "+e+"' || notify-send 'sea-shell' 'Wrong password or could not join "+e+"'"]);
-        root.wifiPwFor = ""; wifiRefresh.start();
+        if (root.wifiJoining || !s.length || !pw.length) return;
+        root.wifiJoinFailed = false;
+        root.wifiJoinMessage = "Connecting…";
+        wifiJoinProc.command = ["nmcli", "--wait", "25", "dev", "wifi", "connect", s, "password", pw];
+        wifiJoinProc.running = true;
     }
     function wifiToggle() { Quickshell.execDetached(["sh","-c","nmcli radio wifi | grep -q enabled && nmcli radio wifi off || nmcli radio wifi on"]); wifiRefresh.start() }
     Timer { id: wifiRefresh; interval: 2500; onTriggered: root.wifiRescan(true) }
@@ -1837,6 +1908,14 @@ ShellRoot {
     Timer { interval: 900000; running: true; repeat: true; triggeredOnStart: true; onTriggered: wxProc.running = true }
     // ---- forecast (3-day, from wttr.in j1) ----
     property var wxForecast: []     // [{day, icon, hi, lo, cond}]
+    // the place the weather is for, as the widgets title it
+    // no file is normal (Kuching is the default), so its absence is not worth a warning
+    FileView { id: wxLocFile; path: Quickshell.env("HOME") + "/.config/sea-shell/location"; watchChanges: true; printErrors: false; onFileChanged: reload() }
+    // RELOAD WITHOUT QUITTING. `qs kill` and starting again made Quickshell crash on its way
+    // out (a Wayland teardown segfault) and put up its crash reporter every time. Reloading
+    // the configuration in place rebuilds everything without ever exiting.
+    IpcHandler { target: "shell"; function reload(): void { Quickshell.reload(true) } }
+    readonly property string wxLoc: (wxLocFile.text() || "Kuching").trim()
     Process {
         id: wxfProc; running: true
         command: ["sh","-c","loc=$(cat ~/.config/sea-shell/location 2>/dev/null || echo Kuching); curl -s --max-time 10 \"wttr.in/$loc?format=j1\" 2>/dev/null"]
@@ -1880,9 +1959,28 @@ ShellRoot {
     property string powerProfile: "balanced"
     Process { id: ppGet; running: true; command: ["sh","-c","powerprofilesctl get 2>/dev/null"]
         stdout: StdioCollector { id: ppOut; onStreamFinished: root.powerProfile = (ppOut.text.trim() || "balanced") } }
-    Timer { interval: 15000; running: true; repeat: true; triggeredOnStart: true; onTriggered: ppGet.running = true }
+    Timer { interval: 15000; running: true; repeat: true; triggeredOnStart: true; onTriggered: { ppGet.running = true; fanGet.running = true } }
     function setProfile(p) { Quickshell.execDetached(["powerprofilesctl","set",p]); root.powerProfile = p; ppRefresh.start() }
     Timer { id: ppRefresh; interval: 800; onTriggered: ppGet.running = true }
+
+    // ---------- gaming fan preset (sea-perf.sh → root helper sea-fancurve) ----------
+    // The row only exists once /usr/local/bin/sea-fancurve is installed: fan curves need root
+    // and an lm_sensors fancontrol setup, which most machines do not have.
+    property bool   hasFanCurve: false
+    property string fanMode: "custom"     // auto | quiet | max | custom, read back by sea-perf.sh status
+    Process { id: fanGet; running: true
+        command: ["sh","-c","[ -x /usr/local/bin/sea-fancurve ] && echo 1 || echo 0; ~/.config/quickshell/sea-shell/sea-perf.sh status"]
+        stdout: StdioCollector { id: fanOut; onStreamFinished: {
+            var l = fanOut.text.trim().split("\n");
+            root.hasFanCurve = l[0] === "1"; root.fanMode = l[1] || "custom";
+        } } }
+    function setFanMode(m) {
+        root.fanMode = m;
+        Quickshell.execDetached(["sh","-c","~/.config/quickshell/sea-shell/sea-perf.sh " + m]);
+        fanRefresh.start();
+    }
+    // fancontrol takes about a second to restart; read back after it, not before
+    Timer { id: fanRefresh; interval: 2500; onTriggered: { fanGet.running = true; ppGet.running = true } }
 
     // ---------- control center (quick toggles used by the "cc" dropdown) ----------
     function ccActive(k) {
@@ -2150,7 +2248,7 @@ ShellRoot {
     property var fakeBars: []
     Timer {
         interval: 66; repeat: true
-        running: root.openPop === "mpris" && root.hqInfo !== "" && root.player !== null && root.player.isPlaying
+        running: (root.openPop === "mpris" || root.widgetsScreen !== "" || root.desktopHasMedia) && !Tok.reducedMotion && root.hqInfo !== "" && root.player !== null && root.player.isPlaying
         onTriggered: {
             var t = Date.now() / 1000, prev = root.fakeBars, out = [];
             for (var i = 0; i < 22; i++) {
@@ -2167,6 +2265,8 @@ ShellRoot {
     readonly property var vizBars: root.hqInfo !== "" ? root.fakeBars : root.cavaValues
 
     // ---------- lyrics (lrclib.net — free, keyless; synced LRC when available) ----------
+    property int mediaTab: 0
+    onMediaTabChanged: { root.infoOpen = mediaTab === 1; root.lyricsOpen = mediaTab === 2; if (root.lyricsOpen) root.fetchLyrics() }
     property bool lyricsOpen: false
     property bool infoOpen: false        // track-details sidecar (opens on the opposite side of lyrics)
     property var lyrics: []              // [{t: seconds, l: line}] when synced
@@ -2408,7 +2508,8 @@ ShellRoot {
         // Also while a media widget is on the desktop and something is actually playing —
         // that widget draws these same bars, and until 6.4 cava only ever ran for the
         // dropdown, so the desktop visualiser was reading silence and drawing a flat line.
-        running: (root.openPop === "mpris" || (root.desktopHasMedia && root.player !== null))
+        running: (root.openPop === "mpris" || root.widgetsScreen !== "" || root.desktopHasMedia)
+                 && root.player !== null && root.player.isPlaying && !Tok.reducedMotion
                  && root.hqInfo === ""   // no point capturing silence in bit-perfect mode
         // bash process substitution + exec → quickshell owns cava directly and can
         // actually kill it (piping into `cava -p /dev/stdin` leaked a cava per open)
@@ -2788,6 +2889,7 @@ ShellRoot {
         if (v) { root.gameWasDnd = root.dnd; root.setDnd(true); }
         else if (!root.gameWasDnd) root.setDnd(false);
         root.gameOn = v;
+        fanRefresh.start();     // game mode changes the fans and the profile; show the result
     }
     function toggleGame() { Quickshell.execDetached(["sh","-c","~/.config/quickshell/sea-shell/sea-gamemode.sh toggle"]) }
     IpcHandler {
@@ -3008,7 +3110,10 @@ ShellRoot {
     function zoomSet(f) {
         var z = Math.max(1.0, Math.min(root.zoomMax, Math.round(f * 100) / 100));
         root.zoomFactor = z;
-        Quickshell.execDetached(["hyprctl", "keyword", "cursor:zoom_factor", "" + z]);
+        // keyword is legacy-parser only (Lua configs refuse it, 0.57 doesn't know it at all),
+        // so fall back to eval — same pattern as matugen-accent.sh and the display tab.
+        Quickshell.execDetached(["sh", "-c", "hyprctl keyword cursor:zoom_factor " + z + " 2>/dev/null | grep -q '^ok' || "
+            + "hyprctl eval 'hl.config({ cursor = { zoom_factor = " + z + " } })' >/dev/null 2>&1"]);
         root.osdReady = true;   // zoom is always user-initiated — never a startup flash
         root.showOsd("zoom", (z - 1) / (root.zoomMax - 1), z > 1.01 ? "zoom_in" : "zoom_out");
     }
@@ -3358,7 +3463,7 @@ ShellRoot {
         id: dw
         property Item host
         property alias card: cardBg
-        property int cardW: 240
+        property int cardW: 280
         property int cardH: 120
         property Item sidecar: null      // optional extra panel (e.g. lyrics) that must also receive clicks
         property Item sidecar2: null     // second optional panel (e.g. track details on the other side)
@@ -3468,7 +3573,7 @@ ShellRoot {
                 if (root.barVertical)          return Math.max(8, Math.min(dw.shN - dw.cardH - 8, dw.hostGY + dw.hostNH/2 - dw.cardH/2));
                 return dw.hostGY + dw.hostNH + 8 - slide;   // top bar
             }
-            radius: Tok.rCard
+            radius: 18
             // A hair of growth on the way in, anchored to the edge the card came from, so the
             // slide has some weight behind it. 1.5% — enough to feel, small enough that the
             // text never visibly resamples.
@@ -3476,13 +3581,9 @@ ShellRoot {
             transformOrigin: root.cfgEdge === "bottom" ? Item.Bottom
                            : root.cfgEdge === "left"   ? Item.Left
                            : root.cfgEdge === "right"  ? Item.Right : Item.Top
-            // Flat, and translucent in step with the bar: dropOpacity tracks cfgOpacity so the
-            // cards and the bar read as one material. What was removed is the DECORATION that
-            // used to ride on top — a two-stop gradient, a "matte-glass" rim and a white
-            // highlight hairline, three stacked layers imitating frosted glass. The see-through
-            // is the feature; the fake glass was not.
-            color: Tok.alpha(Tok.surface, root.dropOpacity)
-            border.width: 1; border.color: Tok.ruleHard
+            // Stable, opaque material: blur is decoration, never the source of contrast.
+            color: Tok.surface
+            border.width: 1; border.color: Tok.alpha(Tok.ruleHard, 0.65)
         }
     }
 
@@ -3491,6 +3592,7 @@ ShellRoot {
         model: Quickshell.screens
         PanelWindow {
             id: bar
+            readonly property bool widgetBar: true
             property var modelData
             screen: modelData
             // per-monitor: user can turn the bar off entirely on a given output.
@@ -3582,8 +3684,8 @@ ShellRoot {
                 // In PILL mode the strip itself carries nothing: the three clusters grow
                 // their own grounds below, and one continuous background behind them would
                 // just be the bar again with extra outlines drawn on it.
-                color: root.barPills ? "transparent" : theme.a(root.barFillColor, root.cfgOpacity)
-                border.width: (root.barPills || root.cfgOpacity < 0.06) ? 0 : 1
+                color: root.barPills ? "transparent" : theme.a(root.barFillColor, root.barSurfaceOpacity)
+                border.width: (root.barPills || root.barSurfaceOpacity < 0.06) ? 0 : 1
                 border.color: Tok.ruleHard
 
                 Item {
@@ -3606,8 +3708,8 @@ ShellRoot {
                         anchors.leftMargin: -9
                         anchors.rightMargin: -9
                         radius: Tok.rCard
-                        color: theme.a(root.barFillColor, root.cfgOpacity)
-                        border.width: root.cfgOpacity < 0.06 ? 0 : 1
+                        color: theme.a(root.barFillColor, root.barSurfaceOpacity)
+                        border.width: root.barSurfaceOpacity < 0.06 ? 0 : 1
                         border.color: Tok.ruleHard
                     }
                     Rectangle {
@@ -3618,8 +3720,8 @@ ShellRoot {
                         anchors.leftMargin: -9
                         anchors.rightMargin: -9
                         radius: Tok.rCard
-                        color: theme.a(root.barFillColor, root.cfgOpacity)
-                        border.width: root.cfgOpacity < 0.06 ? 0 : 1
+                        color: theme.a(root.barFillColor, root.barSurfaceOpacity)
+                        border.width: root.barSurfaceOpacity < 0.06 ? 0 : 1
                         border.color: Tok.ruleHard
                     }
                     // Never use visible:false — a hidden subtree collapses its Text pills'
@@ -3644,6 +3746,35 @@ ShellRoot {
                     height: 26
                     implicitWidth: leftGroup.spanW()
                     width: implicitWidth
+                    // The workspaces + title and the global menu trade places on focus changes.
+                    // menuShown lags gmenu.available so the swap can fade: on the way in, the
+                    // workspaces fade out first and the menu fades in where they were. On the
+                    // way out the old menu is already gone (the snapshot is the new window's),
+                    // so the workspaces just fade straight back in.
+                    property bool menuShown: false
+                    property real swapFade: 1
+                    property real swapSlide: 0
+                    Connections {
+                        target: gmenu
+                        function onAvailableChanged() {
+                            swapAnim.stop();
+                            if (gmenu.available) swapAnim.start();
+                            else { leftGroup.menuShown = false; swapIn.start(); }
+                        }
+                    }
+                    SequentialAnimation {
+                        id: swapAnim
+                        NumberAnimation { target: leftGroup; property: "swapFade"; to: 0
+                            duration: Tok.mMicro; easing.type: Easing.InCubic }
+                        ScriptAction { script: { leftGroup.menuShown = gmenu.available; swapIn.start(); } }
+                    }
+                    ParallelAnimation {
+                        id: swapIn
+                        NumberAnimation { target: leftGroup; property: "swapFade"; from: 0; to: 1
+                            duration: Tok.mBase; easing.type: Easing.OutCubic }
+                        NumberAnimation { target: leftGroup; property: "swapSlide"; from: -6; to: 0
+                            duration: Tok.mBase; easing.type: Easing.OutCubic }
+                    }
                     function oidx(w) { var i = leftGroup.order ? leftGroup.order.indexOf(w) : -1; return i < 0 ? 999 : i; }
                     // BOTH `visible` AND `width` ARE READ FOR EVERY CHILD, EVERY TIME, and the
                     // short-circuit only happens after. A QML binding re-runs when a property
@@ -3737,7 +3868,7 @@ ShellRoot {
                                         elide: Text.ElideRight
                                         text: modelData.label || ""
                                         color: smRow.lit ? Tok.accentInk : theme.text
-                                        font.pixelSize: 12; font.family: root.cfgFont
+                                        font.pixelSize: 12; font.family: "Adwaita Sans"
                                         Behavior on color { ColorAnimation { duration: Tok.mFast } } }
                                     Text { id: smKey
                                         visible: !smRow.isSep && !!modelData.key
@@ -3762,7 +3893,9 @@ ShellRoot {
                         // now. They come straight back the moment the focused window has no menu
                         // — which is most windows — and the left group measures only visible
                         // children, so the menu simply starts where they were.
-                        visible: !gmenu.available
+                        visible: !leftGroup.menuShown
+                        opacity: leftGroup.swapFade
+                        transform: Translate { x: leftGroup.swapSlide }
                         columns: 99
                         rowSpacing: 6; columnSpacing: 6
                         verticalItemAlignment: Grid.AlignVCenter
@@ -3894,6 +4027,11 @@ ShellRoot {
                     GlobalMenu {
                         id: gmenu
                         property string lid: "lgTitle"; x: leftGroup.xFor(lid); anchors.verticalCenter: parent.verticalCenter
+                        // overrides GlobalMenu's own `visible: available`, so the strip waits
+                        // for the workspaces to fade out before it takes their place
+                        visible: available && leftGroup.menuShown
+                        opacity: leftGroup.swapFade
+                        transform: Translate { x: leftGroup.swapSlide }
                         pal: theme
                         uiFont: root.cfgFont
                         script: root.appmenuScript
@@ -3935,9 +4073,11 @@ ShellRoot {
                         // the window title. Capped short so a long app class (e.g. electron apps)
                         // can't grow into the centre and push the media pill out — it's only a hint.
                         property string lid: "lgTitle"; x: leftGroup.xFor(lid); anchors.verticalCenter: parent.verticalCenter
-                        visible: !gmenu.available
+                        visible: !leftGroup.menuShown
+                        opacity: leftGroup.swapFade
+                        transform: Translate { x: leftGroup.swapSlide }
                         width: Math.min(implicitWidth, 130); elide: Text.ElideRight
-                        color: theme.faint; font.pixelSize: 12; font.family: root.cfgFont
+                        color: theme.sub; font.pixelSize: 12; font.family: "Adwaita Sans"
                         text: {
                             // Same staleness as the strip had: activeToplevel keeps naming the
                             // window you left once focus drops to nothing, so an empty desktop
@@ -3987,11 +4127,18 @@ ShellRoot {
                 }
                 Drop { screen: bar.screen
                     id: mprisDrop; host: root.barVertical ? mprisPillVert : mprisPill; shown: root.openPop ==="mpris" && root.openBar === bar
-                    cardW: 380; cardH: mprCol.implicitHeight + 32
-                    sidecar: root.lyricsOpen ? lyrPanel : null           // clicks land on the panel only while it's open
-                    sidecar2: root.infoOpen ? infoPanel : null
+                    cardW: Math.min(748, mprisDrop.swN - 24); cardH: Math.min(300, mprisDrop.shN - root.cfgHeight - 24)
+
                     onVisibleChanged: if (visible && root.lyricsOpen) root.fetchLyrics()   // track may have changed while closed
-                    Column { id: mprCol; anchors.fill: mprisDrop.card; anchors.margins: 15; spacing: 11
+                    MediaPlayerFrame {
+                        id: mediaFrame; anchors.fill: mprisDrop.card
+                        player: root.player; mascotSource: Qt.resolvedUrl("media-miku.gif"); selectedTab: root.mediaTab; viz: root.vizBars; active: mprisDrop.shown; reducedMotion: Tok.reducedMotion
+                        ink: Tok.ink; secondary: Tok.ink2; accent: Tok.accent; wash: Tok.accentWash; rule: Tok.rule
+                        onSelected: tab => root.mediaTab = tab
+                    }
+                    Column { id: mprCol
+                        parent: mediaFrame.controlsHost
+                        width: parent.width; spacing: 7
 
                         // player switcher chips (only when several apps are playing)
                         Row { width: parent.width; spacing: 6; visible: root.players.length > 1
@@ -4002,144 +4149,32 @@ ShellRoot {
                                     color: cur ? theme.a(theme.iris,0.28) : (pcMa.containsMouse ? theme.a(theme.iris,0.14) : theme.a(theme.line,0.5))
                                     border.width: 1; border.color: cur ? theme.iris : theme.a(theme.line,0.9)
                                     Text { id: pcTxt; anchors.centerIn: parent; text: (root.players[index].identity||"player").toLowerCase()
-                                        color: cur ? theme.text : theme.sub; font.pixelSize: 9; font.family: root.cfgFont }
+                                        color: cur ? theme.text : theme.sub; font.pixelSize: 9; font.family: "Adwaita Sans" }
                                     MouseArea { id: pcMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
                                         onClicked: root.playerSel = index } } } }
 
-                        // ---- ART, with the level meter riding its bottom edge ----
-                        //
-                        // The art was an 84px thumbnail beside three lines of text, and the cava
-                        // meter was a 38px band under it doing nothing a shorter one could not. The
-                        // art is the one thing in here worth looking at, so it takes the full width;
-                        // the meter sits on it and costs no height at all.
-                        // ClippingRectangle, not Rectangle: `clip: true` on a plain Rectangle clips
-                        // children to its BOUNDING BOX and ignores the radius entirely, so the art
-                        // kept four square corners inside a rounded frame no matter what radius was
-                        // set. Quickshell's ClippingRectangle clips to the rounded shape itself.
-                        ClippingRectangle {
-                            id: artBox
-                            // SQUARE, because cover art is — a 0.62 box cropped the top and bottom off
-                            // every sleeve to make a shape nothing is delivered in. At full panel width
-                            // it then dominated everything under it, so it sits at 62% and centred:
-                            // still the anchor, no longer the entire panel.
-                            anchors.horizontalCenter: parent.horizontalCenter
-                            width: Math.round(parent.width * 0.62); height: width
-                            radius: Tok.r
-                            color: theme.a(theme.line, 0.6)
-                            border.width: 1; border.color: theme.a(theme.iris, 0.25)
-                            Image { id: artImg; anchors.fill: parent; asynchronous: true
-                                fillMode: Image.PreserveAspectCrop
-                                source: (root.player && root.player.trackArtUrl) ? root.player.trackArtUrl : ""
-                                visible: status === Image.Ready }
-                            Sym { anchors.centerIn: parent; text: "music_note"; sz: 46; color: theme.faint
-                                visible: !artImg.visible }
-                            // The meter sits ON the art, so it has to stay out of its way: a slim
-                            // band of hairlines rather than the slab of blocks it was, and a scrim
-                            // that only fades in under the band itself instead of a hard 32px shelf
-                            // cutting across the bottom third of every sleeve.
-                            Rectangle { anchors.left: parent.left; anchors.right: parent.right
-                                anchors.bottom: parent.bottom; height: 22
-                                visible: root.vizBars.length > 0 && artImg.visible
-                                color: theme.a(theme.bg, 0.34) }
-                            Row { id: vizRow
-                                anchors.left: parent.left; anchors.right: parent.right; anchors.bottom: parent.bottom
-                                anchors.leftMargin: 8; anchors.rightMargin: 8; anchors.bottomMargin: 6
-                                height: 12; spacing: 3
-                                Repeater { model: root.vizBars.length
-                                    delegate: Rectangle { required property int index
-                                        width: Math.max(1, (vizRow.width - (root.vizBars.length-1)*3) / Math.max(1, root.vizBars.length))
-                                        height: Math.max(1.5, (root.vizBars[index]||0)/100*12)
-                                        anchors.bottom: parent.bottom; radius: 0
-                                        color: theme.a(theme.iris, 0.55 + 0.45*((root.vizBars[index]||0)/100)) } } } }
-
-                        // ---- title · artist — album folded onto the artist line, one row saved ----
-                        Column { width: parent.width; spacing: 2
-                            Text { width: parent.width; elide: Text.ElideRight
-                                text: root.player ? (root.player.trackTitle||"\u2014") : "\u2014"
-                                color: theme.text; font.pixelSize: 17; font.family: root.cfgFont; font.bold: true }
-                            Text { width: parent.width; elide: Text.ElideRight; visible: text !== ""
-                                text: {
-                                    if (!root.player) return "";
-                                    var a = root.player.trackArtist || "", al = root.player.trackAlbum || "";
-                                    return (a && al) ? a + "  \u00b7  " + al : (a || al);
-                                }
-                                color: theme.sub; font.pixelSize: 12; font.family: root.cfgFont } }
-
-                        // ---- seek ----
-                        Column { width: parent.width; spacing: 5; visible: root.player && root.player.length>0
-                            Item { width: parent.width; height: 12
-                                Rectangle { id: seekTrack; anchors.verticalCenter: parent.verticalCenter; width: parent.width
-                                    height: seekMa.containsMouse||seekMa.pressed ? 6 : 4; radius: Tok.r; color: theme.a(theme.line,0.85)
-                                    Behavior on height { NumberAnimation { duration: 90 } }
-                                    Rectangle { height: parent.height; radius: Tok.r; color: theme.iris
-                                        width: parent.width * (root.player && root.player.length>0 ? Math.max(0,Math.min(1, root.mprisPos/root.player.length)) : 0) } }
-                                // the handle exists only while you are pointing at the bar
-                                Rectangle { visible: seekMa.containsMouse || seekMa.pressed
-                                    width: 10; height: 10; radius: Tok.rSmall; color: theme.iris
-                                    anchors.verticalCenter: parent.verticalCenter
-                                    x: Math.max(0, Math.min(parent.width - width,
-                                        seekTrack.width * (root.player && root.player.length>0 ? root.mprisPos/root.player.length : 0) - width/2)) }
-                                MouseArea { id: seekMa; anchors.fill: parent; hoverEnabled: true
-                                    cursorShape: (root.player && root.player.canSeek) ? Qt.PointingHandCursor : Qt.ArrowCursor
-                                    function seekTo(x) { if (!root.player || !root.player.canSeek || !(root.player.length>0)) return;
-                                        var f = Math.max(0, Math.min(1, x/width)); root.player.position = f*root.player.length; root.mprisPos = f*root.player.length }
-                                    onPressed: (e)=> seekTo(e.x)
-                                    onPositionChanged: (e)=> { if (pressed) seekTo(e.x) } } }
-                            Item { width: parent.width; height: 12
-                                IndText { anchors.left: parent.left; anchors.verticalCenter: parent.verticalCenter
-                                    mono: true; sz: 10; color: theme.sub; text: root.fmtTime(root.mprisPos) }
-                                // REMAINING, not total. Mid-track the number you want is how much is
-                                // left, and the total is already implied by the bar. Mono and tabular
-                                // so it stops twitching — the old row used the UI face, so the whole
-                                // line re-measured itself on every tick.
-                                IndText { anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
-                                    mono: true; sz: 10; color: theme.faint
-                                    text: "-" + root.fmtTime(Math.max(0, (root.player ? root.player.length : 0) - root.mprisPos)) } } }
-
-                        // ---- transport: ONE primary, the rest recede ----
-                        // Five same-weight buttons made you read the row to find play. It is now the
-                        // only filled control in the panel, which is the whole point of an accent.
-                        // The row is ALWAYS five slots wide — 32·36·48·36·32 — so play sits on the
-                        // panel's axis by construction. Hiding unsupported controls was what broke
-                        // that: a Row drops invisible children from layout and re-centres on what is
-                        // left, so a player that reports loop but not shuffle pushed play off-axis,
-                        // and one that reports neither made the row silently lose two buttons.
-                        // Unsupported now reads as unavailable — dimmed and inert — which is a fact
-                        // about the player, not a reason to rearrange the furniture.
-                        // Every button anchors its OWN verticalCenter: a Row lays children out left
-                        // to right and leaves y at 0, so the 48px play button hung 6px lower than the
-                        // 36px ones beside it and only looked centred because it is the biggest thing
-                        // in the row.
-                        Row { anchors.horizontalCenter: parent.horizontalCenter; spacing: 8; height: 48
-                            Rectangle { width: 32; height: 32; radius: Tok.r; anchors.verticalCenter: parent.verticalCenter
-                                readonly property bool can: root.player ? root.player.shuffleSupported : false
-                                opacity: can ? 1.0 : 0.32
-                                color: (can && sh.containsMouse) ? theme.a(theme.iris,0.16) : "transparent"
-                                Sym { anchors.centerIn: parent; text: "shuffle"; sz: 17; color: (root.player&&root.player.shuffle) ? theme.iris : theme.faint }
-                                MouseArea { id: sh; anchors.fill: parent; hoverEnabled: true
-                                    cursorShape: parent.can ? Qt.PointingHandCursor : Qt.ArrowCursor
-                                    onClicked: if(parent.can && root.player) root.player.shuffle = !root.player.shuffle } }
-                            Rectangle { width: 36; height: 36; radius: Tok.r; anchors.verticalCenter: parent.verticalCenter; color: pv.containsMouse?theme.a(theme.iris,0.16):"transparent"
-                                Sym { anchors.centerIn: parent; text: "skip_previous"; sz: 22; color: (root.player&&root.player.canGoPrevious)?theme.text:theme.faint }
-                                MouseArea { id: pv; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: if(root.player) root.player.previous() } }
-                            Rectangle { width: 48; height: 48; radius: Tok.r; anchors.verticalCenter: parent.verticalCenter; color: theme.iris
-                                opacity: pp.containsMouse ? 0.85 : 1.0
-                                Behavior on opacity { NumberAnimation { duration: 120 } }
-                                Sym { anchors.centerIn: parent; text: (root.player&&root.player.isPlaying)?"pause":"play_arrow"; sz: 27; color: Tok.accentInk }
-                                MouseArea { id: pp; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: if(root.player) root.player.togglePlaying() } }
-                            Rectangle { width: 36; height: 36; radius: Tok.r; anchors.verticalCenter: parent.verticalCenter; color: nx.containsMouse?theme.a(theme.iris,0.16):"transparent"
-                                Sym { anchors.centerIn: parent; text: "skip_next"; sz: 22; color: (root.player&&root.player.canGoNext)?theme.text:theme.faint }
-                                MouseArea { id: nx; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: if(root.player) root.player.next() } }
-                            Rectangle { width: 32; height: 32; radius: Tok.r; anchors.verticalCenter: parent.verticalCenter
-                                readonly property bool can: root.player ? root.player.loopSupported : false
-                                opacity: can ? 1.0 : 0.32
-                                color: (can && lp.containsMouse) ? theme.a(theme.iris,0.16) : "transparent"
-                                Sym { anchors.centerIn: parent; sz: 17
-                                    text: (root.player&&root.player.loopState===MprisLoopState.Track) ? "repeat_one" : "repeat"
-                                    color: (root.player&&root.player.loopState!==MprisLoopState.None) ? theme.iris : theme.faint }
-                                MouseArea { id: lp; anchors.fill: parent; hoverEnabled: true
-                                    cursorShape: parent.can ? Qt.PointingHandCursor : Qt.ArrowCursor
-                                    onClicked: { if(!parent.can || !root.player) return; root.player.loopState = root.player.loopState===MprisLoopState.None ? MprisLoopState.Playlist : root.player.loopState===MprisLoopState.Playlist ? MprisLoopState.Track : MprisLoopState.None } } } }
+                        MaterialWidget {
+                            width: parent.width; height: root.players.length > 1 ? 96 : 124
+                            kind: "media"; mediaPart: "controls"; player: root.player; viz: root.vizBars; active: mprisDrop.shown
+                            surface: Tok.surface; container: Tok.accentWash; accent: Tok.accent
+                            ink: Tok.ink; secondary: Tok.ink2; accentInk: Tok.accentInk; reducedMotion: Tok.reducedMotion
+                        }
+                        Row { spacing: 8; width: parent.width
+                            Rectangle { width: (parent.width-8)/2; height: 30; radius: 15
+                                color: root.player && root.player.shuffle ? Tok.accentWash : "transparent"
+                                Text { anchors.centerIn: parent; text: "Shuffle"; color: Tok.ink2; font.family: "Adwaita Sans"; font.pixelSize: 12 }
+                                opacity: root.player && root.player.shuffleSupported ? 1 : 0.4
+                                MouseArea { anchors.fill: parent; enabled: !!root.player && root.player.shuffleSupported; cursorShape: Qt.PointingHandCursor
+                                    onClicked: root.player.shuffle = !root.player.shuffle }
+                            }
+                            Rectangle { width: (parent.width-8)/2; height: 30; radius: 15
+                                color: root.player && root.player.loopState !== MprisLoopState.None ? Tok.accentWash : "transparent"
+                                Text { anchors.centerIn: parent; text: root.player && root.player.loopState===MprisLoopState.Track ? "Repeat track" : root.player && root.player.loopState===MprisLoopState.Playlist ? "Repeat playlist" : "Repeat off"; color: Tok.ink2; font.family: "Adwaita Sans"; font.pixelSize: 12 }
+                                opacity: root.player && root.player.loopSupported ? 1 : 0.4
+                                MouseArea { anchors.fill: parent; enabled: !!root.player && root.player.loopSupported; cursorShape: Qt.PointingHandCursor
+                                    onClicked: root.player.loopState = root.player.loopState===MprisLoopState.None ? MprisLoopState.Playlist : root.player.loopState===MprisLoopState.Playlist ? MprisLoopState.Track : MprisLoopState.None }
+                            }
+                        }
 
                         // ---- signal chain ----
                         // The one thing no other shell can tell you: where the audio is actually
@@ -4149,20 +4184,20 @@ ShellRoot {
                         Rectangle {
                             width: parent.width; height: 26; radius: Tok.r
                             visible: root.player !== null
-                            color: theme.a(theme.line, 0.35)
-                            border.width: 1
+                            color: "transparent"
+                            border.width: 0
                             border.color: theme.a(theme.line,0.9)
                             Row { anchors.left: parent.left; anchors.leftMargin: 8
                                 anchors.right: hqChip.left; anchors.rightMargin: 6
                                 anchors.verticalCenter: parent.verticalCenter; spacing: 6
                                 Sym { anchors.verticalCenter: parent.verticalCenter
-                                    text: "volume_up"; sz: 13; color: theme.faint }
+                                    text: "volume_up"; sz: 13; color: theme.sub }
                                 IndText { anchors.verticalCenter: parent.verticalCenter; mono: true; sz: 9
-                                    text: "OUT"; color: theme.faint; font.letterSpacing: 1 }
+                                    text: "OUT"; color: theme.sub; font.letterSpacing: 1 }
                                 Text { anchors.verticalCenter: parent.verticalCenter
                                     text: root.outputLabel; elide: Text.ElideRight
                                     color: theme.sub
-                                    font.pixelSize: 11; font.family: root.cfgFont } }
+                                    font.pixelSize: 11; font.family: "Adwaita Sans" } }
                             IndChip { id: hqChip
                                 anchors.right: parent.right; anchors.rightMargin: 6
                                 anchors.verticalCenter: parent.verticalCenter
@@ -4172,7 +4207,7 @@ ShellRoot {
 
                         // ---- player volume ----
                         Row { width: parent.width; spacing: 8; visible: root.player ? root.player.volumeSupported : false
-                            Sym { anchors.verticalCenter: parent.verticalCenter; text: "volume_down"; sz: 15; color: theme.faint }
+                            Sym { anchors.verticalCenter: parent.verticalCenter; text: "volume_down"; sz: 15; color: theme.sub }
                             Item { width: parent.width - 48; height: 12; anchors.verticalCenter: parent.verticalCenter
                                 Rectangle { anchors.verticalCenter: parent.verticalCenter; width: parent.width; height: 4; radius: Tok.r; color: theme.a(theme.line,0.85)
                                     Rectangle { height: parent.height; radius: Tok.r; color: theme.a(theme.iris,0.8)
@@ -4180,68 +4215,43 @@ ShellRoot {
                                 MouseArea { anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
                                     function setV(x) { if (root.player) root.player.volume = Math.max(0, Math.min(1, x/width)) }
                                     onPressed: (e)=> setV(e.x); onPositionChanged: (e)=> { if (pressed) setV(e.x) } } }
-                            Sym { anchors.verticalCenter: parent.verticalCenter; text: "volume_up"; sz: 15; color: theme.faint } }
+                            Sym { anchors.verticalCenter: parent.verticalCenter; text: "volume_up"; sz: 15; color: theme.sub } }
 
-                        // details (left) + lyrics (right) toggles — each panel opens BESIDE the card as a sidecar
-                        Row { width: parent.width; spacing: 8; height: 26
-                            Rectangle { width: (parent.width-8)/2; height: 26; radius: Tok.r
-                                color: dtMa.containsMouse ? theme.a(theme.iris,0.14) : theme.a(theme.line,0.4)
-                                border.width: 1; border.color: root.infoOpen ? theme.a(theme.iris,0.5) : theme.a(theme.line,0.9)
-                                Row { anchors.centerIn: parent; spacing: 6
-                                    Sym { anchors.verticalCenter: parent.verticalCenter; text: "info"; sz: 14; color: root.infoOpen ? theme.iris : theme.sub }
-                                    Text { anchors.verticalCenter: parent.verticalCenter; text: root.infoOpen ? "hide details" : "details"
-                                        color: root.infoOpen ? theme.text : theme.sub; font.pixelSize: 10; font.family: root.cfgFont } }
-                                MouseArea { id: dtMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
-                                    onClicked: root.infoOpen = !root.infoOpen } }
-                            Rectangle { width: (parent.width-8)/2; height: 26; radius: Tok.r
-                                color: lyMa.containsMouse ? theme.a(theme.iris,0.14) : theme.a(theme.line,0.4)
-                                border.width: 1; border.color: root.lyricsOpen ? theme.a(theme.iris,0.5) : theme.a(theme.line,0.9)
-                                Row { anchors.centerIn: parent; spacing: 6
-                                    Sym { anchors.verticalCenter: parent.verticalCenter; text: "lyrics"; sz: 14; color: root.lyricsOpen ? theme.iris : theme.sub }
-                                    Text { anchors.verticalCenter: parent.verticalCenter; text: root.lyricsOpen ? "hide lyrics" : "lyrics"
-                                        color: root.lyricsOpen ? theme.text : theme.sub; font.pixelSize: 10; font.family: root.cfgFont } }
-                                MouseArea { id: lyMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
-                                    onClicked: { root.lyricsOpen = !root.lyricsOpen; if (root.lyricsOpen) root.fetchLyrics(root.lyricsState!=='ok' && root.lyricsState!=='plain') } } } }
                     }
 
                     // ---- lyrics sidecar: full-height panel next to the player card ----
                     Rectangle {
                         id: lyrPanel
-                        visible: root.lyricsOpen && root.openPop === "mpris"
-                        width: 340; height: mprisDrop.card.height
-                        // right of the card; flips to the left near the screen edge
-                        x: (mprisDrop.card.x + mprisDrop.card.width + 10 + width > mprisDrop.swN - 8)
-                           ? mprisDrop.card.x - width - 10 : mprisDrop.card.x + mprisDrop.card.width + 10
-                        y: mprisDrop.card.y
-                        radius: Tok.rCard; color: Tok.alpha(Tok.surface, root.dropOpacity)
-                        border.width: 1; border.color: Tok.ruleHard
-                        Column { anchors.fill: parent; anchors.margins: 13; spacing: 8
-                            Row { width: parent.width; spacing: 6
-                                Sym { anchors.verticalCenter: parent.verticalCenter; text: "lyrics"; sz: 15; color: theme.iris }
-                                Text { anchors.verticalCenter: parent.verticalCenter; text: "lyrics"; color: theme.text; font.pixelSize: 12; font.bold: true; font.family: root.cfgFont }
-                                Item { width: parent.width - 150; height: 1 }
-                                // No anchors.right. An item inside a Row may not set left, right,
-                                // horizontalCenter, fill or centerIn — Qt disables the whole Row
-                                // when one does, which is what this was quietly doing since 6.1.1.
-                                // The spacer Item above already pushes this group to the right.
-                                Row { anchors.verticalCenter: parent.verticalCenter; spacing: 5
+                        parent: mediaFrame.lyricsHost
+                        anchors.fill: parent
+                        color: "transparent"; border.width: 0
+                        Column { anchors.fill: parent; anchors.margins: 0; spacing: 8
+                            Item {
+                                width: parent.width; height: 24
+                                Text { anchors.left: parent.left; anchors.verticalCenter: parent.verticalCenter
+                                    width: Math.max(0,parent.width-lyricHeaderActions.width-12); elide: Text.ElideRight
+                                    text: "Lyrics"; color: theme.text; font.pixelSize: 12; font.bold: true; font.family: "Adwaita Sans" }
+                                Row { id: lyricHeaderActions; anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter; spacing: 6
                                     Repeater { model: [{k:"r",l:"あ→a"},{k:"t",l:"EN"}]
                                         delegate: Rectangle { required property var modelData
                                             readonly property bool on: modelData.k==="r" ? root.cfgLyrRomaji : root.cfgLyrTrans
-                                            height: 18; radius: Tok.rSmall; width: lxT.implicitWidth + 12
-                                            color: on ? theme.a(theme.iris,0.28) : theme.a(theme.line,0.5)
-                                            border.width: 1; border.color: on ? theme.iris : theme.a(theme.line,0.9)
-                                            Text { id: lxT; anchors.centerIn: parent; text: modelData.l
-                                                color: on ? theme.text : theme.faint; font.pixelSize: 9; font.family: root.cfgFont }
-                                            MouseArea { anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
-                                                onClicked: modelData.k==="r" ? root.lyrToggleRomaji() : root.lyrToggleTrans() } } }
-                                    Text { anchors.verticalCenter: parent.verticalCenter; text: root.lyricsState==="ok" ? "synced" : ""; color: theme.faint; font.pixelSize: 9; font.family: root.cfgFont } } }
+                                            height: 20; radius: 6; width: languageLabel.implicitWidth+12
+                                            color: on ? Tok.accentWash : Tok.sunken
+                                            Text { id: languageLabel; anchors.centerIn: parent; text: modelData.l; color: Tok.ink2; font.pixelSize: 10; font.family: "Adwaita Sans" }
+                                            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                                                onClicked: modelData.k==="r" ? root.lyrToggleRomaji() : root.lyrToggleTrans() }
+                                        }
+                                    }
+                                    Text { anchors.verticalCenter: parent.verticalCenter; visible: root.lyricsState==="ok"
+                                        text: "Synced"; color: theme.sub; font.pixelSize: 10; font.family: "Adwaita Sans" }
+                                }
+                            }
                             Rectangle { width: parent.width; height: 1; color: theme.a(theme.iris,0.2) }
                             // height was hardcoded to `- 34` against a header that has since grown a
                             // row of 18px chips, so the list ran past the bottom of the panel
                             Item { width: parent.width; height: parent.height - 44
-                                Text { anchors.centerIn: parent; visible: root.lyricsState==="loading"; text: "fetching lyrics…"; color: theme.faint; font.pixelSize: 11; font.family: root.cfgFont }
-                                Text { anchors.centerIn: parent; visible: root.lyricsState==="none"; text: "no lyrics found"; color: theme.faint; font.pixelSize: 11; font.family: root.cfgFont }
+                                Text { anchors.centerIn: parent; visible: root.lyricsState==="loading"; text: "fetching lyrics…"; color: theme.sub; font.pixelSize: 11; font.family: "Adwaita Sans" }
+                                Text { anchors.centerIn: parent; visible: root.lyricsState==="none"; text: "no lyrics found"; color: theme.sub; font.pixelSize: 11; font.family: "Adwaita Sans" }
                                 // synced: follows playback, current line highlighted, click to seek
                                 ListView { id: lyrView; anchors.fill: parent; visible: root.lyricsState==="ok"; clip: true
                                     model: root.lyrics; spacing: 3
@@ -4270,12 +4280,12 @@ ShellRoot {
                                         Text { id: lyT; width: parent.width
                                             text: modelData.l; wrapMode: Text.Wrap; horizontalAlignment: Text.AlignHCenter
                                             color: index===root.lyrIdx ? theme.frost : (index<root.lyrIdx ? theme.faint : theme.sub)
-                                            font.pixelSize: index===root.lyrIdx ? 14 : 12; font.bold: index===root.lyrIdx; font.family: root.cfgFont
+                                            font.pixelSize: index===root.lyrIdx ? 17 : 13; font.bold: index===root.lyrIdx; font.family: "Adwaita Sans"
                                             Behavior on color { ColorAnimation { duration: 150 } } }
                                         Text { width: parent.width; visible: parent.parent.sub2 !== ""
                                             text: parent.parent.sub2; wrapMode: Text.Wrap; horizontalAlignment: Text.AlignHCenter
                                             color: index===root.lyrIdx ? theme.iris : theme.faint
-                                            font.pixelSize: index===root.lyrIdx ? 11 : 10; font.family: root.cfgFont
+                                            font.pixelSize: index===root.lyrIdx ? 11 : 10; font.family: "Adwaita Sans"
                                             font.italic: true } }
                                         MouseArea { anchors.fill: parent; cursorShape: (root.player&&root.player.canSeek)?Qt.PointingHandCursor:Qt.ArrowCursor
                                             onClicked: { if (root.player && root.player.canSeek) { root.player.position = modelData.t; root.mprisPos = modelData.t } } } }
@@ -4284,46 +4294,29 @@ ShellRoot {
                                 Flickable { anchors.fill: parent; visible: root.lyricsState==="plain"; clip: true
                                     contentHeight: plainT.height; boundsBehavior: Flickable.StopAtBounds
                                     Text { id: plainT; width: parent.width; text: root.plainLyrics; wrapMode: Text.Wrap
-                                        horizontalAlignment: Text.AlignHCenter; color: theme.sub; font.pixelSize: 12; font.family: root.cfgFont } } } } }
+                                        horizontalAlignment: Text.AlignHCenter; color: theme.sub; font.pixelSize: 12; font.family: "Adwaita Sans" } } } } }
 
                     // ---- track-details sidecar: opens on the OPPOSITE side of the lyrics panel ----
                     Rectangle {
                         id: infoPanel
-                        visible: root.infoOpen && root.openPop === "mpris"
-                        // ask MusicBrainz only when someone actually looks at this panel,
-                        // and only once per track — same deal as the lyrics sidecar
+                        parent: mediaFrame.detailsHost
+                        anchors.fill: parent
+                        color: "transparent"; border.width: 0
                         onVisibleChanged: if (visible) root.fetchMeta()
-                        // grow to fit the details (art + rows) so nothing clips; never shorter than the card
-                        width: 288; height: Math.max(mprisDrop.card.height, detailsCol.implicitHeight + 28)
                         clip: true
-                        // prefer the LEFT of the card (mirrors lyrics on the right); flip right near the screen edge
-                        x: (mprisDrop.card.x - 10 - width < 8)
-                           ? mprisDrop.card.x + mprisDrop.card.width + 10 : mprisDrop.card.x - width - 10
-                        y: mprisDrop.card.y
-                        radius: Tok.rCard; color: Tok.alpha(Tok.surface, root.dropOpacity)
-                        border.width: 1; border.color: Tok.ruleHard
-                        Column { id: detailsCol; anchors.fill: parent; anchors.margins: 14; spacing: 10
+                        Flickable { id: infoScroll; anchors.fill: parent; anchors.margins: 0
+                            contentWidth: width; contentHeight: detailsCol.implicitHeight; clip: true; boundsBehavior: Flickable.StopAtBounds
+                            flickableDirection: Flickable.VerticalFlick
+                            interactive: contentHeight > height + 1
+                            onContentHeightChanged: if (contentHeight <= height + 1) contentY = 0
+                            onHeightChanged: if (contentHeight <= height + 1) contentY = 0
+                        Column { id: detailsCol; width: infoScroll.width; spacing: 6
                             Row { width: parent.width; spacing: 6
                                 Sym { anchors.verticalCenter: parent.verticalCenter; text: "info"; sz: 15; color: theme.iris }
-                                Text { anchors.verticalCenter: parent.verticalCenter; text: "track details"; color: theme.text; font.pixelSize: 12; font.bold: true; font.family: root.cfgFont } }
+                                Text { anchors.verticalCenter: parent.verticalCenter; text: "track details"; color: theme.text; font.pixelSize: 12; font.bold: true; font.family: "Adwaita Sans" } }
                             Rectangle { width: parent.width; height: 1; color: theme.a(theme.iris,0.2) }
-                            // large album art
-                            // ClippingRectangle for the same reason the player's art is one: a plain
-                            // Rectangle clips to its bounding box and leaves the image square-cornered
-                            // inside a rounded frame.
-                            ClippingRectangle { anchors.horizontalCenter: parent.horizontalCenter
-                                width: Math.min(parent.width, 150); height: width; radius: Tok.r
-                                color: theme.a(theme.line,0.6); border.width: 1; border.color: theme.a(theme.iris,0.3)
-                                Image { anchors.fill: parent; asynchronous: true; fillMode: Image.PreserveAspectCrop
-                                    source: (root.player && root.player.trackArtUrl) ? root.player.trackArtUrl : ""; visible: status===Image.Ready }
-                                Sym { anchors.centerIn: parent; text: "music_note"; sz: 40; color: theme.faint; visible: !(root.player && root.player.trackArtUrl && root.player.trackArtUrl!=="") } }
-                            Text { width: parent.width; horizontalAlignment: Text.AlignHCenter; wrapMode: Text.Wrap; maximumLineCount: 2; elide: Text.ElideRight
-                                text: root.player ? (root.player.trackTitle||"—") : "—"; color: theme.text; font.pixelSize: 14; font.bold: true; font.family: root.cfgFont }
-                            Text { width: parent.width; horizontalAlignment: Text.AlignHCenter; wrapMode: Text.Wrap; maximumLineCount: 2; elide: Text.ElideRight; visible: text!==""
-                                text: root.player ? (root.player.trackArtist||"") : ""; color: theme.sub; font.pixelSize: 11; font.family: root.cfgFont }
-                            Rectangle { width: parent.width; height: 1; color: theme.a(theme.iris,0.12) }
                             // detail rows (static ones via a model; live time rows bound directly so they don't rebuild the list)
-                            Column { id: infoRows; width: parent.width; spacing: 8
+                            Column { id: infoRows; width: parent.width; spacing: 6
                                 Repeater {
                                     model: {
                                         var p = root.player; if (!p) return [];
@@ -4368,13 +4361,14 @@ ShellRoot {
                                             mono: true; sz: 11; text: modelData.v; color: theme.text } }
                                 }
                                 Item { width: infoRows.width; height: 16
-                                    Text { anchors.left: parent.left; anchors.verticalCenter: parent.verticalCenter; text: "Elapsed"; color: theme.faint; font.pixelSize: 11; font.family: root.cfgFont }
+                                    Text { anchors.left: parent.left; anchors.verticalCenter: parent.verticalCenter; text: "Elapsed"; color: theme.sub; font.pixelSize: 11; font.family: "Adwaita Sans" }
                                     Text { anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter; horizontalAlignment: Text.AlignRight
-                                        text: root.fmtTime(root.mprisPos); color: theme.text; font.pixelSize: 11; font.family: root.cfgFont } }
+                                        text: root.fmtTime(root.mprisPos); color: theme.text; font.pixelSize: 11; font.family: "Adwaita Sans" } }
                                 Item { width: infoRows.width; height: 16
-                                    Text { anchors.left: parent.left; anchors.verticalCenter: parent.verticalCenter; text: "Remaining"; color: theme.faint; font.pixelSize: 11; font.family: root.cfgFont }
+                                    Text { anchors.left: parent.left; anchors.verticalCenter: parent.verticalCenter; text: "Remaining"; color: theme.sub; font.pixelSize: 11; font.family: "Adwaita Sans" }
                                     Text { anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter; horizontalAlignment: Text.AlignRight
-                                        text: "-" + root.fmtTime(Math.max(0,(root.player?root.player.length:0)-root.mprisPos)); color: theme.text; font.pixelSize: 11; font.family: root.cfgFont } } }
+                                        text: "-" + root.fmtTime(Math.max(0,(root.player?root.player.length:0)-root.mprisPos)); color: theme.text; font.pixelSize: 11; font.family: "Adwaita Sans" } } }
+                        }
                         }
                     } }
 
@@ -4730,14 +4724,14 @@ ShellRoot {
                         cardW: 340; cardH: updCol.implicitHeight + 30
                         Column { id: updCol; anchors.fill: updDrop.card; anchors.margins: 15; spacing: 10
                             Row { width: parent.width
-                                Text { text: "updates"; color: theme.iris; font.pixelSize: 11; font.family: root.cfgFont; font.bold: true; font.letterSpacing: 0.8 }
+                                Text { text: "Updates"; color: theme.text; font.pixelSize: 15; font.family: "Adwaita Sans"; font.bold: true }
                                 Item { width: parent.width - 120; height: 1 }
                                 Text { text: root.updChecking ? "checking…" : (root.updRepo + " repo · " + root.updAur + " aur")
-                                    color: theme.faint; font.pixelSize: 10; font.family: Tok.mono } }
+                                    color: theme.sub; font.pixelSize: 10; font.family: Tok.mono } }
                             Rectangle { width: parent.width; height: 1; color: theme.a(theme.iris, 0.16) }
 
                             Text { visible: root.updTotal === 0 && !root.updChecking
-                                text: "everything is up to date"; color: theme.sub; font.pixelSize: 12; font.family: root.cfgFont }
+                                text: "everything is up to date"; color: theme.sub; font.pixelSize: 12; font.family: "Adwaita Sans" }
 
                             // Capped, but the footer says by how much — a list that silently stops
                             // at 12 reads as "12 updates" when it might be 90.
@@ -4766,7 +4760,7 @@ ShellRoot {
                             }
                             Text { visible: root.updList.length > 12
                                 text: "+" + (root.updList.length - 12) + " more not shown"
-                                color: theme.faint; font.pixelSize: 10; font.family: Tok.mono }
+                                color: theme.sub; font.pixelSize: 10; font.family: Tok.mono }
 
                             Row { width: parent.width; spacing: 8
                                 Rectangle { width: (parent.width - 8) * 0.62; height: 34; radius: Tok.r
@@ -4777,7 +4771,7 @@ ShellRoot {
                                         Sym { anchors.verticalCenter: parent.verticalCenter; text: "download"; sz: 15
                                             color: updGoMa.containsMouse ? Tok.accentInk : theme.frost }
                                         Text { anchors.verticalCenter: parent.verticalCenter; text: "update now"
-                                            color: updGoMa.containsMouse ? Tok.accentInk : theme.text; font.pixelSize: 12; font.family: root.cfgFont } }
+                                            color: updGoMa.containsMouse ? Tok.accentInk : theme.text; font.pixelSize: 12; font.family: "Adwaita Sans" } }
                                     MouseArea { id: updGoMa; anchors.fill: parent; hoverEnabled: true
                                         enabled: root.updTotal > 0
                                         cursorShape: Qt.PointingHandCursor; onClicked: root.updRun() } }
@@ -4786,7 +4780,7 @@ ShellRoot {
                                     border.width: 1; border.color: theme.a(theme.iris, 0.16)
                                     Row { anchors.centerIn: parent; spacing: 6
                                         Sym { anchors.verticalCenter: parent.verticalCenter; text: "refresh"; sz: 15; color: theme.frost }
-                                        Text { anchors.verticalCenter: parent.verticalCenter; text: "check"; color: theme.sub; font.pixelSize: 11; font.family: root.cfgFont } }
+                                        Text { anchors.verticalCenter: parent.verticalCenter; text: "check"; color: theme.sub; font.pixelSize: 11; font.family: "Adwaita Sans" } }
                                     MouseArea { id: updReMa; anchors.fill: parent; hoverEnabled: true
                                         cursorShape: Qt.PointingHandCursor; onClicked: root.updRefresh() } }
                             }
@@ -4798,7 +4792,7 @@ ShellRoot {
                         id: ccDrop; host: root.barVertical ? ccPillVert : ccPill; shown: root.openPop === "cc" && root.openBar === bar
                         cardW: 316; cardH: ccCol.implicitHeight + 30
                         Column { id: ccCol; anchors.fill: ccDrop.card; anchors.margins: 15; spacing: 12
-                            Text { text: "quick settings"; color: theme.iris; font.pixelSize: 11; font.family: root.cfgFont; font.bold: true; font.letterSpacing: 0.8 }
+                            Text { text: "Quick settings"; color: theme.text; font.pixelSize: 15; font.family: "Adwaita Sans"; font.bold: true }
                             // toggle tiles
                             Grid { width: parent.width; columns: 2; columnSpacing: 8; rowSpacing: 8
                                 Repeater {
@@ -4820,13 +4814,13 @@ ShellRoot {
                                         Behavior on color { ColorAnimation { duration: 120 } }
                                         Row { anchors.left: parent.left; anchors.leftMargin: 11; anchors.right: parent.right; anchors.rightMargin: 8; anchors.verticalCenter: parent.verticalCenter; spacing: 8
                                             Sym { anchors.verticalCenter: parent.verticalCenter; text: on ? modelData.onI : modelData.offI; sz: 18; color: on ? theme.iris : theme.sub }
-                                            Text { anchors.verticalCenter: parent.verticalCenter; width: parent.width - 26; text: modelData.l; color: on ? theme.text : theme.sub; font.pixelSize: 12; font.family: root.cfgFont; elide: Text.ElideRight } }
+                                            Text { anchors.verticalCenter: parent.verticalCenter; width: parent.width - 26; text: modelData.l; color: on ? theme.text : theme.sub; font.pixelSize: 12; font.family: "Adwaita Sans"; elide: Text.ElideRight } }
                                         MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.ccToggle(modelData.k) }
                                     }
                                 }
                             }
                             // power profile
-                            Text { text: "power profile"; color: theme.faint; font.pixelSize: 10; font.family: root.cfgFont }
+                            Text { text: "power profile"; color: theme.sub; font.pixelSize: 10; font.family: "Adwaita Sans" }
                             Row { width: parent.width; spacing: 6
                                 Repeater {
                                     model: [ { k: "power-saver", i: "eco", l: "Saver" }, { k: "balanced", i: "balance", l: "Balanced" }, { k: "performance", i: "bolt", l: "Perf" } ]
@@ -4838,8 +4832,26 @@ ShellRoot {
                                         Behavior on color { ColorAnimation { duration: 120 } }
                                         Column { anchors.centerIn: parent; spacing: 2
                                             Sym { anchors.horizontalCenter: parent.horizontalCenter; text: modelData.i; sz: 16; color: sel ? theme.bg : theme.sub }
-                                            Text { anchors.horizontalCenter: parent.horizontalCenter; text: modelData.l; color: sel ? theme.bg : theme.sub; font.pixelSize: 10; font.family: root.cfgFont; font.bold: sel } }
+                                            Text { anchors.horizontalCenter: parent.horizontalCenter; text: modelData.l; color: sel ? theme.bg : theme.sub; font.pixelSize: 10; font.family: "Adwaita Sans"; font.bold: sel } }
                                         MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.setProfile(modelData.k) }
+                                    }
+                                }
+                            }
+                            // gaming fan preset: profile + fan curve in one click; game mode re-applies the last pick
+                            Text { visible: root.hasFanCurve; text: "gaming fans · used by game mode"; color: theme.sub; font.pixelSize: 10; font.family: "Adwaita Sans" }
+                            Row { visible: root.hasFanCurve; width: parent.width; spacing: 6
+                                Repeater {
+                                    model: [ { k: "auto", i: "auto_mode", l: "Auto" }, { k: "quiet", i: "mode_fan", l: "Quiet" }, { k: "max", i: "speed", l: "Max" } ]
+                                    delegate: Rectangle {
+                                        required property var modelData
+                                        readonly property bool sel: root.fanMode === modelData.k
+                                        width: (parent.width - 12) / 3; height: 44; radius: Tok.r
+                                        color: sel ? theme.iris : theme.a(theme.line, 0.4); border.width: 1; border.color: sel ? theme.iris : theme.a(theme.iris, 0.14)
+                                        Behavior on color { ColorAnimation { duration: 120 } }
+                                        Column { anchors.centerIn: parent; spacing: 2
+                                            Sym { anchors.horizontalCenter: parent.horizontalCenter; text: modelData.i; sz: 16; color: sel ? theme.bg : theme.sub }
+                                            Text { anchors.horizontalCenter: parent.horizontalCenter; text: modelData.l; color: sel ? theme.bg : theme.sub; font.pixelSize: 10; font.family: "Adwaita Sans"; font.bold: sel } }
+                                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.setFanMode(modelData.k) }
                                     }
                                 }
                             }
@@ -4849,7 +4861,7 @@ ShellRoot {
                                 border.width: 1; border.color: theme.a(theme.iris, 0.16)
                                 Row { anchors.centerIn: parent; spacing: 8
                                     Sym { anchors.verticalCenter: parent.verticalCenter; text: "settings"; sz: 16; color: theme.frost }
-                                    Text { anchors.verticalCenter: parent.verticalCenter; text: "all settings"; color: theme.text; font.pixelSize: 12; font.family: root.cfgFont } }
+                                    Text { anchors.verticalCenter: parent.verticalCenter; text: "all settings"; color: theme.text; font.pixelSize: 12; font.family: "Adwaita Sans" } }
                                 MouseArea { id: ccSetMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
                                     onClicked: { root.openPop = ""; root.openSettings(0) } }
                             }
@@ -4862,33 +4874,33 @@ ShellRoot {
                             Row { width: parent.width; spacing: 10
                                 Sym { anchors.verticalCenter: parent.verticalCenter; text: root.wxIcon(root.wxCond); sz: 30; color: theme.frost }
                                 Column { anchors.verticalCenter: parent.verticalCenter; spacing: 1; width: parent.width - 40
-                                    Text { text: root.wxTemp; color: theme.text; font.pixelSize: 20; font.family: root.cfgFont; font.bold: true }
-                                    Text { width: parent.width; text: root.wxCond; color: theme.sub; font.pixelSize: 11; font.family: root.cfgFont
+                                    Text { text: root.wxTemp; color: theme.text; font.pixelSize: 20; font.family: "Adwaita Sans"; font.bold: true }
+                                    Text { width: parent.width; text: root.wxCond; color: theme.sub; font.pixelSize: 11; font.family: "Adwaita Sans"
                                         wrapMode: Text.Wrap; maximumLineCount: 2; elide: Text.ElideRight } } }
                             Rectangle { width: parent.width; height: 1; color: theme.a(theme.line,0.7) }
                             Repeater { model: [{i:"thermostat",l:"feels like",v:root.wxFeels},{i:"humidity_percentage",l:"humidity",v:root.wxHumid},{i:"air",l:"wind",v:root.wxWind}]
                                 delegate: Item { required property var modelData; width: parent.width; height: 20
                                     Sym { id: wxdIc; anchors.verticalCenter: parent.verticalCenter; text: modelData.i; sz: 15; color: theme.iris }
                                     Text { anchors { left: wxdIc.right; leftMargin: 8; verticalCenter: parent.verticalCenter }
-                                        text: modelData.l; color: theme.faint; font.pixelSize: 12; font.family: root.cfgFont }
+                                        text: modelData.l; color: theme.sub; font.pixelSize: 12; font.family: "Adwaita Sans" }
                                     Text { anchors { right: parent.right; verticalCenter: parent.verticalCenter }
                                         width: Math.min(implicitWidth, parent.width - 110); elide: Text.ElideLeft; horizontalAlignment: Text.AlignRight
-                                        text: modelData.v; color: theme.text; font.pixelSize: 12; font.family: root.cfgFont } } }
+                                        text: modelData.v; color: theme.text; font.pixelSize: 12; font.family: "Adwaita Sans" } } }
                             // ---- 3-day forecast ----
                             Rectangle { width: parent.width; height: 1; color: theme.a(theme.line,0.7); visible: root.wxForecast.length>0 }
-                            Text { visible: root.wxForecast.length>0; text: "forecast"; color: theme.faint; font.pixelSize: 10; font.family: root.cfgFont }
+                            Text { visible: root.wxForecast.length>0; text: "forecast"; color: theme.sub; font.pixelSize: 10; font.family: "Adwaita Sans" }
                             Repeater { model: root.wxForecast
                                 delegate: Row { required property var modelData; width: parent.width; height: 26; spacing: 8
-                                    Text { anchors.verticalCenter: parent.verticalCenter; text: modelData.day; color: theme.text; font.pixelSize: 12; font.family: root.cfgFont; width: 46 }
+                                    Text { anchors.verticalCenter: parent.verticalCenter; text: modelData.day; color: theme.text; font.pixelSize: 12; font.family: "Adwaita Sans"; width: 46 }
                                     Sym { anchors.verticalCenter: parent.verticalCenter; text: root.wxIcon(modelData.cond); sz: 17; color: theme.frost }
-                                    Text { anchors.verticalCenter: parent.verticalCenter; width: parent.width - 168; elide: Text.ElideRight; text: modelData.cond; color: theme.sub; font.pixelSize: 11; font.family: root.cfgFont }
-                                    Text { anchors.verticalCenter: parent.verticalCenter; text: modelData.hi; color: theme.text; font.pixelSize: 12; font.family: root.cfgFont }
-                                    Text { anchors.verticalCenter: parent.verticalCenter; text: modelData.lo; color: theme.faint; font.pixelSize: 12; font.family: root.cfgFont } } }
+                                    Text { anchors.verticalCenter: parent.verticalCenter; width: parent.width - 168; elide: Text.ElideRight; text: modelData.cond; color: theme.sub; font.pixelSize: 11; font.family: "Adwaita Sans" }
+                                    Text { anchors.verticalCenter: parent.verticalCenter; text: modelData.hi; color: theme.text; font.pixelSize: 12; font.family: "Adwaita Sans" }
+                                    Text { anchors.verticalCenter: parent.verticalCenter; text: modelData.lo; color: theme.sub; font.pixelSize: 12; font.family: "Adwaita Sans" } } }
                             Rectangle { width: parent.width; height: 1; color: theme.a(theme.line,0.7) }
                             Item { width: parent.width; height: 26
                                 Row { anchors.fill: parent; spacing: 8
                                     Sym { anchors.verticalCenter: parent.verticalCenter; text: "settings"; sz: 15; color: theme.sub }
-                                    Text { anchors.verticalCenter: parent.verticalCenter; text: "set location / units"; color: theme.sub; font.pixelSize: 11; font.family: root.cfgFont } }
+                                    Text { anchors.verticalCenter: parent.verticalCenter; text: "set location / units"; color: theme.sub; font.pixelSize: 11; font.family: "Adwaita Sans" } }
                                 MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { root.openPop=""; root.openSettings(3) } } } } }
                     Drop { screen: bar.screen
                         id: trayDrop; host: bar.trayHost
@@ -4904,7 +4916,7 @@ ShellRoot {
                                     try { return !trayMenu.children || !trayMenu.children.values || trayMenu.children.values.length === 0 }
                                     catch (e) { return true }
                                 }
-                                text: "no menu"; color: theme.faint; font.pixelSize: 11; font.family: root.cfgFont; leftPadding: 6; topPadding: 4
+                                text: "no menu"; color: theme.sub; font.pixelSize: 11; font.family: "Adwaita Sans"; leftPadding: 6; topPadding: 4
                             }
                             Repeater { model: { try { return trayMenu.children ? trayMenu.children : [] } catch(e) { return [] } }
                                 delegate: Rectangle { required property var modelData
@@ -4912,7 +4924,7 @@ ShellRoot {
                                     color: (modelData && !modelData.isSeparator && em.containsMouse) ? theme.a(theme.iris,0.16) : "transparent"
                                     Rectangle { visible: !!(modelData && modelData.isSeparator); anchors.verticalCenter: parent.verticalCenter; x: 5; width: parent.width-10; height: 1; color: theme.a(theme.line,0.8) }
                                     Row { visible: !!(modelData && !modelData.isSeparator); anchors.fill: parent; anchors.leftMargin: 9; anchors.rightMargin: 9; spacing: 8
-                                        Text { anchors.verticalCenter: parent.verticalCenter; text: (modelData && modelData.text) ? modelData.text : ""; color: (modelData && modelData.enabled)?theme.text:theme.faint; font.pixelSize: 12; font.family: root.cfgFont; elide: Text.ElideRight; width: parent.width-22 }
+                                        Text { anchors.verticalCenter: parent.verticalCenter; text: (modelData && modelData.text) ? modelData.text : ""; color: (modelData && modelData.enabled)?theme.text:theme.faint; font.pixelSize: 12; font.family: "Adwaita Sans"; elide: Text.ElideRight; width: parent.width-22 }
                                         Sym { anchors.verticalCenter: parent.verticalCenter; visible: !!(modelData && modelData.hasChildren); text: "chevron_right"; sz: 14; color: theme.sub } }
                                     MouseArea { id: em; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; enabled: !!(modelData && !modelData.isSeparator)
                                         onClicked: { try { if(modelData && !modelData.hasChildren){ modelData.triggered(); root.openPop="" } } catch(e) { root.openPop=""; } } } } } } }
@@ -4923,7 +4935,7 @@ ShellRoot {
                             // Header
                             Item { width: parent.width; height: 28
                                 Text { anchors.verticalCenter: parent.verticalCenter; anchors.left: parent.left
-                                    text: "notifications"; color: theme.iris; font.pixelSize: 11; font.family: root.cfgFont; font.bold: true; font.letterSpacing: 0.8 }
+                                    text: "Notifications"; color: theme.text; font.pixelSize: 15; font.family: "Adwaita Sans"; font.bold: true }
                                 Row { anchors.verticalCenter: parent.verticalCenter; anchors.right: parent.right; spacing: 6
                                     // Do Not Disturb toggle
                                     Rectangle { anchors.verticalCenter: parent.verticalCenter
@@ -4932,20 +4944,20 @@ ShellRoot {
                                         border.width: 1; border.color: root.dnd ? theme.a(theme.warn, 0.5) : "transparent"
                                         Row { id: dndRow; anchors.centerIn: parent; spacing: 4
                                             Sym { anchors.verticalCenter: parent.verticalCenter; text: root.dnd ? "do_not_disturb_on" : "do_not_disturb_off"; sz: 13; color: root.dnd ? theme.warn : theme.sub }
-                                            Text { anchors.verticalCenter: parent.verticalCenter; text: "DND"; color: root.dnd ? theme.warn : theme.sub; font.pixelSize: 10; font.family: root.cfgFont; font.bold: root.dnd } }
+                                            Text { anchors.verticalCenter: parent.verticalCenter; text: "DND"; color: root.dnd ? theme.warn : theme.sub; font.pixelSize: 10; font.family: "Adwaita Sans"; font.bold: root.dnd } }
                                         MouseArea { id: dndMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.setDnd(!root.dnd) } }
                                     // clear all
                                     Rectangle { anchors.verticalCenter: parent.verticalCenter
                                         visible: root.notes.length > 0
                                         width: clrTxt.implicitWidth + 16; height: 22; radius: Tok.r
                                         color: clrMa.containsMouse ? theme.a(theme.bad, 0.18) : theme.a(theme.line, 0.5)
-                                        Text { id: clrTxt; anchors.centerIn: parent; text: "clear all"; color: clrMa.containsMouse ? theme.bad : theme.sub; font.pixelSize: 10; font.family: root.cfgFont }
+                                        Text { id: clrTxt; anchors.centerIn: parent; text: "clear all"; color: clrMa.containsMouse ? theme.bad : theme.sub; font.pixelSize: 10; font.family: "Adwaita Sans" }
                                         MouseArea { id: clrMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.noteClear() } } } }
                             Rectangle { width: parent.width; height: 1; color: theme.a(theme.line, 0.6) }
                             Item { height: 2; width: 1 }
                             // ---- muted apps (per-app DND) — chips you can tap to un-mute ----
                             Column { width: parent.width; spacing: 5; visible: root.mutedApps.length > 0
-                                Text { text: "muted apps"; color: theme.faint; font.pixelSize: 10; font.family: root.cfgFont; font.letterSpacing: 0.5 }
+                                Text { text: "muted apps"; color: theme.sub; font.pixelSize: 10; font.family: "Adwaita Sans"; font.letterSpacing: 0.5 }
                                 Flow { width: parent.width; spacing: 5
                                     Repeater { model: root.mutedApps
                                         delegate: Rectangle { required property var modelData
@@ -4954,11 +4966,11 @@ ShellRoot {
                                             border.width: 1; border.color: theme.a(theme.warn,0.35)
                                             Row { id: mchip; anchors.centerIn: parent; spacing: 4
                                                 Sym { anchors.verticalCenter: parent.verticalCenter; text: "notifications_off"; sz: 11; color: theme.warn }
-                                                Text { anchors.verticalCenter: parent.verticalCenter; text: modelData; color: theme.sub; font.pixelSize: 10; font.family: root.cfgFont }
-                                                Sym { anchors.verticalCenter: parent.verticalCenter; text: "close"; sz: 11; color: theme.faint } }
+                                                Text { anchors.verticalCenter: parent.verticalCenter; text: modelData; color: theme.sub; font.pixelSize: 10; font.family: "Adwaita Sans" }
+                                                Sym { anchors.verticalCenter: parent.verticalCenter; text: "close"; sz: 11; color: theme.sub } }
                                             MouseArea { id: mchMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.toggleMute(modelData) } } } }
                                 Rectangle { width: parent.width; height: 1; color: theme.a(theme.line, 0.6) } }
-                            Text { visible: root.notes.length===0; text: "no notifications"; color: theme.faint; font.pixelSize: 12; font.family: root.cfgFont; topPadding: 4 }
+                            Text { visible: root.notes.length===0; text: "no notifications"; color: theme.sub; font.pixelSize: 12; font.family: "Adwaita Sans"; topPadding: 4 }
                             Flickable { width: parent.width; height: Math.min(390, listCol.implicitHeight); contentHeight: listCol.implicitHeight; clip: true; boundsBehavior: Flickable.StopAtBounds; visible: root.notes.length>0
                                 Column { id: listCol; width: parent.width; spacing: 6
                                     Repeater { model: root.notes
@@ -4968,7 +4980,7 @@ ShellRoot {
                                             Column { id: ec; anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top; anchors.margins: 10; spacing: 3
                                                 Item { width: parent.width; height: 16
                                                     Text { anchors.left: parent.left; anchors.verticalCenter: parent.verticalCenter
-                                                        text: modelData.appName; color: theme.frost; font.pixelSize: 10; font.family: root.cfgFont; elide: Text.ElideRight; width: parent.width - 46 - 26; font.bold: true }
+                                                        text: modelData.appName; color: theme.frost; font.pixelSize: 10; font.family: "Adwaita Sans"; elide: Text.ElideRight; width: parent.width - 46 - 26; font.bold: true }
                                                     // mute-this-app toggle
                                                     Rectangle { id: noteMute; anchors.right: noteTime.left; anchors.rightMargin: 6; anchors.verticalCenter: parent.verticalCenter
                                                         width: 18; height: 16; radius: Tok.r
@@ -4977,9 +4989,9 @@ ShellRoot {
                                                         Sym { anchors.centerIn: parent; text: noteMute.m ? "notifications_off" : "notifications_active"; sz: 12; color: noteMute.m ? theme.warn : theme.faint }
                                                         MouseArea { id: nmMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.toggleMute(modelData.appName) } }
                                                     Text { id: noteTime; anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
-                                                        text: modelData.time; color: theme.faint; font.pixelSize: 10; font.family: root.cfgFont; width: 46; horizontalAlignment: Text.AlignRight } }
-                                                Text { width: parent.width; visible: modelData.summary!==""; text: modelData.summary; color: theme.text; font.pixelSize: 12; font.family: root.cfgFont; wrapMode: Text.WordWrap }
-                                                Text { width: parent.width; visible: modelData.body!==""; text: modelData.body; color: theme.sub; font.pixelSize: 11; font.family: root.cfgFont; wrapMode: Text.WordWrap; maximumLineCount: 3; elide: Text.ElideRight; textFormat: Text.PlainText }
+                                                        text: modelData.time; color: theme.sub; font.pixelSize: 10; font.family: "Adwaita Sans"; width: 46; horizontalAlignment: Text.AlignRight } }
+                                                Text { width: parent.width; visible: modelData.summary!==""; text: modelData.summary; color: theme.text; font.pixelSize: 12; font.family: "Adwaita Sans"; wrapMode: Text.WordWrap }
+                                                Text { width: parent.width; visible: modelData.body!==""; text: modelData.body; color: theme.sub; font.pixelSize: 11; font.family: "Adwaita Sans"; wrapMode: Text.WordWrap; maximumLineCount: 3; elide: Text.ElideRight; textFormat: Text.PlainText }
                                                 // The actions were recorded on every notification and drawn on
                                                 // none of them here, so anything that timed out or arrived
                                                 // during DND landed in history with its buttons in the data
@@ -5003,27 +5015,45 @@ ShellRoot {
                                                             border.color: nact.live ? theme.a(theme.iris,0.35) : theme.a(theme.line,0.9)
                                                             Text { id: nactT; anchors.centerIn: parent
                                                                 text: nact.modelData.t; color: nact.live ? theme.text : theme.faint
-                                                                font.pixelSize: 10; font.family: root.cfgFont }
+                                                                font.pixelSize: 10; font.family: "Adwaita Sans" }
                                                             MouseArea { id: naMa; anchors.fill: parent; hoverEnabled: true
                                                                 cursorShape: nact.live ? Qt.PointingHandCursor : Qt.ArrowCursor
                                                                 onClicked: if (nact.live) root.noteInvoke(nrow.modelData.key, nact.modelData.i) } } } } } } } } } } }
                     Drop { screen: bar.screen
                         id: wifiDrop; host: root.barVertical ? wifiPillVert : wifiPill; shown: root.openPop ==="wifi" && root.openBar === bar
-                        cardW: 290; cardH: wifiCol.implicitHeight + 28
-                        onVisibleChanged: if(!visible) root.wifiPwFor = ""
-                        Column { id: wifiCol; anchors.fill: wifiDrop.card; anchors.margins: 14; spacing: 4
+                        cardW: 320; cardH: wifiCol.implicitHeight + 24
+                        property bool expanded: false
+                        Connections { target: wifiDrop; function onShownChanged() { if (!wifiDrop.shown && root.openPop !== "wifi") root.wifiCancelDraft() } }
+                        Column { id: wifiCol; anchors.fill: wifiDrop.card; anchors.margins: 12; spacing: 5
                             // Header
                             Item { width: parent.width; height: 28
                                 Text { anchors.verticalCenter: parent.verticalCenter; anchors.left: parent.left
-                                    text: "wi-fi"; color: theme.iris; font.pixelSize: 11; font.family: root.cfgFont; font.bold: true; font.letterSpacing: 0.8 }
+                                    text: "Wi-Fi"; color: theme.text; font.pixelSize: 16; font.family: "Adwaita Sans"; font.bold: true; font.letterSpacing: 0.8 }
                                 Rectangle { anchors.verticalCenter: parent.verticalCenter; anchors.right: parent.right
                                     width: 26; height: 26; radius: Tok.r
                                     color: rfm.containsMouse ? theme.a(theme.iris,0.18) : "transparent"
                                     Sym { anchors.centerIn: parent; text: "refresh"; sz: 15; color: theme.sub }
                                     MouseArea { id: rfm; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.wifiRescan(true) } } }
+                            Text { width: parent.width; elide: Text.ElideRight
+                                text: root.wifiOn ? "Connected to " + root.ssid : "Choose a network to connect"
+                                color: root.wifiOn ? theme.good : theme.sub; font.pixelSize: 12; font.family: "Adwaita Sans" }
+                            Text { text: root.wifiScanning ? "Scanning for networks…" : "Available networks"; color: theme.sub
+                                font.pixelSize: 11; font.family: "Adwaita Sans" }
+                            // This editor is outside Repeater: scan replacement cannot destroy focus, cursor or draft.
+                            WifiJoinCard {
+                                width: parent.width; visible: root.wifiPwFor.length > 0
+                                ssid: root.wifiPwFor; draft: root.wifiDraft; busy: root.wifiJoining
+                                message: root.wifiJoinMessage; failed: root.wifiJoinFailed
+                                surface: theme.a(theme.iris, 0.07); ink: theme.text; muted: theme.sub
+                                accent: theme.iris; accentInk: Tok.accentInk; danger: theme.bad
+                                fontFamily: "Adwaita Sans"; rounding: Tok.rSmall
+                                onEdited: value => root.wifiDraft = value
+                                onSubmitted: value => root.wifiJoin(root.wifiPwFor, value)
+                                onCancelled: root.wifiCancelDraft()
+                            }
                             Rectangle { width: parent.width; height: 1; color: theme.a(theme.line, 0.6) }
                             Item { height: 2; width: 1 }
-                            Repeater { model: root.wifiList
+                            Repeater { model: wifiDrop.expanded ? root.wifiList : root.wifiList.slice(0, 4)
                                 delegate: Column { id: netRow; required property var modelData; width: parent.width; spacing: 3
                                     readonly property bool asking: root.wifiPwFor === netRow.modelData.ssid
                                     readonly property bool saved: root.wifiSaved.indexOf(netRow.modelData.ssid) >= 0
@@ -5040,12 +5070,13 @@ ShellRoot {
                                     readonly property string chipTone:
                                           netRow.secLbl === "OPEN" || netRow.secLbl === "WEP" ? "warn"
                                         : netRow.saved                                        ? "accent" : "neutral"
-                                    Rectangle { width: parent.width; height: 34; radius: Tok.r
+                                    Rectangle { width: parent.width; height: 36; radius: Tok.rSmall
+                                        Behavior on color { ColorAnimation { duration: Tok.mFast } }
                                         color: netRow.modelData.active ? theme.a(theme.iris,0.18) : (netRow.asking ? theme.a(theme.iris,0.10) : (wm.containsMouse ? theme.a(theme.line,0.45) : "transparent"))
                                         border.width: netRow.modelData.active ? 1 : 0; border.color: theme.a(theme.iris,0.3)
                                         // base click zone sits UNDER the forget hitbox
                                         MouseArea { id: wm; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
-                                            onClicked: { if(netRow.modelData.active) return; if(netRow.asking) root.wifiPwFor=""; else root.wifiConnect(netRow.modelData.ssid, netRow.modelData.secure) } }
+                                            onClicked: { if(netRow.modelData.active) return; if(netRow.asking) root.wifiCancelDraft(); else root.wifiConnect(netRow.modelData.ssid, netRow.modelData.secure) } }
                                         // Anchored rather than laid out in a Row: the old row sized the
                                         // SSID by subtracting magic numbers for whatever might sit to its
                                         // right, and the forget button — anchored to the same right edge —
@@ -5077,7 +5108,7 @@ ShellRoot {
                                             anchors.verticalCenter: parent.verticalCenter
                                             elide: Text.ElideRight; text: netRow.modelData.ssid
                                             color: netRow.modelData.active ? theme.text : theme.sub
-                                            font.pixelSize: 12; font.family: root.cfgFont; font.bold: netRow.modelData.active }
+                                            font.pixelSize: 12; font.family: "Adwaita Sans"; font.bold: netRow.modelData.active }
                                         // forget — only for remembered networks, and only on hover so it can't be hit by accident
                                         Rectangle {
                                             anchors.verticalCenter: parent.verticalCenter; anchors.right: parent.right; anchors.rightMargin: 6
@@ -5087,24 +5118,21 @@ ShellRoot {
                                             Sym { anchors.centerIn: parent; text: "delete"; sz: 14; color: fgm.containsMouse ? theme.bad : theme.faint }
                                             MouseArea { id: fgm; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
                                                 onClicked: root.wifiForget(netRow.modelData.ssid) } } }
-                                    // inline password field
-                                    Row { width: parent.width; height: 34; visible: netRow.asking; spacing: 6
-                                        Rectangle { width: parent.width-42; height: 32; radius: Tok.r; color: theme.a(theme.line,0.5); border.width: 1; border.color: pwIn.activeFocus?theme.iris:theme.a(theme.iris,0.2)
-                                            TextInput { id: pwIn; anchors.fill: parent; anchors.leftMargin: 10; anchors.rightMargin: 10; verticalAlignment: TextInput.AlignVCenter
-                                                echoMode: TextInput.Password; color: theme.text; font.pixelSize: 12; font.family: root.cfgFont; clip: true; focus: netRow.asking
-                                                onAccepted: root.wifiJoin(netRow.modelData.ssid, text)
-                                                Text { anchors.verticalCenter: parent.verticalCenter; visible: pwIn.text===""; text: "password ↵"; color: theme.faint; font.pixelSize: 12; font.family: root.cfgFont } } }
-                                        Rectangle { width: 36; height: 32; radius: Tok.r; color: jm.containsMouse?theme.iris:theme.a(theme.iris,0.2); border.width: 1; border.color: theme.iris
-                                            Sym { anchors.centerIn: parent; text: "arrow_forward"; sz: 14; color: jm.containsMouse?theme.bg:theme.frost }
-                                            MouseArea { id: jm; anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.wifiJoin(netRow.modelData.ssid, pwIn.text) } } } } }
+                                } }
                             Text { visible: root.wifiList.length===0
                                 text: root.wifiScanning ? "scanning…" : "no networks in range"
-                                color: theme.faint; font.pixelSize: 11; font.family: root.cfgFont; topPadding: 4 }
-                            // The list has always been capped at the top 8 by signal and never said so,
-                            // which reads as "these are all the networks there are" when it is not.
-                            Text { visible: root.wifiSeen > root.wifiList.length
-                                text: "+" + (root.wifiSeen - root.wifiList.length) + " weaker, hidden"
-                                color: theme.faint; font.pixelSize: 10; font.family: root.cfgFont; topPadding: 3 }
+                                color: theme.sub; font.pixelSize: 11; font.family: "Adwaita Sans"; topPadding: 4 }
+                            Rectangle {
+                                visible: root.wifiList.length > 4; width: parent.width; height: 28; radius: 7
+                                color: moreWifi.containsMouse ? Tok.accentWash : "transparent"
+                                Text { anchors.centerIn: parent; text: wifiDrop.expanded ? "Show fewer networks" : "Other networks…"
+                                    color: theme.sub; font.family: "Adwaita Sans"; font.pixelSize: 12 }
+                                MouseArea { id: moreWifi; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                    onClicked: wifiDrop.expanded = !wifiDrop.expanded }
+                            }
+                            Text { visible: wifiDrop.expanded && root.wifiSeen > root.wifiList.length
+                                text: "+" + (root.wifiSeen - root.wifiList.length) + " more nearby"
+                                color: theme.sub; font.pixelSize: 11; font.family: "Adwaita Sans" }
 
                             // ---- VPN Section ----
                             Item { height: 2; width: 1 }
@@ -5125,10 +5153,10 @@ ShellRoot {
                                     Text { anchors.verticalCenter: parent.verticalCenter
                                         text: "Cloudflare WARP"
                                         color: root.warpConnected ? theme.text : theme.sub
-                                        font.pixelSize: 12; font.family: root.cfgFont }
+                                        font.pixelSize: 12; font.family: "Adwaita Sans" }
                                     Text { anchors.verticalCenter: parent.verticalCenter
                                         visible: root.warpConnected
-                                        text: "· " + root.warpMode; color: theme.faint; font.pixelSize: 10; font.family: root.cfgFont } }
+                                        text: "· " + root.warpMode; color: theme.sub; font.pixelSize: 10; font.family: "Adwaita Sans" } }
                                 IndToggle { anchors.verticalCenter: parent.verticalCenter; anchors.right: parent.right
                                     on: root.warpConnected; onToggled: root.warpToggle() } }
 
@@ -5142,7 +5170,7 @@ ShellRoot {
                                         border.width: cur ? 1 : 0; border.color: theme.a(theme.good,0.4)
                                         Text { id: modeTxt; anchors.centerIn: parent
                                             text: modelData; color: cur ? theme.good : theme.faint
-                                            font.pixelSize: 9; font.family: root.cfgFont; font.bold: cur }
+                                            font.pixelSize: 9; font.family: "Adwaita Sans"; font.bold: cur }
                                         MouseArea { id: modeMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
                                             onClicked: root.warpSetMode(modelData) } } } }
 
@@ -5158,12 +5186,12 @@ ShellRoot {
                                                 color: modelData.active ? theme.iris : (connecting ? theme.frost : (failed ? theme.bad : theme.faint)) }
                                             Text { anchors.verticalCenter: parent.verticalCenter
                                                 text: modelData.name; color: modelData.active ? theme.text : (connecting ? theme.frost : (failed ? theme.bad : theme.sub))
-                                                font.pixelSize: 11; font.family: root.cfgFont; font.bold: modelData.active || connecting; elide: Text.ElideRight } }
+                                                font.pixelSize: 11; font.family: "Adwaita Sans"; font.bold: modelData.active || connecting; elide: Text.ElideRight } }
                                         Text {
                                             visible: connecting || failed || modelData.active
                                             text: connecting ? "connecting…" : (failed ? "connection failed" : "connected")
                                             color: connecting ? theme.frost : (failed ? theme.bad : theme.good)
-                                            font.pixelSize: 9; font.family: root.cfgFont; leftPadding: 21 } }
+                                            font.pixelSize: 9; font.family: "Adwaita Sans"; leftPadding: 21 } }
                                     Rectangle { anchors.verticalCenter: parent.verticalCenter; anchors.right: parent.right
                                         width: 36; height: 20; radius: Tok.r
                                         color: modelData.active ? theme.iris : (connecting ? theme.a(theme.frost, 0.4) : theme.a(theme.line, 0.85))
@@ -5175,12 +5203,12 @@ ShellRoot {
                                             onClicked: if (!connecting) root.vpnToggle(modelData.name) } } } } } }
                     Drop { screen: bar.screen
                         id: btDrop; host: root.barVertical ? btPillVert : btPill; shown: root.openPop ==="bt" && root.openBar === bar
-                        cardW: 290; cardH: btCol.implicitHeight + 28
-                        Column { id: btCol; anchors.fill: btDrop.card; anchors.margins: 14; spacing: 4
+                        cardW: 300; cardH: btCol.implicitHeight + 24
+                        Column { id: btCol; anchors.fill: btDrop.card; anchors.margins: 12; spacing: 5
                             // Header
                             Item { width: parent.width; height: 28
                                 Text { anchors.verticalCenter: parent.verticalCenter; anchors.left: parent.left
-                                    text: "bluetooth"; color: theme.iris; font.pixelSize: 11; font.family: root.cfgFont; font.bold: true; font.letterSpacing: 0.8 }
+                                    text: "Bluetooth"; color: theme.text; font.pixelSize: 15; font.family: "Adwaita Sans"; font.bold: true }
                                 Row { anchors.verticalCenter: parent.verticalCenter; anchors.right: parent.right; spacing: 6
                                     Rectangle { width: 26; height: 26; radius: Tok.r
                                         color: btScanMa.containsMouse ? theme.a(theme.iris,0.18) : "transparent"
@@ -5200,13 +5228,13 @@ ShellRoot {
                                     border.width: modelData.connected ? 1 : 0; border.color: theme.a(theme.iris,0.3)
                                     Row { anchors.fill: parent; anchors.leftMargin: 10; anchors.rightMargin: 10; spacing: 8
                                         Sym { anchors.verticalCenter: parent.verticalCenter; text: root.btIcon(modelData); sz: 17; color: modelData.connected?theme.iris:theme.frost }
-                                        Text { anchors.verticalCenter: parent.verticalCenter; width: parent.width - (modelData.batteryAvailable?100:60); elide: Text.ElideRight; text: root.btName(modelData); color: theme.text; font.pixelSize: 12; font.family: root.cfgFont; font.bold: modelData.connected }
-                                        Text { anchors.verticalCenter: parent.verticalCenter; visible: modelData.batteryAvailable; text: Math.round((modelData.battery||0)*100)+"%"; color: theme.sub; font.pixelSize: 10; font.family: root.cfgFont }
+                                        Text { anchors.verticalCenter: parent.verticalCenter; width: parent.width - (modelData.batteryAvailable?100:60); elide: Text.ElideRight; text: root.btName(modelData); color: theme.text; font.pixelSize: 12; font.family: "Adwaita Sans"; font.bold: modelData.connected }
+                                        Text { anchors.verticalCenter: parent.verticalCenter; visible: modelData.batteryAvailable; text: Math.round((modelData.battery||0)*100)+"%"; color: theme.sub; font.pixelSize: 10; font.family: "Adwaita Sans" }
                                         Sym { anchors.verticalCenter: parent.verticalCenter; visible: modelData.connected; text: "check_circle"; sz: 14; color: theme.good }
                                         Sym { anchors.verticalCenter: parent.verticalCenter; visible: modelData.pairing; text: "sync"; sz: 14; color: theme.warn } }
                                     MouseArea { id: dm; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
                                         onClicked: { if(modelData.connected) modelData.disconnect(); else modelData.connect() } } } }
-                            Text { visible: root.btDevices.length===0; text: (root.btAdapter&&root.btAdapter.enabled)?"tap search to scan…":"bluetooth is off"; color: theme.faint; font.pixelSize: 11; font.family: root.cfgFont; topPadding: 4 } } }
+                            Text { visible: root.btDevices.length===0; text: (root.btAdapter&&root.btAdapter.enabled) ? (root.btAdapter.discovering ? "Searching for nearby devices…" : "No devices listed. Use search to discover.") : "Bluetooth is turned off"; color: theme.sub; font.pixelSize: 11; font.family: "Adwaita Sans"; topPadding: 4 } } }
                     // KDE Connect: the phone's state, then the things you actually open the
                     // widget for — ring, send a file, push the clipboard, browse its storage.
                     // The settings tab is one gear away rather than the only destination.
@@ -5218,7 +5246,7 @@ ShellRoot {
                             // Header
                             Item { width: parent.width; height: 26
                                 Text { anchors.verticalCenter: parent.verticalCenter; anchors.left: parent.left
-                                    text: "kde connect"; color: theme.iris; font.pixelSize: 11; font.family: root.cfgFont; font.bold: true; font.letterSpacing: 0.8 }
+                                    text: "Kde connect"; color: theme.text; font.pixelSize: 15; font.family: "Adwaita Sans"; font.bold: true }
                                 Row { anchors.verticalCenter: parent.verticalCenter; anchors.right: parent.right; spacing: 2
                                     Rectangle { width: 26; height: 26; radius: Tok.r
                                         color: kdeRfMa.containsMouse ? theme.a(theme.iris,0.18) : "transparent"
@@ -5245,7 +5273,7 @@ ShellRoot {
                                             // capped so one long hostname can't push the switcher to three rows
                                             Text { id: chipTxt; anchors.verticalCenter: parent.verticalCenter; text: modelData.name
                                                 width: Math.min(implicitWidth, 104); elide: Text.ElideRight
-                                                color: sel ? theme.text : theme.sub; font.pixelSize: 10; font.family: root.cfgFont } }
+                                                color: sel ? theme.text : theme.sub; font.pixelSize: 10; font.family: "Adwaita Sans" } }
                                         MouseArea { id: chipMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
                                             onClicked: root.kdeSel = modelData.id } } } }
                             // The device itself
@@ -5262,10 +5290,10 @@ ShellRoot {
                                                 color: root.kdeActive ? theme.iris : theme.faint } }
                                         Column { anchors.verticalCenter: parent.verticalCenter; width: parent.width - 43; spacing: 2
                                             Text { width: parent.width; elide: Text.ElideRight; text: kdeCol.dev ? kdeCol.dev.name : ""
-                                                color: theme.text; font.pixelSize: 13; font.family: root.cfgFont; font.bold: true }
+                                                color: theme.text; font.pixelSize: 13; font.family: "Adwaita Sans"; font.bold: true }
                                             Row { spacing: 6
                                                 Text { anchors.verticalCenter: parent.verticalCenter; text: root.kdeStatus(kdeCol.dev)
-                                                    color: root.kdeActive ? theme.frost : theme.faint; font.pixelSize: 10; font.family: root.cfgFont }
+                                                    color: root.kdeActive ? theme.frost : theme.faint; font.pixelSize: 10; font.family: "Adwaita Sans" }
                                                 // cellular strength, 0–4 bars
                                                 Row { anchors.verticalCenter: parent.verticalCenter; spacing: 2; height: 11
                                                     visible: kdeCol.dev && kdeCol.dev.signal >= 0
@@ -5306,7 +5334,7 @@ ShellRoot {
                                 Text { width: parent.width; wrapMode: Text.WordWrap
                                     visible: kdeCol.dev && (kdeCol.dev.isPairRequestedByPeer || kdeCol.dev.isPairRequested)
                                     text: "check that your device shows the key " + (kdeCol.dev ? kdeCol.dev.verificationKey : "")
-                                    color: theme.sub; font.pixelSize: 10; font.family: root.cfgFont }
+                                    color: theme.sub; font.pixelSize: 10; font.family: "Adwaita Sans" }
                                 Row { width: parent.width; spacing: 8
                                     visible: kdeCol.dev && kdeCol.dev.isPairRequestedByPeer
                                     KdeAct { width: (kdeCol.width - 8)/2; icon: "check_circle"; label: "accept"; tint: theme.good
@@ -5318,20 +5346,20 @@ ShellRoot {
                                     onAct: root.kdeRun(["--pair", kdeCol.dev.id]) }
                                 Text { visible: kdeCol.dev && !kdeCol.dev.isReachable
                                     text: "not on this network — open the app on the device"
-                                    color: theme.faint; font.pixelSize: 10; font.family: root.cfgFont } }
+                                    color: theme.sub; font.pixelSize: 10; font.family: "Adwaita Sans" } }
                             // Unpair sits at the bottom, small and out of the way of the shortcuts
                             Item { width: parent.width; height: 16; visible: kdeCol.dev !== null && kdeCol.dev.isPaired
                                 Text { anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
                                     text: "unpair"; color: unpMa.containsMouse ? theme.bad : theme.a(theme.faint, 0.8)
-                                    font.pixelSize: 10; font.family: root.cfgFont
+                                    font.pixelSize: 10; font.family: "Adwaita Sans"
                                     MouseArea { id: unpMa; anchors.fill: parent; anchors.margins: -6; hoverEnabled: true
                                         cursorShape: Qt.PointingHandCursor; onClicked: root.kdeRun(["--unpair", kdeCol.dev.id]) } } }
                             // Nothing at all — usually the daemon just hasn't seen the phone yet
                             Column { width: parent.width; spacing: 3; visible: root.kdeDevices.length === 0
-                                Text { text: "no devices"; color: theme.sub; font.pixelSize: 12; font.family: root.cfgFont }
+                                Text { text: "no devices"; color: theme.sub; font.pixelSize: 12; font.family: "Adwaita Sans" }
                                 Text { width: parent.width; wrapMode: Text.WordWrap
                                     text: "open KDE Connect on your phone, make sure it's on the same network, then hit refresh"
-                                    color: theme.faint; font.pixelSize: 10; font.family: root.cfgFont } } } }
+                                    color: theme.sub; font.pixelSize: 10; font.family: "Adwaita Sans" } } } }
                     Drop { screen: bar.screen
                         id: sysDrop; host: root.barVertical ? sysPillVert : sysPill; shown: root.openPop ==="sys" && root.openBar === bar
                         cardW: 250; cardH: sysCol.implicitHeight + 28
@@ -5339,10 +5367,10 @@ ShellRoot {
                             // Header
                             Item { width: parent.width; height: 20
                                 Text { anchors.verticalCenter: parent.verticalCenter; anchors.left: parent.left
-                                    text: "system"; color: theme.iris; font.pixelSize: 11; font.family: root.cfgFont; font.bold: true; font.letterSpacing: 0.8 }
+                                    text: "System"; color: theme.text; font.pixelSize: 15; font.family: "Adwaita Sans"; font.bold: true }
                                 Row { anchors.verticalCenter: parent.verticalCenter; anchors.right: parent.right; spacing: 4
-                                    Sym { anchors.verticalCenter: parent.verticalCenter; text: "developer_board"; sz: 13; color: theme.faint }
-                                    Text { anchors.verticalCenter: parent.verticalCenter; text: "live"; color: theme.faint; font.pixelSize: 9; font.family: root.cfgFont } } }
+                                    Sym { anchors.verticalCenter: parent.verticalCenter; text: "developer_board"; sz: 13; color: theme.sub }
+                                    Text { anchors.verticalCenter: parent.verticalCenter; text: "live"; color: theme.sub; font.pixelSize: 9; font.family: "Adwaita Sans" } } }
                             Rectangle { width: parent.width; height: 1; color: theme.a(theme.line, 0.6) }
                             // CPU
                             StatBar { width: parent.width; label: "CPU"
@@ -5357,10 +5385,10 @@ ShellRoot {
                                 Rectangle { width: parent.width; height: 1; color: theme.a(theme.line, 0.6) }
                                 Item { width: parent.width; height: 14
                                     Text { anchors.left: parent.left; anchors.verticalCenter: parent.verticalCenter
-                                        text: "GPU"; color: theme.frost; font.pixelSize: 10; font.family: root.cfgFont; font.bold: true; font.letterSpacing: 0.6 }
+                                        text: "GPU"; color: theme.frost; font.pixelSize: 10; font.family: "Adwaita Sans"; font.bold: true; font.letterSpacing: 0.6 }
                                     Text { anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
                                         width: parent.width - 40; elide: Text.ElideLeft; horizontalAlignment: Text.AlignRight
-                                        text: root.gpuName; color: theme.faint; font.pixelSize: 10; font.family: root.cfgFont } }
+                                        text: root.gpuName; color: theme.sub; font.pixelSize: 10; font.family: "Adwaita Sans" } }
                                 StatBar { width: parent.width; label: "usage"
                                     value: root.gpuUsage; barColor: root.loadColor(root.gpuUsage, 70, 90)
                                     rightText: Math.round(root.gpuUsage)+"%  ·  "+Math.round(root.gpuTemp)+"°C" }
@@ -5369,19 +5397,19 @@ ShellRoot {
                                     rightText: root.gpuMemUsed.toFixed(1)+" / "+root.gpuMemTotal.toFixed(1)+" GB" }
                                 Item { width: parent.width; height: 15
                                     Text { anchors.left: parent.left; anchors.verticalCenter: parent.verticalCenter
-                                        text: "power draw"; color: theme.sub; font.pixelSize: 11; font.family: root.cfgFont }
+                                        text: "power draw"; color: theme.sub; font.pixelSize: 11; font.family: "Adwaita Sans" }
                                     Text { anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
-                                        text: root.gpuPower.toFixed(1)+" W"; color: theme.text; font.pixelSize: 11; font.family: root.cfgFont; font.bold: true } } } } }
+                                        text: root.gpuPower.toFixed(1)+" W"; color: theme.text; font.pixelSize: 11; font.family: "Adwaita Sans"; font.bold: true } } } } }
                     Drop { screen: bar.screen
                         id: volDrop; host: root.barVertical ? volPillVert : volPill; shown: root.openPop ==="vol" && root.openBar === bar
-                        cardW: 290; cardH: volCol.implicitHeight + 28
-                        Column { id: volCol; anchors.fill: volDrop.card; anchors.margins: 14; spacing: 4
+                        cardW: 320; cardH: volCol.implicitHeight + 24
+                        Column { id: volCol; anchors.fill: volDrop.card; anchors.margins: 12; spacing: 5
                             // Header
                             Item { width: parent.width; height: 28
                                 Text { anchors.verticalCenter: parent.verticalCenter; anchors.left: parent.left
-                                    text: "volume"; color: theme.iris; font.pixelSize: 11; font.family: root.cfgFont; font.bold: true; font.letterSpacing: 0.8 }
+                                    text: "Volume"; color: theme.text; font.pixelSize: 15; font.family: "Adwaita Sans"; font.bold: true }
                                 Text { anchors.verticalCenter: parent.verticalCenter; anchors.right: parent.right
-                                    text: volPill.vol+"%"; color: theme.sub; font.pixelSize: 12; font.family: root.cfgFont } }
+                                    text: volPill.vol+"%"; color: theme.sub; font.pixelSize: 12; font.family: "Adwaita Sans" } }
                             Rectangle { width: parent.width; height: 1; color: theme.a(theme.line, 0.6) }
                             Item { height: 4; width: 1 }
                             // Volume slider row
@@ -5394,7 +5422,7 @@ ShellRoot {
                                     value: volPill.au ? volPill.au.volume : 0
                                     onMoved: (v)=>{ if(volPill.au){ volPill.au.muted=false; volPill.au.volume=v } } } }
                             Item { height: 2; width: 1 }
-                            Text { text: "output device"; color: theme.faint; font.pixelSize: 10; font.family: root.cfgFont; font.letterSpacing: 0.5 }
+                            Text { text: "Output"; color: theme.sub; font.pixelSize: 12; font.family: "Adwaita Sans"; font.letterSpacing: 0.5 }
                             Item { height: 1; width: 1 }
                             Repeater { model: root.sinks
                                 delegate: Rectangle { required property var modelData; readonly property bool cur: Pipewire.defaultAudioSink && Pipewire.defaultAudioSink.id===modelData.id
@@ -5403,12 +5431,12 @@ ShellRoot {
                                     border.width: cur ? 1 : 0; border.color: theme.a(theme.iris,0.3)
                                     Row { anchors.fill: parent; anchors.leftMargin: 10; anchors.rightMargin: 10; spacing: 8
                                         Sym { anchors.verticalCenter: parent.verticalCenter; text: cur?"radio_button_checked":"radio_button_unchecked"; sz: 15; color: cur?theme.iris:theme.faint }
-                                        Text { anchors.verticalCenter: parent.verticalCenter; width: parent.width-42-sinkBadge.width; elide: Text.ElideRight; text: root.nodeName(modelData); color: theme.text; font.pixelSize: 12; font.family: root.cfgFont; font.bold: cur }
-                                        Text { id: sinkBadge; anchors.verticalCenter: parent.verticalCenter; text: root.audioFmtBadge(modelData.name); visible: text!==""; color: theme.frost; font.pixelSize: 10; font.family: root.cfgFont } }
+                                        Text { anchors.verticalCenter: parent.verticalCenter; width: parent.width-42-sinkBadge.width; elide: Text.ElideMiddle; text: root.nodeName(modelData); color: theme.text; font.pixelSize: 12; font.family: "Adwaita Sans"; font.bold: cur }
+                                        Text { id: sinkBadge; anchors.verticalCenter: parent.verticalCenter; text: root.audioFmtBadge(modelData.name); visible: text!==""; color: theme.frost; font.pixelSize: 10; font.family: "Adwaita Sans" } }
                                     MouseArea { id: sm; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: Pipewire.preferredDefaultAudioSink = modelData } } }
                             // ---- bluetooth codec — only when the current output is a BT device offering a choice ----
                             Item { height: 6; width: 1; visible: root.audioBtSink !== null }
-                            Text { visible: root.audioBtSink !== null; text: "bluetooth codec"; color: theme.faint; font.pixelSize: 10; font.family: root.cfgFont; font.letterSpacing: 0.5 }
+                            Text { visible: root.audioBtSink !== null; text: "Bluetooth codec"; color: theme.sub; font.pixelSize: 12; font.family: "Adwaita Sans"; font.letterSpacing: 0.5 }
                             Flow { visible: root.audioBtSink !== null; width: parent.width; spacing: 6
                                 Repeater { model: root.audioBtSink ? root.audioBtSink.bt_codecs : []
                                     delegate: Rectangle { required property var modelData
@@ -5416,28 +5444,28 @@ ShellRoot {
                                         implicitHeight: 24; implicitWidth: ccT.implicitWidth + 18; radius: Tok.r
                                         color: on ? theme.a(theme.iris, 0.25) : (ccMa.containsMouse ? theme.a(theme.line, 0.55) : theme.a(theme.line, 0.32))
                                         border.width: 1; border.color: on ? theme.a(theme.iris, 0.55) : theme.a(theme.iris, 0.14)
-                                        Text { id: ccT; anchors.centerIn: parent; text: modelData.codec; color: on ? theme.iris : theme.sub; font.pixelSize: 10; font.family: root.cfgFont; font.bold: on }
+                                        Text { id: ccT; anchors.centerIn: parent; text: modelData.codec; color: on ? theme.iris : theme.sub; font.pixelSize: 10; font.family: "Adwaita Sans"; font.bold: on }
                                         MouseArea { id: ccMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.audioSetCodec(root.audioBtSink.name, modelData.profile) } }
                                 }
                             }
                             // ---- per-app mixer (sea-audio.py, 4.0): volume slider + click the chip to change output ----
                             Item { height: 6; width: 1; visible: root.streams.length > 0 }
-                            Text { visible: root.streams.length > 0; text: "apps"; color: theme.faint; font.pixelSize: 10; font.family: root.cfgFont; font.letterSpacing: 0.5 }
+                            Text { visible: root.streams.length > 0; text: "Applications"; color: theme.sub; font.pixelSize: 12; font.family: "Adwaita Sans"; font.letterSpacing: 0.5 }
                             Repeater { model: root.streams
                                 delegate: Column {
                                     required property var modelData
                                     width: parent.width; spacing: 3
                                     // name + output chip
                                     Row { width: parent.width; height: 20; spacing: 8
-                                        Sym { anchors.verticalCenter: parent.verticalCenter; text: "graphic_eq"; sz: 14; color: theme.faint }
+                                        Sym { anchors.verticalCenter: parent.verticalCenter; text: "graphic_eq"; sz: 14; color: theme.sub }
                                         Text { anchors.verticalCenter: parent.verticalCenter; width: parent.width - 22 - appChip.width - 16; elide: Text.ElideRight
-                                            text: root.streamName(modelData); color: theme.sub; font.pixelSize: 11; font.family: root.cfgFont }
+                                            text: root.streamName(modelData); color: theme.sub; font.pixelSize: 11; font.family: "Adwaita Sans" }
                                         Rectangle { id: appChip; anchors.verticalCenter: parent.verticalCenter
                                             implicitWidth: acRow.implicitWidth + 14; height: 20; radius: Tok.r
                                             color: acMa.containsMouse ? theme.a(theme.iris, 0.28) : theme.a(theme.iris, 0.14); border.width: 1; border.color: theme.a(theme.iris, 0.28)
                                             Row { id: acRow; anchors.centerIn: parent; spacing: 3
                                                 Sym { anchors.verticalCenter: parent.verticalCenter; text: "arrow_forward"; sz: 11; color: theme.frost }
-                                                Text { anchors.verticalCenter: parent.verticalCenter; text: root.audioSinkLabelOf(modelData.id); color: theme.frost; font.pixelSize: 10; font.family: root.cfgFont } }
+                                                Text { anchors.verticalCenter: parent.verticalCenter; text: root.audioSinkLabelOf(modelData.id); color: theme.frost; font.pixelSize: 10; font.family: "Adwaita Sans" } }
                                             MouseArea { id: acMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.audioCycleRouteById(modelData.id) } } }
                                     // volume slider + readout
                                     Row { width: parent.width; height: 20; spacing: 8
@@ -5446,7 +5474,7 @@ ShellRoot {
                                             value: modelData.audio ? modelData.audio.volume : 0
                                             onMoved: (v) => { if (modelData.audio) { modelData.audio.muted = false; modelData.audio.volume = v } } }
                                         Text { anchors.verticalCenter: parent.verticalCenter; width: 44; horizontalAlignment: Text.AlignRight
-                                            text: modelData.audio ? Math.round(modelData.audio.volume * 100) + "%" : "—"; color: theme.sub; font.pixelSize: 10; font.family: root.cfgFont } }
+                                            text: modelData.audio ? Math.round(modelData.audio.volume * 100) + "%" : "—"; color: theme.sub; font.pixelSize: 10; font.family: "Adwaita Sans" } }
                                 }
                             }
                         } }
@@ -5457,9 +5485,9 @@ ShellRoot {
                             // Header
                             Item { width: parent.width; height: 28
                                 Text { anchors.verticalCenter: parent.verticalCenter; anchors.left: parent.left
-                                    text: "power profile"; color: theme.iris; font.pixelSize: 11; font.family: root.cfgFont; font.bold: true; font.letterSpacing: 0.8 }
+                                    text: "Power profile"; color: theme.text; font.pixelSize: 15; font.family: "Adwaita Sans"; font.bold: true }
                                 Text { anchors.verticalCenter: parent.verticalCenter; anchors.right: parent.right
-                                    text: batPill.pct+"%"; color: batPill.charging?theme.good:batPill.pct<=20?theme.bad:theme.sub; font.pixelSize: 12; font.family: root.cfgFont } }
+                                    text: batPill.pct+"%"; color: batPill.charging?theme.good:batPill.pct<=20?theme.bad:theme.sub; font.pixelSize: 12; font.family: "Adwaita Sans" } }
                             Rectangle { width: parent.width; height: 1; color: theme.a(theme.line, 0.6) }
                             Item { height: 2; width: 1 }
                             Repeater { model: [{k:"performance",i:"speed",l:"Performance"},{k:"balanced",i:"balance",l:"Balanced"},{k:"power-saver",i:"eco",l:"Power Saver"}]
@@ -5469,7 +5497,7 @@ ShellRoot {
                                     border.width: cur ? 1 : 0; border.color: theme.a(theme.iris,0.3)
                                     Row { anchors.fill: parent; anchors.leftMargin: 10; anchors.rightMargin: 10; spacing: 10
                                         Sym { anchors.verticalCenter: parent.verticalCenter; text: modelData.i; sz: 17; color: cur?theme.iris:theme.frost }
-                                        Text { anchors.verticalCenter: parent.verticalCenter; text: modelData.l; color: cur?theme.text:theme.sub; font.pixelSize: 12; font.family: root.cfgFont; font.bold: cur } }
+                                        Text { anchors.verticalCenter: parent.verticalCenter; text: modelData.l; color: cur?theme.text:theme.sub; font.pixelSize: 12; font.family: "Adwaita Sans"; font.bold: cur } }
                                     MouseArea { id: bm; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.setProfile(modelData.k) } } } } }
                     Drop { screen: bar.screen
                         id: calDrop; host: root.barVertical ? clockPillVert : clockPill; shown: root.openPop ==="cal" && root.openBar === bar
@@ -5486,7 +5514,7 @@ ShellRoot {
                             // identity, not a section label, so it stays centred and full size and only
                             // borrows the chevron.
                             Item { width: parent.width; height: 20
-                                Text { anchors.centerIn: parent; text: Qt.formatDateTime(clock.date,"MMMM yyyy"); color: theme.frost; font.pixelSize: 14; font.family: root.cfgFont; font.bold: true }
+                                Text { anchors.centerIn: parent; text: Qt.formatDateTime(clock.date,"MMMM yyyy"); color: theme.frost; font.pixelSize: 14; font.family: "Adwaita Sans"; font.bold: true }
                                 Sym { anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
                                     text: root.calFolded("cal") ? "expand_more" : "expand_less"; sz: 13
                                     color: mgm.containsMouse ? theme.iris : theme.faint }
@@ -5503,10 +5531,10 @@ ShellRoot {
                                 }
                                 visible: weekN > 0
                                 text: [ todayN>0 ? todayN + " today" : "", weekN>0 ? weekN + " this week" : "" ].filter(Boolean).join("  ·  ")
-                                color: theme.faint; font.pixelSize: 9; font.family: root.cfgFont }
+                                color: theme.sub; font.pixelSize: 9; font.family: "Adwaita Sans" }
                             Grid { anchors.horizontalCenter: parent.horizontalCenter; columns: 7; spacing: 4
                                 Repeater { model: ["S","M","T","W","T","F","S"]
-                                    delegate: Text { required property var modelData; width: 34; horizontalAlignment: Text.AlignHCenter; text: modelData; color: theme.faint; font.pixelSize: 11; font.family: root.cfgFont } }
+                                    delegate: Text { required property var modelData; width: 34; horizontalAlignment: Text.AlignHCenter; text: modelData; color: theme.sub; font.pixelSize: 11; font.family: "Adwaita Sans" } }
                                 Repeater { model: calCol.lead
                                     delegate: Item { width: 34; height: 26 } }
                                 Repeater { model: calCol.days
@@ -5520,7 +5548,7 @@ ShellRoot {
                                         width: 34; height: 26; radius: Tok.r
                                         color: isToday ? theme.iris : (hasEvent ? theme.a(theme.iris, 0.13) : "transparent")
                                         border.width: (hasEvent && !isToday) ? 1 : 0; border.color: theme.a(theme.frost, 0.4)
-                                        Text { anchors.centerIn: parent; text: parent.modelData; color: parent.isToday ? theme.bg : theme.text; font.pixelSize: 12; font.family: root.cfgFont; font.bold: parent.isToday }
+                                        Text { anchors.centerIn: parent; text: parent.modelData; color: parent.isToday ? theme.bg : theme.text; font.pixelSize: 12; font.family: "Adwaita Sans"; font.bold: parent.isToday }
                                         Rectangle {
                                             visible: parent.hasEvent && !parent.isToday
                                             width: 3; height: 3; radius: 1.5; color: theme.frost
@@ -5533,7 +5561,7 @@ ShellRoot {
                                     summary: root.calUpcoming.length === 0 ? "none"
                                            : root.calUpcoming.length + (root.calUpcoming.length > 4 ? " · +" + (root.calUpcoming.length - 4) + " more" : "") }
                                 Column { width: parent.width; spacing: 5; visible: !root.calFolded("up")
-                                Text { visible: root.calUpcoming.length === 0; text: "nothing coming up"; color: theme.faint; font.pixelSize: 10; font.family: root.cfgFont }
+                                Text { visible: root.calUpcoming.length === 0; text: "nothing coming up"; color: theme.sub; font.pixelSize: 10; font.family: "Adwaita Sans" }
                                 Repeater {
                                     model: root.calUpcoming.slice(0, 4)
                                     delegate: Rectangle {
@@ -5547,13 +5575,13 @@ ShellRoot {
                                             anchors.fill: parent; anchors.leftMargin: 7; anchors.rightMargin: 8; spacing: 9
                                             Column { anchors.verticalCenter: parent.verticalCenter; width: 26
                                                 Text { anchors.horizontalCenter: parent.horizontalCenter; text: (""+evRow.modelData.date).slice(8)
-                                                    color: evRow.soon ? theme.frost : theme.iris; font.pixelSize: 15; font.family: root.cfgFont; font.bold: true }
+                                                    color: evRow.soon ? theme.frost : theme.iris; font.pixelSize: 15; font.family: "Adwaita Sans"; font.bold: true }
                                                 Text { anchors.horizontalCenter: parent.horizontalCenter; text: Qt.formatDate(root.calDate(evRow.modelData.date), "MMM").toUpperCase()
-                                                    color: theme.faint; font.pixelSize: 8; font.family: root.cfgFont } }
+                                                    color: theme.sub; font.pixelSize: 8; font.family: "Adwaita Sans" } }
                                             Column { anchors.verticalCenter: parent.verticalCenter; width: parent.width - 44; spacing: 1
-                                                Text { width: parent.width; text: evRow.modelData.title; color: theme.text; font.pixelSize: 11; font.family: root.cfgFont; elide: Text.ElideRight }
+                                                Text { width: parent.width; text: evRow.modelData.title; color: theme.text; font.pixelSize: 11; font.family: "Adwaita Sans"; elide: Text.ElideRight }
                                                 Text { text: evRow.rel + "  ·  " + Qt.formatDate(root.calDate(evRow.modelData.date), "ddd") + (evRow.modelData.time ? "  ·  " + evRow.modelData.time : "")
-                                                    color: evRow.soon ? theme.frost : theme.faint; font.pixelSize: 9; font.family: root.cfgFont } } } } } }
+                                                    color: evRow.soon ? theme.frost : theme.faint; font.pixelSize: 9; font.family: "Adwaita Sans" } } } } } }
 
                             }
                             // ================= TIMER · POMODORO =================
@@ -5569,11 +5597,11 @@ ShellRoot {
                                 // ---- active countdown ----
                                 Column { width: parent.width; spacing: 6; visible: root.tmrRunning
                                     Row { width: parent.width; spacing: 10
-                                        Text { anchors.verticalCenter: parent.verticalCenter; text: root.tmrText; color: root.tmrPaused?theme.warn:theme.frost; font.pixelSize: 30; font.family: root.cfgFont; font.bold: true }
+                                        Text { anchors.verticalCenter: parent.verticalCenter; text: root.tmrText; color: root.tmrPaused?theme.warn:theme.frost; font.pixelSize: 30; font.family: "Adwaita Sans"; font.bold: true }
                                         Column { anchors.verticalCenter: parent.verticalCenter; spacing: 1
                                             Text { text: root.pomoActive ? (root.pomoPhase==="focus"?"focus":(root.pomoPhase==="long"?"long break":"break")) : "timer"
-                                                color: (root.pomoActive && root.pomoPhase!=="focus") ? theme.good : theme.iris; font.pixelSize: 12; font.family: root.cfgFont; font.bold: true }
-                                            Text { visible: root.tmrPaused; text: "paused"; color: theme.warn; font.pixelSize: 9; font.family: root.cfgFont } } }
+                                                color: (root.pomoActive && root.pomoPhase!=="focus") ? theme.good : theme.iris; font.pixelSize: 12; font.family: "Adwaita Sans"; font.bold: true }
+                                            Text { visible: root.tmrPaused; text: "paused"; color: theme.warn; font.pixelSize: 9; font.family: "Adwaita Sans" } } }
                                     Rectangle { width: parent.width; height: 5; radius: 2.5; color: theme.a(theme.line,0.7)
                                         Rectangle { height: parent.height; radius: 2.5
                                             width: parent.width * (root.tmrTotal>0 ? Math.max(0,Math.min(1, 1 - root.tmrRemain/root.tmrTotal)) : 0)
@@ -5583,19 +5611,19 @@ ShellRoot {
                                             color: tpMa.containsMouse ? theme.a(theme.iris,0.25) : theme.a(theme.line,0.4); border.width:1; border.color: theme.a(theme.iris,0.2)
                                             Row { anchors.centerIn: parent; spacing: 5
                                                 Sym { anchors.verticalCenter: parent.verticalCenter; text: root.tmrPaused?"play_arrow":"pause"; sz: 14; color: theme.frost }
-                                                Text { anchors.verticalCenter: parent.verticalCenter; text: root.tmrPaused?"resume":"pause"; color: theme.text; font.pixelSize: 11; font.family: root.cfgFont } }
+                                                Text { anchors.verticalCenter: parent.verticalCenter; text: root.tmrPaused?"resume":"pause"; color: theme.text; font.pixelSize: 11; font.family: "Adwaita Sans" } }
                                             MouseArea { id: tpMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.tmrToggle() } }
                                         Rectangle { visible: root.pomoActive; width: (parent.width - 12)/3; height: 30; radius: Tok.r
                                             color: tsMa.containsMouse ? theme.a(theme.iris,0.25) : theme.a(theme.line,0.4); border.width:1; border.color: theme.a(theme.iris,0.2)
                                             Row { anchors.centerIn: parent; spacing: 5
                                                 Sym { anchors.verticalCenter: parent.verticalCenter; text: "skip_next"; sz: 14; color: theme.frost }
-                                                Text { anchors.verticalCenter: parent.verticalCenter; text: "skip"; color: theme.text; font.pixelSize: 11; font.family: root.cfgFont } }
+                                                Text { anchors.verticalCenter: parent.verticalCenter; text: "skip"; color: theme.text; font.pixelSize: 11; font.family: "Adwaita Sans" } }
                                             MouseArea { id: tsMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.pomoSkip() } }
                                         Rectangle { width: root.pomoActive ? (parent.width-12)/3 : (parent.width-6)/2; height: 30; radius: Tok.r
                                             color: txMa.containsMouse ? theme.a(theme.bad,0.22) : theme.a(theme.line,0.4); border.width:1; border.color: theme.a(theme.bad,0.25)
                                             Row { anchors.centerIn: parent; spacing: 5
                                                 Sym { anchors.verticalCenter: parent.verticalCenter; text: "stop"; sz: 14; color: theme.bad }
-                                                Text { anchors.verticalCenter: parent.verticalCenter; text: "stop"; color: theme.text; font.pixelSize: 11; font.family: root.cfgFont } }
+                                                Text { anchors.verticalCenter: parent.verticalCenter; text: "stop"; color: theme.text; font.pixelSize: 11; font.family: "Adwaita Sans" } }
                                             MouseArea { id: txMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.tmrStop() } } } }
 
                                 // ---- idle: quick timers + pomodoro ----
@@ -5604,31 +5632,31 @@ ShellRoot {
                                         Repeater { model: [1,5,10,15,25]
                                             delegate: Rectangle { required property var modelData; height: 28; radius: Tok.r; width: (parent.width - 4*5)/5
                                                 color: qcMa.containsMouse ? theme.a(theme.iris,0.2) : theme.a(theme.line,0.4); border.width:1; border.color: theme.a(theme.iris,0.16)
-                                                Text { anchors.centerIn: parent; text: modelData+"m"; color: theme.text; font.pixelSize: 11; font.family: root.cfgFont; font.bold: true }
+                                                Text { anchors.centerIn: parent; text: modelData+"m"; color: theme.text; font.pixelSize: 11; font.family: "Adwaita Sans"; font.bold: true }
                                                 MouseArea { id: qcMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.timerStartMin(modelData) } } } }
                                     Rectangle { width: parent.width; height: 34; radius: Tok.r
                                         color: psMa.containsMouse ? theme.iris : theme.a(theme.iris,0.22); border.width:1; border.color: theme.iris
                                         Row { anchors.centerIn: parent; spacing: 7
                                             Sym { anchors.verticalCenter: parent.verticalCenter; text: "local_fire_department"; sz: 16; color: psMa.containsMouse?theme.bg:theme.frost }
-                                            Text { anchors.verticalCenter: parent.verticalCenter; text: "Start Pomodoro · " + root.pomoFocusMin + "/" + root.pomoBreakMin; color: psMa.containsMouse?theme.bg:theme.frost; font.pixelSize: 12; font.family: root.cfgFont; font.bold: true } }
+                                            Text { anchors.verticalCenter: parent.verticalCenter; text: "Start Pomodoro · " + root.pomoFocusMin + "/" + root.pomoBreakMin; color: psMa.containsMouse?theme.bg:theme.frost; font.pixelSize: 12; font.family: "Adwaita Sans"; font.bold: true } }
                                         MouseArea { id: psMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.pomoStart() } }
                                     // compact config: focus / break steppers + DND toggle
                                     Row { width: parent.width; spacing: 8
                                         Row { spacing: 3
-                                            Text { anchors.verticalCenter: parent.verticalCenter; text: "focus"; color: theme.faint; font.pixelSize: 10; font.family: root.cfgFont }
+                                            Text { anchors.verticalCenter: parent.verticalCenter; text: "focus"; color: theme.sub; font.pixelSize: 10; font.family: "Adwaita Sans" }
                                             Rectangle { width: 20; height: 20; radius: Tok.r; color: fmMa.containsMouse?theme.a(theme.iris,0.2):theme.a(theme.line,0.4)
                                                 Sym { anchors.centerIn: parent; text: "remove"; sz: 12; color: theme.frost }
                                                 MouseArea { id: fmMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: { root.pomoFocusMin = Math.max(5, root.pomoFocusMin-5); root.tmrSaveCfg() } } }
-                                            Text { anchors.verticalCenter: parent.verticalCenter; width: 22; horizontalAlignment: Text.AlignHCenter; text: root.pomoFocusMin; color: theme.text; font.pixelSize: 11; font.family: root.cfgFont; font.bold: true }
+                                            Text { anchors.verticalCenter: parent.verticalCenter; width: 22; horizontalAlignment: Text.AlignHCenter; text: root.pomoFocusMin; color: theme.text; font.pixelSize: 11; font.family: "Adwaita Sans"; font.bold: true }
                                             Rectangle { width: 20; height: 20; radius: Tok.r; color: fpMa.containsMouse?theme.a(theme.iris,0.2):theme.a(theme.line,0.4)
                                                 Sym { anchors.centerIn: parent; text: "add"; sz: 12; color: theme.frost }
                                                 MouseArea { id: fpMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: { root.pomoFocusMin = Math.min(120, root.pomoFocusMin+5); root.tmrSaveCfg() } } } }
                                         Row { spacing: 3
-                                            Text { anchors.verticalCenter: parent.verticalCenter; text: "break"; color: theme.faint; font.pixelSize: 10; font.family: root.cfgFont }
+                                            Text { anchors.verticalCenter: parent.verticalCenter; text: "break"; color: theme.sub; font.pixelSize: 10; font.family: "Adwaita Sans" }
                                             Rectangle { width: 20; height: 20; radius: Tok.r; color: bmMa.containsMouse?theme.a(theme.iris,0.2):theme.a(theme.line,0.4)
                                                 Sym { anchors.centerIn: parent; text: "remove"; sz: 12; color: theme.frost }
                                                 MouseArea { id: bmMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: { root.pomoBreakMin = Math.max(1, root.pomoBreakMin-1); root.tmrSaveCfg() } } }
-                                            Text { anchors.verticalCenter: parent.verticalCenter; width: 22; horizontalAlignment: Text.AlignHCenter; text: root.pomoBreakMin; color: theme.text; font.pixelSize: 11; font.family: root.cfgFont; font.bold: true }
+                                            Text { anchors.verticalCenter: parent.verticalCenter; width: 22; horizontalAlignment: Text.AlignHCenter; text: root.pomoBreakMin; color: theme.text; font.pixelSize: 11; font.family: "Adwaita Sans"; font.bold: true }
                                             Rectangle { width: 20; height: 20; radius: Tok.r; color: bpMa.containsMouse?theme.a(theme.iris,0.2):theme.a(theme.line,0.4)
                                                 Sym { anchors.centerIn: parent; text: "add"; sz: 12; color: theme.frost }
                                                 MouseArea { id: bpMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: { root.pomoBreakMin = Math.min(60, root.pomoBreakMin+1); root.tmrSaveCfg() } } } }
@@ -5649,16 +5677,16 @@ ShellRoot {
                                     delegate: Rectangle { required property var modelData; width: parent.width; height: 28; radius: Tok.r
                                         color: wcm.containsMouse ? theme.a(theme.line,0.4) : "transparent"
                                         Row { anchors.fill: parent; anchors.leftMargin: 8; anchors.rightMargin: 8; spacing: 8
-                                            Sym { anchors.verticalCenter: parent.verticalCenter; text: "public"; sz: 13; color: theme.faint }
-                                            Text { anchors.verticalCenter: parent.verticalCenter; width: parent.width - 120; elide: Text.ElideRight; text: modelData.label; color: theme.text; font.pixelSize: 11; font.family: root.cfgFont }
-                                            Text { anchors.verticalCenter: parent.verticalCenter; text: modelData.day; color: theme.faint; font.pixelSize: 9; font.family: root.cfgFont }
-                                            Text { anchors.verticalCenter: parent.verticalCenter; text: modelData.time; color: theme.frost; font.pixelSize: 12; font.family: root.cfgFont; font.bold: true } }
+                                            Sym { anchors.verticalCenter: parent.verticalCenter; text: "public"; sz: 13; color: theme.sub }
+                                            Text { anchors.verticalCenter: parent.verticalCenter; width: parent.width - 120; elide: Text.ElideRight; text: modelData.label; color: theme.text; font.pixelSize: 11; font.family: "Adwaita Sans" }
+                                            Text { anchors.verticalCenter: parent.verticalCenter; text: modelData.day; color: theme.sub; font.pixelSize: 9; font.family: "Adwaita Sans" }
+                                            Text { anchors.verticalCenter: parent.verticalCenter; text: modelData.time; color: theme.frost; font.pixelSize: 12; font.family: "Adwaita Sans"; font.bold: true } }
                                         MouseArea { id: wcm; anchors.fill: parent; hoverEnabled: true; acceptedButtons: Qt.NoButton }
                                         Rectangle { anchors.right: parent.right; anchors.rightMargin: 3; anchors.verticalCenter: parent.verticalCenter; visible: wcm.containsMouse
                                             width: 20; height: 20; radius: Tok.r; color: theme.a(theme.bad,0.22)
                                             Sym { anchors.centerIn: parent; text: "close"; sz: 12; color: theme.bad }
                                             MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.wcRemove(modelData.zone) } } } }
-                                Text { visible: root.wcTimes.length===0; text: "add a city below"; color: theme.faint; font.pixelSize: 10; font.family: root.cfgFont }
+                                Text { visible: root.wcTimes.length===0; text: "add a city below"; color: theme.sub; font.pixelSize: 10; font.family: "Adwaita Sans" }
                                 Flow { width: parent.width; spacing: 5; topPadding: 2
                                     Repeater { model: root.wcPresets
                                         delegate: Rectangle { required property var modelData
@@ -5667,11 +5695,11 @@ ShellRoot {
                                             color: wcaMa.containsMouse ? theme.a(theme.iris,0.2) : theme.a(theme.line,0.35); border.width: 1; border.color: theme.a(theme.iris,0.18)
                                             Row { id: wcAddRow; anchors.centerIn: parent; spacing: 3
                                                 Sym { anchors.verticalCenter: parent.verticalCenter; text: "add"; sz: 11; color: theme.frost }
-                                                Text { anchors.verticalCenter: parent.verticalCenter; text: modelData.l; color: theme.text; font.pixelSize: 9; font.family: root.cfgFont } }
+                                                Text { anchors.verticalCenter: parent.verticalCenter; text: modelData.l; color: theme.text; font.pixelSize: 9; font.family: "Adwaita Sans" } }
                                             MouseArea { id: wcaMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.wcAdd(modelData.z) } } } } } } } }
                     Drop { screen: bar.screen
                         id: pwrDrop; host: root.barVertical ? pwrPillVert : pwrPill; shown: root.openPop ==="pwr" && root.openBar === bar
-                        cardW: 210; cardH: pwrCol.implicitHeight + 28
+                        cardW: 230; cardH: pwrCol.implicitHeight + 24
                         property string confirmL: ""          // reboot/shutdown ask for a second click
                         property string who: ""
                         property string up: ""
@@ -5679,11 +5707,9 @@ ShellRoot {
                         Process { id: upProc; command: ["sh","-c","printf '%s@%s|' \"$USER\" \"$(hostnamectl hostname 2>/dev/null || hostname)\"; awk '{s=int($1); printf \"up %dh %02dm\", s/3600, (s%3600)/60}' /proc/uptime"]
                             stdout: StdioCollector { id: upOut; onStreamFinished: { var p = upOut.text.split("|"); pwrDrop.who = p[0]||""; pwrDrop.up = p[1]||"" } } }
                         Column { id: pwrCol; anchors.fill: pwrDrop.card; anchors.margins: 10; spacing: 3
-                            Row { width: parent.width; spacing: 7; bottomPadding: 2
-                                Sym { anchors.verticalCenter: parent.verticalCenter; text: "person"; sz: 15; color: theme.iris }
-                                Column { anchors.verticalCenter: parent.verticalCenter; spacing: 0
-                                    Text { text: pwrDrop.who; color: theme.text; font.pixelSize: 12; font.family: root.cfgFont; font.bold: true }
-                                    Text { text: pwrDrop.up; color: theme.faint; font.pixelSize: 9; font.family: root.cfgFont } } }
+                            ProfileCard { width: parent.width; height: Math.max(64, implicitHeight - 12); compact: true; flat: true
+                                profile: root.userProfile; subtitle: pwrDrop.up
+                            }
                             Rectangle { width: parent.width; height: 1; color: theme.a(theme.iris,0.2) }
                             Item { width: 1; height: 2 }
                             Repeater { model: [{i:"lock",l:"lock",c:"~/.config/quickshell/sea-shell/sea-lock.sh",col:theme.frost},
@@ -5700,7 +5726,7 @@ ShellRoot {
                                         Sym { anchors.verticalCenter: parent.verticalCenter; text: modelData.i; sz: 17; color: modelData.col }
                                         Text { anchors.verticalCenter: parent.verticalCenter
                                             text: arming ? "click again to " + modelData.l : modelData.l
-                                            color: arming ? theme.bad : theme.text; font.pixelSize: 13; font.family: root.cfgFont } }
+                                            color: arming ? theme.bad : theme.text; font.pixelSize: 13; font.family: "Adwaita Sans" } }
                                     MouseArea { id: pw; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
                                         onClicked: {
                                             if (modelData.danger && !arming) { pwrDrop.confirmL = modelData.l; return }
@@ -6012,12 +6038,12 @@ ShellRoot {
                                 spacing: 0
                                 Text {
                                     text: Qt.formatDateTime(clock.date, "HH")
-                                    color: theme.text; font.pixelSize: 13; font.bold: true; font.family: root.cfgFont
+                                    color: theme.text; font.pixelSize: 13; font.bold: true; font.family: "Adwaita Sans"
                                     Layout.alignment: Qt.AlignHCenter
                                 }
                                 Text {
                                     text: Qt.formatDateTime(clock.date, "mm")
-                                    color: theme.iris; font.pixelSize: 13; font.bold: true; font.family: root.cfgFont
+                                    color: theme.iris; font.pixelSize: 13; font.bold: true; font.family: "Adwaita Sans"
                                     Layout.alignment: Qt.AlignHCenter
                                 }
                             }
@@ -6125,7 +6151,8 @@ ShellRoot {
                     }
                     width: popCol.width; radius: Tok.rCard
                     implicitHeight: pcc.implicitHeight + 22
-                    color: Tok.alpha(Tok.surface, root.dropOpacity)
+                    height: implicitHeight
+                    color: Tok.surface
                     border.width: 1; border.color: pcard.model.urg===2 ? theme.a(theme.bad,0.6) : Tok.ruleHard
                     Column { id: pcc; anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top; anchors.margins: 12; anchors.rightMargin: 36; spacing: 3
                         Row { width: parent.width
@@ -6201,7 +6228,7 @@ ShellRoot {
                                                   easing.type: Easing.Bezier
                                                   easing.bezierCurve: Tok.mEnter } }
             width: 250; height: 54; radius: Tok.rCard
-            color: Tok.alpha(Tok.surface, root.dropOpacity); border.width: 1; border.color: Tok.ruleHard
+            color: Tok.surface; border.width: 1; border.color: Tok.ruleHard
             Row { anchors.fill: parent; anchors.margins: 16; spacing: 13
                 Sym { anchors.verticalCenter: parent.verticalCenter; text: root.osdIcon; sz: 24; color: theme.frost }
                 Column { anchors.verticalCenter: parent.verticalCenter; width: parent.width-52; spacing: 6
@@ -6496,7 +6523,7 @@ ShellRoot {
                                                 anchors { left: parent.left; right: parent.right; bottom: parent.bottom }
                                                 height: Math.round(16 * exposeWin.ui)
                                                 visible: winTile.height > 54 * exposeWin.ui
-                                                color: Tok.alpha(Tok.bg, 0.82)
+                                                color: Tok.bg
                                                 IndText {
                                                     anchors { fill: parent; leftMargin: 5; rightMargin: 5 }
                                                     verticalAlignment: Text.AlignVCenter
@@ -6528,7 +6555,7 @@ ShellRoot {
                                     anchors { left: parent.left; right: parent.right; bottom: parent.bottom
                                               margins: wsCard.border.width }
                                     height: Math.round(26 * exposeWin.ui)
-                                    color: Tok.alpha(Tok.bg, 0.9)
+                                    color: Tok.bg
                                     Rectangle { anchors { left: parent.left; right: parent.right; top: parent.top }
                                                 height: 1; color: Tok.ruleHard }
                                     Row {

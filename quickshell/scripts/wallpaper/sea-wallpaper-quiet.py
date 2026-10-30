@@ -121,6 +121,26 @@ def morph(m, r, fn):
     return [_win(m, x, y, r, fn) for y in range(GH) for x in range(GW)]
 
 
+def lab_grid(img, blur=0):
+    cmd = ["magick", img, "-resize", "480x270!"] + (["-blur", "0x%d" % blur] if blur else []) + \
+          ["-resize", "%dx%d!" % (GW, GH), "-colorspace", "Lab", "-depth", "8", "rgb:-"]
+    out = subprocess.run(cmd, capture_output=True, timeout=60).stdout
+    if len(out) < GW * GH * 3:
+        return None
+    return [out[i * 3:i * 3 + 3] for i in range(GW * GH)]
+
+
+def surround(img):
+    """How far each cell's colour is from the colour of the wide area around it, 0..1."""
+    a, b = lab_grid(img), lab_grid(img, 40)
+    if a is None or b is None:
+        return [0.0] * (GW * GH)
+    d = [((a[i][0] - b[i][0]) ** 2 + 1.6 * (a[i][1] - b[i][1]) ** 2 + 1.6 * (a[i][2] - b[i][2]) ** 2) ** 0.5
+         for i in range(GW * GH)]
+    top = sorted(d)[int(len(d) * 0.97)] or 1.0
+    return [min(1.0, v / top) for v in d]
+
+
 def importance(img):
     # centre-surround: detail that differs from its own neighbourhood
     cs = grid(["magick", img, "-colorspace", "Gray", "-resize", "480x270!",
@@ -130,7 +150,14 @@ def importance(img):
     # chroma: a character is usually more colourful than the sky behind them
     ch = grid(["magick", img, "-colorspace", "HCL", "-channel", "G", "-separate",
                "+channel", "-resize", "%dx%d!" % (GW, GH), "-depth", "8", "gray:-"])
-    m = [0.72 * cs[i] + 0.28 * ch[i] for i in range(GW * GH)]
+    # COLOUR AGAINST ITS SURROUNDINGS. Detail and chroma both miss the commonest anime
+    # wallpaper: a pale, smoothly shaded character on a pale ground. Her face has almost no
+    # edges and almost no colour, so it scored as calm as the sky and widgets sat on it. What
+    # she does have is a colour that differs from the wide area around her. A large, even
+    # region (sea, sky, sand) matches its own surroundings and stays calm, which a single
+    # "background colour" could not manage: it called the sea busy because it is not sky.
+    rg = surround(img)
+    m = [0.45 * cs[i] + 0.15 * ch[i] + 0.40 * rg[i] for i in range(GW * GH)]
     m = morph(morph(m, CLOSE_R, max), CLOSE_R, min)      # close: fill holes in a subject
     return [_win(m, x, y, 1, lambda v: sum(v) / len(v))  # soften
             for y in range(GH) for x in range(GW)]
@@ -172,6 +199,13 @@ def quietest(I, w, h, n=4, pad=1):
 
 
 def write(obj):
+    # LAST CHANGE WINS, NOT LAST TO FINISH. Each wallpaper change measures in the background,
+    # so changing twice quickly races two of these, and the slower one used to land last and
+    # describe a wallpaper that was no longer on screen; the desktop then judged its widgets
+    # against the wrong picture. A result for anything but the current wallpaper is dropped.
+    cur = current_wallpaper()
+    if obj.get("wallpaper") and cur and os.path.realpath(obj["wallpaper"]) != os.path.realpath(cur):
+        return
     os.makedirs(CACHE, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=CACHE, prefix=".wallquiet-")
     try:

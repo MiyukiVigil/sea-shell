@@ -28,6 +28,7 @@ import re
 import shutil
 import subprocess
 import sys
+import shlex
 from pathlib import Path
 
 CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "sea-shell"
@@ -263,7 +264,7 @@ def install_filemanager1_service(entry):
         FM1_FILE.write_text(FM1_STAMP
                             + "[D-BUS Service]\n"
                             + "Name=%s\n" % FM1_NAME
-                            + "Exec=%s\n" % " ".join(argv))
+                            + "Exec=%s\n" % shlex.join(argv))
         return True, ""
     except OSError as exc:
         return False, str(exc)
@@ -307,7 +308,7 @@ def _exec_words(exec_line):
     """The Exec line with the field codes stripped — %u, %F and friends mean
     nothing to a D-Bus service, which is started with no arguments at all."""
     out = []
-    for w in (exec_line or "").split():
+    for w in shlex.split(exec_line or ""):
         if re.fullmatch(r"%[fFuUdDnNickvm]", w):
             continue
         out.append(w)

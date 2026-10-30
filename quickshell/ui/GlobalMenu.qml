@@ -50,7 +50,7 @@ Item {
     property string barEdge: "top"
     property real maxWidth: 0
     property real dropOpacity: 1.0
-    readonly property color cardBg: root.pal ? Tok.alpha(root.pal.panel, root.dropOpacity)
+    readonly property color cardBg: root.pal ? root.pal.panel
                                              : "#181818"
     property bool featureOn: true
     property bool showKeys: true
@@ -151,30 +151,30 @@ Item {
         var isMedia = c.indexOf("spot") >= 0 || c.indexOf("music") >= 0 || c.indexOf("mpv") >= 0 || c.indexOf("vlc") >= 0;
 
         var windowItems = [
-            { label: "Toggle Floating", key: "Super+V", dispatch: "togglefloating" },
-            { label: "Toggle Fullscreen", key: "Super+F", dispatch: "fullscreen" },
+            { label: "Toggle Floating", key: "Super+V", dispatch: "hl.dsp.window.float({ action = 'toggle' })" },
+            { label: "Toggle Fullscreen", key: "Super+F", dispatch: "hl.dsp.window.fullscreen({ mode = 'maximized', action = 'toggle' })" },
             { label: "Pin Window", dispatch: "pin" },
-            { label: "Center Window", dispatch: "centerwindow" },
+            { label: "Center Window", dispatch: "hl.dsp.window.center()" },
             { sep: true },
             {
                 label: "Move to Workspace",
                 items: [
-                    { label: "Workspace 1", key: "Super+Shift+1", dispatch: "movetoworkspacesilent, 1" },
-                    { label: "Workspace 2", key: "Super+Shift+2", dispatch: "movetoworkspacesilent, 2" },
-                    { label: "Workspace 3", key: "Super+Shift+3", dispatch: "movetoworkspacesilent, 3" },
-                    { label: "Workspace 4", key: "Super+Shift+4", dispatch: "movetoworkspacesilent, 4" },
-                    { label: "Workspace 5", key: "Super+Shift+5", dispatch: "movetoworkspacesilent, 5" },
-                    { label: "Workspace 6", key: "Super+Shift+6", dispatch: "movetoworkspacesilent, 6" },
-                    { label: "Workspace 7", key: "Super+Shift+7", dispatch: "movetoworkspacesilent, 7" },
-                    { label: "Workspace 8", key: "Super+Shift+8", dispatch: "movetoworkspacesilent, 8" },
-                    { label: "Workspace 9", key: "Super+Shift+9", dispatch: "movetoworkspacesilent, 9" },
+                    { label: "Workspace 1", key: "Super+Shift+1", dispatch: "hl.dsp.window.move({ workspace = 1, follow = false })" },
+                    { label: "Workspace 2", key: "Super+Shift+2", dispatch: "hl.dsp.window.move({ workspace = 2, follow = false })" },
+                    { label: "Workspace 3", key: "Super+Shift+3", dispatch: "hl.dsp.window.move({ workspace = 3, follow = false })" },
+                    { label: "Workspace 4", key: "Super+Shift+4", dispatch: "hl.dsp.window.move({ workspace = 4, follow = false })" },
+                    { label: "Workspace 5", key: "Super+Shift+5", dispatch: "hl.dsp.window.move({ workspace = 5, follow = false })" },
+                    { label: "Workspace 6", key: "Super+Shift+6", dispatch: "hl.dsp.window.move({ workspace = 6, follow = false })" },
+                    { label: "Workspace 7", key: "Super+Shift+7", dispatch: "hl.dsp.window.move({ workspace = 7, follow = false })" },
+                    { label: "Workspace 8", key: "Super+Shift+8", dispatch: "hl.dsp.window.move({ workspace = 8, follow = false })" },
+                    { label: "Workspace 9", key: "Super+Shift+9", dispatch: "hl.dsp.window.move({ workspace = 9, follow = false })" },
                     { sep: true },
-                    { label: "Special Stash", key: "Super+Shift+`", dispatch: "movetoworkspacesilent, special:scratch" }
+                    { label: "Special Stash", key: "Super+Shift+`", dispatch: "hl.dsp.window.move({ workspace = 'special:scratch', follow = false })" }
                 ]
             },
             { label: "Toggle Opacity", dispatch: "setprop, active, opaque, toggle" },
             { sep: true },
-            { label: "Close Window", key: "Super+Q", dispatch: "killactive" }
+            { label: "Close Window", key: "Super+Q", dispatch: "hl.dsp.window.close()" }
         ];
 
         var toolsItems = [
@@ -239,7 +239,7 @@ Item {
                 { label: "Split Vertical", dispatch: "layoutmsg, splitv" },
                 { sep: true },
                 { label: "Open File Manager", key: "Super+E", command: ["python3", Quickshell.env("HOME") + "/.config/quickshell/sea-shell/sea-fm.py"] },
-                { label: "Toggle Floating", key: "Super+V", dispatch: "togglefloating" }
+                { label: "Toggle Floating", key: "Super+V", dispatch: "hl.dsp.window.float({ action = 'toggle' })" }
             ];
         } else if (isBrowser) {
             actionsItems = [
@@ -354,11 +354,11 @@ Item {
         } catch (err) {}
 
         out.push({ label: "Hide Window", key: "Super+Shift+`",
-                   dispatch: "movetoworkspacesilent, special:magic" });
-        out.push({ label: "Toggle Floating", key: "Super+V", dispatch: "togglefloating" });
-        out.push({ label: "Toggle Fullscreen", key: "Super+F", dispatch: "fullscreen" });
+                   dispatch: "hl.dsp.window.move({ workspace = 'special:magic', follow = false })" });
+        out.push({ label: "Toggle Floating", key: "Super+V", dispatch: "hl.dsp.window.float({ action = 'toggle' })" });
+        out.push({ label: "Toggle Fullscreen", key: "Super+F", dispatch: "hl.dsp.window.fullscreen({ mode = 'maximized', action = 'toggle' })" });
         out.push({ sep: true });
-        out.push({ label: "Close Window", key: "Super+Q", dispatch: "killactive" });
+        out.push({ label: "Close Window", key: "Super+Q", dispatch: "hl.dsp.window.close()" });
         out.push({
             label: root.appWindowCount > 1
                    ? ("Quit " + root.appName + " — " + root.appWindowCount + " windows")
@@ -390,7 +390,7 @@ Item {
             for (var i = 0; i < list.length; i++) {
                 var lw = list[i] && list[i].lastIpcObject;
                 if (lw && ("" + lw["class"]) === root.appClass && lw.address)
-                    Hyprland.dispatch("closewindow address:" + lw.address);
+                    Hyprland.dispatch("hl.dsp.window.close({ window = 'address:" + lw.address + "' })");
             }
         } catch (err) {}
     }
@@ -522,7 +522,7 @@ Item {
         var key = root.cacheKey(parts);
         if (root.cache[key] !== undefined || root.loadingPath.length) return;
         root.loadingPath = parts.join("/");
-        reader.command = ["python3", root.script, "--submenu", root.loadingPath];
+        reader.command = ["python3", root.script, "--submenu", root.loadingPath, "--pid", String(root.pid)];
         reader.running = true;
     }
 
@@ -580,9 +580,8 @@ Item {
     // rather than a band painted across it — the single detail that most separates a modern
     // menu from a 1990s one.
     readonly property int rowPadX: 10
-    // The checkmark column, reserved for the whole card whenever ANY item in it can be
-    // ticked — so labels do not jump sideways the moment something is switched on. macOS
-    // reserves one too.
+    // Visible checkmarks and icons get a gutter on their own row. An unchecked
+    // action must not indent every plain command in the menu.
     //
     // It was 11, on the reasoning that the tick may overhang into the padding. It may not:
     // the glyph is drawn at 12px and the label began at 11, so a ticked row printed its
@@ -607,7 +606,7 @@ Item {
         for (var i = 0; i < items.length; i++) {
             var it = items[i];
             if (!it || it.sep) continue;
-            var lw = root.textW(it.label);
+            var lw = root.textW(it.label) + ((it.checked === true || it.icon) ? root.checkGutter : 0);
             if (lw > maxL) maxL = lw;
             if (root.showKeys && it.key) {
                 var kw = root.keyW(it.key);
@@ -615,8 +614,7 @@ Item {
             }
             if ((it.items && it.items.length) || it.stub) kids = true;
         }
-        var w = (root.levelChecks(items) ? root.checkGutter : 0)
-              + maxL + (maxK > 0 ? maxK + 26 : 0) + (kids ? 16 : 0)
+        var w = maxL + (maxK > 0 ? maxK + 26 : 0) + (kids ? 16 : 0)
               + (root.cardPadX + root.rowPadX) * 2 + 8;
         return Math.max(172, Math.ceil(w));
     }
@@ -1107,6 +1105,23 @@ Item {
 
     Process { id: invoker }
     // The sidecar resolves by label path, or executes direct action/command/dispatch
+    function activateShortcut(key) {
+        if (!key || !root.pid) return false;
+        var parts = key.split("+");
+        var k = parts.pop();
+        var mods = [];
+        var names = { "Ctrl": "CTRL", "Control": "CTRL", "Alt": "ALT",
+                      "Shift": "SHIFT", "Meta": "SUPER", "Super": "SUPER" };
+        for (var i = 0; i < parts.length; i++) {
+            if (!names[parts[i]]) return false;
+            mods.push(names[parts[i]]);
+        }
+        if (!mods.length || !/^[A-Za-z0-9_]+$/.test(k)) return false;
+        root.close();
+        Hyprland.dispatch("hl.dsp.send_shortcut({ mods = '" + mods.join(" ")
+                          + "', key = '" + k + "', window = 'pid:" + root.pid + "' })");
+        return true;
+    }
     function activate(level, label) {
         var items = root.levels[level];
         var it = null;
@@ -1116,6 +1131,7 @@ Item {
             }
         }
         if (it) {
+            if (!it.dispatch && !it.command && !it.action && root.activateShortcut(it.key)) return;
             if (it.dispatch) {
                 root.close();
                 Hyprland.dispatch(it.dispatch);
@@ -1140,11 +1156,12 @@ Item {
     function activatePath(parts) {
         if (!root.script.length || !parts || !parts.length) return;
         root.close();
-        invoker.command = ["python3", root.script, "--invoke", parts.join("/")];
+        invoker.command = ["python3", root.script, "--invoke", parts.join("/"), "--pid", String(root.pid)];
         invoker.running = true;
     }
     function activateHit(hit) {
         if (!hit) return;
+        if (!hit.dispatch && !hit.command && !hit.action && root.activateShortcut(hit.key)) return;
         if (hit.dispatch) {
             root.close();
             Hyprland.dispatch(hit.dispatch);
@@ -1734,7 +1751,7 @@ Item {
                                     Text {
                                         id: rowTxt
                                         anchors.left: parent.left
-                                        anchors.leftMargin: root.rowPadX + lvl.gutter
+                                        anchors.leftMargin: root.rowPadX + ((rowIt.modelData.checked === true || rowIt.modelData.icon) ? root.checkGutter : 0)
                                         anchors.verticalCenter: parent.verticalCenter
                                         visible: !rowIt.isSep
                                         text: modelData.label || ""
@@ -1747,7 +1764,7 @@ Item {
                                         font.family: root.uiFont
                                         elide: Text.ElideRight
                                         Behavior on color { ColorAnimation { duration: Tok.mFast } }
-                                        width: Math.max(0, parent.width - root.rowPadX * 2 - lvl.gutter
+                                        width: Math.max(0, parent.width - root.rowPadX * 2 - ((rowIt.modelData.checked === true || rowIt.modelData.icon) ? root.checkGutter : 0)
                                                - (accTxt.visible ? accTxt.implicitWidth + 20 : 0)
                                                - ((rowIt.hasKids || rowIt.isStub) ? 16 : 2))
                                     }
@@ -1797,7 +1814,7 @@ Item {
                                             lvl.hoverIdx = rowIt.index;
                                             root.holdOpen();
                                             if (lvl.deepest) root.cursor = rowIt.index;
-                                            if (rowIt.hasKids) root.descend(lvl.index, rowIt.index);
+                                            if (rowIt.hasKids || (rowIt.isStub && root.snap && root.snap.source === "dbusmenu")) root.descend(lvl.index, rowIt.index);
                                             else root.truncateSoon(lvl.index);
                                         }
                                         // Guarded: leaving row 3 for row 4 fires row 4's
@@ -1825,7 +1842,7 @@ Item {
                                 Text {
                                     anchors.verticalCenter: parent.verticalCenter
                                     x: root.rowPadX
-                                    text: "reading menu"
+                                    text: ""
                                     color: root.pal ? root.pal.faint : "#777"
                                     font.pixelSize: 12
                                     font.family: root.uiFont
@@ -1865,7 +1882,7 @@ Item {
             // row that asked for it.
             Rectangle {
                 id: deadCard
-                visible: !root.searching && drop.shown && root.deadEnd && root.deadGeom !== null
+                visible: false // Quiet mode: no helper cards on submenu clicks.
                 x: root.deadGeom ? root.deadGeom.x : 0
                 y: root.deadGeom ? root.deadGeom.y : 0
                 width: root.deadGeom ? root.deadGeom.w : 268
@@ -1901,8 +1918,7 @@ Item {
             // The card for a top-level menu that turned out to be unreachable, so a click
             // never looks like it did nothing at all.
             Rectangle {
-                visible: !root.searching && drop.shown && root.openIndex !== -1
-                         && root.levels.length === 0
+                visible: false // Quiet mode: no unavailable-menu helper.
                 y: root.anchorY(height)
                 x: Math.max(6, Math.min(drop.hostX, (drop.width / root.ui) - width - 6))
                 width: 200
@@ -1913,7 +1929,7 @@ Item {
                 border.color: root.pal ? root.pal.line : "#333"
                 Text {
                     anchors.centerIn: parent
-                    text: root.loadingPath.length ? "reading menu" : "this menu will not open"
+                    text: root.loadingPath.length ? "" : "menu not available yet"
                     color: root.pal ? root.pal.faint : "#777"
                     font.pixelSize: 12
                     font.italic: root.loadingPath.length > 0

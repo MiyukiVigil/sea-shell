@@ -176,7 +176,7 @@ ShellRoot {
             width: Math.min(parent.width - 80, 940)
             height: Math.min(parent.height - 80, 660)
             radius: Tok.rCard
-            color: theme.a(theme.bg, 0.98)
+            color: theme.bg
             border.width: 1; border.color: theme.a(theme.iris, 0.34)
             MouseArea { anchors.fill: parent }
 

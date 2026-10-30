@@ -54,6 +54,9 @@ Item {
     property real fieldH: 1000
     property real fieldY: 0
 
+    // how busy the wallpaper is under a rectangle (fractions), for the drag hint
+    property var busyFn: null
+    property real busyLimit: 0.3
     // fx, fy are fractions; `exact` means the user asked for no nudging (shift held).
     signal moved(real fx, real fy, bool exact)
     signal removed()
@@ -72,6 +75,13 @@ Item {
     readonly property string ground: (item.spec && item.spec.ground) ? item.spec.ground : "rule"
     readonly property string tone: (item.spec && item.spec.tone) ? item.spec.tone : "accent"
     readonly property string align: (item.spec && item.spec.align) ? item.spec.align : "left"
+    // "card": the Material/macOS tile, solid. "glass": the same tile, half see-through. "clear":
+    // the same content with no tile at all, a faint ground fading in only where the wallpaper is
+    // busy. "classic": the original read-out below, a label, a hairline and the figure.
+    readonly property string look: (item.spec && item.spec.look) ? item.spec.look : "card"
+    readonly property bool clear: item.look === "classic" && item.kind !== "launch"
+    readonly property real cardFill: item.look === "glass" ? 0.55
+        : item.look === "clear" ? Math.max(0, Math.min(0.6, (item.busy - 0.18) * 2.2)) : 1
     readonly property color accent: {
         if (!item.pal) return "#63c7dd";
         switch (item.tone) {
@@ -111,25 +121,51 @@ Item {
     Rectangle {
         anchors.fill: parent
         anchors.margins: -10
-        radius: Tok.r + 2
-        color: item.pal ? item.pal.a(item.pal.bg, 0.62) : "#a0101010"
-        opacity: item.editing ? 0.0
-               : item.ground === "panel" ? 0.92
-               : Math.max(0, Math.min(1, (item.busy - 0.30) * 4))
-        visible: opacity > 0.01
-        Behavior on opacity { NumberAnimation { duration: 220; easing.type: Tok.mEase } }
+        radius: 22
+        color: item.pal ? item.pal.bg : "#101010"
+        visible: !item.editing && item.kind === "launch"
+    }
+
+    // The clear read-out's ground: always with "panel", and with "rule" only where the
+    // wallpaper under it is busy enough to need one. A background step, never a glow.
+    Rectangle {
+        anchors.fill: parent
+        anchors.margins: -14
+        radius: 20
+        visible: item.clear && !item.editing
+        color: item.pal ? item.pal.bg : "#101010"
+        opacity: item.ground === "panel" ? 0.82
+               : item.ground === "rule" ? Math.max(0, Math.min(0.75, (item.busy - 0.18) * 2.2)) : 0
+        Behavior on opacity { NumberAnimation { duration: Tok.mSlow } }
     }
 
     // ---------- the arranging frame ----------
     Rectangle {
         anchors.fill: parent
         anchors.margins: -10
-        radius: Tok.r + 2
+        radius: 22
         visible: item.editing
-        color: item.pal ? item.pal.a(item.pal.bg, 0.45) : "#40000000"
+        color: item.pal ? item.pal.bg : "#101010"
         border.width: 1
         border.color: item.pal ? item.pal.a(item.pal.iris, dragArea.drag.active ? 0.95 : 0.4)
                                : "#7788ccff"
+    }
+
+    MaterialWidget {
+        anchors.fill: parent; visible: item.kind !== "launch" && !item.clear; enabled: !item.editing
+        face: (item.spec && item.spec.face) ? item.spec.face : "dial"
+        fill: item.cardFill
+        Behavior on fill { NumberAnimation { duration: Tok.mSlow } }
+        kind: item.kind; readings: item.readings; player: item.player; viz: item.viz; active: item.visible
+        // the size class the desktop chose (sea-desktop.py FOOTPRINTS), as macOS's three
+        size: ({ small: "s", medium: "m", large: "l" })[(item.spec && item.spec.size) || (item.kind === "clock" ? "small" : "medium")] || ""
+        uiFont: Tok.sans
+        // The small clock IS its shape, so it stands bare unless "panel" asks for a card; the
+        // others carry text, which needs a ground over a photo, unless "bare" is chosen.
+        bare: item.ground === "bare"
+              || (item.kind === "clock" && ((item.spec && item.spec.size) || "small") === "small" && item.ground !== "panel")
+        surface: Tok.surface; container: Tok.accentWash; accent: Tok.accent
+        ink: Tok.ink; secondary: Tok.ink2; accentInk: Tok.accentInk; reducedMotion: Tok.reducedMotion
     }
 
     // ---------- the read-out ----------
@@ -144,7 +180,7 @@ Item {
         anchors.right: parent.right
         anchors.verticalCenter: parent.verticalCenter
         spacing: 3
-        visible: item.kind !== "launch"
+        visible: item.clear
 
         IndLabel {
             text: item.caption
@@ -445,9 +481,21 @@ Item {
         launcher.running = true;
     }
 
+    // ---------- editing one widget ----------
+    // A gear on every widget while arranging, as macOS's Edit Widget: its size, look, face and
+    // ground right on the desktop, where you can see what each choice does, instead of a list
+    // of chips in Settings that you have to match back to the widget by name.
+    property bool optionsOpen: false
+    onEditingChanged: if (!editing) item.optionsOpen = false
+    function setOpt(key, value) {
+        if (!item.spec || !item.spec.id) return;
+        Quickshell.execDetached(["python3", Qt.resolvedUrl("sea-desktop.py").toString().replace("file://", ""),
+                                 "--set", "" + item.spec.id, "--" + key, "" + value]);
+    }
     // ---------- interaction ----------
     MouseArea {
         id: dragArea
+        enabled: item.editing || item.kind === "launch"
         anchors.fill: parent
         hoverEnabled: true
         cursorShape: item.editing ? (drag.active ? Qt.ClosedHandCursor : Qt.OpenHandCursor)
@@ -473,6 +521,125 @@ Item {
                 return;
             }
             if (item.kind === "launch") item.launch();
+        }
+    }
+
+    Rectangle {
+        id: gear
+        visible: item.editing && item.kind !== "launch"
+        z: 5
+        anchors.right: parent.right; anchors.top: parent.top; anchors.margins: -2
+        width: 30; height: 30; radius: 15
+        color: gearMa.containsMouse || item.optionsOpen ? Tok.accent : Tok.bg
+        border.width: 1; border.color: Tok.ruleHard
+        Text { anchors.centerIn: parent; text: item.optionsOpen ? "close" : "settings"; font.family: "Material Symbols Rounded"; font.pixelSize: 17
+            color: gearMa.containsMouse || item.optionsOpen ? Tok.accentInk : Tok.ink }
+        MouseArea { id: gearMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: item.optionsOpen = !item.optionsOpen }
+    }
+    Rectangle {
+        id: options
+        visible: item.optionsOpen && item.editing
+        z: 6
+        // opens towards the middle of the screen, so it is never cut off at an edge
+        x: item.x + item.width / 2 > item.fieldW / 2 ? item.width - width : 0
+        y: gear.y + gear.height + 6
+        width: optCol.implicitWidth + 24; height: optCol.implicitHeight + 24
+        radius: 18; color: Tok.bg; border.width: 1; border.color: Tok.ruleHard
+        MouseArea { anchors.fill: parent }      // clicks here are not drags of the widget
+        Column {
+            id: optCol
+            anchors.centerIn: parent; spacing: 8
+            DesktopOption { item: item; label: "Size"; key: "size"; current: (item.spec && item.spec.size) || (item.kind === "clock" ? "small" : "medium")
+                choices: [{ v: "small", l: "S" }, { v: "medium", l: "M" }, { v: "large", l: "L" }] }
+            DesktopOption { item: item; label: "Look"; key: "look"; current: item.look
+                choices: [{ v: "card", l: "Card" }, { v: "glass", l: "Glass" }, { v: "clear", l: "Clear" }, { v: "classic", l: "Classic" }] }
+            DesktopOption { item: item; visible: item.kind === "clock"; label: "Face"; key: "face"; current: (item.spec && item.spec.face) || "dial"
+                choices: [{ v: "dial", l: "Dial" }, { v: "cookie", l: "Cookie" }, { v: "digital", l: "Digital" }, { v: "stacked", l: "Stack" }] }
+            DesktopOption { item: item; visible: item.look === "classic"; label: "Ground"; key: "ground"; current: item.ground
+                choices: [{ v: "rule", l: "Auto" }, { v: "panel", l: "Panel" }, { v: "bare", l: "Bare" }] }
+            DesktopOption { item: item; visible: item.look === "classic"; label: "Colour"; key: "tone"; current: item.tone
+                choices: [{ v: "accent", l: "Accent" }, { v: "frost", l: "Frost" }, { v: "plain", l: "Plain" }] }
+            Row {
+                spacing: 6
+                Rectangle {
+                    implicitWidth: pinT.implicitWidth + 40; implicitHeight: 28; radius: 14
+                    color: pinMa.containsMouse ? Tok.accentWash : Tok.sunken
+                    Row { id: pinT; anchors.centerIn: parent; spacing: 4
+                        Text { text: "push_pin"; font.family: "Material Symbols Rounded"; font.pixelSize: 15; color: Tok.ink; anchors.verticalCenter: parent.verticalCenter }
+                        Text { text: item.spec && item.spec.pinned ? "Pinned" : "Pin here"; font.family: Tok.sans; font.pixelSize: 11; color: Tok.ink; anchors.verticalCenter: parent.verticalCenter } }
+                    MouseArea { id: pinMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                        onClicked: Quickshell.execDetached(["python3", Qt.resolvedUrl("sea-desktop.py").toString().replace("file://", ""),
+                            item.spec && item.spec.pinned ? "--unpin" : "--pin", "" + item.spec.id]) }
+                }
+                Rectangle {
+                    implicitWidth: rmT.implicitWidth + 40; implicitHeight: 28; radius: 14
+                    color: rmMa.containsMouse ? Tok.critWash : Tok.sunken
+                    Row { id: rmT; anchors.centerIn: parent; spacing: 4
+                        Text { text: "delete"; font.family: "Material Symbols Rounded"; font.pixelSize: 15; color: Tok.crit; anchors.verticalCenter: parent.verticalCenter }
+                        Text { text: "Remove"; font.family: Tok.sans; font.pixelSize: 11; color: Tok.crit; anchors.verticalCenter: parent.verticalCenter } }
+                    MouseArea { id: rmMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: { item.optionsOpen = false; item.removed() } }
+                }
+            }
+        }
+    }
+
+    // ---------- while dragging: where will it really land ----------
+    // A widget let go on busy ground moves to the nearest calm spot, which looked like a drag
+    // that had not worked. Now it says so before you let go.
+    readonly property bool overBusy: dragArea.drag.active && !!item.busyFn && !!item.spec
+        && item.busyFn(item.x / item.fieldW, (item.y - item.fieldY) / item.fieldH, item.spec.w, item.spec.h) > item.busyLimit
+    Rectangle {
+        visible: item.overBusy
+        z: 7
+        anchors.horizontalCenter: parent.horizontalCenter; anchors.top: parent.bottom; anchors.topMargin: 16
+        width: hintT.implicitWidth + 24; height: 30; radius: 15; color: Tok.bg; border.width: 1; border.color: Tok.warn
+        Text { id: hintT; anchors.centerIn: parent; text: "Busy here: it will move to a calm spot · hold Shift to keep it here"
+            color: Tok.ink; font.family: Tok.sans; font.pixelSize: 11 }
+    }
+
+    // ---------- resizing ----------
+    // Drag the corner; the widget snaps to the nearest of the three sizes, as macOS's do, and
+    // the outline shows which one it will be before you let go.
+    property string resizeTo: ""
+    readonly property var footPx: ({
+        small:  { w: 0.0885 * item.fieldW, h: 0.17 * item.fieldH },
+        medium: { w: 0.1875 * item.fieldW, h: 0.17 * item.fieldH },
+        large:  { w: 0.1875 * item.fieldW, h: 0.376 * item.fieldH } })
+    Rectangle {
+        visible: item.resizeTo !== ""
+        z: 4
+        width: item.resizeTo ? item.footPx[item.resizeTo].w : 0
+        height: item.resizeTo ? item.footPx[item.resizeTo].h : 0
+        radius: 22; color: "transparent"; border.width: 2; border.color: Tok.accent
+        Rectangle { anchors.centerIn: parent; width: sizeT.implicitWidth + 20; height: 26; radius: 13; color: Tok.accent
+            Text { id: sizeT; anchors.centerIn: parent; text: item.resizeTo ? item.resizeTo.charAt(0).toUpperCase() + item.resizeTo.slice(1) : ""
+                color: Tok.accentInk; font.family: Tok.sans; font.pixelSize: 12; font.bold: true } }
+    }
+    Rectangle {
+        id: grip
+        visible: item.editing && item.kind !== "launch" && !item.optionsOpen
+        z: 5
+        anchors.right: parent.right; anchors.bottom: parent.bottom; anchors.margins: -4
+        width: 26; height: 26; radius: 13
+        color: gripMa.containsMouse || gripMa.pressed ? Tok.accent : Tok.bg
+        border.width: 1; border.color: Tok.ruleHard
+        Text { anchors.centerIn: parent; text: "open_in_full"; rotation: 90; font.family: "Material Symbols Rounded"; font.pixelSize: 15
+            color: gripMa.containsMouse || gripMa.pressed ? Tok.accentInk : Tok.ink }
+        MouseArea {
+            id: gripMa
+            anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.SizeFDiagCursor
+            property point start
+            onPressed: e => start = mapToItem(item, e.x, e.y)
+            onPositionChanged: e => {
+                if (!pressed) return;
+                var p = mapToItem(item, e.x, e.y);
+                var w = item.width + (p.x - start.x), h = item.height + (p.y - start.y);
+                var fp = item.footPx;
+                item.resizeTo = w < (fp.small.w + fp.medium.w) / 2 ? "small"
+                              : h > (fp.medium.h + fp.large.h) / 2 ? "large" : "medium";
+            }
+            onReleased: { if (item.resizeTo) item.setOpt("size", item.resizeTo); item.resizeTo = "" }
+            onCanceled: item.resizeTo = ""
         }
     }
 }

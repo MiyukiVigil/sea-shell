@@ -100,8 +100,8 @@ class FileManager1(QObject):
         if not HAVE_GI:
             return False
         threading.Thread(target=self._run, name="sea-fm-fm1", daemon=True).start()
-        self._owned.wait(0.8)
-        return self._conn is not None and self._owned.is_set()
+        # Name acquisition is optional and must never delay the first frame.
+        return True
 
     # ---- the thread ----------------------------------------------------
 

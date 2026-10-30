@@ -33,6 +33,7 @@ PanelWindow {
     property string uiFont: "sans"
     property real ui: 1.0
     property bool editing: false
+    signal doneRequested()
     // Readings for the widgets, supplied by the bar (see shell.qml).
     property var readings: ({})
     property var player: null
@@ -84,9 +85,12 @@ PanelWindow {
         id: conf
         path: root.confPath
         watchChanges: true
+        // READ ONLY ONCE THE LOAD HAS LANDED. This used to call reload() and then text() in
+        // one breath, but reload() finishes later, so text() could hand back the file as it
+        // was BEFORE the change: what was shown lagged one change behind, and removing the
+        // last widget could leave it on screen until something else changed.
         function apply() {
             try {
-                reload();
                 var t = text();
                 if (!t || !t.trim()) { root.items = []; return }
                 var j = JSON.parse(t);
@@ -95,9 +99,9 @@ PanelWindow {
                 root.items = [];
             }
         }
-        onFileChanged: apply()
+        onFileChanged: reload()
         onLoaded: apply()
-        Component.onCompleted: apply()
+        Component.onCompleted: reload()
     }
 
     // ONE WRITER, AND IT IS NOT THIS FILE.
@@ -133,18 +137,21 @@ PanelWindow {
         id: quietFile
         path: Quickshell.env("HOME") + "/.cache/sea-shell/wallquiet.json"
         watchChanges: true
+        // READ ONLY ONCE THE LOAD HAS LANDED. This used to call reload() and then text() in
+        // one breath, but reload() finishes later, so text() could hand back the file as it
+        // was BEFORE the change: what was shown lagged one change behind, and removing the
+        // last widget could leave it on screen until something else changed.
         function apply() {
             try {
-                reload();
                 var t = text();
                 root.quiet = (t && t.trim()) ? JSON.parse(t) : ({});
             } catch (e) {
                 root.quiet = ({});
             }
         }
-        onFileChanged: apply()
+        onFileChanged: reload()
         onLoaded: apply()
-        Component.onCompleted: apply()
+        Component.onCompleted: reload()
     }
 
     // How much is going on under a rectangle given in FRACTIONS of the screen. 0 is empty.
@@ -215,8 +222,10 @@ PanelWindow {
     }
 
     // ---------- what is drawn ----------
+    // Native-sized (screen ÷ ui) and scaled up from the corner, so it lands exactly on the
+    // screen. No anchors.fill: that overrode width/height with the physical size, and at a
+    // UI scale below 1× the arranging layer then covered only the top-left of the screen.
     Item {
-        anchors.fill: parent
         scale: root.ui
         transformOrigin: Item.TopLeft
         width: root.sw
@@ -229,7 +238,10 @@ PanelWindow {
             anchors.fill: parent
             enabled: root.editing
             acceptedButtons: Qt.RightButton
-            onClicked: root.editing = false
+            // ASK, do not assign: `editing` is bound from the shell, and setting it here cut
+            // that binding, so after one right-click the gallery could no longer turn arranging
+            // on and every widget stayed stuck where it was.
+            onClicked: root.doneRequested()
         }
 
         // keep-clear shading, only while arranging. The point is that you can SEE what the
@@ -275,6 +287,8 @@ PanelWindow {
                 fieldW: root.sw
                 fieldH: root.sh - root.insetTop - root.insetBottom
                 fieldY: root.insetTop
+                busyFn: root.busyAt
+                busyLimit: root.busyLimit
                 onRemoved: root.removeItem(modelData.id)
                 onMoved: (fx, fy, exact) => {
                     // SHIFT is one statement, not two: "put it exactly here" and "stop

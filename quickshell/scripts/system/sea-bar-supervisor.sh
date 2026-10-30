@@ -16,7 +16,10 @@
 # repo before (it self-kills), and `pkill -x qs` would take out the `qs -p` panels too.
 
 PIDFILE="${XDG_RUNTIME_DIR:-/tmp}/sea-shell-supervisor.pid"
-LOCK="${XDG_RUNTIME_DIR:-/tmp}/sea-shell-supervisor-${HYPRLAND_INSTANCE_SIGNATURE:-none}.lock"
+# The display identifies the connection we actually draw on. Editors may retain
+# a previous Hyprland signature after a compositor restart; using that signature
+# lets two supervisors draw bars on the same current Wayland display.
+LOCK="${XDG_RUNTIME_DIR:-/tmp}/sea-shell-supervisor-${WAYLAND_DISPLAY:-default}.lock"
 LOG="${XDG_RUNTIME_DIR:-/tmp}/sea-shell-supervisor.log"
 
 # ---- restart: hand over to a fresh supervisor -------------------------------
@@ -43,8 +46,11 @@ echo $$ > "$PIDFILE"
 
 child=""
 cleanup() {
-    [ -n "$child" ] && kill "$child" 2>/dev/null
-    rm -f "$PIDFILE"
+    if [ -n "$child" ]; then
+        kill "$child" 2>/dev/null
+        wait "$child" 2>/dev/null
+    fi
+    [ "$(cat "$PIDFILE" 2>/dev/null)" = "$$" ] && rm -f "$PIDFILE"
     exit 0
 }
 trap cleanup TERM INT HUP
@@ -67,14 +73,31 @@ for v in $(env | sed -n 's/^\(VSCODE_[A-Z_]*\)=.*/\1/p'); do unset "$v"; done
 # a different one; the bar itself has never needed it.
 case "$LD_LIBRARY_PATH" in *code*|*electron*) unset LD_LIBRARY_PATH ;; esac
 
+# A long-lived editor or supervisor can retain a retired compositor signature.
+# Resolve the live instance for this display before each launch, including respawns.
+refresh_session() {
+    live_signature=$(hyprctl instances -j 2>/dev/null | python3 -c '
+import json, os, sys
+try:
+    matches = [i for i in json.load(sys.stdin) if i.get("wl_socket") == os.environ.get("WAYLAND_DISPLAY")]
+    if matches: print(max(matches, key=lambda i: i.get("time", 0))["instance"])
+except (ValueError, KeyError): pass
+')
+    if [ -n "$live_signature" ]; then
+        HYPRLAND_INSTANCE_SIGNATURE="$live_signature"
+        export HYPRLAND_INSTANCE_SIGNATURE
+    fi
+}
+
 fails=0
 while :; do
+    refresh_session
     start=$(date +%s)
     # 9<&- : do NOT leak the lock fd into the bar. Everything the bar spawns
     # (sea-kdeconnect.py, the cliphist wl-paste watchers) inherits it otherwise and
     # keeps the lock held long after the bar is gone, so every later supervisor sees
     # a taken lock and exits silently — leaving no bar at all.
-    qs -c sea-shell 9<&- &
+    qs -n -c sea-shell 9<&- &
     child=$!
     wait "$child"
     rc=$?
@@ -85,6 +108,14 @@ while :; do
     # that is what an old-style `pkill -xf 'qs -c sea-shell'` expects to be able
     # to do. Deliberately stopping the SUPERVISOR is what --restart / TERM is for.
     echo "$(date '+%F %T') bar exited rc=$rc after ${run}s" >> "$LOG"
+
+    # --no-duplicate exits successfully when a user has already started a bar.
+    # Wait for that instance rather than spawning alongside it or counting a crash.
+    if [ "$rc" -eq 0 ]; then
+        fails=0
+        sleep 2
+        continue
+    fi
 
     if [ "$run" -lt 5 ]; then
         fails=$((fails + 1))

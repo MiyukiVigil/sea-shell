@@ -397,7 +397,7 @@ Item {
                     width:  dock.vertical ? dock.thickness : dock.cardLen
                     height: dock.vertical ? dock.cardLen : dock.thickness
                     radius: Tok.rCard
-                    color: Tok.alpha(Tok.surface, dock.surfaceOpacity)
+                    color: Tok.surface
                     border.width: 1
                     border.color: Tok.alpha(Tok.ruleHard, 0.55)
 
@@ -597,7 +597,7 @@ Item {
                     width: tipText.implicitWidth + 14
                     height: tipText.implicitHeight + 8
                     radius: Tok.r
-                    color: Tok.alpha(Tok.raised, Math.max(0.86, dock.surfaceOpacity))
+                    color: Tok.raised
                     border.width: 1; border.color: Tok.alpha(Tok.ruleHard, 0.6)
 
                     x: dock.vertical

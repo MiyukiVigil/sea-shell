@@ -50,6 +50,11 @@ opt_check ncat          "wallpaper auto-pause"
 opt_check powerprofilesctl "power profiles"
 opt_check udisksctl     "disk mount/unmount"
 
+# the file manager is a python app, so a missing module is invisible from PATH — and SUPER+E
+# just does nothing, because Hyprland swallows the traceback
+if python3 -c "import PySide6" >/dev/null 2>&1; then row ok optional PySide6 "file manager"
+else row warn optional PySide6 "missing — file manager (SUPER+E) unavailable (sudo pacman -S pyside6)"; fi
+
 if have swww || have awww; then row ok optional "swww/awww" "static wallpapers"
 else row warn optional "swww/awww" "missing — static wallpapers unavailable"; fi
 if have mpvpaper; then row ok optional mpvpaper "animated wallpapers"
@@ -127,10 +132,10 @@ suppid=$(pgrep -f '[s]ea-bar-supervisor' 2>/dev/null | head -1)
 # ---- crash history (the whole point of this script) ----
 LOG="$STATE/sea-shell-supervisor.log"
 if [ -f "$LOG" ]; then
-    total=$(grep -c "bar exited" "$LOG" 2>/dev/null || echo 0)
+    total=$(grep -c "bar exited" "$LOG" 2>/dev/null); total=${total:-0}
     # rc=255 is the wayland-connection death that a fullscreen client teardown causes;
     # rc=143 is a deliberate TERM (a restart), which is not a fault.
-    crashes=$(grep -c "rc=255" "$LOG" 2>/dev/null || echo 0)
+    crashes=$(grep -c "rc=255" "$LOG" 2>/dev/null); crashes=${crashes:-0}
     last=$(grep "bar exited" "$LOG" 2>/dev/null | tail -1)
     if [ "$crashes" -gt 0 ]; then
         row warn crashes "unexpected exits" "$crashes of $total (rc=255 = wayland connection lost)"

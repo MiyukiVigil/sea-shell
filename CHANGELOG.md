@@ -5,6 +5,30 @@ All notable changes to **sea-shell** are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Gaming fans in quick settings.** An Auto / Quiet / Max row under the power profile
+  sets the profile and the fans together (`sea-perf.sh auto|quiet|max`). Auto hands the
+  fans back to the firmware, Quiet runs a low lm_sensors fancontrol curve, and Max pins
+  them at full speed. A fixed speed is used for Max because a curve hunts audibly when the
+  temperature sits near one of its edges. The fan half needs root, so it goes through a
+  small helper, `sea-fancurve`, that accepts only those three presets and is run through a
+  sudoers rule. The row stays hidden until that helper is installed in `/usr/local/bin`.
+- **The global menu fades in instead of popping.** Moving to a window with a menu bar
+  now fades the workspaces and title out and slides the menu in where they were. Moving
+  back fades the workspaces in. Reduced motion turns both off.
+- **Game mode switches itself on and off.** Feral gamemode's start/end hooks
+  (`~/.config/gamemode.ini`, written by install.sh when you have none) run
+  `sea-gamemode.sh auto-on|auto-off`, so any game launched through `gamemoderun` turns game
+  mode on, and it turns off when the last one exits. Game mode switched on by hand is never
+  turned off by a game exiting.
+- **Game mode handles the fans and the idle lock.** It applies the last "gaming fans" preset
+  and restores the previous one afterwards, and it stops hypridle while you play, since a
+  controller does not count as input and the screen would otherwise dim and lock mid-game.
+  Picking a fan preset while game mode is on keeps the performance profile.
+
 ## [6.5.0] - 2026-08-26
 
 **The file manager update.** sea-shell has shipped a file manager for a while; this is the

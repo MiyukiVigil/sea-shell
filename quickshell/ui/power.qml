@@ -9,6 +9,11 @@ import QtQuick
 
 ShellRoot {
     id: root
+    property var userProfile: ({})
+    FileView { path: Quickshell.env("HOME") + "/.config/sea-shell/profile.json"; watchChanges: true
+        onLoaded: { try { root.userProfile=JSON.parse(text()) } catch(e){} }
+        onFileChanged: reload()
+    }
     property int sel: 0
     property int arming: -1        // action index waiting for its second confirm
     property string who: ""
@@ -16,7 +21,10 @@ ShellRoot {
     property string accent: "#63c7dd"
     property bool cfgLight: false
     property real cfgScale: 0     // 0 = auto (per-monitor), >0 = manual UI-scale multiplier
+    property var  cfgMonitors: ({})   // per-monitor overrides from appearance.json
     function uiFor(scr) {          // matches shell.qml: ≤1440p → 1×, grows past it, capped 2.5×
+        var mo = (scr && scr.name && root.cfgMonitors[scr.name]) ? root.cfgMonitors[scr.name].scale : 0;
+        if (mo > 0) return mo;                // per-monitor override wins (same rule as the bar)
         if (root.cfgScale > 0) return root.cfgScale;
         var h = (scr && scr.height) ? scr.height : 0;
         if (h <= 1440) return 1.0;
@@ -24,7 +32,7 @@ ShellRoot {
     }
     // follow the bar's appearance config (accent + light/dark + UI scale)
     Process { running: true; command: ["sh","-c","cat \"$HOME/.config/sea-shell/appearance.json\" 2>/dev/null"]
-        stdout: StdioCollector { id: apOut; onStreamFinished: { try { var j=JSON.parse(apOut.text); if(j.accent) root.accent=j.accent; if(j.scale!==undefined) root.cfgScale=j.scale; if(j.mode!==undefined) root.cfgLight=(""+j.mode==="light") } catch(e){} } } }
+        stdout: StdioCollector { id: apOut; onStreamFinished: { try { var j=JSON.parse(apOut.text); if(j.accent) root.accent=j.accent; if(j.scale!==undefined) root.cfgScale=j.scale; if(j.monitors) root.cfgMonitors=j.monitors; if(j.mode!==undefined) root.cfgLight=(""+j.mode==="light") } catch(e){} } } }
 
     // ---------- industrial token shim ----------
     // Colours come from the shared Tok singleton (see shell.qml). This surface used to carry its
@@ -79,7 +87,10 @@ ShellRoot {
         // transformOrigin is the centre, i.e. the screen centre for this full-screen surface)
         Binding { target: win.contentItem; property: "scale"; value: win.ui }
 
-        Rectangle { anchors.fill: parent; color: Qt.rgba(0,0,0,0.6); MouseArea { anchors.fill: parent; onClicked: Qt.quit() } }
+        // scrim in native units so it still reaches the screen edges after the scale (a
+        // UI scale < 1× would otherwise shrink it into a dimmed box with a bright frame)
+        Rectangle { anchors.centerIn: parent; width: win.width / win.ui; height: win.height / win.ui
+            color: Qt.rgba(0,0,0,0.6); MouseArea { anchors.fill: parent; onClicked: Qt.quit() } }
         Item {
             anchors.fill: parent; focus: true
             Keys.onPressed: (e)=> {
@@ -92,20 +103,24 @@ ShellRoot {
             }
         }
 
-        // user @ host · uptime
-        Column {
+        // The panel grows by however much a large name font made the profile card taller, and
+        // the buttons move down half that, so the whole thing stays centred.
+        Rectangle {
+            anchors.centerIn: parent; width: 680; height: 326 + profileCard.grown; radius: 24
+            color: Tok.bg; border.width: 1; border.color: Tok.ruleHard
+        }
+        ProfileCard {
+            id: profileCard
+            readonly property real grown: height - 102
             anchors.horizontalCenter: parent.horizontalCenter
-            anchors.bottom: cardsRow.top; anchors.bottomMargin: 34
-            spacing: 4
-            Text { anchors.horizontalCenter: parent.horizontalCenter; text: root.who
-                color: theme.text; font.pixelSize: 17; font.bold: true; font.family: Tok.mono }
-            Text { anchors.horizontalCenter: parent.horizontalCenter; text: root.up
-                color: theme.faint; font.pixelSize: 12; font.family: Tok.mono }
+            anchors.bottom: cardsRow.top; anchors.bottomMargin: 18
+            width: 632; height: Math.max(102, implicitHeight - 14); profile: root.userProfile
+            subtitle: root.up + " · Choose a session action"
         }
 
         Row {
             id: cardsRow
-            anchors.centerIn: parent; spacing: 22
+            anchors.horizontalCenter: parent.horizontalCenter; anchors.verticalCenter: parent.verticalCenter; anchors.verticalCenterOffset: 40 + profileCard.grown / 2; spacing: 10
             Repeater {
                 model: root.actions
                 delegate: Rectangle {
@@ -113,22 +128,22 @@ ShellRoot {
                     required property int index
                     readonly property bool cur: index === root.sel
                     readonly property bool arm: index === root.arming
-                    width: 130; height: 150; radius: Tok.rCard
-                    scale: cur ? 1.05 : 1.0
-                    color: arm ? theme.a(theme.bad,0.16) : cur ? theme.a(theme.iris,0.16) : theme.a(theme.bg,0.96)
+                    width: 118; height: 110; radius: Tok.rCard
+                    scale: cur ? 1.025 : 1.0
+                    color: arm ? Tok.critWash : cur ? Tok.accentWash : theme.bg
                     border.width: cur || arm ? 2 : 1
                     border.color: arm ? theme.bad : cur ? modelData.col : theme.a(theme.iris,0.24)
-                    Behavior on color { ColorAnimation { duration: 120 } }
-                    Behavior on scale { NumberAnimation { duration: 120; easing.type: Easing.OutCubic } }
+                    Behavior on color { ColorAnimation { duration: Tok.mFast } }
+                    Behavior on scale { NumberAnimation { duration: Tok.mFast; easing.type: Easing.OutCubic } }
                     Column {
                         anchors.centerIn: parent; spacing: 12
                         Text { anchors.horizontalCenter: parent.horizontalCenter; text: modelData.i
-                            font.family: "Material Symbols Outlined"; font.pixelSize: 46; color: arm ? theme.bad : modelData.col }
+                            font.family: "Material Symbols Outlined"; font.pixelSize: 30; color: arm ? theme.bad : modelData.col }
                         Text { anchors.horizontalCenter: parent.horizontalCenter; text: arm ? "sure?" : modelData.l
-                            color: arm ? theme.bad : theme.text; font.pixelSize: 14; font.family: Tok.mono }
+                            color: arm ? theme.bad : theme.text; font.pixelSize: 14; font.family: Tok.sans }
                         Text { anchors.horizontalCenter: parent.horizontalCenter
                             text: String.fromCharCode(modelData.k).toLowerCase()
-                            color: cur ? theme.frost : theme.faint; font.pixelSize: 10; font.family: Tok.mono }
+                            color: cur ? theme.frost : theme.faint; font.pixelSize: 10; font.family: Tok.sans }
                     }
                     MouseArea { anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
                         onEntered: { root.sel = index; if (root.arming !== index) root.arming = -1 }
@@ -142,7 +157,7 @@ ShellRoot {
             text: root.arming >= 0 ? "press again to " + root.actions[root.arming].l.toLowerCase() + " · esc to cancel"
                                    : "←→ select · ⏎ go · l s o r p · esc to cancel"
             color: root.arming >= 0 ? theme.bad : theme.faint
-            font.pixelSize: 12; font.family: Tok.mono
+            font.pixelSize: 12; font.family: Tok.sans
         }
     }
 }

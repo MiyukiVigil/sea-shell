@@ -26,12 +26,29 @@ if [ -f "$lua" ]; then
     disp="${action%%,*}"; disp="$(printf '%s' "$disp" | tr -d ' ')"
     params="${action#*,}"; params="${params# }"
     esc() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'; }
-    if [ "$disp" = "exec" ]; then
-        dsp="hl.dsp.exec_cmd(\"$(esc "$params")\")"
-    else
-        # universal fallback: run ANY dispatcher via hyprctl (avoids per-dispatcher Lua mapping)
-        dsp="hl.dsp.exec_cmd(\"hyprctl dispatch $(esc "$disp $params")\")"
-    fi
+    # Legacy dispatchers are mapped onto the Lua API — the old `hyprctl dispatch <disp> <params>`
+    # fallback stopped working on Lua configs, where hyprctl evaluates its argument as Lua
+    # (`hl.dispatch(workspace 3)` → parse error), so every non-exec bind added here was dead.
+    # A raw `hl.dsp.…(…)` expression typed as the action is passed through untouched.
+    p="$(esc "$params")"
+    case "$action" in hl.dsp.*) disp="lua" ;; esac
+    case "$disp" in
+        lua)            dsp="$action" ;;
+        exec)           dsp="hl.dsp.exec_cmd(\"$p\")" ;;
+        killactive)     dsp="hl.dsp.window.close()" ;;
+        togglefloating) dsp="hl.dsp.window.float({ action = \"toggle\" })" ;;
+        fullscreen)     dsp="hl.dsp.window.fullscreen({ mode = \"fullscreen\", action = \"toggle\" })" ;;
+        centerwindow)   dsp="hl.dsp.window.center()" ;;
+        workspace)      dsp="hl.dsp.focus({ workspace = \"$p\" })" ;;
+        movetoworkspace) dsp="hl.dsp.window.move({ workspace = \"$p\" })" ;;
+        movefocus)      dsp="hl.dsp.focus({ direction = \"$p\" })" ;;
+        movewindow)     dsp="hl.dsp.window.move({ direction = \"$p\" })" ;;
+        togglespecialworkspace) dsp="hl.dsp.workspace.toggle_special(\"${p:-special}\")" ;;
+        exit)           dsp="hl.dsp.exit()" ;;
+        *)
+            echo "sea-add-bind: no Lua mapping for dispatcher '$disp' — use 'exec, <cmd>' or an hl.dsp.… expression" >&2
+            exit 2 ;;
+    esac
     printf '\nhl.bind("%s", %s, { description = "%s" })\n' "$(esc "$keys")" "$dsp" "$(esc "$desc")" >> "$lua"
 fi
 

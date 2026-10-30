@@ -279,9 +279,13 @@ ShellRoot {
         onVisibleChanged: if (visible) tdIn.input.forceActiveFocus()
         Binding { target: dWin.contentItem; property: "scale"; value: dWin.ui }
 
-        // opaque ground — no frost, no blur
+        // opaque ground — no frost, no blur. Sized in NATIVE units (screen ÷ ui) because the
+        // contentItem is scaled: anchors.fill laid it out at the physical size, so below 1× it
+        // shrank into a box with see-through edges and above 1× the content ran off-screen.
         Rectangle {
-            anchors.fill: parent
+            anchors.centerIn: parent
+            width: dWin.width / dWin.ui
+            height: dWin.height / dWin.ui
             color: Tok.bg
             opacity: Tok.loaded ? 1 : 0
             Behavior on opacity { NumberAnimation { duration: 140; easing.type: Easing.OutCubic } }

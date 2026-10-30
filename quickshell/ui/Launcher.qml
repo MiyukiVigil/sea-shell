@@ -23,8 +23,11 @@ Scope {
     property bool cfgLight: false
     property real cfgRadius: 14
     property real cfgScale: 0     // 0 = auto (per-monitor), >0 = manual UI-scale multiplier
+    property var  cfgMonitors: ({})   // per-monitor overrides from appearance.json
     // matches shell.qml uiFor(): ≤1440p untouched, grows past it, capped at 2.5×
     function uiFor(scr) {
+        var mo = (scr && scr.name && root.cfgMonitors[scr.name]) ? root.cfgMonitors[scr.name].scale : 0;
+        if (mo > 0) return mo;                // per-monitor override wins (same rule as the bar)
         if (root.cfgScale > 0) return root.cfgScale;
         var h = (scr && scr.height) ? scr.height : 0;
         if (h <= 1440) return 1.0;
@@ -52,13 +55,11 @@ Scope {
     function toggle() { root.shown ? close() : open("") }
     function close() { root.shown = false }
 
-    // CLOSE IS INSTANT: the card opacity is zeroed on the same frame (see card.openF),
-    // and — paired with `layerrule = animation none` on sea-shell:launcher — the layer
-    // surface can't fade its last buffer, so the result text never lingers on close.
-    // We hold the window mapped ~90ms, then unmap and only THEN clear the query, so the
-    // list never repopulates while still on screen.
+    SurfaceMotion { id: launcherMotion; opened: root.shown; reduced: Tok.reducedMotion }
+    // Keep results intact until the exit has finished; reopening reverses from its current frame.
     onShownChanged: { if (shown) { held = true; holdTimer.stop() } else holdTimer.restart() }
-    Timer { id: holdTimer; interval: 90; onTriggered: { root.held = false; field.text = ""; root.query = "" } }
+    Timer { id: holdTimer; interval: Tok.reducedMotion ? 0 : 170
+        onTriggered: { root.held = false; field.text = ""; root.query = "" } }
 
     // ---------- industrial token shim ----------
     // Colours come from the shared Tok singleton (see shell.qml). This surface used to carry its
@@ -84,7 +85,7 @@ Scope {
 
     // accent follows the bar's appearance config
     Process { id: apProc; running: true; command: ["sh","-c","cat \"$HOME/.config/sea-shell/appearance.json\" 2>/dev/null"]
-        stdout: StdioCollector { id: apOut; onStreamFinished: { try { var j=JSON.parse(apOut.text); if(j.accent) root.accent=j.accent; if(j.radius!==undefined) root.cfgRadius=j.radius; if(j.scale!==undefined) root.cfgScale=j.scale; if(j.mode!==undefined) root.cfgLight=(""+j.mode==="light") } catch(e){} } } }
+        stdout: StdioCollector { id: apOut; onStreamFinished: { try { var j=JSON.parse(apOut.text); if(j.accent) root.accent=j.accent; if(j.radius!==undefined) root.cfgRadius=j.radius; if(j.scale!==undefined) root.cfgScale=j.scale; if(j.monitors) root.cfgMonitors=j.monitors; if(j.mode!==undefined) root.cfgLight=(""+j.mode==="light") } catch(e){} } } }
 
     // ---------- frecency history ----------
     Process { running: true; command: ["sh","-c","d=\"$HOME/.config/sea-shell\"; mkdir -p \"$d\"; cat \"$d/launcher-history.json\" 2>/dev/null; printf '\\n%s/launcher-history.json' \"$d\" >&2"]
@@ -406,7 +407,7 @@ Scope {
         color: "transparent"
         WlrLayershell.namespace: "sea-shell:launcher"
         WlrLayershell.layer: WlrLayer.Overlay
-        WlrLayershell.keyboardFocus: WlrKeyboardFocus.Exclusive
+        WlrLayershell.keyboardFocus: root.shown ? WlrKeyboardFocus.Exclusive : WlrKeyboardFocus.None
         exclusionMode: ExclusionMode.Ignore
         onVisibleChanged: if (visible) field.forceActiveFocus()
 
@@ -424,34 +425,18 @@ Scope {
             y: parent.height * 0.16
             radius: Tok.rCard
             // glassy matte — translucent so the compositor blur (sea-shell:launcher
-            // layerrule) frosts the wallpaper behind it; soft cool tint, no gloss.
-            color: theme.a(theme.bg, theme.light ? 0.60 : 0.52)
+            // Solid material keeps text independent of the wallpaper and other windows.
+            color: theme.bg
             border.width: 1; border.color: theme.a(theme.frost, 0.26)
             Behavior on height { NumberAnimation { duration: 110; easing.type: Easing.OutCubic } }
 
-            // open fades + tiles in; close zeroes openF on the same frame → instant, no
-            // lingering. (An imperative Animation.start() in Component.onCompleted makes
-            // quickshell 0.3 exit silently on layer surfaces, so we drive it via Connections.)
-            property real openF: 0.0
+            readonly property real openF: launcherMotion.progress
             opacity: openF
-            // combine the open-animation tile-in with the global UI scale; grow from the top
-            // so the card stays pinned at y (16% down) and centred horizontally on big displays
+            enabled: root.shown
             transformOrigin: Item.Top
-            scale: win.ui * (0.975 + 0.025 * openF)
-            NumberAnimation { id: cardIn; target: card; property: "openF"; to: 1.0
-                duration: 200; easing.type: Easing.OutCubic }
-            Connections { target: root; function onShownChanged() {
-                if (root.shown) cardIn.restart(); else { cardIn.stop(); card.openF = 0.0 } } }
+            scale: win.ui * (0.97 + 0.03 * openF)
+            transform: Translate { y: -12 * (1 - card.openF) }
 
-            // frosted-glass rim: a whisper of light at the top edge, fading out — matte,
-            // not a glossy sheen. Sits above the fill, below the content.
-            Rectangle {
-                anchors.fill: parent; radius: parent.radius
-                gradient: Gradient {
-                    GradientStop { position: 0.0;  color: Qt.rgba(1, 1, 1, theme.light ? 0.10 : 0.05) }
-                    GradientStop { position: 0.35; color: "transparent" }
-                }
-            }
             Rectangle { anchors { top: parent.top; left: parent.left; right: parent.right; topMargin: 1; leftMargin: parent.radius; rightMargin: parent.radius }
                 height: 1; color: Qt.rgba(1, 1, 1, theme.light ? 0.45 : 0.12) }
 
@@ -468,7 +453,7 @@ Scope {
                     clip: true
                     onTextChanged: root.query = text
                     Text { text: "apps  ·  >run  =calc  ~files  ?web  ;clip  :sys  .emoji"; visible: field.text===""
-                        color: theme.faint; font.pixelSize: 14; font.family: Tok.mono; anchors.verticalCenter: parent.verticalCenter }
+                        color: theme.sub; font.pixelSize: 14; font.family: Tok.mono; anchors.verticalCenter: parent.verticalCenter }
                     Keys.onEscapePressed: root.close()
                     Keys.onReturnPressed: (e)=> {
                         if ((e.modifiers & Qt.ControlModifier) && root.results[root.sel] && root.results[root.sel].type==="run")
@@ -523,7 +508,7 @@ Scope {
                     required property var modelData
                     required property int index
                     width: list.width; height: 52; radius: Tok.r
-                    color: rowMa.containsMouse && index !== root.sel ? theme.a(theme.iris, 0.07)
+                    color: false ? theme.a(theme.iris, 0.07)
                                                                      : "transparent"
                     Behavior on color { ColorAnimation { duration: Tok.mFast } }
                     // icon: real app icon when we have one, Material glyph otherwise, letter-tile fallback
@@ -556,7 +541,7 @@ Scope {
                         Text { width: parent.width; elide: Text.ElideRight; textFormat: Text.StyledText
                             text: modelData.title; color: theme.text; font.pixelSize: 14; font.family: Tok.mono }
                         Text { width: parent.width; elide: Text.ElideRight; visible: text!==""
-                            text: modelData.sub||""; color: theme.faint; font.pixelSize: 11; font.family: Tok.mono }
+                            text: modelData.sub||""; color: theme.sub; font.pixelSize: 11; font.family: Tok.mono }
                     }
                     Text { id: favStar
                         anchors { right: parent.right; rightMargin: 14; verticalCenter: parent.verticalCenter }
@@ -564,7 +549,7 @@ Scope {
                         font.family: "Material Symbols Outlined"; font.pixelSize: 14
                         color: modelData.fav ? theme.warn : theme.faint }
                     MouseArea { id: rowMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
-                        onEntered: root.sel = index
+                        // Hover never changes the keyboard selection while searching.
                         onClicked: root.activate(index) }
                 }
             }
@@ -576,10 +561,10 @@ Scope {
                 anchors.bottom: parent.bottom; anchors.bottomMargin: 8
                 Text { anchors { left: parent.left; leftMargin: 18; verticalCenter: parent.verticalCenter }
                     text: root.results.length + (root.results.length===1 ? " result" : " results")
-                    color: theme.faint; font.pixelSize: 10; font.family: Tok.mono }
+                    color: theme.sub; font.pixelSize: 10; font.family: Tok.mono }
                 Text { anchors { right: parent.right; rightMargin: 18; verticalCenter: parent.verticalCenter }
                     text: "↑↓ move · ⏎ open · alt+1–9 quick · esc close"
-                    color: theme.faint; font.pixelSize: 10; font.family: Tok.mono }
+                    color: theme.sub; font.pixelSize: 10; font.family: Tok.mono }
             }
         }
     }

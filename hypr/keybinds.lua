@@ -17,11 +17,13 @@ local keybinds  = "~/.config/quickshell/sea-shell/sea-toggle.sh keybinds"
 local shotmenu  = "~/.config/quickshell/sea-shell/sea-toggle.sh screenshot"
 
 -- ---------------- apps ----------------
+hl.bind(mod .. " + Return",    hl.dsp.exec_cmd(term),                                          { description = "Terminal" })
 hl.bind(mod .. " + T",         hl.dsp.exec_cmd(term),                                          { description = "Terminal" })
 hl.bind(mod .. " + Q",         hl.dsp.window.close(),                                          { description = "Close window" })
 hl.bind("CTRL + Space",        hl.dsp.exec_cmd(menu),                                          { description = "App launcher" })
 hl.bind(mod .. " + Space",     hl.dsp.exec_cmd(menu),                                          { description = "App launcher" })
 hl.bind(mod .. " + E",         hl.dsp.exec_cmd("python3 ~/.config/quickshell/sea-shell/sea-fm.py"),             { description = "File manager (sea-fm)" })
+hl.bind(mod .. " + B",         hl.dsp.exec_cmd(browser),                                       { description = "Browser" })
 hl.bind(mod .. " + A",         hl.dsp.exec_cmd(browser),                                       { description = "Browser" })
 hl.bind(mod .. " + S",         hl.dsp.exec_cmd(settings),                                      { description = "Control center" })
 hl.bind(mod .. " + SHIFT + W", hl.dsp.exec_cmd(wallpick),                                      { description = "Wallpaper picker" })
@@ -57,10 +59,10 @@ hl.bind(mod .. " + SHIFT + F", hl.dsp.window.fullscreen({ mode = "fullscreen", a
 hl.bind(mod .. " + P",         hl.dsp.window.float({ action = "toggle" }),                            { description = "Toggle floating" })
 hl.bind(mod .. " + C",         hl.dsp.window.center(),                                                { description = "Center window" })
 
--- focus (vim keys + arrows)
+-- focus (vim keys + arrows). No SUPER+K here: that is the cheat-sheet, and Hyprland fires
+-- EVERY bind on a combo, so focus-up and the cheat-sheet both ran. Use SUPER+Up instead.
 hl.bind(mod .. " + H",     hl.dsp.focus({ direction = "l" }), { description = "Focus left" })
 hl.bind(mod .. " + L",     hl.dsp.focus({ direction = "r" }), { description = "Focus right" })
-hl.bind(mod .. " + K",     hl.dsp.focus({ direction = "u" }), { description = "Focus up" })
 hl.bind(mod .. " + J",     hl.dsp.focus({ direction = "d" }), { description = "Focus down" })
 hl.bind(mod .. " + left",  hl.dsp.focus({ direction = "l" }), { description = "Focus left" })
 hl.bind(mod .. " + right", hl.dsp.focus({ direction = "r" }), { description = "Focus right" })
@@ -106,6 +108,7 @@ hl.bind("XF86AudioMicMute",       hl.dsp.exec_cmd("wpctl set-mute @DEFAULT_AUDIO
 hl.bind("XF86MonBrightnessUp",    hl.dsp.exec_cmd("brightnessctl set 5%+"),                            { repeating = true, locked = true, description = "Brightness up" })
 hl.bind("XF86MonBrightnessDown",  hl.dsp.exec_cmd("brightnessctl set 5%-"),                            { repeating = true, locked = true, description = "Brightness down" })
 hl.bind("XF86AudioPlay",          hl.dsp.exec_cmd("playerctl play-pause"),                             { locked = true, description = "Play / pause" })
+hl.bind("XF86AudioPause",         hl.dsp.exec_cmd("playerctl play-pause"),                             { locked = true, description = "Play / pause" })
 hl.bind("XF86AudioNext",          hl.dsp.exec_cmd("playerctl next"),                                   { locked = true, description = "Next track" })
 hl.bind("XF86AudioPrev",          hl.dsp.exec_cmd("playerctl previous"),                               { locked = true, description = "Previous track" })
 
@@ -136,13 +139,20 @@ hl.bind(mod .. " + SHIFT + G", hl.dsp.exec_cmd("~/.config/quickshell/sea-shell/s
 hl.bind(mod .. " + R", hl.dsp.exec_cmd("qs -c sea-shell ipc call recorder toggle"),              { description = "Screen Recording" })
 
 -- ---------------- screen magnifier (Hyprland cursor:zoom_factor) ----------------
--- SUPER +/- steps the zoom (hold to repeat), SUPER 0 resets. The level flashes in the OSD.
+-- SUPER +/- steps the zoom (hold to repeat), SUPER CTRL 0 resets. The level flashes in the OSD.
+-- (Not plain SUPER 0 — that is workspace 10, and both fired.)
 hl.bind(mod .. " + equal",       hl.dsp.exec_cmd("qs -c sea-shell ipc call zoom inc"),   { repeating = true, description = "Magnifier zoom in" })
 hl.bind(mod .. " + minus",       hl.dsp.exec_cmd("qs -c sea-shell ipc call zoom dec"),   { repeating = true, description = "Magnifier zoom out" })
 hl.bind(mod .. " + KP_Add",      hl.dsp.exec_cmd("qs -c sea-shell ipc call zoom inc"),   { repeating = true, description = "Magnifier zoom in" })
 hl.bind(mod .. " + KP_Subtract", hl.dsp.exec_cmd("qs -c sea-shell ipc call zoom dec"),   { repeating = true, description = "Magnifier zoom out" })
-hl.bind(mod .. " + 0",           hl.dsp.exec_cmd("qs -c sea-shell ipc call zoom reset"), { description = "Magnifier reset" })
+hl.bind(mod .. " + CTRL + 0",    hl.dsp.exec_cmd("qs -c sea-shell ipc call zoom reset"), { description = "Magnifier reset" })
 
--- NOTE: preserved from keybinds.conf — SUPER+C is bound twice (center window above, and Code here).
--- The last-registered wins in Hyprland; left as-is for a faithful migration. Remove one to resolve.
-hl.bind(mod .. " + C", hl.dsp.exec_cmd("code"), { description = "Code" })
+-- SUPER+C is "Center window" (see the README); Code moved to SUPER+SHIFT+C. The old note here
+-- said the last-registered bind wins — it doesn't, Hyprland runs both, so SUPER+C centred the
+-- window AND opened VS Code.
+
+
+hl.bind("SUPER + ALT + W", hl.dsp.exec_cmd("qs -c sea-shell ipc call widgets toggle"), { description = "Widget drawer" })
+
+
+hl.bind("SUPER + SHIFT + c", hl.dsp.exec_cmd("code"), { description = "Code" })

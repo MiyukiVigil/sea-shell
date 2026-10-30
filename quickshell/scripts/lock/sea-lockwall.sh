@@ -64,7 +64,14 @@ esac
 if [ -f "$LOCK_CONF" ]; then
     # Use sed to replace the path = line inside the background block
     # Works even if the file uses spaces around =
-    sed -i "s|^\( *path *= *\).*|\1$DEST|" "$LOCK_CONF"
+    python3 - "$LOCK_CONF" "$DEST" <<'PYLOCK'
+import re, sys
+from pathlib import Path
+path=Path(sys.argv[1]); destination=sys.argv[2]
+text=path.read_text()
+text=re.sub(r'background\s*\{[^{}]*\}', lambda block: re.sub(r'^(\s*path\s*=).*$', lambda m:m[1]+' '+destination, block[0], flags=re.M), text)
+path.write_text(text)
+PYLOCK
 fi
 
 echo "sea-lockwall: lock background set to $DEST"

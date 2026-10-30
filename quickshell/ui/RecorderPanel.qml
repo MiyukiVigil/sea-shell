@@ -336,7 +336,7 @@ Scope {
             width: 560
             height: card.implicitHeight + 40
             radius: Tok.rCard
-            color: theme.a(theme.bg, 0.98)
+            color: theme.bg
             border.width: 1; border.color: theme.a(theme.iris, 0.34)
             MouseArea { anchors.fill: parent }
 
@@ -548,7 +548,7 @@ Scope {
         Rectangle {
             anchors.centerIn: parent
             width: 132; height: 132; radius: Tok.rCard
-            color: theme.a(theme.bg, 0.86)
+            color: theme.bg
             border.width: 2; border.color: theme.a(theme.bad, 0.8)
             Text {
                 anchors.centerIn: parent

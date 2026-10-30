@@ -13,6 +13,7 @@ import Quickshell.Services.UPower
 import Quickshell.Bluetooth
 import QtQuick
 import QtQuick.Layouts
+import QtQuick.Effects
 
 Scope {
     id: root
@@ -31,10 +32,18 @@ Scope {
             if (v.length > 0) root.seaVersion = v;
         } }
     }
+    property var userProfile: ({})
+    FileView {
+        path: Quickshell.env("HOME") + "/.config/sea-shell/profile.json"
+        watchChanges: true
+        onLoaded: { try { root.userProfile=JSON.parse(text()) } catch(e){} }
+        onFileChanged: reload()
+    }
     property int tab: 8                             // land on the System / About dashboard
 
     // ---- resident lifecycle: the panel is hidden until shown, so it costs ~nothing closed ----
     property bool shown: false
+    property bool authenticationPending: false
     function openPanel() { root.showTab(8) }
     function openTab(t) { root.showTab(t) }
     function closePanel() { root.shown = false }
@@ -98,10 +107,50 @@ Scope {
         19: { l: "Disks",          i: "hard_drive" },
         20: { l: "Bar",            i: "view_agenda" },
         21: { l: "Desktop",        i: "wallpaper" },
-        22: { l: "Default Apps",   i: "apps" }
+        22: { l: "Default Apps",   i: "apps" },
+        23: { l: "Your profile", i: "account_circle" }
     })
+    readonly property var pageDescriptions: ({"0": "Output, input and individual application volume.", "1": "Arrange monitors and choose resolution, refresh rate and scaling.", "2": "Manage wired, wireless and VPN connections.", "3": "Choose your location, units and weather information.", "4": "Preview your desktop look before applying colors, fonts and icons.", "5": "Configure desktop actions and shortcuts to common tools.", "6": "Choose power profiles and session actions.", "7": "Find and edit your keyboard shortcuts.", "8": "Inspect your system and available maintenance actions.", "9": "Pair devices and manage Bluetooth connections.", "10": "Configure screen locking, dimming and idle behavior.", "11": "Manage calendars, events and reminders.", "12": "Choose the information shown in your bar.", "13": "Save a desktop look or switch between theme profiles.", "14": "Connect your phone and manage sharing features.", "15": "Configure keyboard, pointer and touchpad behavior.", "16": "Customize dock placement, sizing and behavior.", "17": "Set behavior for matching application windows.", "18": "Review application activity and screen-time preferences.", "19": "Inspect storage devices and available space.", "20": "Set bar placement, appearance and visibility.", "21": "Manage wallpaper and desktop layout.", "23": "Personalize your picture, display name and lock screen.", "22": "Choose which applications open folders, links and files."})
+    function pageEffectNote(t) {
+        if (t === 1) return "Monitor changes use Apply. Keep a working display connected while testing.";
+        if (t === 4 || t === 13) return "Appearance saves automatically; app icons may need an app restart.";
+        if (t === 17) return "Some window rules take effect when the application opens a new window.";
+        if (t === 22) return "Defaults affect future opens. An already-running file manager may keep handling reveal requests until it closes.";
+        return "Use Apply where shown. Each section keeps its existing behavior.";
+    }
     function tabLabel(t) { var m = root.tabMeta[t]; return m ? m.l : "" }
     function tabIcon(t)  { var m = root.tabMeta[t]; return m ? m.i : "tune" }
+    // the icon tile's hue turn for each page, matching its sidebar group
+    readonly property var tabHues: ({ 2: 0, 9: 0, 14: 0, 0: -0.09, 18: -0.09, 8: 0.5, 4: 0.09, 13: 0.09, 20: 0.09, 12: 0.09,
+        21: 0.18, 16: 0.18, 17: 0.18, 1: -0.18, 6: -0.18, 10: -0.18, 11: 0.3, 3: 0.3, 22: 0.3, 5: 0.3, 7: -0.3, 15: -0.3, 19: -0.3, 23: 0 })
+    function tabHue(t) { var h = root.tabHues[t]; return h === undefined ? 0 : h }
+
+    // ---- the macOS look: colours derived from the palette, never fixed ----
+    // A group panel and a hovered row are the ink laid thinly over the window, so they go a
+    // shade darker in light mode and a shade lighter in dark, as System Settings' do.
+    readonly property color groupFill: Qt.rgba(Tok.ink.r, Tok.ink.g, Tok.ink.b, Tok.light ? 0.04 : 0.05)
+    readonly property color groupRule: Qt.rgba(Tok.ink.r, Tok.ink.g, Tok.ink.b, 0.075)
+    readonly property color rowHover:  Qt.rgba(Tok.ink.r, Tok.ink.g, Tok.ink.b, 0.07)
+    function tileColor(turn) {
+        var h = ((Tok._h + turn) % 1 + 1) % 1;
+        return Qt.hsla(h, Tok._achromatic ? 0 : 0.46, Tok.light ? 0.55 : 0.5, 1);
+    }
+
+    // ---- back and forward, as in System Settings' toolbar ----
+    property var navBack: []
+    property var navFwd: []
+    property int navLast: tab
+    property bool navMoving: false
+    function navGo(dir) {
+        var from = dir < 0 ? root.navBack : root.navFwd;
+        if (!from.length) return;
+        var to = from[from.length - 1];
+        root.navMoving = true;
+        if (dir < 0) { root.navBack = from.slice(0, -1); root.navFwd = root.navFwd.concat([root.tab]) }
+        else { root.navFwd = from.slice(0, -1); root.navBack = root.navBack.concat([root.tab]) }
+        root.tab = to;
+        root.navMoving = false;
+    }
 
     // ---- default applications -------------------------------------------------
     // WHICH PROGRAM OPENS WHAT is a system-wide setting, not a shell one: it lives
@@ -170,11 +219,23 @@ Scope {
     }
     // The sections of the page being looked at, for the jump chips.
     readonly property var pageSections: {
+        var currentAppearanceTab = root.apSubTab;
         var _ = root.sectionTick;               // recompute when the registry settles
         if (!root.sectionsReady) return [];
         var out = [];
         for (var i = 0; i < root.sectionIndex.length; i++)
-            if (root.sectionIndex[i].tab === root.tab) out.push(root.sectionIndex[i]);
+            if (root.sectionIndex[i].tab === root.tab) {
+                var ancestor = root.sectionIndex[i].item;
+                var matches = true;
+                while (ancestor) {
+                    if (root.tab === 4 && typeof ancestor.appearanceSubTab !== "undefined") {
+                        matches = ancestor.appearanceSubTab === currentAppearanceTab;
+                        break;
+                    }
+                    ancestor = ancestor.parent;
+                }
+                if (matches) out.push(root.sectionIndex[i]);
+            }
         // IN PAGE ORDER. Sections complete bottom-up, so the registry holds them backwards
         // and the chips read the page from the end. Once the page is laid out the sections'
         // own positions are the truth — and they are laid out, because chips are only drawn
@@ -202,8 +263,25 @@ Scope {
     function jumpTo(entry) {
         if (!entry) return;
         if (root.tab !== entry.tab) root.showTab(entry.tab);
+        if (entry.tab === 4) {
+            var ancestor = entry.item;
+            while (ancestor) {
+                if (typeof ancestor.appearanceSubTab !== "undefined") {
+                    root.apSubTab = ancestor.appearanceSubTab;
+                    break;
+                }
+                ancestor = ancestor.parent;
+            }
+        }
         root.pendingJump = entry.item;
         jumpTimer.restart();
+    }
+    // A search is done once it has taken you somewhere: the field empties and lets go of the
+    // keyboard, so the sidebar shows the pages again (and Escape closes the panel again).
+    function jumpFromSearch(entry) {
+        root.jumpTo(entry);
+        navIn.text = "";
+        navIn.focus = false;
     }
     function doJump() {
         var it = root.pendingJump;
@@ -225,9 +303,11 @@ Scope {
         // here and there, and one of those mirrors drives the WHOLE SHELL's palette.
         root.apFresh = false;
         apReadProc.running = true;                  // pick up appearance changes made while closed
-        if (root.tab === t) root.refreshTab(t); else root.tab = t;   // else onTabChanged refreshes
+        root.tab = t;
+        tabRefresh.restart();
         root.shown = true;
     }
+    Timer { id: tabRefresh; interval: 80; onTriggered: root.refreshTab(root.tab) }
     function refreshTab(t) {
         if (t === 0) root.audioRefresh()              // audio: sink formats + streams
         if (t === 1) { root.reloadMonitors(); root.reloadDisplayProfiles() }   // display: monitors + saved layout profiles
@@ -244,6 +324,83 @@ Scope {
         if (t === 11) { reloadEventsProc.running = true; calCfgLoad.running = true }  // calendar
     }
     function run(cmd) { Quickshell.execDetached(["sh", "-c", cmd]) }
+    property string appearanceSaveState: "Appearance saves automatically"
+    property bool appearanceSaveFailed: false
+    property string pendingAppearancePayload: ""
+    property var appearancePostSaveAction: null
+    function afterAppearanceSave(action) {
+        if (appearanceWriter.running || root.pendingAppearancePayload.length) root.appearancePostSaveAction = action;
+        else action();
+    }
+    readonly property string appearanceSaveScript: Qt.resolvedUrl("sea-save-appearance.py").toString().replace("file://", "")
+    function queueAppearanceSave(jsonText) {
+        // Escape non-ASCII before btoa so fonts and paths survive UTF-8 decoding.
+        var ascii = jsonText.replace(/[\u007f-\uffff]/g, function(c) {
+            return "\\u" + ("0000" + c.charCodeAt(0).toString(16)).slice(-4);
+        });
+        root.pendingAppearancePayload = Qt.btoa(ascii);
+        root.appearanceSaveFailed = false;
+        root.appearanceSaveState = "Saving…";
+        root.flushAppearanceSave();
+    }
+    function flushAppearanceSave() {
+        if (appearanceWriter.running || !root.pendingAppearancePayload.length) return;
+        appearanceWriter.command = ["python3", root.appearanceSaveScript, root.pendingAppearancePayload];
+        root.pendingAppearancePayload = "";
+        appearanceWriter.running = true;
+    }
+    Process {
+        id: appearanceWriter
+        onExited: (exitCode, exitStatus) => {
+            root.appearanceSaveFailed = exitCode !== 0;
+            root.appearanceSaveState = exitCode === 0 ? "Appearance saved" : "Could not save · try again";
+            if (root.pendingAppearancePayload.length) Qt.callLater(root.flushAppearanceSave);
+            else if (exitCode === 0 && root.appearancePostSaveAction) {
+                var action = root.appearancePostSaveAction;
+                root.appearancePostSaveAction = null;
+                action();
+            } else if (exitCode !== 0) root.appearancePostSaveAction = null;
+        }
+    }
+    property string apIconTheme: "breeze"
+    property var installedIconThemes: []
+    property var iconPreviewCatalog: []
+    readonly property string iconThemeScript: Qt.resolvedUrl("sea-icons.py").toString().replace("file://", "")
+    Process {
+        command: ["python3", root.iconThemeScript, "--catalog"]
+        running: true
+        stdout: StdioCollector { onStreamFinished: {
+            try { root.iconPreviewCatalog = JSON.parse(text); root.installedIconThemes = root.iconPreviewCatalog.map(function(e) { return e.name; }); } catch (e) {}
+        } }
+    }
+    property string iconApplyState: ""
+    property bool iconApplyFailed: false
+    property string pendingIconTheme: ""
+    property string pendingIconMode: "light"
+    function startIconApply() {
+        if (iconApplier.running || !root.pendingIconTheme.length) return;
+        iconApplier.command = ["python3", root.iconThemeScript, "--theme", root.pendingIconTheme, "--mode", root.pendingIconMode];
+        root.pendingIconTheme = "";
+        iconApplier.running = true;
+    }
+    Process {
+        id: iconApplier
+        onExited: (exitCode, exitStatus) => {
+            root.iconApplyFailed = exitCode !== 0;
+            root.iconApplyState = exitCode === 0 ? "Icon settings saved · reopen apps to refresh" : "Icon update failed · try again";
+            if (root.pendingIconTheme.length) Qt.callLater(root.startIconApply);
+        }
+    }
+    function applyIconTheme(name) {
+        root.apIconTheme = name;
+        root.saveAppearance();
+        root.pendingIconTheme = name;
+        root.pendingIconMode = root.apLight ? "light" : "dark";
+        root.iconApplyState = "Updating icon settings…";
+        root.iconApplyFailed = false;
+        root.startIconApply();
+    }
+
 
     // ---------- the desktop ----------
     // The arrangement is owned by sea-desktop.py, not by this panel: there is one desktop
@@ -260,9 +417,12 @@ Scope {
         id: dtFile
         path: Quickshell.env("HOME") + "/.config/sea-shell/desktop.json"
         watchChanges: true
+        // READ ONLY ONCE THE LOAD HAS LANDED. This used to call reload() and then text() in
+        // one breath, but reload() finishes later, so text() could hand back the file as it
+        // was BEFORE the change: what was shown lagged one change behind, and removing the
+        // last widget could leave it on screen until something else changed.
         function apply() {
             try {
-                reload();
                 var t = text();
                 var j = (t && t.trim()) ? JSON.parse(t) : null;
                 root.dtItems = (j && j.items) ? j.items : [];
@@ -270,9 +430,9 @@ Scope {
                 root.dtAuto = (a === true) ? "rescue" : (a === false) ? "off" : ("" + a);
             } catch (e) { root.dtItems = [] }
         }
-        onFileChanged: apply()
+        onFileChanged: reload()
         onLoaded: apply()
-        Component.onCompleted: apply()
+        Component.onCompleted: reload()
     }
     // Installed applications, filtered by what has been typed. Capped: this is a picker,
     // and a list you have to scroll is a list you should have searched.
@@ -295,7 +455,10 @@ Scope {
         return out.slice(0, 7);
     }
     onTabChanged: {
-        refreshTab(tab);
+        if (!root.navMoving && root.navLast !== tab) { root.navBack = root.navBack.concat([root.navLast]).slice(-30); root.navFwd = [] }
+        root.navLast = tab;
+        if (root.shown) pageArrival.restart();
+        tabRefresh.restart();
         // The applications list is filled when that page is first looked at, not
         // at startup: it walks every applications directory on the machine and
         // nothing needs that until asked. There can only be ONE handler for a
@@ -362,8 +525,8 @@ Scope {
         root.fileBrowserDirs = false;
         var ext = "";
         if (filter) {
-            var m = filter.match(/\*\.([a-zA-Z0-9]+)/);
-            if (m) ext = "." + m[1];
+            var matches = filter.match(/\*\.[a-zA-Z0-9]+/g);
+            if (matches) ext = matches.map(function(m) { return m.slice(1).toLowerCase() }).join("|");
             else if (filter.indexOf(".") >= 0) ext = filter.slice(filter.indexOf("."));
         }
         root.fileBrowserFilter = ext;
@@ -681,7 +844,7 @@ Scope {
     }
     Process {
         id: kbProc; running: true
-        command: ["sh","-c","hyprctl binds -j"]
+        command: ["python3", Qt.resolvedUrl("sea-keybinds.py").toString().replace("file://",""), "--list"]
         stdout: StdioCollector { id: kbOut; onStreamFinished: {
             try {
                 var arr = JSON.parse(kbOut.text); var out = []; var seen = {};
@@ -696,9 +859,9 @@ Scope {
                     // singled out because its argument is a plain command string that can
                     // be edited safely; every other dispatcher is a structured lua call
                     // and is shown read-only rather than handed to a text box.
-                    var isExec = (b.dispatcher || "").toLowerCase().indexOf("exec") >= 0;
-                    out.push({ keys: keys, desc: desc, key: b.key, mods: mods, canEdit: hasDesc,
-                               dispatcher: b.dispatcher || "", arg: b.arg || "", isExec: isExec });
+                    var isExec = b.sourceCommand !== null && b.sourceCommand !== undefined;
+                    out.push({ keys: keys, desc: desc, key: b.key, mods: mods, canEdit: !!b.sourceId, sourceId: b.sourceId || "",
+                               dispatcher: b.dispatcher || "", arg: isExec ? b.sourceCommand : (b.dispatcher || ""), isExec: isExec });
                 }
                 root.kbBinds = out;
             } catch(e) {}
@@ -725,7 +888,7 @@ Scope {
         var combo = root.kbRecMods.join(" ");
         for (var i=0;i<root.kbBinds.length;i++) {
             var b = root.kbBinds[i];
-            if (b.desc === root.kbRec.desc && b.key === root.kbRec.key) continue;
+            if (b.sourceId === root.kbRec.sourceId) continue;
             if (b.mods.join(" ") === combo && b.key.toLowerCase() === base.toLowerCase()) {
                 root.kbConflict = "already used by “" + b.desc + "”"; return }
         }
@@ -734,10 +897,24 @@ Scope {
         // variable, a multi-line call) into a plain string for no reason.
         var cmd = (root.kbRec.isExec && root.kbRecAction.trim() !== ""
                    && root.kbRecAction !== root.kbRec.arg) ? root.kbRecAction.trim() : "";
-        Quickshell.execDetached(["sh", Qt.resolvedUrl("sea-rebind.sh").toString().replace("file://",""),
-                                 root.kbRec.desc, root.kbRec.key, combo, base, cmd]);
-        root.kbRec = null; root.kbRecAction = ""; root.kbConflict = "";
-        kbRefetch.start();
+        var args = ["--edit",root.kbRec.sourceId,combo,base];
+        if (cmd !== "") args.push(cmd);
+        root.kbMutate(args);
+    }
+    property bool kbDeleteArmed: false
+    function kbMutate(args) {
+        if (kbWriter.running) return;
+        root.kbConflict = "Saving…";
+        kbWriter.command = ["python3", Qt.resolvedUrl("sea-keybinds.py").toString().replace("file://","")].concat(args);
+        kbWriter.running = true;
+    }
+    Process {
+        id: kbWriter
+        stderr: StdioCollector { id: kbWriteError }
+        onExited: code => {
+            if (code === 0) { root.kbCloseEditor(); kbRefetch.restart() }
+            else root.kbConflict = kbWriteError.text.trim() || "Could not save shortcut";
+        }
     }
     function kbApplyAddBind() {
         var modsStr = root.kbAddMods.join(" ");
@@ -753,7 +930,7 @@ Scope {
     // ---- keybind editor popup: open in edit or add mode, and close ----
     property string kbRecAction: ""
     function kbOpenEdit(bind) {
-        root.kbAdding = false;
+        root.kbAdding = false; root.kbDeleteArmed = false;
         root.kbRec = bind; root.kbRecMods = bind.mods.slice(); root.kbRecKey = bind.key;
         root.kbRecAction = bind.arg || "";
         root.kbRecRecording = false; root.kbConflict = "";
@@ -1023,7 +1200,9 @@ Scope {
         var lua = 'hl.monitor({ output = "' + root.curMon.name + '", mode = "' + root.selRes + "@" + root.selHz
                 + '", position = "auto", scale = ' + root.curMon.scale + ", transform = " + root.selTransform + " })";
         run("{ hyprctl keyword monitor '" + spec + "' | grep -q '^ok' || hyprctl eval '" + lua + "'; } "
-            + "&& notify-send 'sea-shell' 'Display: " + root.selRes + "@" + root.selHz + "Hz'");
+            + "&& notify-send 'sea-shell' 'Display: " + root.selRes + "@" + root.selHz + "Hz'"
+            // hyprctl only changes the running session — write it to monitors.lua so it survives a reboot
+            + "; sleep 1; python3 '" + root._displayScript + "' --persist");
         monRefresh.start();
     }
     Timer { id: monRefresh; interval: 900; onTriggered: monProc.running = true }
@@ -1046,7 +1225,8 @@ Scope {
         root.profName = ""; dispProfRefresh.restart();
     }
     function applyDisplayProfile(name) {
-        Quickshell.execDetached(["sh", "-c", "python3 '" + root._displayScript + "' --apply '" + ("" + name).replace(/'/g, "") + "' && notify-send 'sea-shell' 'Layout → " + ("" + name).replace(/'/g, "") + "'"]);
+        Quickshell.execDetached(["sh", "-c", "python3 '" + root._displayScript + "' --apply '" + ("" + name).replace(/'/g, "") + "' && notify-send 'sea-shell' 'Layout → " + ("" + name).replace(/'/g, "") + "'"
+            + "; sleep 1; python3 '" + root._displayScript + "' --persist"]);
         monRefresh.start();
     }
     function deleteDisplayProfile(name) {
@@ -1057,6 +1237,8 @@ Scope {
     // ---------- appearance (shared with the bar via ~/.config/sea-shell/appearance.json) ----------
     property real apRadius: 14
     property real apOpacity: 0.80
+    property bool apReducedMotion: false
+    property bool apBarOpaque: true
     property int  apHeight: 42
     property real apScale: 0                 // UI scale: 0 = auto (per-monitor), >0 = manual multiplier
     // effective scale used for the live preview + the settings window itself (mirrors shell.qml)
@@ -1066,7 +1248,17 @@ Scope {
         if (h <= 1440) return 1.0;
         return Math.min(2.5, h / 1080);
     }
-    function uiScale() { return root.apScale > 0 ? root.apScale : root.autoScaleEstimate(); }
+    // effective scale on one screen — same precedence as shell.qml uiFor(): per-monitor override,
+    // then the global multiplier, then auto from that screen's own height
+    function uiScaleFor(scr) {
+        var mo = (scr && scr.name) ? root.monScaleAp(scr.name) : 0;
+        if (mo > 0) return mo;
+        if (root.apScale > 0) return root.apScale;
+        var h = (scr && scr.height) ? scr.height : 0;
+        if (h <= 0) return root.autoScaleEstimate();
+        if (h <= 1440) return 1.0;
+        return Math.min(2.5, h / 1080);
+    }
     // per-monitor overrides — { name: { bar: bool, scale: number(0=inherit) } } (mirrors shell.qml cfgMonitors)
     property var apMonitors: ({})
     function monBarAp(name)   { var m = name ? root.apMonitors[name] : null; return !(m && m.bar === false); }
@@ -1927,7 +2119,7 @@ Scope {
     property string apDarkEnd: "07:00"      // dark ends (light begins)
     property var apCustomFonts: []      // fonts the user typed, persisted as chips
     property string apAppMode: "auto"       // system app dark/light: "auto" (follows shell), "dark", "light"
-    property int apSubTab: 0
+    property int apSubTab: 5
     property int idlSubTab: 0
     // ---------- bar widgets toggles ----------
     property bool wgMpris: true
@@ -1996,9 +2188,11 @@ Scope {
     readonly property var fontPresets: root.baseFonts.concat(root.apCustomFonts)
     Process { id: apReadProc; running: true; command: ["sh","-c","cat \"$HOME/.config/sea-shell/appearance.json\" 2>/dev/null"]
         stdout: StdioCollector { id: apOut; onStreamFinished: { try { var j=JSON.parse(apOut.text);
+            root.apReducedMotion=!!j.reducedMotion;
+            if(j.barOpaque!==undefined) root.apBarOpaque=!!j.barOpaque;
             if(j.radius!==undefined) root.apRadius=j.radius; if(j.opacity!==undefined) root.apOpacity=j.opacity;
             if(j.height!==undefined) root.apHeight=j.height; if(j.scale!==undefined) root.apScale=j.scale; if(j.accent!==undefined) root.apAccent=j.accent;
-            if(j.font!==undefined) root.apFont=j.font; if(j.customFonts!==undefined) root.apCustomFonts=j.customFonts;
+            if(j.iconTheme!==undefined) root.apIconTheme=j.iconTheme; if(j.font!==undefined) root.apFont=j.font; if(j.customFonts!==undefined) root.apCustomFonts=j.customFonts;
             if(j.mode!==undefined) root.apLight=(""+j.mode==="light"); if(j.matugen!==undefined) root.apMatugen=!!j.matugen;
             if(j.scheme!==undefined && (""+j.scheme).length>0) root.apScheme=j.scheme;
             if(j.barFill!==undefined && (""+j.barFill).length>0) root.apBarFill=j.barFill;
@@ -2110,6 +2304,8 @@ Scope {
             accent: root.apAccent,
             radius: root.apRadius,
             opacity: root.apOpacity,
+            reducedMotion: root.apReducedMotion,
+            barOpaque: true,
             height: root.apHeight,
             scale: root.apScale,
             font: root.apFont,
@@ -2167,6 +2363,8 @@ Scope {
         if (p.accent !== undefined) root.apAccent = p.accent;
         if (p.radius !== undefined) root.apRadius = p.radius;
         if (p.opacity !== undefined) root.apOpacity = p.opacity;
+        if (p.reducedMotion !== undefined) root.apReducedMotion = p.reducedMotion;
+        if (p.barOpaque !== undefined) root.apBarOpaque = p.barOpaque;
         if (p.height !== undefined) root.apHeight = p.height;
         if (p.scale !== undefined) root.apScale = p.scale;
         if (p.font !== undefined) root.apFont = p.font;
@@ -2262,9 +2460,12 @@ Scope {
         var j = JSON.stringify({
             radius:          Math.round(root.apRadius),
             opacity:         Number(root.apOpacity.toFixed(2)),
+            reducedMotion:   root.apReducedMotion,
+            barOpaque:       true,
             height:          Math.round(root.apHeight),
             scale:           Number(root.apScale.toFixed(2)),
             accent:          root.apAccent,
+            iconTheme:       root.apIconTheme,
             font:            root.apFont,
             customFonts:     root.apCustomFonts,
             mode:            (root.apLight?'light':'dark'),
@@ -2347,10 +2548,7 @@ Scope {
             leftOrder:       root.apLeftOrder,
             monitors:        root.apMonitors
         });
-        var d = "\"$HOME/.config/sea-shell\"";
-        run("mkdir -p " + d + " && printf %s " + JSON.stringify(Qt.btoa(j))
-            + " | base64 -d > " + d + "/appearance.json.tmp && "
-            + "mv -f " + d + "/appearance.json.tmp " + d + "/appearance.json");
+        root.queueAppearanceSave(j);
     }
     // apply the system app dark/light preference independently from the shell theme
     function applyAppMode() {
@@ -2373,7 +2571,7 @@ Scope {
     // was reported. The sleep is because saveAppearance() writes the config from its own detached
     // process, and this script reads modeSource back out of that file — start it in the same
     // instant and it reads the value you just replaced and no-ops.
-    function applyModeFromWallpaper() { run("sleep 0.4; sh '" + root.modeScript + "'") }
+    function applyModeFromWallpaper() { root.afterAppearanceSave(function() { Quickshell.execDetached(["sh", root.modeScript]); }); }
 
     // CHOOSING A COLOUR BY HAND IS AN OVERRIDE, and an override the next wallpaper silently
     // undoes is not one — the same rule the light/dark source follows. With match-colours left
@@ -2387,14 +2585,14 @@ Scope {
         root.apAccent = c;
         root.apMatugen = false;                 // yours now, until you turn matching back on
         root.saveAppearance();
-        run("sleep 0.4; sh '" + root.matugenScript + "'");
+        root.afterAppearanceSave(function() { Quickshell.execDetached(["sh", root.matugenScript]); });
     }
     // The wallpaper's OWN colours are a different case: choosing one of these is choosing what
     // matching would have given you, so matching stays on.
     function pickPaletteAccent(c) {
         root.apAccent = c;
         root.saveAppearance();
-        run("sleep 0.4; sh '" + root.matugenScript + "'");
+        root.afterAppearanceSave(function() { Quickshell.execDetached(["sh", root.matugenScript]); });
     }
     property string wpCycleScript:  Qt.resolvedUrl("sea-wallpaper-cycle.sh").toString().replace("file://","")
     property string wpRotateScript: Qt.resolvedUrl("sea-wallpaper-rotate.sh").toString().replace("file://","")
@@ -2723,27 +2921,72 @@ Scope {
         color: theme.frost; verticalAlignment: Text.AlignVCenter
     }
 
-    // Region heading: mono, uppercase, tracked, over a hard rule that runs the full width. The
-    // heading is no longer accent-coloured — with one heading per group the accent was doing
-    // decoration, not signalling, and it competed with genuinely active controls below it.
+    // A section is a macOS-style group: a bold title, and everything after it on the page, up
+    // to the next section, sits on one rounded panel. The panel is drawn from here, behind the
+    // section's siblings, so the twenty-odd pages did not have to be rewritten into containers:
+    // their rows already keep a 14px inset on both sides, which is exactly the panel's padding.
     component Section: ColumnLayout {
         id: sec
         property string title: ""
         property string icon: ""
+        readonly property bool isSection: true
         // Every section on every page puts itself on the map as it is built. That map is
         // what the search field searches and what the jump chips above each page aim at —
         // one registry, so a section added later is findable without being listed anywhere
         // by hand.
-        Component.onCompleted: root.regSection(sec)
-        Layout.fillWidth: true; Layout.leftMargin: 14; Layout.topMargin: 4
-        spacing: 4
-        RowLayout {
-            spacing: 8
-            Sym { text: icon; sz: 15; color: Tok.ink3 }
-            Text { text: title; color: Tok.ink2; font.pixelSize: Tok.tLabel; font.family: Tok.mono
-                font.weight: 600; font.letterSpacing: 1.15; font.capitalization: Font.AllUppercase }
+        Component.onCompleted: { root.regSection(sec); Qt.callLater(sec.insetRows) }
+        Layout.fillWidth: true; Layout.leftMargin: 14; Layout.topMargin: 14
+        spacing: 7
+        // Everything on this section's panel keeps the panel's 14px padding. Most rows were
+        // written with it; the ones that were not sat flush against the panel's edge, a box
+        // jammed inside a box. Rather than finding each by hand, the section gives the inset
+        // to any row of its own that has none — now, and whenever a Repeater adds more.
+        function insetRows() {
+            var host = sec.parent;
+            if (!host) return;
+            var kids = host.children, mine = false;
+            for (var i = 0; i < kids.length; i++) {
+                var k = kids[i];
+                if (k === sec) { mine = true; continue }
+                if (!mine) continue;
+                if (k.isSection === true) break;
+                if (!k.Layout) continue;
+                if (k.Layout.leftMargin === 0) k.Layout.leftMargin = 14;
+                if (k.Layout.rightMargin === 0) k.Layout.rightMargin = 14;
+            }
         }
-        Rectangle { Layout.fillWidth: true; height: 1; color: Tok.ruleHard }
+        Connections { target: sec.parent; function onChildrenChanged() { Qt.callLater(sec.insetRows) } }
+        RowLayout {
+            spacing: 7
+            Sym { text: icon; sz: 14; color: Tok.ink3 }
+            Text { text: title; color: Tok.ink; font.pixelSize: 13; font.family: Tok.sans
+                font.weight: 700 }
+        }
+        // Zero-height, so the layout ignores it; the panel hangs off it and reaches down to
+        // just above the next visible section among the same siblings, or the page's end.
+        Item {
+            Layout.fillWidth: true; Layout.preferredHeight: 0
+            Rectangle {
+                readonly property Item host: sec.parent
+                readonly property real gap: host && host.spacing !== undefined ? host.spacing : 12
+                readonly property real reach: {
+                    if (!host) return 0;
+                    var kids = host.children, mine = false;
+                    for (var i = 0; i < kids.length; i++) {
+                        var k = kids[i];
+                        if (k === sec) { mine = true; continue }
+                        if (mine && k.visible && k.isSection === true) return k.y - gap;
+                    }
+                    return host.height + 12;
+                }
+                x: -sec.x; y: 0; z: -1
+                width: host ? host.width : 0
+                height: reach - (sec.y + sec.height)
+                visible: height > 18
+                radius: Tok.r + 2
+                color: root.groupFill; border.width: 1; border.color: root.groupRule
+            }
+        }
     }
 
     // custom slider (0..1)
@@ -2784,12 +3027,12 @@ Scope {
         implicitWidth: 44; implicitHeight: 24; radius: Tok.r
         color: on ? Tok.accent : Tok.sunken
         border.width: 1; border.color: on ? Tok.accent : Tok.ruleHard
-        Behavior on color { ColorAnimation { duration: 120 } }
+        Behavior on color { ColorAnimation { duration: Tok.mFast } }
         // knob must contrast with whatever it sits ON: accent-ink over the lit track, tertiary
         // ink over the dark one. (It was a single fixed colour, which the palette change broke.)
         Rectangle { width: 18; height: 18; radius: Tok.r; y: 3; x: tg.on ? tg.width - width - 3 : 3
             color: tg.on ? Tok.accentInk : Tok.ink3
-            Behavior on x { NumberAnimation { duration: 130; easing.type: Easing.OutCubic } } }
+            Behavior on x { NumberAnimation { duration: Tok.mFast; easing.type: Easing.OutCubic } } }
         MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: tg.toggled() }
     }
 
@@ -2803,11 +3046,11 @@ Scope {
         property bool on: false
         signal toggled()
         Layout.fillWidth: true
-        implicitHeight: Math.max(52, tcRow.implicitHeight + 18)
+        implicitHeight: Math.max(60, tcRow.implicitHeight + 24)
+        // Flat: it sits on its section's panel, as a row of a macOS group does.
         radius: Tok.r
-        color: tcMa.containsMouse ? theme.a(theme.line, 0.55) : theme.a(theme.line, 0.4)
-        border.width: 1; border.color: tc.on ? theme.a(theme.iris, 0.5) : theme.a(theme.iris, 0.14)
-        Behavior on color { ColorAnimation { duration: 110 } }
+        color: tcMa.containsMouse ? root.rowHover : "transparent"
+        Behavior on color { ColorAnimation { duration: Tok.mFast } }
         RowLayout {
             id: tcRow
             anchors.fill: parent; anchors.leftMargin: 14; anchors.rightMargin: 14; spacing: 12
@@ -2823,6 +3066,7 @@ Scope {
     // icon · fixed-width label · slider · fixed-width readout — columns line up across every slider
     component SliderRow: RowLayout {
         id: sr
+        implicitHeight: 42
         property string icon: ""
         property string label: ""
         property real value: 0
@@ -2831,7 +3075,7 @@ Scope {
         signal moved(real v)
         Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; spacing: 12
         Sym { text: sr.icon; sz: 18; color: theme.sub; Layout.alignment: Qt.AlignVCenter }
-        Text { text: sr.label; color: theme.sub; font.pixelSize: 12; font.family: Tok.mono; Layout.minimumWidth: 76 }
+        Text { text: sr.label; color: theme.sub; font.pixelSize: 13; font.family: Tok.sans; Layout.minimumWidth: 100 }
         Slider { fill: sr.tint; value: sr.value; onMoved: (v) => sr.moved(v) }
         Text { text: sr.readout; color: theme.sub; font.pixelSize: 12; font.family: Tok.mono; Layout.minimumWidth: 48; horizontalAlignment: Text.AlignRight }
     }
@@ -2839,6 +3083,8 @@ Scope {
     // selectable pill for choice groups (resolution, scheme, profile, …)
     component Chip: Rectangle {
         id: ch
+        scale: chMa.pressed ? 0.96 : 1
+        Behavior on scale { NumberAnimation { duration: Tok.mMicro; easing.type: Easing.OutCubic } }
         property string label: ""
         property string icon: ""
         // Some chips ARE their symbol — the workspace numbering picker shows ⚀⚁⚂ rather than
@@ -2849,7 +3095,7 @@ Scope {
         implicitWidth: chRow.implicitWidth + 24; implicitHeight: 32; radius: Tok.r
         color: on ? theme.iris : (chMa.containsMouse ? theme.a(theme.iris, 0.16) : theme.a(theme.line, 0.4))
         border.width: 1; border.color: on ? theme.iris : theme.a(theme.iris, 0.16)
-        Behavior on color { ColorAnimation { duration: 100 } }
+        Behavior on color { ColorAnimation { duration: Tok.mFast } }
         Row { id: chRow; anchors.centerIn: parent; spacing: 6
             Sym { visible: ch.icon !== ""; anchors.verticalCenter: parent.verticalCenter; text: ch.icon; sz: 15; color: ch.on ? Tok.accentInk : Tok.ink2 }
             Text { anchors.verticalCenter: parent.verticalCenter; text: ch.label; color: ch.on ? Tok.accentInk : Tok.ink; font.pixelSize: 12; font.family: ch.labelFont; font.bold: ch.on } }
@@ -2859,6 +3105,8 @@ Scope {
     // accent action button (Apply, Save, …)
     component AccentBtn: Rectangle {
         id: ab
+        scale: abMa.pressed ? 0.98 : 1
+        Behavior on scale { NumberAnimation { duration: Tok.mMicro; easing.type: Easing.OutCubic } }
         property string label: ""
         property string icon: ""
         property bool enabled: true
@@ -2867,7 +3115,7 @@ Scope {
         opacity: ab.enabled ? 1 : 0.45
         color: abMa.containsMouse && ab.enabled ? theme.iris : theme.a(theme.iris, 0.22)
         border.width: 1; border.color: theme.iris
-        Behavior on color { ColorAnimation { duration: 110 } }
+        Behavior on color { ColorAnimation { duration: Tok.mFast } }
         RowLayout { anchors.centerIn: parent; spacing: 8
             Sym { visible: ab.icon !== ""; text: ab.icon; sz: 17; color: abMa.containsMouse && ab.enabled ? Tok.accentInk : Tok.ink2 }
             Text { text: ab.label; color: abMa.containsMouse && ab.enabled ? Tok.accentInk : Tok.ink; font.pixelSize: 13; font.family: Tok.mono; font.bold: true } }
@@ -2883,9 +3131,8 @@ Scope {
         Layout.fillWidth: true
         Rectangle {
             Layout.fillWidth: true; implicitHeight: 42; radius: Tok.r
-            color: rma.containsMouse ? theme.a(theme.iris, 0.16) : theme.a(theme.line, 0.38)
-            border.width: 1; border.color: rma.containsMouse ? theme.iris : theme.a(theme.iris, 0.16)
-            Behavior on color { ColorAnimation { duration: 110 } }
+            color: rma.containsMouse ? root.rowHover : "transparent"
+            Behavior on color { ColorAnimation { duration: Tok.mFast } }
             RowLayout {
                 anchors.fill: parent; anchors.leftMargin: 13; anchors.rightMargin: 13; spacing: 10
                 Sym { text: parent.parent.parent.icon; sz: 19; color: parent.parent.parent.tint }
@@ -3360,47 +3607,51 @@ Scope {
     }
 
     // a single tab button in the sidebar
+    // A sidebar row as macOS draws it: a small coloured tile with a white glyph, then the name,
+    // and a filled accent row for the page you are on. The tiles are not Apple's rainbow: each
+    // group turns the accent's hue by its own step, so they stay one family with the palette.
     component TabBtn: Rectangle {
+        id: tb
         property string icon: ""
         property string label: ""
         property int idx: 0
+        property real hue: 0
         readonly property bool sel: root.tab === idx
-        Layout.fillWidth: true; implicitHeight: 30; radius: Tok.r
-        color: sel ? Tok.accentWash : (tbm.containsMouse ? Tok.surface : "transparent")
-        // selection is an inset accent bar plus a wash — not an outline. An outlined tab reads
-        // as a button you can press again; a bar reads as "you are here".
-        Rectangle {
-            visible: sel
-            anchors { left: parent.left; top: parent.top; bottom: parent.bottom }
-            width: 2; color: Tok.accent
-        }
+        Layout.fillWidth: true; implicitHeight: 32; radius: Tok.r
+        color: sel ? Tok.accent : (tbm.containsMouse ? root.rowHover : "transparent")
+        Behavior on color { ColorAnimation { duration: Tok.mFast } }
         RowLayout {
-            anchors.fill: parent; anchors.leftMargin: 11; anchors.rightMargin: 11; spacing: 10
-            Sym { text: icon; sz: 17; color: sel ? Tok.accent : Tok.ink3 }
-            Text { text: label; color: sel ? Tok.ink : Tok.ink2; font.pixelSize: Tok.tDense
-                font.family: Tok.sans; font.weight: sel ? 600 : 400; Layout.fillWidth: true }
+            anchors.fill: parent; anchors.leftMargin: 6; anchors.rightMargin: 10; spacing: 10
+            Rectangle {
+                implicitWidth: 22; implicitHeight: 22; radius: Math.min(7, Tok.r)
+                color: root.tileColor(tb.hue)
+                border.width: tb.sel ? 1 : 0; border.color: Qt.rgba(1, 1, 1, 0.55)
+                Sym { anchors.centerIn: parent; text: tb.icon; sz: 15; color: "white" }
+            }
+            Text { text: tb.label; color: tb.sel ? Tok.accentInk : Tok.ink; font.pixelSize: 13
+                font.family: Tok.sans; font.weight: tb.sel ? 600 : 400
+                elide: Text.ElideRight; Layout.fillWidth: true }
         }
-        MouseArea { id: tbm; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.tab = idx }
+        MouseArea { id: tbm; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.tab = tb.idx }
     }
 
-    // small uppercase section heading that groups the sidebar tabs
-    component GroupLabel: Text {
-        Layout.fillWidth: true; Layout.topMargin: 12; Layout.leftMargin: 5; Layout.bottomMargin: 2
-        color: Tok.ink3; font.pixelSize: 10; font.family: Tok.mono
-        font.weight: 600; font.letterSpacing: 1.3; font.capitalization: Font.AllUppercase
-    }
+    // macOS separates the sidebar's groups with space, not headings.
+    component GroupGap: Item { Layout.fillWidth: true; implicitHeight: 9 }
 
     // one key/value tile for the About/System dashboard
     component InfoTile: Rectangle {
         property string icon: ""
+        property url logo: ""
         property string iconFont: "Material Symbols Outlined"   // set "Symbols Nerd Font" for brand/distro glyphs
         property string label: ""
         property string value: "…"
         Layout.fillWidth: true; implicitHeight: 46; radius: Tok.r
-        color: theme.a(theme.line, 0.24); border.width: 1; border.color: theme.a(theme.iris, 0.10)
+        color: Qt.rgba(Tok.ink.r, Tok.ink.g, Tok.ink.b, 0.035)
         RowLayout {
             anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 12; spacing: 11
-            Sym { text: icon; sz: 19; color: theme.iris; font.family: iconFont }
+            ThemedLogo { visible: logo.toString().length > 0; artwork: logo; Layout.preferredWidth: 30; Layout.preferredHeight: 24 }
+
+            Sym { visible: !logo.toString().length; text: icon; sz: 19; color: theme.iris; font.family: iconFont }
             ColumnLayout {
                 spacing: 1; Layout.fillWidth: true
                 Text { text: label; color: theme.faint; font.pixelSize: 9; font.family: Tok.mono; font.bold: true; font.letterSpacing: 1 }
@@ -3427,21 +3678,35 @@ Scope {
         Text { text: value; color: theme.sub; font.pixelSize: 11; font.family: Tok.mono; Layout.preferredWidth: 96; horizontalAlignment: Text.AlignRight }
     }
 
+    SurfaceMotion { id: settingsMotion; opened: root.shown && (root.apLoaded || Tok.loaded); reduced: Tok.reducedMotion; enterDuration: 160; exitDuration: 100 }
+    NumberAnimation { id: pageArrival; target: pane; property: "arrival"; from: 0; to: 1
+        duration: Tok.mBase; easing.type: Easing.OutCubic }
+    onApSubTabChanged: if (root.shown) pageArrival.restart()
+
     // ============ window ============
     PanelWindow {
         id: panel
-        visible: root.shown                    // resident: mapped only while open
+        visible: !root.authenticationPending && (root.shown || settingsMotion.presenting)
+        WlrLayershell.namespace: "sea-shell:settings"
         anchors { top: true; bottom: true; left: true; right: true }
         color: "transparent"
         WlrLayershell.layer: WlrLayer.Overlay
-        WlrLayershell.keyboardFocus: WlrKeyboardFocus.Exclusive
+        WlrLayershell.keyboardFocus: root.shown ? WlrKeyboardFocus.Exclusive : WlrKeyboardFocus.None
         exclusionMode: ExclusionMode.Ignore
+        readonly property real ui: root.uiScaleFor(panel.screen)
 
-        Rectangle { anchors.fill: parent; color: Qt.rgba(0, 0, 0, 0.5); MouseArea { anchors.fill: parent; onClicked: root.closePanel() } }
+        // The scrim lives inside the scaled contentItem, so it is sized in NATIVE units
+        // (screen ÷ ui) to land exactly on the screen edges once scaled. With anchors.fill it
+        // was shrunk with everything else: at a UI scale below 1× the dim only covered the
+        // middle of the screen and left a bright frame round it (and clicks on that frame
+        // fell through instead of closing).
+        Rectangle { anchors.centerIn: parent; width: panel.width / panel.ui; height: panel.height / panel.ui
+            opacity: settingsMotion.progress
+            color: Qt.rgba(0, 0, 0, 0.5); MouseArea { anchors.fill: parent; onClicked: root.closePanel() } }
         Item { anchors.fill: parent; focus: root.shown; Keys.onEscapePressed: root.closePanel() }
         // scale the whole settings window with the UI scale — live-previews as the slider moves.
         // Content is authored native; clamps are in native space so it always fits the screen.
-        Binding { target: panel.contentItem; property: "scale"; value: root.uiScale() }
+        Binding { target: panel.contentItem; property: "scale"; value: panel.ui }
 
         Rectangle {
             anchors.centerIn: parent
@@ -3451,14 +3716,16 @@ Scope {
             // sidebar and the content compete for a window that has been told not to grow.
             // Still clamped to fit, and still capped so it never becomes a full-screen wall
             // of controls on a 4K panel.
-            width: Math.min(parent.width / root.uiScale() - 60, 1240)
-            height: Math.min(parent.height / root.uiScale() - 60, 880)
+            width: Math.min(parent.width / panel.ui - 60, 1240)
+            height: Math.min(parent.height / panel.ui - 60, 880)
             radius: Tok.rCard
             // fade in once the saved palette is read — no default sea-cyan flash first
-            opacity: root.apLoaded ? 1 : 0
-            Behavior on opacity { NumberAnimation { duration: 130; easing.type: Easing.OutCubic } }
-            color: theme.a(theme.bg, 0.98)
-            border.width: 1; border.color: theme.a(theme.iris, 0.34)
+            opacity: settingsMotion.progress
+            enabled: root.shown
+            scale: 0.975 + 0.025 * settingsMotion.progress
+            transform: Translate { y: 18 * (1 - settingsMotion.progress) }
+            color: Tok.surface
+            border.width: 1; border.color: Tok.ruleHard
             MouseArea { anchors.fill: parent }
 
             // ---------------- sidebar (anchored, fixed width) ----------------
@@ -3467,36 +3734,29 @@ Scope {
             // adding a single tab pushed "Actions" out past the panel's rounded edge. Trimming
             // row heights would only postpone that, so the list is a Flickable: it scrolls when
             // it must, sits still when it need not, and survives the next tab being added.
+            // ---------------- sidebar ----------------
+            // macOS layout: its own full-height pane, search at the top, then you, then the
+            // pages in groups separated by space. The tab list SCROLLS: a fixed column silently
+            // overflowed the card the day one more tab was added.
+            Rectangle {
+                id: sidebarPane
+                anchors { left: parent.left; top: parent.top; bottom: parent.bottom }
+                anchors.margins: 1
+                width: sidebar.width + 24; radius: parent.radius - 1
+                color: Tok.bg
+                // square off the corners on the content side
+                Rectangle { anchors { right: parent.right; top: parent.top; bottom: parent.bottom } width: parent.radius; color: parent.color }
+                Rectangle { anchors { right: parent.right; top: parent.top; bottom: parent.bottom } width: 1; color: root.groupRule }
+            }
             Item {
                 id: sidebar
-                anchors { left: parent.left; top: parent.top; bottom: parent.bottom; margins: 18 }
-                width: 202
+                anchors { left: parent.left; top: parent.top; bottom: parent.bottom; leftMargin: 12; topMargin: 16; bottomMargin: 12 }
+                width: 224
 
                 ColumnLayout {
                     id: sbHead
                     anchors { left: parent.left; right: parent.right; top: parent.top }
-                    spacing: 3
-                    // ---- brand header: logo + name + version ----
-                    RowLayout {
-                    spacing: 11; Layout.fillWidth: true; Layout.bottomMargin: 4
-                    SeaLogo { size: 34; card: theme.panel; accent: theme.iris; highlight: theme.frost; rim: theme.iris }
-                    ColumnLayout {
-                        spacing: 1; Layout.fillWidth: true
-                        RowLayout {
-                            spacing: 6
-                            Text { text: "sea-shell"; color: theme.text; font.pixelSize: 17; font.family: Tok.mono; font.bold: true }
-                            Rectangle {
-                                implicitHeight: 15; implicitWidth: verTxt.width + 10; radius: Tok.r
-                                color: theme.a(theme.iris, 0.18); border.width: 1; border.color: theme.a(theme.iris, 0.4)
-                                Text { id: verTxt; anchors.centerIn: parent; text: "v" + root.seaVersion
-                                    color: theme.frost; font.pixelSize: 9; font.family: Tok.mono; font.bold: true }
-                            }
-                        }
-                        Text { text: "control center"; color: theme.frost; font.pixelSize: 10; font.family: Tok.mono }
-                    }
-                }
-                    Rectangle { Layout.fillWidth: true; Layout.topMargin: 4; Layout.bottomMargin: 2; height: 1; color: theme.a(theme.iris, 0.14) }
-
+                    spacing: 8
                     // ---- search ----
                     // The one control that makes twenty-two pages navigable: type a few
                     // letters and Enter goes to the first hit. Deliberately NOT focused when
@@ -3526,7 +3786,7 @@ Scope {
                                     if (navIn.text.length) { navIn.text = ""; e.accepted = true }
                                 } else if ((e.key === Qt.Key_Return || e.key === Qt.Key_Enter)
                                            && root.navHits.length > 0) {
-                                    root.jumpTo(root.navHits[0]); e.accepted = true;
+                                    root.jumpFromSearch(root.navHits[0]); e.accepted = true;
                                 }
                             }
                             Text {
@@ -3547,6 +3807,18 @@ Scope {
                                 cursorShape: Qt.PointingHandCursor
                                 onClicked: { navIn.text = ""; navIn.forceActiveFocus() } }
                         }
+                    }
+
+                    // ---- you, as the Apple Account row is: picture, name, what it opens ----
+                    Rectangle {
+                        Layout.fillWidth: true; Layout.topMargin: 2
+                        implicitHeight: meCard.implicitHeight; radius: Tok.r
+                        color: root.tab === 23 ? Tok.accentWash : (meMa.containsMouse ? root.rowHover : "transparent")
+                        border.width: root.tab === 23 ? 1 : 0; border.color: theme.a(theme.iris, 0.35)
+                        Behavior on color { ColorAnimation { duration: Tok.mFast } }
+                        ProfileCard { id: meCard; width: parent.width; compact: true; flat: true
+                            profile: root.userProfile; subtitle: "profile & lock screen" }
+                        MouseArea { id: meMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.tab = 23 }
                     }
                 }
 
@@ -3608,7 +3880,7 @@ Scope {
                                 }
                                 MouseArea { id: hitMa; anchors.fill: parent; hoverEnabled: true
                                     cursorShape: Qt.PointingHandCursor
-                                    onClicked: root.jumpTo(modelData) }
+                                    onClicked: root.jumpFromSearch(modelData) }
                             }
                         }
                     }
@@ -3619,34 +3891,37 @@ Scope {
                         width: sbFlick.width
                         spacing: 3
 
-                        GroupLabel { text: "OVERVIEW" }
-                            TabBtn { icon: "monitor_heart";        label: "System";      idx: 8 }
-                            GroupLabel { text: "LOOK & FEEL" }
-                            TabBtn { icon: "palette";              label: "Appearance";  idx: 4 }
-                            TabBtn { icon: "view_agenda";          label: "Bar";         idx: 20 }
-                            TabBtn { icon: "widgets";              label: "Bar Widgets"; idx: 12 }
-                            TabBtn { icon: "dock_to_bottom";       label: "Dock";        idx: 16 }
-                            TabBtn { icon: "wallpaper";            label: "Desktop";     idx: 21 }
-                            TabBtn { icon: "picture_in_picture";   label: "Window rules"; idx: 17 }
-                            TabBtn { icon: "auto_awesome";         label: "Theme Profiles"; idx: 13 }
-                            GroupLabel { text: "DEVICES" }
-                            TabBtn { icon: "volume_up";            label: "Audio";       idx: 0 }
-                            TabBtn { icon: "brightness_6";         label: "Display";     idx: 1 }
-                            TabBtn { icon: "wifi";                 label: "Network";     idx: 2 }
-                            TabBtn { icon: "bluetooth";            label: "Bluetooth";   idx: 9 }
-                            TabBtn { icon: "phonelink";            label: "KDE Connect"; idx: 14 }
-                TabBtn { icon: "hard_drive";           label: "Disks";       idx: 19 }
-                            GroupLabel { text: "DAILY" }
-                            TabBtn { icon: "cloud";                label: "Weather";     idx: 3 }
-                            TabBtn { icon: "calendar_month";       label: "Calendar";    idx: 11 }
-                            TabBtn { icon: "keyboard";             label: "Keybinds";    idx: 7 }
-                            TabBtn { icon: "mouse";                label: "Input";       idx: 15 }
-                TabBtn { icon: "hourglass_top";        label: "Screen time"; idx: 18 }
-                            TabBtn { icon: "apps";                 label: "Default Apps"; idx: 22 }
-                            GroupLabel { text: "SESSION" }
-                            TabBtn { icon: "bedtime";              label: "Idle & lock"; idx: 10 }
-                            TabBtn { icon: "bolt";                 label: "Actions";     idx: 5 }
-                            TabBtn { icon: "power_settings_new";   label: "Power";       idx: 6 }
+                        // System Settings' order: connections, sound and attention, how it
+                        // looks, the desktop, the screen and power, everyday apps, then input.
+                        TabBtn { icon: "wifi";                 label: "Network";      idx: 2;  hue: 0 }
+                        TabBtn { icon: "bluetooth";            label: "Bluetooth";    idx: 9;  hue: 0 }
+                        TabBtn { icon: "phonelink";            label: "KDE Connect";  idx: 14; hue: 0 }
+                        GroupGap {}
+                        TabBtn { icon: "volume_up";            label: "Audio";        idx: 0;  hue: -0.09 }
+                        TabBtn { icon: "hourglass_top";        label: "Screen time";  idx: 18; hue: -0.09 }
+                        GroupGap {}
+                        TabBtn { icon: "monitor_heart";        label: "System";       idx: 8;  hue: 0.5 }
+                        TabBtn { icon: "palette";              label: "Appearance";   idx: 4;  hue: 0.09 }
+                        TabBtn { icon: "auto_awesome";         label: "Theme Profiles"; idx: 13; hue: 0.09 }
+                        TabBtn { icon: "view_agenda";          label: "Bar";          idx: 20; hue: 0.09 }
+                        TabBtn { icon: "widgets";              label: "Bar Widgets";  idx: 12; hue: 0.09 }
+                        GroupGap {}
+                        TabBtn { icon: "wallpaper";            label: "Desktop";      idx: 21; hue: 0.18 }
+                        TabBtn { icon: "dock_to_bottom";       label: "Dock";         idx: 16; hue: 0.18 }
+                        TabBtn { icon: "picture_in_picture";   label: "Window rules"; idx: 17; hue: 0.18 }
+                        GroupGap {}
+                        TabBtn { icon: "brightness_6";         label: "Display";      idx: 1;  hue: -0.18 }
+                        TabBtn { icon: "power_settings_new";   label: "Power";        idx: 6;  hue: -0.18 }
+                        TabBtn { icon: "bedtime";              label: "Idle & lock";  idx: 10; hue: -0.18 }
+                        GroupGap {}
+                        TabBtn { icon: "calendar_month";       label: "Calendar";     idx: 11; hue: 0.3 }
+                        TabBtn { icon: "cloud";                label: "Weather";      idx: 3;  hue: 0.3 }
+                        TabBtn { icon: "apps";                 label: "Default Apps"; idx: 22; hue: 0.3 }
+                        TabBtn { icon: "bolt";                 label: "Actions";      idx: 5;  hue: 0.3 }
+                        GroupGap {}
+                        TabBtn { icon: "keyboard";             label: "Keybinds";     idx: 7;  hue: -0.3 }
+                        TabBtn { icon: "mouse";                label: "Input";        idx: 15; hue: -0.3 }
+                        TabBtn { icon: "hard_drive";           label: "Disks";        idx: 19; hue: -0.3 }
                     }
                 }
 
@@ -3665,18 +3940,18 @@ Scope {
                 }
 
                 // pinned to the bottom of the sidebar, outside the scrolling area
-                Text {
+                RowLayout {
                     id: sbFoot
-                    anchors { left: parent.left; right: parent.right; bottom: parent.bottom }
-                    text: "esc to close"; color: theme.faint; font.pixelSize: 10
-                    font.family: Tok.mono; horizontalAlignment: Text.AlignHCenter
+                    anchors { left: parent.left; right: parent.right; bottom: parent.bottom; leftMargin: 6; rightMargin: 6 }
+                    spacing: 8
+                    SeaLogo { size: 20; card: theme.panel; accent: theme.iris; highlight: theme.frost; rim: theme.iris }
+                    Text { text: "sea-shell"; color: theme.sub; font.pixelSize: 11; font.family: Tok.mono; font.bold: true }
+                    Text { text: "v" + root.seaVersion; color: theme.faint; font.pixelSize: 10; font.family: Tok.mono }
+                    Item { Layout.fillWidth: true }
+                    Text { text: "esc"; color: theme.faint; font.pixelSize: 10; font.family: Tok.mono }
                 }
             }
 
-            Rectangle {
-                anchors { left: sidebar.right; leftMargin: 11; top: parent.top; topMargin: 20; bottom: parent.bottom; bottomMargin: 20 }
-                width: 1; color: theme.a(theme.iris, 0.16)
-            }
 
             // ---------------- content pane (anchored between sidebar and edge) ----------------
             // ---------------- page header: where you are, and what is on this page ----------------
@@ -3689,20 +3964,77 @@ Scope {
             // one row, ALWAYS ON SCREEN because this sits outside the scroll area. The Bar
             // page has ten sections and the global menu is the ninth; reaching it was nine
             // sections of scrolling and is now one click.
+            // ---------------- toolbar: back, forward, where you are ----------------
+            RowLayout {
+                id: toolbar
+                anchors { left: sidebarPane.right; leftMargin: 18; right: parent.right; rightMargin: 16; top: parent.top; topMargin: 14 }
+                spacing: 4
+                Repeater {
+                    model: [{ g: "chevron_left", d: -1 }, { g: "chevron_right", d: 1 }]
+                    delegate: Rectangle {
+                        required property var modelData
+                        readonly property bool can: modelData.d < 0 ? root.navBack.length > 0 : root.navFwd.length > 0
+                        implicitWidth: 28; implicitHeight: 26; radius: Tok.r
+                        color: navMa.containsMouse && can ? root.rowHover : "transparent"
+                        Sym { anchors.centerIn: parent; text: modelData.g; sz: 22; color: can ? Tok.ink2 : Qt.rgba(Tok.ink3.r, Tok.ink3.g, Tok.ink3.b, 0.45) }
+                        MouseArea { id: navMa; anchors.fill: parent; hoverEnabled: true; enabled: can
+                            cursorShape: Qt.PointingHandCursor; onClicked: root.navGo(modelData.d) }
+                    }
+                }
+                Text { Layout.leftMargin: 8; text: root.tabLabel(root.tab)
+                    color: theme.text; font.pixelSize: 15; font.family: Tok.sans; font.bold: true }
+                Item { Layout.fillWidth: true }
+                Text { text: root.appearanceSaveState
+                    color: root.appearanceSaveFailed ? theme.bad : theme.faint
+                    font.pixelSize: 10; font.family: Tok.sans
+                    elide: Text.ElideRight; Layout.maximumWidth: 260 }
+                Rectangle {
+                    implicitWidth: 26; implicitHeight: 26; radius: 13
+                    color: closeMa.containsMouse ? root.rowHover : "transparent"
+                    Sym { anchors.centerIn: parent; text: "close"; sz: 17; color: closeMa.containsMouse ? Tok.ink : Tok.ink3 }
+                    MouseArea { id: closeMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.closePanel() }
+                }
+            }
+            Rectangle {
+                anchors { left: sidebarPane.right; right: parent.right; top: toolbar.bottom; topMargin: 12 }
+                height: 1; color: root.groupRule
+            }
+
+            // ---------------- hero: what this page is, and what is on it ----------------
+            //
+            // The chips are the fix for "it is so far down": every section of this page, in
+            // one row, ALWAYS ON SCREEN because this sits outside the scroll area. The Bar
+            // page has ten sections and the global menu is the ninth; reaching it was nine
+            // sections of scrolling and is now one click.
             ColumnLayout {
                 id: pageHead
-                anchors { left: sidebar.right; leftMargin: 24; right: parent.right
-                          rightMargin: 20; top: parent.top; topMargin: 18 }
-                spacing: 9
-                RowLayout {
+                readonly property real columnWidth: Math.min(parent.width - sidebarPane.width - 56, 860)
+                x: sidebarPane.width + (parent.width - sidebarPane.width - columnWidth) / 2
+                width: columnWidth
+                anchors { top: toolbar.bottom; topMargin: 26 }
+                spacing: 10
+                Rectangle {
                     Layout.fillWidth: true
-                    spacing: 10
-                    Sym { text: root.tabIcon(root.tab); sz: 21; color: theme.iris }
-                    Text {
-                        text: root.tabLabel(root.tab)
-                        color: theme.text; font.pixelSize: 19; font.family: Tok.mono; font.bold: true
+                    implicitHeight: heroRow.implicitHeight + 28
+                    radius: Tok.r + 2; color: root.groupFill; border.width: 1; border.color: root.groupRule
+                    RowLayout {
+                        id: heroRow
+                        anchors { left: parent.left; right: parent.right; verticalCenter: parent.verticalCenter; leftMargin: 16; rightMargin: 16 }
+                        spacing: 14
+                        Rectangle { implicitWidth: 52; implicitHeight: 52; radius: Math.min(14, Tok.r + 4)
+                            Layout.alignment: Qt.AlignTop
+                            color: root.tileColor(root.tabHue(root.tab))
+                            Sym { anchors.centerIn: parent; text: root.tabIcon(root.tab); sz: 30; color: "white" } }
+                        ColumnLayout {
+                            Layout.fillWidth: true; spacing: 4
+                            Text { text: root.tabLabel(root.tab)
+                                color: theme.text; font.pixelSize: 19; font.family: Tok.sans; font.bold: true }
+                            Text { Layout.fillWidth: true; wrapMode: Text.WordWrap
+                                text: root.pageDescriptions[root.tab] || ""; color: theme.sub; font.pixelSize: 12; font.family: Tok.sans }
+                            Text { Layout.fillWidth: true; wrapMode: Text.WordWrap; Layout.topMargin: 2
+                                text: root.pageEffectNote(root.tab); color: theme.faint; font.pixelSize: 10; font.family: Tok.sans }
+                        }
                     }
-                    Item { Layout.fillWidth: true }
                 }
                 Flow {
                     Layout.fillWidth: true
@@ -3713,18 +4045,16 @@ Scope {
                         model: root.pageSections
                         delegate: Rectangle {
                             required property var modelData
-                            height: 25; radius: Tok.r
+                            height: 24; radius: 12
                             width: chipT.implicitWidth + 22
-                            color: chipMa.containsMouse ? theme.a(theme.iris, 0.22)
-                                                        : theme.a(theme.line, 0.5)
-                            border.width: 1; border.color: theme.a(theme.iris, 0.16)
+                            color: chipMa.containsMouse ? Tok.accentWash : root.groupFill
+                            border.width: 1; border.color: chipMa.containsMouse ? theme.a(theme.iris, 0.35) : root.groupRule
                             Behavior on color { ColorAnimation { duration: Tok.mFast } }
                             Text {
                                 id: chipT; anchors.centerIn: parent
                                 text: modelData.title
                                 color: chipMa.containsMouse ? theme.text : theme.sub
-                                font.pixelSize: 10; font.family: Tok.mono
-                                font.letterSpacing: 0.6; font.capitalization: Font.AllUppercase
+                                font.pixelSize: 11; font.family: Tok.sans
                             }
                             MouseArea {
                                 id: chipMa; anchors.fill: parent; hoverEnabled: true
@@ -3734,7 +4064,6 @@ Scope {
                         }
                     }
                 }
-                Rectangle { Layout.fillWidth: true; height: 1; color: theme.a(theme.iris, 0.14) }
             }
 
             // The content column had no scrollbar of any kind — the only clue that a page
@@ -3754,7 +4083,7 @@ Scope {
 
             Flickable {
                 id: contentFlick
-                anchors { left: sidebar.right; leftMargin: 24; right: parent.right; rightMargin: 20; top: pageHead.bottom; topMargin: 10; bottom: parent.bottom; bottomMargin: 20 }
+                anchors { left: sidebarPane.right; leftMargin: 1; right: parent.right; rightMargin: 14; top: pageHead.bottom; topMargin: 4; bottom: parent.bottom; bottomMargin: 14 }
                 contentWidth: width
                 contentHeight: pane.implicitHeight
                 clip: true
@@ -3762,7 +4091,12 @@ Scope {
 
                 ColumnLayout {
                     id: pane
-                    width: contentFlick.width
+                    property real arrival: 1
+                    opacity: 0.65 + 0.35 * arrival
+                    transform: Translate { y: 8 * (1 - pane.arrival) }
+                    // the same centred column as the hero above it
+                    width: pageHead.width
+                    x: pageHead.x - contentFlick.x
                     spacing: 16
 
                         // ================= AUDIO =================
@@ -3851,11 +4185,11 @@ Scope {
                                             Repeater { model: root.sinks
                                                 delegate: Rectangle { required property var modelData
                                                     readonly property bool here: appRow.modelData.sink_id === modelData.id
-                                                    implicitHeight: 24; implicitWidth: chipT.implicitWidth + 18; radius: Tok.r
-                                                    color: here ? theme.a(theme.iris, 0.25) : (chipMa.containsMouse ? theme.a(theme.line, 0.55) : theme.a(theme.line, 0.32))
+                                                    implicitHeight: 24; implicitWidth: routeChipText.implicitWidth + 18; radius: Tok.r
+                                                    color: here ? theme.a(theme.iris, 0.25) : (routeChipMouse.containsMouse ? theme.a(theme.line, 0.55) : theme.a(theme.line, 0.32))
                                                     border.width: 1; border.color: here ? theme.a(theme.iris, 0.55) : theme.a(theme.iris, 0.14)
-                                                    Text { id: chipT; anchors.centerIn: parent; text: modelData.nickname || root.nodeName(modelData); color: here ? theme.iris : theme.sub; font.pixelSize: 10; font.family: Tok.mono; font.bold: here }
-                                                    MouseArea { id: chipMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.audioRoute(appRow.modelData.id, modelData.name) } } } } } } }
+                                                    Text { id: routeChipText; anchors.centerIn: parent; text: modelData.nickname || root.nodeName(modelData); color: here ? theme.iris : theme.sub; font.pixelSize: 10; font.family: Tok.mono; font.bold: here }
+                                                    MouseArea { id: routeChipMouse; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.audioRoute(appRow.modelData.id, modelData.name) } } } } } } }
                         }
 
                         // ================= DISPLAY =================
@@ -4045,11 +4379,11 @@ Scope {
                         ColumnLayout {
                             property int tabIdx: 2
                             visible: root.tab === 2; Layout.fillWidth: true; spacing: 12
+                            Section { title: "wi-fi networks"; icon: "wifi" }
                             RowLayout {
                                 Layout.fillWidth: true; spacing: 8
-                                Sym { text: "wifi"; sz: 18; color: theme.iris }
-                                Text { text: "wi-fi networks"; color: theme.iris; font.pixelSize: 12; font.family: Tok.mono; font.bold: true }
-                                Rectangle { Layout.fillWidth: true; height: 1; color: theme.a(theme.iris, 0.18) }
+                                Text { text: "wi-fi networks"; color: Tok.ink; font.pixelSize: 13; font.family: Tok.sans }
+                                Item { Layout.fillWidth: true }
                                 // radio on/off toggle
                                 Rectangle { implicitWidth: 46; implicitHeight: 22; radius: Tok.r
                                     color: root.wifiRadio ? theme.a(theme.iris, 0.35) : theme.a(theme.line, 0.7)
@@ -4097,8 +4431,8 @@ Scope {
                                         onAskingChanged: if (asking) pwIn.forceActiveFocus()
                                         Layout.fillWidth: true; implicitHeight: asking ? 80 : 40; radius: Tok.r
                                         Behavior on implicitHeight { NumberAnimation { duration: 110; easing.type: Easing.OutCubic } }
-                                        color: modelData.active ? theme.a(theme.iris, 0.2) : (wma.containsMouse || asking ? theme.a(theme.line, 0.5) : theme.a(theme.line, 0.3))
-                                        border.width: 1; border.color: asking ? theme.iris : modelData.active ? theme.iris : theme.a(theme.iris, 0.12)
+                                        color: modelData.active ? Tok.accentWash : (wma.containsMouse || asking ? root.rowHover : "transparent")
+                                        border.width: asking || modelData.active ? 1 : 0; border.color: theme.a(theme.iris, 0.45)
                                         clip: true
                                         ColumnLayout {
                                             anchors { fill: parent; leftMargin: 12; rightMargin: 12; topMargin: 4; bottomMargin: 6 }
@@ -4135,7 +4469,7 @@ Scope {
                                                 visible: wrow.asking; Layout.fillWidth: true; spacing: 8
                                                 Rectangle {
                                                     Layout.fillWidth: true; implicitHeight: 28; radius: Tok.r
-                                                    color: theme.a(theme.bg, 0.8); border.width: 1; border.color: theme.a(theme.iris, 0.4)
+                                                    color: theme.bg; border.width: 1; border.color: theme.a(theme.iris, 0.4)
                                                     TextInput { id: pwIn
                                                         anchors { fill: parent; leftMargin: 9; rightMargin: 9 }
                                                         verticalAlignment: TextInput.AlignVCenter
@@ -4163,7 +4497,7 @@ Scope {
                                 Rectangle {
                                     Layout.fillWidth: true; implicitHeight: root.hidOpen ? 78 : 34; radius: Tok.r; clip: true
                                     Behavior on implicitHeight { NumberAnimation { duration: 110; easing.type: Easing.OutCubic } }
-                                    color: theme.a(theme.line, 0.3); border.width: 1; border.color: root.hidOpen ? theme.iris : theme.a(theme.iris, 0.12)
+                                    color: root.hidOpen ? root.rowHover : "transparent"; border.width: root.hidOpen ? 1 : 0; border.color: theme.a(theme.iris, 0.45)
                                     ColumnLayout {
                                         anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 12; anchors.topMargin: 4; anchors.bottomMargin: 6; spacing: 4
                                         Item {
@@ -4178,12 +4512,12 @@ Scope {
                                         RowLayout {
                                             visible: root.hidOpen; Layout.fillWidth: true; spacing: 8
                                             Rectangle { Layout.fillWidth: true; implicitHeight: 28; radius: Tok.r
-                                                color: theme.a(theme.bg, 0.8); border.width: 1; border.color: theme.a(theme.iris, 0.4)
+                                                color: theme.bg; border.width: 1; border.color: theme.a(theme.iris, 0.4)
                                                 TextInput { id: hidSsid; anchors { fill: parent; leftMargin: 9; rightMargin: 9 }
                                                     verticalAlignment: TextInput.AlignVCenter; color: theme.text; font.pixelSize: 12; font.family: Tok.mono; clip: true
                                                     Text { text: "ssid"; visible: hidSsid.text===""; color: theme.faint; font.pixelSize: 11; font.family: Tok.mono; anchors.verticalCenter: parent.verticalCenter } } }
                                             Rectangle { Layout.fillWidth: true; implicitHeight: 28; radius: Tok.r
-                                                color: theme.a(theme.bg, 0.8); border.width: 1; border.color: theme.a(theme.iris, 0.4)
+                                                color: theme.bg; border.width: 1; border.color: theme.a(theme.iris, 0.4)
                                                 TextInput { id: hidPw; anchors { fill: parent; leftMargin: 9; rightMargin: 9 }
                                                     verticalAlignment: TextInput.AlignVCenter; color: theme.text; font.pixelSize: 12; font.family: Tok.mono; echoMode: TextInput.Password; clip: true
                                                     Text { text: "password (blank if open)"; visible: hidPw.text===""; color: theme.faint; font.pixelSize: 11; font.family: Tok.mono; anchors.verticalCenter: parent.verticalCenter }
@@ -4211,15 +4545,15 @@ Scope {
                             visible: root.tab === 2; Layout.fillWidth: true; spacing: 10
 
                             // WARP header row
+                            Section { title: "cloudflare warp"; icon: "security" }
                             RowLayout {
                                 Layout.fillWidth: true; spacing: 8
-                                Sym { text: "security"; sz: 18; color: root.warpConnected ? theme.good : theme.iris }
-                                Text { text: "Cloudflare WARP"; color: theme.iris; font.pixelSize: 12; font.family: Tok.mono; font.bold: true }
-                                Rectangle { Layout.fillWidth: true; height: 1; color: theme.a(theme.iris, 0.18) }
+                                Text { text: "Cloudflare WARP"; color: Tok.ink; font.pixelSize: 13; font.family: Tok.sans }
+                                Item { Layout.fillWidth: true }
                                 Rectangle { implicitWidth: 46; implicitHeight: 22; radius: Tok.r
                                     color: root.warpConnected ? theme.a(theme.good, 0.4) : theme.a(theme.line, 0.7)
                                     border.width: 1; border.color: root.warpConnected ? theme.good : theme.a(theme.line, 0.9)
-                                    Behavior on color { ColorAnimation { duration: 120 } }
+                                    Behavior on color { ColorAnimation { duration: Tok.mFast } }
                                     Rectangle { width: 16; height: 16; radius: Tok.r; y: 3
                                         x: root.warpConnected ? parent.width - 19 : 3
                                         color: root.warpConnected ? theme.frost : theme.faint
@@ -4247,12 +4581,7 @@ Scope {
                             }
 
                             // VPN connections divider
-                            RowLayout {
-                                Layout.fillWidth: true; spacing: 8; Layout.topMargin: 4
-                                Sym { text: "vpn_key"; sz: 18; color: theme.iris }
-                                Text { text: "VPN connections"; color: theme.iris; font.pixelSize: 12; font.family: Tok.mono; font.bold: true }
-                                Rectangle { Layout.fillWidth: true; height: 1; color: theme.a(theme.iris, 0.18) }
-                            }
+                            Section { title: "vpn connections"; icon: "vpn_key" }
 
                             // saved VPN list
                             ColumnLayout {
@@ -4283,7 +4612,7 @@ Scope {
                                                 implicitWidth: 104; implicitHeight: 30; radius: Tok.r
                                                 color: connecting ? theme.a(theme.line, 0.5) : (vtm.containsMouse ? (modelData.active ? theme.a(theme.bad,0.3) : theme.iris) : (modelData.active ? theme.a(theme.bad,0.15) : theme.a(theme.iris,0.2)))
                                                 border.width: 1; border.color: connecting ? theme.a(theme.line, 0.7) : (modelData.active ? theme.bad : theme.iris)
-                                                Behavior on color { ColorAnimation { duration: 110 } }
+                                                Behavior on color { ColorAnimation { duration: Tok.mFast } }
                                                 Text { anchors.centerIn: parent
                                                     text: connecting ? "connecting…" : (modelData.active ? "disconnect" : "connect")
                                                     color: connecting ? theme.faint : (vtm.containsMouse ? (modelData.active ? theme.bad : theme.bg) : (modelData.active ? theme.bad : theme.frost))
@@ -4308,8 +4637,8 @@ Scope {
                                 implicitHeight: root.vpnAddOpen ? vpnAddInner.implicitHeight + 20 : 42
                                 radius: Tok.r; clip: true
                                 Behavior on implicitHeight { NumberAnimation { duration: 150; easing.type: Easing.OutCubic } }
-                                color: theme.a(theme.line, 0.3)
-                                border.width: 1; border.color: root.vpnAddOpen ? theme.a(theme.iris, 0.4) : theme.a(theme.iris, 0.12)
+                                color: root.vpnAddOpen ? root.rowHover : "transparent"
+                                border.width: root.vpnAddOpen ? 1 : 0; border.color: theme.a(theme.iris, 0.45)
 
                                 ColumnLayout {
                                     id: vpnAddInner
@@ -4345,7 +4674,7 @@ Scope {
                                         visible: root.vpnAddOpen; Layout.fillWidth: true; spacing: 8
                                         Rectangle {
                                             Layout.fillWidth: true; implicitHeight: 34; radius: Tok.r
-                                            color: theme.a(theme.bg, 0.8); border.width: 1
+                                            color: theme.bg; border.width: 1
                                             border.color: vpnPathIn.activeFocus ? theme.iris : theme.a(theme.iris, 0.25)
                                             TextInput {
                                                 id: vpnPathIn
@@ -4463,15 +4792,16 @@ Scope {
                                 Layout.fillWidth: true; spacing: 6; Layout.bottomMargin: 8
                                 Repeater {
                                     model: [
-                                        { i: "contrast", l: "theme" },
-                                        { i: "palette", l: "colors" },
-                                        { i: "tune", l: "targets" },
-                                        { i: "font_download", l: "fonts" },
-                                        { i: "wallpaper", l: "wallpaper" }
+                                        { i: "visibility", l: "preview", k: 5 },
+                                        { i: "contrast", l: "theme", k: 0 },
+                                        { i: "palette", l: "colors", k: 1 },
+                                        { i: "tune", l: "targets", k: 2 },
+                                        { i: "font_download", l: "fonts", k: 3 },
+                                        { i: "wallpaper", l: "wallpaper", k: 4 }
                                     ]
                                     delegate: Rectangle {
                                         required property var modelData; required property int index
-                                        readonly property bool sel: root.apSubTab === index
+                                        readonly property bool sel: root.apSubTab === modelData.k
                                         Layout.fillWidth: true; implicitHeight: 34; radius: Tok.r
                                         color: sel ? theme.iris : (subMa.containsMouse ? theme.a(theme.iris, 0.16) : theme.a(theme.line, 0.4))
                                         border.width: 1; border.color: sel ? theme.iris : theme.a(theme.iris, 0.14)
@@ -4480,13 +4810,33 @@ Scope {
                                             Sym { text: modelData.i; sz: 14; color: sel ? theme.bg : theme.frost }
                                             Text { text: modelData.l; color: sel ? theme.bg : theme.text; font.pixelSize: 11; font.family: root.apFont; font.bold: sel }
                                         }
-                                        MouseArea { id: subMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.apSubTab = index }
+                                        MouseArea { id: subMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.apSubTab = modelData.k }
                                     }
+                                }
+                            }
+
+                            AppearancePreview {
+                                Layout.fillWidth: true
+                                visible: root.apSubTab === 5
+                                property int appearanceSubTab: 5
+                                baseLight: root.apLight; baseAccent: root.apAccent; baseFont: root.apFont
+                                baseSolid: root.apBarOpaque; baseIconTheme: root.apIconTheme
+                                iconCatalog: root.iconPreviewCatalog; fonts: root.fontPresets; barFill: root.apBarFill
+                                onApplied: (light, accent, fontName, solid, iconTheme) => {
+                                    var accentChanged = root.apAccent.toString() !== accent.toString();
+                                    root.apModeSource = "manual";
+                                    root.apLight = light; root.apFont = fontName; root.apBarOpaque = solid;
+                                    root.apAccent = accent; root.apIconTheme = iconTheme;
+                                    if (accentChanged) root.apMatugen = false;
+                                    root.applyIconTheme(iconTheme);
+                                    root.applyAppMode();
+                                    if (accentChanged) root.afterAppearanceSave(function() { Quickshell.execDetached(["sh", root.matugenScript]); });
                                 }
                             }
 
                             // SUB-TAB 0: Bar Theme
                             ColumnLayout {
+                                property int appearanceSubTab: 0
                                 visible: root.apSubTab === 0; Layout.fillWidth: true; spacing: 12
                                 Section { title: "theme"; icon: "contrast" }
                                 Flow { Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; spacing: 7
@@ -4543,10 +4893,25 @@ Scope {
                                             onPicked: { root.apAppMode=modelData.k; root.saveAppearance(); root.applyAppMode() } } } }
                                 Text { visible: root.apAppMode!=="auto"; text: "apps will stay " + root.apAppMode + " regardless of shell theme"; color: theme.iris; font.pixelSize: 10; font.family: Tok.mono; Layout.leftMargin: 14 }
 
+
+                                Section { title: "application icons"; icon: "folder" }
+                                Text { Layout.fillWidth: true; Layout.leftMargin: 14; wrapMode: Text.WordWrap
+                                    text: "Choose one icon family for Files and desktop applications. Light and dark variants follow your theme."
+                                    color: theme.sub; font.pixelSize: 11; font.family: Tok.sans }
+                                Flow { Layout.fillWidth: true; Layout.leftMargin: 14; spacing: 8
+                                    Repeater { model: root.installedIconThemes
+                                        delegate: Chip { required property var modelData
+                                            label: modelData; icon: "folder"; on: root.apIconTheme === modelData
+                                            onPicked: root.applyIconTheme(modelData) }
+                                    }
+                                }
+                                Text { Layout.leftMargin: 14; text: root.iconApplyState || "Some running applications need reopening to refresh their icons."
+                                    color: root.iconApplyFailed ? theme.bad : theme.faint; font.pixelSize: 10; font.family: Tok.sans }
                             }
 
                             // SUB-TAB 1: Colors
                             ColumnLayout {
+                                property int appearanceSubTab: 1
                                 visible: root.apSubTab === 1; Layout.fillWidth: true; spacing: 12
                                 Section { title: "accent colour"; icon: "palette" }
                                 Flow { Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; spacing: 10
@@ -4583,6 +4948,7 @@ Scope {
 
                             // SUB-TAB 2: Custom Targets Overrides
                             ColumnLayout {
+                                property int appearanceSubTab: 2
                                 visible: root.apSubTab === 2; Layout.fillWidth: true; spacing: 14
                                 // ---------- per-target colour overrides ----------
                                 ColumnLayout { Layout.fillWidth: true; spacing: 8
@@ -4784,6 +5150,7 @@ Scope {
 
                             // SUB-TAB 3: Fonts
                             ColumnLayout {
+                                property int appearanceSubTab: 3
                                 visible: root.apSubTab === 3; Layout.fillWidth: true; spacing: 12
                                 Section { title: "font"; icon: "font_download" }
                                 Flow { Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; spacing: 7
@@ -4793,19 +5160,18 @@ Scope {
                                             color: sel?theme.iris:(fmm.containsMouse?theme.a(theme.iris,0.16):theme.a(theme.line,0.4)); border.width: 1; border.color: sel?theme.iris:theme.a(theme.iris,0.16)
                                             Text { id: ft; anchors.centerIn: parent; text: modelData; color: sel?theme.bg:theme.text; font.pixelSize: 12; font.family: modelData; font.bold: sel }
                                             MouseArea { id: fmm; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: { root.apFont=modelData; root.saveAppearance() } } } } }
-                                Rectangle { Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; implicitHeight: 38; radius: Tok.r
-                                    color: theme.a(theme.line,0.4); border.width: 1; border.color: fontIn.activeFocus?theme.iris:theme.a(theme.iris,0.16)
-                                    TextInput { id: fontIn; anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 12; verticalAlignment: TextInput.AlignVCenter
-                                        color: theme.text; font.pixelSize: 13; font.family: root.apFont; clip: true; selectByMouse: true; selectionColor: theme.a(theme.iris,0.4)
-                                        Component.onCompleted: text = root.apFont
-                                        onAccepted: root.addCustomFont(text)
-                                        Text { anchors.verticalCenter: parent.verticalCenter; visible: fontIn.text===""; text: "type a font name, ↵ to save it as a chip"; color: theme.faint; font.pixelSize: 13; font.family: root.apFont } } }
+                                FontPicker {
+                                    Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14
+                                    text: root.apFont
+                                    onPicked: function(family) { root.addCustomFont(family) }
+                                }
                                 Text { text: "changes apply to the bar live"; color: theme.faint; font.pixelSize: 10; font.family: Tok.mono; Layout.leftMargin: 14 }
                             }
 
                             // SUB-TAB 4: Wallpaper — folder · transition · rotation · pair · motion
                             ColumnLayout {
                                 id: wpTab
+                                property int appearanceSubTab: 4
                                 visible: root.apSubTab === 4; Layout.fillWidth: true; spacing: 12
                                 // "" | day | night — which cartridge slot the shelf is filling.
                                 property string armed: ""
@@ -5195,8 +5561,8 @@ Scope {
                                         radius: Tok.r
                                         color: roleBlock.expanded ? theme.a(theme.iris, 0.10)
                                              : (roleMa.containsMouse ? Tok.hover : "transparent")
-                                        border.width: 1
-                                        border.color: roleBlock.expanded ? theme.a(theme.iris, 0.35) : Tok.rule
+                                        border.width: roleBlock.expanded ? 1 : 0
+                                        border.color: theme.a(theme.iris, 0.35)
 
                                         RowLayout {
                                             anchors.fill: parent
@@ -5447,6 +5813,29 @@ Scope {
                                     // widget: five widgets times four axes is twenty
                                     // controls, and a settings page you have to scroll past
                                     // is how a customisable thing stops being customised.
+                                    // card / glass / clear: the Material/macOS tile, solid, half
+                                    // see-through, or none; classic: the original read-out
+                                    Chip {
+                                        visible: modelData.kind !== "launch"
+                                        label: modelData.look || "card"
+                                        icon: (modelData.look || "card") === "card" ? "crop_square" : "texture"
+                                        onPicked: {
+                                            var o = ["card", "glass", "clear", "classic"];
+                                            var i = o.indexOf(modelData.look || "card");
+                                            root.dtRun(["--set", "" + modelData.id, "--look", o[(i + 1) % o.length]]);
+                                        }
+                                    }
+                                    Chip {
+                                        visible: modelData.kind === "clock"
+                                        label: modelData.face || "dial"
+                                        icon: "schedule"
+                                        onPicked: {
+                                            var o = ["dial", "cookie", "digital", "stacked"];
+                                            var i = o.indexOf(modelData.face || "dial");
+                                            root.dtRun(["--set", "" + modelData.id,
+                                                        "--face", o[(i + 1) % o.length]]);
+                                        }
+                                    }
                                     Chip {
                                         visible: modelData.kind !== "launch"
                                         label: modelData.ground || "rule"
@@ -5664,7 +6053,7 @@ Scope {
                                         implicitWidth: lgRow.implicitWidth + 20; implicitHeight: 36; radius: Tok.r
                                         color: sel ? theme.iris : (lgMa.containsMouse ? theme.a(theme.iris, 0.16) : theme.a(theme.line, 0.4))
                                         border.width: 1; border.color: sel ? theme.iris : theme.a(theme.iris, 0.16)
-                                        Behavior on color { ColorAnimation { duration: 100 } }
+                                        Behavior on color { ColorAnimation { duration: Tok.mFast } }
                                         Row {
                                             id: lgRow; anchors.centerIn: parent; spacing: 7
                                             // The choice IS the picture. A list of distro names with
@@ -5740,9 +6129,10 @@ Scope {
                                         Repeater { model: root.edges
                                             delegate: Chip { required property var modelData; label: modelData; on: root.apEdge===modelData
                                                 onPicked: { root.apEdge=modelData; root.saveAppearance() } } } } }
-                                SliderRow { icon: "opacity"; label: "opacity"; tint: theme.frost; value: root.apOpacity; readout: Math.round(root.apOpacity*100)+"%"
-                                    onMoved: (v)=>{ root.apOpacity = v; root.saveAppearance() } }
-                                Text { visible: root.apOpacity < 0.06; text: "↑ 0% hides the bar background — only the buttons show"; color: theme.faint; font.pixelSize: 10; font.family: Tok.mono; Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14 }
+                                ToggleCard { icon: "animation"; title: "reduced motion"; desc: "minimize shell movement and show transitions immediately"
+                                    on: root.apReducedMotion; onToggled: { root.apReducedMotion=!root.apReducedMotion; root.saveAppearance() } }
+                                Text { text: "Panels, menus and the bar use solid backgrounds for readability."; color: theme.sub
+                                    font.pixelSize: 11; font.family: Tok.sans; Layout.fillWidth: true; Layout.leftMargin: 14 }
                                 RowLayout { Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; spacing: 12
                                     Sym { text: "format_color_fill"; sz: 18; color: theme.sub; Layout.alignment: Qt.AlignVCenter }
                                     Text { text: "bar fill"; color: theme.sub; font.pixelSize: 12; font.family: Tok.mono; Layout.minimumWidth: 76 }
@@ -5750,7 +6140,6 @@ Scope {
                                         Repeater { model: [{k:"matugen",l:"matugen"},{k:"black",l:"black"},{k:"white",l:"white"}]
                                             delegate: Chip { required property var modelData; label: modelData.l; on: root.apBarFill===modelData.k
                                                 onPicked: { root.apBarFill=modelData.k; root.saveAppearance() } } } } }
-                                Text { visible: root.apBarFill!=="matugen" && root.apOpacity<0.99; text: "↑ set opacity to 100% for a solid " + root.apBarFill + " bar"; color: theme.faint; font.pixelSize: 10; font.family: Tok.mono; Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14 }
                                 SliderRow { icon: "height"; label: "bar height"; tint: theme.good; value: (root.apHeight-34)/20; readout: Math.round(root.apHeight)+"px"
                                     onMoved: (v)=>{ root.apHeight = 34 + v*20; root.saveAppearance() } }
                                 ToggleCard { icon: "swipe_up"; title: "auto-hide bar"; desc: "tucks the bar away · push the cursor to the edge to reveal it"
@@ -5799,8 +6188,8 @@ Scope {
                                         width: wrap.width; height: wrap.height; radius: Tok.r
                                         anchors.horizontalCenter: parent.horizontalCenter
                                         anchors.verticalCenter: parent.verticalCenter
-                                        color: theme.a(theme.line, wrap.held ? 0.75 : 0.4)
-                                        border.width: 1; border.color: wrap.held ? theme.iris : (wrap.enabledVal ? theme.a(theme.iris, 0.5) : theme.a(theme.iris, 0.16))
+                                        color: wrap.held ? Tok.raised : (wrap.styleOpen ? root.rowHover : "transparent")
+                                        border.width: wrap.held ? 1 : 0; border.color: theme.iris
                                         Drag.active: wrap.held
                                         Drag.source: wrap
                                         Drag.hotSpot.x: width / 2; Drag.hotSpot.y: height / 2
@@ -6010,8 +6399,8 @@ Scope {
                                         width: lwrap.width; height: lwrap.height; radius: Tok.r
                                         anchors.horizontalCenter: parent.horizontalCenter
                                         anchors.verticalCenter: parent.verticalCenter
-                                        color: theme.a(theme.line, lwrap.held ? 0.75 : 0.4)
-                                        border.width: 1; border.color: lwrap.held ? theme.iris : theme.a(theme.iris, 0.5)
+                                        color: lwrap.held ? Tok.raised : "transparent"
+                                        border.width: lwrap.held ? 1 : 0; border.color: theme.iris
                                         Drag.active: lwrap.held
                                         Drag.source: lwrap
                                         Drag.hotSpot.x: width / 2; Drag.hotSpot.y: height / 2
@@ -6364,7 +6753,7 @@ Scope {
                             IndTable {
                                 Layout.fillWidth: true
                                 rowHeight: 30
-                                selectable: false
+                                selectable: true
                                 rows: root.kbShown
                                 emptyText: root.kbQuery !== "" ? "no bind matches that" : "—"
                                 columns: [
@@ -6377,6 +6766,14 @@ Scope {
                                 color: theme.faint; font.pixelSize: 10; font.family: Tok.mono }
                         }
 
+                        ColumnLayout {
+                            property int tabIdx: 23
+                            visible: root.tab === 23; Layout.fillWidth: true; spacing: 14
+                            Section { title: "Your profile"; icon: "account_circle" }
+                            ProfileSettings { id: userProfileEditor; Layout.fillWidth: true
+                                onBrowseRequested: root.pickFile("Choose profile picture", "*.png *.jpg *.jpeg *.webp", function(path) { userProfileEditor.setAvatar(path) })
+                            }
+                        }
                         // ================= SYSTEM =================
                         // ================= SYSTEM / ABOUT =================
                         ColumnLayout {
@@ -6387,49 +6784,22 @@ Scope {
                             // Was a horizontal accent gradient behind a brand hero. Flat surface
                             // and a hairline now — an internal tool opens on its data, not on a
                             // decorated masthead.
-                            Rectangle {
-                                Layout.fillWidth: true; radius: Tok.r; implicitHeight: 90
-                                color: Tok.surface
-                                border.width: 1; border.color: Tok.rule
-                                RowLayout {
-                                    anchors.fill: parent; anchors.leftMargin: 20; anchors.rightMargin: 20; spacing: 18
-                                    SeaLogo { size: 62; card: theme.panel; accent: theme.iris; highlight: theme.frost; rim: theme.iris }
-                                    ColumnLayout {
-                                        spacing: 4; Layout.fillWidth: true
-                                        RowLayout { spacing: 9
-                                            Text { text: "sea-shell"; color: theme.text; font.pixelSize: 25; font.family: Tok.mono; font.bold: true }
-                                            Rectangle { Layout.alignment: Qt.AlignVCenter
-                                                implicitHeight: 21; implicitWidth: hvT.width + 15; radius: Tok.r; color: theme.iris
-                                                Text { id: hvT; anchors.centerIn: parent; text: "v" + root.seaVersion; color: theme.bg; font.pixelSize: 11; font.family: Tok.mono; font.bold: true } }
-                                        }
-                                        RowLayout { spacing: 7
-                                            Sym { text: "person"; sz: 14; color: theme.frost }
-                                            Text { text: root.sysInfo.host || "…"; color: theme.frost; font.pixelSize: 13; font.family: Tok.mono }
-                                            // distro logo: CachyOS is drawn (no Nerd glyph exists); everything else uses the Font Logos glyph
-                                            CachyLogo { visible: root.sysInfo.id === "cachyos"; size: 15; color: theme.faint; Layout.leftMargin: 6 }
-                                            Text { visible: root.sysInfo.id !== "cachyos"; text: root.distroGlyph(root.sysInfo.id, root.sysInfo.idlike)
-                                                font.family: "Symbols Nerd Font"; font.pixelSize: 14; color: theme.faint; Layout.leftMargin: 6 }
-                                            Text { text: root.sysInfo.os || "…"; color: theme.sub; font.pixelSize: 12; font.family: Tok.mono; elide: Text.ElideRight; Layout.fillWidth: true }
-                                        }
-                                    }
-                                    ColumnLayout { spacing: 2; Layout.alignment: Qt.AlignVCenter
-                                        Text { text: "UPTIME"; color: theme.faint; font.pixelSize: 8; font.family: Tok.mono; font.bold: true; font.letterSpacing: 1.5; Layout.alignment: Qt.AlignRight }
-                                        Text { text: root.sysInfo.up || "…"; color: theme.frost; font.pixelSize: 15; font.family: Tok.mono; font.bold: true; Layout.alignment: Qt.AlignRight }
-                                    }
-                                }
+                            ProfileCard { Layout.fillWidth: true; profile: root.userProfile
+                                subtitleIcon: root.sysInfo.id === "cachyos" ? Qt.resolvedUrl("brand-cachyos.svg") : ""
+                                subtitle: (root.sysInfo.os || "sea-shell") + " · " + (root.sysInfo.host || "") + " · up " + (root.sysInfo.up || "…")
                             }
 
                             // ---- system info grid ----
                             Section { title: "system"; icon: "monitor_heart" }
                             GridLayout {
-                                Layout.fillWidth: true; columns: 2; columnSpacing: 10; rowSpacing: 8
+                                Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; columns: 2; columnSpacing: 10; rowSpacing: 8
                                 InfoTile { icon: root.nfKernel; iconFont: "Symbols Nerd Font"; label: "KERNEL"; value: root.sysInfo.kernel || "…" }
-                                InfoTile { icon: root.nfHypr;   iconFont: "Symbols Nerd Font"; label: "COMPOSITOR"; value: root.sysInfo.wm ? ("Hyprland " + root.sysInfo.wm) : "Hyprland" }
-                                InfoTile { iconFont: "Symbols Nerd Font"; label: "SESSION"
+                                InfoTile { logo: Qt.resolvedUrl("brand-hyprland.svg"); icon: root.nfHypr;   iconFont: "Symbols Nerd Font"; label: "COMPOSITOR"; value: root.sysInfo.wm ? ("Hyprland " + root.sysInfo.wm) : "Hyprland" }
+                                InfoTile { logo: root.sysInfo.session === "wayland" ? Qt.resolvedUrl("brand-wayland-symbol.svg") : ""; iconFont: "Symbols Nerd Font"; label: "SESSION"
                                     icon: (root.sysInfo.session === "x11" || root.sysInfo.session === "tty") ? root.nfXorg : root.nfWayland
                                     value: root.sysInfo.session ? (root.sysInfo.session.charAt(0).toUpperCase() + root.sysInfo.session.slice(1)) : "Wayland" }
                                 InfoTile { icon: "aspect_ratio";    label: "RESOLUTION"; value: root.sysInfo.res || "…" }
-                                InfoTile { icon: "code";            label: "SHELL";      value: root.sysInfo.shell || "…" }
+                                InfoTile { logo: Qt.resolvedUrl("brand-quickshell-symbol.svg"); icon: "code";            label: "SHELL";      value: root.sysInfo.shell || "…" }
                                 InfoTile { icon: "inventory_2";     label: "PACKAGES";   value: root.sysInfo.pkgs ? (root.sysInfo.pkgs + "  ·  pacman") : "…" }
                                 InfoTile { icon: "architecture";    label: "ARCH";       value: root.sysInfo.arch || "…" }
                                 InfoTile { icon: "monitoring";      label: "LOAD AVG";   value: root.sysInfo.load || "…" }
@@ -6437,11 +6807,13 @@ Scope {
 
                             // ---- hardware ----
                             Section { title: "hardware"; icon: "memory" }
-                            InfoTile { icon: "developer_board"; label: "CPU"
+                            InfoTile { Layout.leftMargin: 14; Layout.rightMargin: 14; logo: (root.sysInfo.cpu || "").toLowerCase().indexOf("intel") >= 0 ? Qt.resolvedUrl("brand-intel.svg") : (root.sysInfo.cpu || "").toLowerCase().indexOf("amd") >= 0 ? Qt.resolvedUrl("brand-amd.svg") : ""; icon: "developer_board"; label: "CPU"
                                 value: (root.sysInfo.cpu || "…") + (root.sysInfo.cores ? ("  ·  " + root.sysInfo.cores + " threads") : "") }
                             Repeater { model: root.sysInfo.gpus || []
-                                delegate: InfoTile { required property var modelData; icon: "view_in_ar"; label: "GPU"; value: modelData } }
-                            ColumnLayout { Layout.fillWidth: true; Layout.topMargin: 4; spacing: 10
+                                delegate: InfoTile { required property var modelData; Layout.leftMargin: 14; Layout.rightMargin: 14
+                                    logo: /nvidia|geforce|rtx|gtx/i.test(modelData) ? Qt.resolvedUrl("brand-nvidia.svg") : /intel|iris|uhd/i.test(modelData) ? Qt.resolvedUrl("brand-intel.svg") : /amd|radeon/i.test(modelData) ? Qt.resolvedUrl("brand-amd.svg") : ""
+                                    icon: "view_in_ar"; label: "GPU"; value: modelData } }
+                            ColumnLayout { Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; Layout.topMargin: 4; spacing: 10
                                 Meter { label: "memory"; pct: parseInt(root.sysInfo.rampct) || 0; value: root.sysInfo.ram || "…"; fill: theme.iris }
                                 Meter { label: "disk /"; pct: parseInt(root.sysInfo.diskpct) || 0; value: root.sysInfo.disk || "…"; fill: theme.frost }
                             }
@@ -6585,6 +6957,7 @@ Scope {
                             // ---- overview ----
                             // Numbers first, detail below: how many drives, how much of the root
                             // filesystem is gone, and whether anything is plugged in.
+                            Section { title: "overview"; icon: "monitoring" }
                             RowLayout {
                                 Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14
                                 Layout.topMargin: 4; spacing: Tok.s8
@@ -6608,6 +6981,7 @@ Scope {
                             }
 
                             // ---- one panel per physical drive ----
+                            Section { title: "drives"; icon: "hard_drive" }
                             Repeater {
                                 model: root.diskDrives
                                 delegate: ColumnLayout {
@@ -7092,11 +7466,11 @@ Scope {
                             visible: root.tab === 11; Layout.fillWidth: true; spacing: 14
 
                             // header + live count
+                            Section { title: "calendar"; icon: "calendar_month" }
                             RowLayout {
                                 Layout.fillWidth: true; spacing: 8
-                                Sym { text: "calendar_month"; sz: 18; color: theme.iris }
-                                Text { text: "calendar"; color: theme.iris; font.pixelSize: 12; font.family: Tok.mono; font.bold: true }
-                                Rectangle { Layout.fillWidth: true; height: 1; color: theme.a(theme.iris, 0.18) }
+                                Text { text: "calendar"; color: Tok.ink; font.pixelSize: 13; font.family: Tok.sans }
+                                Item { Layout.fillWidth: true }
                                 Rectangle { visible: root.calEvents.length > 0; implicitHeight: 20; implicitWidth: cntTxt.width + 16; radius: Tok.r
                                     color: theme.a(theme.iris, 0.16); border.width: 1; border.color: theme.a(theme.iris, 0.3)
                                     Text { id: cntTxt; anchors.centerIn: parent; text: root.calEvents.length + (root.calEvents.length===1 ? " event" : " events")
@@ -7106,7 +7480,7 @@ Scope {
                             // ---- import card ----
                             Rectangle {
                                 Layout.fillWidth: true; radius: Tok.r; implicitHeight: impCol.implicitHeight + 24
-                                color: theme.a(theme.line, 0.28); border.width: 1; border.color: theme.a(theme.iris, 0.12)
+                                color: "transparent"
                                 ColumnLayout {
                                     id: impCol
                                     anchors.left: parent.left; anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
@@ -7117,7 +7491,7 @@ Scope {
                                         Layout.fillWidth: true; spacing: 8
                                         Rectangle {
                                             Layout.fillWidth: true; implicitHeight: 36; radius: Tok.r
-                                            color: theme.a(theme.bg, 0.4); border.width: 1
+                                            color: theme.bg; border.width: 1
                                             border.color: calUrlIn.activeFocus ? theme.iris : theme.a(theme.iris, 0.16)
                                             RowLayout { anchors.fill: parent; anchors.leftMargin: 10; anchors.rightMargin: 10; spacing: 8
                                                 Sym { text: "link"; sz: 15; color: theme.faint }
@@ -7197,7 +7571,7 @@ Scope {
                             }
                             Rectangle {
                                 Layout.fillWidth: true; implicitHeight: 46; radius: Tok.r
-                                color: theme.a(theme.line, 0.28); border.width: 1; border.color: root.calRemind ? theme.a(theme.iris, 0.4) : theme.a(theme.iris, 0.12)
+                                color: "transparent"
                                 RowLayout { anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 12; spacing: 10
                                     Sym { text: "notifications_active"; sz: 18; color: root.calRemind ? theme.frost : theme.faint }
                                     ColumnLayout { spacing: 0; Layout.fillWidth: true
@@ -7278,11 +7652,11 @@ Scope {
                         ColumnLayout {
                             property int tabIdx: 9
                             visible: root.tab === 9; Layout.fillWidth: true; spacing: 12
+                            Section { title: "bluetooth"; icon: "bluetooth" }
                             RowLayout {
                                 Layout.fillWidth: true; spacing: 8
-                                Sym { text: "bluetooth"; sz: 18; color: theme.iris }
-                                Text { text: "bluetooth"; color: theme.iris; font.pixelSize: 12; font.family: Tok.mono; font.bold: true }
-                                Rectangle { Layout.fillWidth: true; height: 1; color: theme.a(theme.iris, 0.18) }
+                                Text { text: "bluetooth"; color: Tok.ink; font.pixelSize: 13; font.family: Tok.sans }
+                                Item { Layout.fillWidth: true }
                                 Sym { text: (root.btAdapter && root.btAdapter.discovering) ? "sync" : "search"; sz: 16; color: theme.sub
                                     MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
                                         onClicked: if (root.btAdapter) root.btAdapter.discovering = !root.btAdapter.discovering } }
@@ -7321,11 +7695,11 @@ Scope {
                         ColumnLayout {
                             property int tabIdx: 14
                             visible: root.tab === 14; Layout.fillWidth: true; spacing: 12
+                            Section { title: "kde connect"; icon: "phonelink" }
                             RowLayout {
                                 Layout.fillWidth: true; spacing: 8
-                                Sym { text: "phonelink"; sz: 18; color: theme.iris }
-                                Text { text: "kde connect"; color: theme.iris; font.pixelSize: 12; font.family: Tok.mono; font.bold: true }
-                                Rectangle { Layout.fillWidth: true; height: 1; color: theme.a(theme.iris, 0.18) }
+                                Text { text: "kde connect"; color: Tok.ink; font.pixelSize: 13; font.family: Tok.sans }
+                                Item { Layout.fillWidth: true }
                                 Sym { text: "sync"; sz: 16; color: theme.sub
                                     MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.reloadKde() } }
                             }
@@ -7472,6 +7846,21 @@ Scope {
                         ColumnLayout {
                             property int tabIdx: 10
                             visible: root.tab === 10; Layout.fillWidth: true; spacing: 14
+
+                            Section { title: "Login screen"; icon: "login" }
+                            SddmSettings {
+                                id: loginThemeSettings
+                                onAuthenticatingChanged: root.authenticationPending = authenticating
+                                Layout.fillWidth: true; ink: theme.text
+                                // the live login preview exists only while it can be seen
+                                previewLive: root.shown && root.tab === 10 && !root.authenticationPending
+                                onAvatarBrowseRequested: root.pickFile("Choose user picture", "*.png *.jpg *.jpeg *.webp", function(path) {
+                                    loginThemeSettings.setAvatar(path)
+                                })
+                                onBrowseRequested: root.pickFile("Choose login background", "*.png *.jpg *.jpeg *.webp *.gif *.mp4 *.webm", function(path) {
+                                    loginThemeSettings.setBackground(path)
+                                })
+                            }
 
                             // segmented horizontal navigation bar for Idle & Lock sub-menus
                             RowLayout {
@@ -8152,7 +8541,7 @@ Scope {
                     implicitHeight: kbDlg.implicitHeight + 36
                     height: implicitHeight
                     radius: Tok.r
-                    color: theme.a(theme.panel, 0.99)
+                    color: theme.panel
                     border.width: 1; border.color: theme.a(theme.iris, 0.4)
                     MouseArea { anchors.fill: parent }   // swallow clicks so they don't hit the dim
                     ColumnLayout {
@@ -8240,6 +8629,12 @@ Scope {
                             color: root.kbConflict !== "" ? theme.bad : theme.faint; font.pixelSize: 10; font.family: Tok.mono }
                         // actions
                         RowLayout { Layout.fillWidth: true; spacing: 10; Layout.topMargin: 2
+                            Rectangle { visible: !root.kbAdding; implicitWidth: 110; implicitHeight: 32; radius: Tok.r
+                                color: Tok.critWash
+                                Text { anchors.centerIn: parent; text: root.kbDeleteArmed ? "Confirm delete" : "Delete"; color: Tok.crit; font.pixelSize: 12; font.family: Tok.sans }
+                                MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                                    onClicked: { if (root.kbDeleteArmed && root.kbRec) root.kbMutate(["--delete",root.kbRec.sourceId]); else root.kbDeleteArmed = true } }
+                            }
                             Item { Layout.fillWidth: true }
                             Rectangle { implicitWidth: 76; implicitHeight: 32; radius: Tok.r
                                 color: kbCanMa.containsMouse ? theme.a(theme.bad,0.14) : "transparent"; border.width: 1; border.color: kbCanMa.containsMouse ? theme.bad : theme.a(theme.line,0.6)
@@ -8264,7 +8659,7 @@ Scope {
                 visible: root.fileBrowserOpen
                 anchors.fill: parent
                 radius: Tok.r
-                color: theme.a(theme.bg, 0.98)
+                color: theme.bg
                 border.width: 1; border.color: theme.a(theme.iris, 0.4)
                 MouseArea { anchors.fill: parent } // block clicks to content below
 
@@ -8284,7 +8679,7 @@ Scope {
                             implicitWidth: fbUseRow.implicitWidth + 22; implicitHeight: 32; radius: Tok.r
                             color: fbUseMa.containsMouse ? theme.iris : theme.a(theme.iris, 0.22)
                             border.width: 1; border.color: theme.iris
-                            Behavior on color { ColorAnimation { duration: 110 } }
+                            Behavior on color { ColorAnimation { duration: Tok.mFast } }
                             RowLayout {
                                 id: fbUseRow; anchors.centerIn: parent; spacing: 7
                                 Sym { text: "check"; sz: 16; color: fbUseMa.containsMouse ? Tok.accentInk : Tok.ink }
@@ -8320,7 +8715,7 @@ Scope {
                             MouseArea { id: fbUpMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.goUpDir() } }
                         Rectangle {
                             Layout.fillWidth: true; implicitHeight: 34; radius: Tok.r
-                            color: theme.a(theme.bg, 0.8); border.width: 1; border.color: theme.a(theme.iris, 0.2)
+                            color: theme.bg; border.width: 1; border.color: theme.a(theme.iris, 0.2)
                             Text { anchors { fill: parent; leftMargin: 12; rightMargin: 12 }
                                 verticalAlignment: Text.AlignVCenter
                                 text: root.fileBrowserPath; color: theme.frost; font.pixelSize: 12; font.family: Tok.mono; elide: Text.ElideLeft } }
@@ -8353,7 +8748,7 @@ Scope {
                                     required property var modelData
                                     readonly property bool isDir: modelData.type === "d"
                                     readonly property bool matchesFilter: root.fileBrowserDirs ? false
-                                        : (!root.fileBrowserFilter || modelData.name.endsWith(root.fileBrowserFilter))
+                                        : (!root.fileBrowserFilter || root.fileBrowserFilter.split("|").some(function(ext) { return modelData.name.toLowerCase().endsWith(ext.toLowerCase()) }))
                                     visible: isDir || matchesFilter
                                     Layout.fillWidth: true
                                     implicitHeight: (isDir || matchesFilter) ? 38 : 0

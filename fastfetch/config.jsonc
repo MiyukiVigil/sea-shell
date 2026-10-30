@@ -1,0 +1,84 @@
+{
+  "logo": {
+    "type": "kitty",
+    "source": "~/.config/fastfetch/logo.png",
+    "position": "left",
+    "width": 28,
+    "height": 13,
+    "padding": {
+      "top": 1,
+      "right": 2
+    }
+  },
+  "display": {
+    "separator": "  ·  ",
+    "key": {
+      "width": 19
+    },
+    "color": {
+      "keys": "38;2;162;226;232",
+      "title": "38;2;243;190;211",
+      "separator": "90"
+    },
+    "showErrors": false
+  },
+  "modules": [
+    {
+      "type": "title",
+      "format": "  {user-name}  /  {host-name}"
+    },
+    {
+      "type": "custom",
+      "format": "  ──────────────────────────────────────────"
+    },
+    {
+      "type": "os",
+      "key": "󰣇  system"
+    },
+    {
+      "type": "kernel",
+      "key": "  kernel"
+    },
+    {
+      "type": "uptime",
+      "key": "󰥔  awake"
+    },
+    "break",
+    {
+      "type": "wm",
+      "key": "  desktop"
+    },
+    {
+      "type": "terminal",
+      "key": "  terminal"
+    },
+    {
+      "type": "shell",
+      "key": "  shell"
+    },
+    "break",
+    {
+      "type": "cpu",
+      "key": "  processor"
+    },
+    {
+      "type": "gpu",
+      "key": "󰢮  graphics"
+    },
+    {
+      "type": "memory",
+      "key": "  memory"
+    },
+    {
+      "type": "disk",
+      "key": "󰋊  storage",
+      "folders": "/"
+    },
+    "break",
+    {
+      "type": "colors",
+      "paddingLeft": 2,
+      "symbol": "circle"
+    }
+  ]
+}

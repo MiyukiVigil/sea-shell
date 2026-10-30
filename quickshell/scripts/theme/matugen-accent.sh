@@ -185,6 +185,28 @@ disp.pop("keyColor", None)                      # remove the wrong property earl
 disp["color"] = sgr                             # a string colours the keys (labels) + title
 d.setdefault("logo", {})["color"] = {"1": sgr}  # single-colour ascii logo → the accent
 json.dump(d, open(p, "w", encoding="utf-8"), indent=4, ensure_ascii=False)
+# Our compact artwork is a transparent raster; tint its alpha mask on theme changes.
+logo = d.get("logo", {})
+if logo.get("source") == "~/.config/fastfetch/logo.png":
+    import os
+    os.environ["QT_QPA_PLATFORM"] = "offscreen"
+    os.environ["QT_QPA_PLATFORMTHEME"] = ""
+    os.environ["QT_STYLE_OVERRIDE"] = "Fusion"
+    try:
+        from PySide6.QtGui import QGuiApplication, QImage, QPainter, QColor
+        app = QGuiApplication.instance() or QGuiApplication([])
+        image_path = os.path.expanduser(logo["source"])
+        image = QImage(image_path)
+        if not image.isNull():
+            painter = QPainter(image)
+            painter.setCompositionMode(QPainter.CompositionMode_SourceIn)
+            painter.fillRect(image.rect(), QColor(acc))
+            painter.end()
+            image.save(image_path + ".tmp", "PNG")
+            os.replace(image_path + ".tmp", image_path)
+    except (ImportError, OSError):
+        pass
+
 PY
 }
 

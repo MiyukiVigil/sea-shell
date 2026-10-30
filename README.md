@@ -317,9 +317,13 @@ after five failures in a row rather than spinning.
 
 ### Game mode · `SUPER+SHIFT+G`
 
-Strips blur, shadows, animations and the video wallpaper, switches to the performance profile and
-silences notifications — then restores **every one to the value it had before**, not to a
-hardcoded default.
+Strips blur, shadows, animations and the video wallpaper, switches to the performance profile,
+applies your "gaming fans" preset, keeps the screen from idling and silences notifications —
+then restores **every one to the value it had before**, not to a hardcoded default.
+
+It also switches itself: with gamemode installed, install.sh writes `~/.config/gamemode.ini`
+hooks, so any game launched through `gamemoderun` turns game mode on, and it turns off when the
+last game exits. Game mode you switched on by hand stays on.
 
 Steam and gamescope windows are separately forced opaque with no blur, shadow, rounding or
 animation. An unfocused game at `inactive_opacity 0.96` drags a 4-pass blur that samples the
@@ -537,7 +541,9 @@ and a "used by …" note.
 | `SUPER+SHIFT+W` | Wallpaper picker |
 | `SUPER+SHIFT+D` | Toggle light / dark |
 | `SUPER+Return` · `Q` · `E` · `B` · `F` · `P` · `C` | Terminal · close · files · browser · maximise · float · centre |
-| `SUPER+hjkl` | Focus — `SHIFT` moves, `CTRL` resizes |
+| `SUPER+hjkl` / arrows | Focus (`SUPER+K` is the cheat-sheet, so focus up is `SUPER+Up`) — `SHIFT` moves, `CTRL` resizes |
+| `SUPER+SHIFT+C` | VS Code |
+| `SUPER+=` · `SUPER+-` · `SUPER+CTRL+0` | Magnifier in · out · reset |
 | `SUPER+1–0` | Workspaces — `SHIFT` sends there |
 | ``SUPER+` `` · ``SUPER+SHIFT+` `` | Scratchpad — show it · send the window to it |
 | `SUPER+SHIFT+R` · `SUPER+SHIFT+B` | Reload Hyprland · restart the bar |

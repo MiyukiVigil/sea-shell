@@ -103,6 +103,13 @@ copy_dir() {
   fi
   rm -rf "$dest"; mkdir -p "$dest"
   cp -a "$src"/. "$dest"/
+  # Native browsing core is optional; Python remains the compatible fallback.
+  local core="$SCRIPT_DIR/native/sea-fm-core/target/release/sea-fm-core"
+  if command -v cargo >/dev/null 2>&1; then
+    cargo build --release --locked --manifest-path "$SCRIPT_DIR/native/sea-fm-core/Cargo.toml" \
+      || warn "native file core build failed; using Python fallback"
+  fi
+  if [ -x "$core" ]; then install -m 755 "$core" "$dest/sea-fm-core"; fi
   touch "$dest/.sea-shell"
   chmod +x "$dest"/*.sh 2>/dev/null
   ok "installed ${dest/#$HOME/\~}/"
@@ -143,6 +150,7 @@ deploy_qs() {
   # of knowing where its source is.
   printf '%s\n' "$SCRIPT_DIR" > "$dest/REPO_PATH"
   chmod +x "$dest"/*.sh "$dest"/*.py 2>/dev/null
+  python3 "$dest/sea-register-files.py" || warn "could not register Files with the desktop"
   ok "installed ${dest/#$HOME/\~}/ (${mode}, flattened)"
 }
 
@@ -159,6 +167,8 @@ check_deps() {
   # static wallpapers want swww (or its awww fork); animated ones want mpvpaper
   command -v swww >/dev/null 2>&1 || command -v awww >/dev/null 2>&1 || optional+=("swww")
   command -v mpvpaper >/dev/null 2>&1 || optional+=("mpvpaper")
+  # the file manager is a python app, not a binary — check the module, not PATH
+  python3 -c "import PySide6" >/dev/null 2>&1 || optional+=("pyside6")
   [ -x /usr/lib/hyprpolkitagent/hyprpolkitagent ] || command -v hyprpolkitagent >/dev/null 2>&1 || optional+=("hyprpolkitagent")
   [ ${#missing[@]} -gt 0 ] && warn "REQUIRED but not on PATH: ${missing[*]}"
   [ ${#optional[@]} -gt 0 ] && warn "optional, some features off without them: ${optional[*]}"
@@ -187,6 +197,7 @@ REPO_PKGS=(
   python-hidapi                                       # Moondrop DAC EQ panel (USB-HID control)
   python-pykakasi pypinyin                            # lyrics pronunciation — kana/kanji→romaji, hanzi→pinyin (both offline)
   at-spi2-core python-gobject                         # global menu — the focused window's menu bar, read over accessibility
+  pyside6                                             # file manager (SUPER+E) — sea-fm.py is a PySide6/QML app
   translate-shell                                     # lyrics translation (Google's unofficial endpoint; optional, degrades quietly)
 )
 # AUR packages — need an AUR helper (paru/yay); bootstrapped below if absent.
@@ -257,10 +268,10 @@ hypr_block() {
   local block="dofile(\"$1/sea.lua\")
 dofile(\"$1/keybinds.lua\")
 hl.on(\"hyprland.start\", function()
+    hl.exec_cmd(\"exec ~/.config/quickshell/sea-shell/sea-wallpaper-restore.sh\")
     hl.exec_cmd(\"sh ~/.config/quickshell/sea-shell/sea-bar-supervisor.sh\")
     hl.exec_cmd(\"command -v hypridle >/dev/null && exec hypridle\")
     hl.exec_cmd(\"[ -x /usr/lib/hyprpolkitagent/hyprpolkitagent ] && exec /usr/lib/hyprpolkitagent/hyprpolkitagent\")
-    hl.exec_cmd(\"sleep 0.5; exec ~/.config/quickshell/sea-shell/sea-wallpaper-restore.sh\")
 end)"
   printf '%s' "$block"
 }
@@ -287,6 +298,23 @@ wire_hypr_lua() {
     add_block "$lua" "$(hypr_block "$1")" "$MARK_A_LUA" "$MARK_B_LUA"
     warn "installed a starter ~/.config/hypr/hyprland.lua — tweak monitors/keyboard to taste"
   fi
+}
+
+# Feral gamemode runs [custom] start/end when the first game launched through gamemoderun
+# starts and the last one exits, which switches sea-shell's game mode on and off by itself.
+# Only written when the user has no ~/.config/gamemode.ini of their own.
+wire_gamemode() {
+  command -v gamemoded >/dev/null 2>&1 || return 0
+  local ini="$CFG/gamemode.ini"
+  if [ -e "$ini" ]; then
+    grep -q 'sea-gamemode.sh auto-on' "$ini" || info "auto game mode: add to ${ini/#$HOME/\~} [custom]: start=~/.config/quickshell/sea-shell/sea-gamemode.sh auto-on / end=… auto-off"
+    return 0
+  fi
+  printf '%s\n' '; sea-shell: game mode follows any game launched through gamemoderun' \
+    '[custom]' \
+    'start=~/.config/quickshell/sea-shell/sea-gamemode.sh auto-on' \
+    'end=~/.config/quickshell/sea-shell/sea-gamemode.sh auto-off' > "$ini"
+  ok "wired game mode to gamemode (${ini/#$HOME/\~})"
 }
 
 do_install() {
@@ -354,6 +382,7 @@ do_install() {
   # 3) wallpaper: install the repo one if present; --wallpaper regenerates it
   [ -f "$SCRIPT_DIR/sea-wall.png" ] && copy_file "$SCRIPT_DIR/sea-wall.png" "$DATA_DIR/sea-wall.png"
   if [ "${WALLPAPER:-0}" = "1" ]; then set_wallpaper; fi
+  wire_gamemode
 
   # 4) apply live: reload hyprland + (re)start the bar from the installed config
   if command -v hyprctl >/dev/null 2>&1 && [ -n "${HYPRLAND_INSTANCE_SIGNATURE:-}" ]; then

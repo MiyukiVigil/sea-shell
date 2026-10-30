@@ -18,6 +18,7 @@ ShellRoot {
     property string accent: "#63c7dd"
     property bool cfgLight: false
     property real cfgScale: 0
+    property var  cfgMonitors: ({})   // per-monitor overrides from appearance.json
     property string capturePath: "/tmp/sea-capture.png"
     readonly property string rawPath: "/tmp/sea-shot-raw.png"
 
@@ -44,6 +45,8 @@ ShellRoot {
     property string hoverTip: ""
 
     function uiFor(scr) {
+        var mo = (scr && scr.name && root.cfgMonitors[scr.name]) ? root.cfgMonitors[scr.name].scale : 0;
+        if (mo > 0) return mo;                // per-monitor override wins (same rule as the bar)
         if (root.cfgScale > 0) return root.cfgScale;
         var h = (scr && scr.height) ? scr.height : 0;
         if (h <= 1440) return 1.0;
@@ -90,7 +93,7 @@ ShellRoot {
         stdout: StdioCollector { id: apOut; onStreamFinished: {
             try { var j=JSON.parse(apOut.text);
                 if(j.accent) root.accent=j.accent;
-                if(j.scale!==undefined) root.cfgScale=j.scale;
+                if(j.scale!==undefined) root.cfgScale=j.scale; if(j.monitors) root.cfgMonitors=j.monitors;
                 if(j.mode!==undefined) root.cfgLight=(""+j.mode==="light");
             } catch(e){} } } }
 
@@ -408,7 +411,7 @@ ShellRoot {
                     scale: root.uiFor(mainWin.screen)
                     transformOrigin: Item.Bottom
                     width: bar.implicitWidth + 28; height: 52; radius: Tok.rCard
-                    color: theme.a(theme.bg, 0.96)
+                    color: theme.bg
                     border.width: 1; border.color: theme.a(theme.iris, 0.35)
 
                     // tooltip
@@ -416,7 +419,7 @@ ShellRoot {
                         visible: root.hoverTip !== ""
                         anchors { bottom: parent.top; bottomMargin: 8; horizontalCenter: parent.horizontalCenter }
                         width: tipTxt.implicitWidth + 18; height: 24; radius: Tok.r
-                        color: theme.a(theme.bg, 0.98); border.width: 1; border.color: theme.a(theme.iris, 0.3)
+                        color: theme.bg; border.width: 1; border.color: theme.a(theme.iris, 0.3)
                         Text { id: tipTxt; anchors.centerIn: parent; text: root.hoverTip
                             color: theme.text; font.pixelSize: 11; font.family: Tok.mono }
                     }
@@ -496,7 +499,7 @@ ShellRoot {
                     scale: root.uiFor(mainWin.screen)
                     transformOrigin: Item.Top
                     width: hintTxt.implicitWidth + 24; height: 28; radius: Tok.rCard
-                    color: theme.a(theme.bg, 0.92)
+                    color: theme.bg
                     border.width: 1; border.color: theme.a(theme.iris, 0.3)
                     Text {
                         id: hintTxt
