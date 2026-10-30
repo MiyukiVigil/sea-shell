@@ -1699,6 +1699,21 @@ ShellRoot {
     readonly property bool wifiScanning: wifiScan.running
     property string ssid: ""
     property bool wifiOn: false
+    // A join in flight: the network we asked for, or the one NetworkManager is bringing up on
+    // its own (auto-reconnect after resume). Without it the icon stayed on "off" and the row
+    // on its old look for the whole handshake, so a click seemed to do nothing for 5–10 s.
+    property string wifiAsked: ""
+    property string wifiDevConnecting: ""
+    readonly property string wifiConnectingTo: root.wifiAsked !== "" ? root.wifiAsked : root.wifiDevConnecting
+    readonly property bool wifiBusy: root.wifiConnectingTo !== ""
+    // steps the bars 1 → 2 → 3 while busy, so the pill reads as working rather than off
+    property int wifiPhase: 0
+    Timer { interval: 420; repeat: true; running: root.wifiBusy
+        onRunningChanged: root.wifiPhase = 0
+        onTriggered: root.wifiPhase = (root.wifiPhase + 1) % 3 }
+    readonly property string wifiIcon: root.wifiBusy ? ["wifi_1_bar", "wifi_2_bar", "wifi"][root.wifiPhase]
+                                                     : (root.wifiOn ? "wifi" : "wifi_off")
+    readonly property color wifiAccent: root.wifiBusy ? theme.sub : (root.wifiOn ? theme.frost : theme.bad)
     // Connection state comes from the DEVICE state (authoritative + instant), NOT from
     // the scan list's ACTIVE column. That column depends on scan freshness and can drop
     // the active AP for several polls right after a reconnect — which left the bar icon
@@ -1708,13 +1723,14 @@ ShellRoot {
         command: ["sh","-c","nmcli -t -f DEVICE,TYPE,STATE,CONNECTION dev status 2>/dev/null | awk -F: '$2==\"wifi\"{print $3 \"\\t\" $4; exit}'"]
         stdout: StdioCollector { id: wifiStatOut; onStreamFinished: {
             var t = wifiStatOut.text.replace(/\n$/,"");
-            if (!t) { root.wifiOn = false; root.ssid = ""; return }
+            if (!t) { root.wifiOn = false; root.ssid = ""; root.wifiDevConnecting = ""; return }
             var p = t.split("\t"); var st = p[0]||""; var conn = p[1]||"";
             root.wifiOn = (st === "connected");
             root.ssid = root.wifiOn ? conn : "";
+            root.wifiDevConnecting = st.indexOf("connecting") === 0 ? (conn || "network") : "";
         } }
     }
-    Timer { interval: 10000; running: true; repeat: true; triggeredOnStart: true; onTriggered: wifiStatus.running = true }
+    Timer { interval: root.wifiBusy ? 1000 : 10000; running: true; repeat: true; triggeredOnStart: true; onTriggered: wifiStatus.running = true }
     // the network list for the dropdown (styling only — active row cross-checks the
     // connected SSID from dev status so a stale ACTIVE column can't mis-highlight)
     //
@@ -1794,6 +1810,7 @@ ShellRoot {
                 root.wifiJoinMessage = "Could not connect. Check the password and try again.";
             }
             wifiJoinProc.command = [];
+            root.wifiAsked = "";
             root.wifiRescan(false);
         }
     }
@@ -1819,7 +1836,13 @@ ShellRoot {
             if (exitCode !== 0 && root.wifiRetry !== "") {
                 root.wifiPwFor = root.wifiRetry;
                 root.wifiJoinMessage = "Saved credentials did not connect. Enter the password to retry.";
-            } else root.wifiPwFor = "";
+            } else {
+                if (exitCode !== 0)
+                    Quickshell.execDetached(["notify-send", "sea-shell", "Could not join " + root.wifiAsked]);
+                root.wifiPwFor = "";
+            }
+            root.wifiAsked = "";
+            wifiStatus.running = true;
             root.wifiRetry = "";
             wifiRefresh.start();
         }
@@ -1833,20 +1856,22 @@ ShellRoot {
             // joining a new network cost a guaranteed round-trip through nmcli before the
             // password field appeared. settings.qml had the savedCons check; the bar didn't.
             if (root.wifiSaved.indexOf(s) >= 0) {
-                root.wifiRetry = s;
+                root.wifiRetry = s; root.wifiAsked = s;
                 wifiUp.command = ["nmcli", "--wait", "25", "con", "up", "id", s];
                 wifiUp.running = true; return;
             }
             root.wifiPwFor = s; return;       // never seen → ask straight away
         }
-        Quickshell.execDetached(["sh","-c","nmcli dev wifi connect '"+e+"' || notify-send 'sea-shell' 'Could not join "+e+"'"]);
-        root.wifiPwFor = ""; wifiRefresh.start();
+        root.wifiPwFor = ""; root.wifiRetry = ""; root.wifiAsked = s;
+        wifiUp.command = ["nmcli", "--wait", "25", "dev", "wifi", "connect", s];
+        wifiUp.running = true;
     }
     // Argument arrays preserve SSIDs/passwords exactly; completion comes from nmcli's exit code.
     function wifiJoin(s, pw) {
         if (root.wifiJoining || !s.length || !pw.length) return;
         root.wifiJoinFailed = false;
         root.wifiJoinMessage = "Connecting…";
+        root.wifiAsked = s;
         wifiJoinProc.command = ["nmcli", "--wait", "25", "dev", "wifi", "connect", s, "password", pw];
         wifiJoinProc.running = true;
     }
@@ -4729,7 +4754,7 @@ ShellRoot {
                     Pill { owner: bar; id: wifiPill; key: "wifi"
                         wid: "wgWifi"; x: rightGroup.xFor(wid); anchors.verticalCenter: parent.verticalCenter
                         visible: root.cfgWifi
-                        icon: root.wifiOn ? "wifi" : "wifi_off"; accent: root.wifiOn ? theme.frost : theme.bad
+                        icon: root.wifiIcon; accent: root.wifiAccent
                         }   // icon-only: SSID lives in the dropdown
                     
 
@@ -5186,8 +5211,9 @@ ShellRoot {
                                     Sym { anchors.centerIn: parent; text: "refresh"; sz: 15; color: theme.sub }
                                     MouseArea { id: rfm; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.wifiRescan(true) } } }
                             Text { width: parent.width; elide: Text.ElideRight
-                                text: root.wifiOn ? "Connected to " + root.ssid : "Choose a network to connect"
-                                color: root.wifiOn ? theme.good : theme.sub; font.pixelSize: 12; font.family: Tok.sans }
+                                text: root.wifiBusy ? "Connecting to " + root.wifiConnectingTo + "…"
+                                    : root.wifiOn ? "Connected to " + root.ssid : "Choose a network to connect"
+                                color: root.wifiBusy ? theme.frost : root.wifiOn ? theme.good : theme.sub; font.pixelSize: 12; font.family: Tok.sans }
                             Text { text: root.wifiScanning ? "Scanning for networks…" : "Available networks"; color: theme.sub
                                 font.pixelSize: 11; font.family: Tok.sans }
                             // This editor is outside Repeater: scan replacement cannot destroy focus, cursor or draft.
@@ -5207,6 +5233,7 @@ ShellRoot {
                             Repeater { model: wifiDrop.expanded ? root.wifiList : root.wifiList.slice(0, 4)
                                 delegate: Column { id: netRow; required property var modelData; width: parent.width; spacing: 3
                                     readonly property bool asking: root.wifiPwFor === netRow.modelData.ssid
+                                    readonly property bool joining: root.wifiConnectingTo === netRow.modelData.ssid
                                     readonly property bool saved: root.wifiSaved.indexOf(netRow.modelData.ssid) >= 0
                                     readonly property string secLbl: root.wifiSecLabel(netRow.modelData.sec)
                                     // ONE chip per row, carrying whichever fact is worth the width here.
@@ -5214,28 +5241,31 @@ ShellRoot {
                                     // that, "remembered" is what explains the row's behaviour (it joins
                                     // without asking), and only an unknown network needs its scheme named.
                                     readonly property string chipText:
-                                          netRow.secLbl === "OPEN" || netRow.secLbl === "WEP" ? netRow.secLbl
+                                          netRow.joining                                      ? "CONNECTING"
+                                        : netRow.secLbl === "OPEN" || netRow.secLbl === "WEP" ? netRow.secLbl
                                         : netRow.modelData.active                             ? ""
                                         : netRow.saved                                        ? "SAVED"
                                         : netRow.secLbl
                                     readonly property string chipTone:
-                                          netRow.secLbl === "OPEN" || netRow.secLbl === "WEP" ? "warn"
+                                          netRow.joining                                      ? "accent"
+                                        : netRow.secLbl === "OPEN" || netRow.secLbl === "WEP" ? "warn"
                                         : netRow.saved                                        ? "accent" : "neutral"
                                     Rectangle { width: parent.width; height: 36; radius: Tok.rSmall
                                         Behavior on color { ColorAnimation { duration: Tok.mFast } }
-                                        color: netRow.modelData.active ? theme.a(theme.iris,0.18) : (netRow.asking ? theme.a(theme.iris,0.10) : (wm.containsMouse ? theme.a(theme.line,0.45) : "transparent"))
+                                        color: netRow.modelData.active ? theme.a(theme.iris,0.18) : (netRow.asking || netRow.joining ? theme.a(theme.iris,0.10) : (wm.containsMouse ? theme.a(theme.line,0.45) : "transparent"))
                                         border.width: netRow.modelData.active ? 1 : 0; border.color: theme.a(theme.iris,0.3)
                                         // base click zone sits UNDER the forget hitbox
                                         MouseArea { id: wm; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
-                                            onClicked: { if(netRow.modelData.active) return; if(netRow.asking) root.wifiCancelDraft(); else root.wifiConnect(netRow.modelData.ssid, netRow.modelData.secure) } }
+                                            onClicked: { if(netRow.modelData.active || netRow.joining) return; if(netRow.asking) root.wifiCancelDraft(); else root.wifiConnect(netRow.modelData.ssid, netRow.modelData.secure) } }
                                         // Anchored rather than laid out in a Row: the old row sized the
                                         // SSID by subtracting magic numbers for whatever might sit to its
                                         // right, and the forget button — anchored to the same right edge —
                                         // was drawn straight over the trailing glyph.
                                         Sym { id: sigIcon
                                             anchors.left: parent.left; anchors.leftMargin: 10; anchors.verticalCenter: parent.verticalCenter
-                                            text: netRow.modelData.signal>66?"signal_wifi_4_bar":netRow.modelData.signal>33?"network_wifi_3_bar":"network_wifi_1_bar"
-                                            sz: 16; color: netRow.modelData.active ? theme.iris : theme.faint }
+                                            text: netRow.joining ? root.wifiIcon
+                                                : netRow.modelData.signal>66?"signal_wifi_4_bar":netRow.modelData.signal>33?"network_wifi_3_bar":"network_wifi_1_bar"
+                                            sz: 16; color: netRow.modelData.active || netRow.joining ? theme.iris : theme.faint }
                                         Row { id: rightBits
                                             anchors.right: parent.right; anchors.rightMargin: 10
                                             anchors.verticalCenter: parent.verticalCenter; spacing: 6
@@ -6173,8 +6203,8 @@ ShellRoot {
                         Pill { owner: bar; vert: true; id: wifiPillVert; key: "wifi"
                             wid: "wgWifi"; Layout.alignment: Qt.AlignHCenter
                             visible: root.cfgWifi
-                            icon: root.wifiOn ? "wifi" : "wifi_off"
-                            accent: root.wifiOn ? theme.frost : theme.bad }
+                            icon: root.wifiIcon
+                            accent: root.wifiAccent }
 
                         Pill { owner: bar; vert: true; id: btPillVert; key: "bt"
                             wid: "wgBluetooth"; Layout.alignment: Qt.AlignHCenter

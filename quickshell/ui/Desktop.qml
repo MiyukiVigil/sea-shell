@@ -78,6 +78,22 @@ PanelWindow {
 
     // ---------- the arrangement ----------
     property var items: []
+    // The Repeater runs on the ids, not on `items`: a JS array model rebuilds every delegate
+    // each time it is replaced, so a widget the wallpaper nudged was destroyed and re-made at
+    // its new spot, a teleport. The ids only change when a widget is added or removed, so a
+    // move reaches a widget that is still alive and it can glide there.
+    property var ids: []
+    readonly property var byId: {
+        var m = {};
+        for (var i = 0; i < root.items.length; i++) m[root.keyOf(root.items[i], i)] = root.items[i];
+        return m;
+    }
+    function keyOf(it, i) { return (it && it.id) ? "" + it.id : "#" + i }
+    onItemsChanged: {
+        var k = root.items.map((it, i) => root.keyOf(it, i));
+        if (k.join("\n") !== root.ids.join("\n")) root.ids = k;
+        root.rebuildMask();
+    }
     readonly property string confPath:
         Quickshell.env("HOME") + "/.config/sea-shell/desktop.json"
 
@@ -223,7 +239,6 @@ PanelWindow {
         for (var i = 0; i < maskPool.count; i++) a.push(maskPool.objectAt(i));
         root.maskRegions = a;
     }
-    onItemsChanged: root.rebuildMask()
 
     mask: Region {
         // Arranging takes the whole screen, so a widget can be dragged anywhere including
@@ -288,21 +303,21 @@ PanelWindow {
         }
 
         Repeater {
-            model: root.items
+            model: root.ids
             delegate: DesktopItem {
                 required property var modelData
-                required property int index
+                readonly property var entry: root.byId[modelData] || ({ x: 0, y: 0, w: 0.1, h: 0.08 })
                 pal: root.pal
                 uiFont: root.uiFont
-                spec: modelData
+                spec: entry
                 editing: root.editing
                 readings: root.readings
                 player: root.player
                 viz: root.viz
                 // What the wallpaper is doing under this item, so it can decide whether it
                 // needs a ground at all. Same map, same threshold as the placement nudge.
-                busy: root.busyAt(modelData.x, modelData.y, modelData.w, modelData.h)
-                under: root.lumaAt(modelData.x, modelData.y, modelData.w, modelData.h)
+                busy: root.busyAt(entry.x, entry.y, entry.w, entry.h)
+                under: root.lumaAt(entry.x, entry.y, entry.w, entry.h)
                 history: root.cpuHistory
                 memHistory: root.memHistory
                 gpuHistory: root.gpuHistory
@@ -311,14 +326,14 @@ PanelWindow {
                 fieldY: root.insetTop
                 busyFn: root.busyAt
                 busyLimit: root.busyLimit
-                onRemoved: root.removeItem(modelData.id)
+                onRemoved: root.removeItem(entry.id)
                 onMoved: (fx, fy, exact) => {
                     // SHIFT is one statement, not two: "put it exactly here" and "stop
                     // moving it when the wallpaper changes" are the same intent — you have
                     // overruled the map, and it would be rude to overrule you back tomorrow.
                     var p = exact ? Qt.point(fx, fy)
-                                  : root.settle(fx, fy, modelData.w, modelData.h);
-                    root.moveItem(modelData.id, p.x, p.y, exact);
+                                  : root.settle(fx, fy, entry.w, entry.h);
+                    root.moveItem(entry.id, p.x, p.y, exact);
                 }
             }
         }

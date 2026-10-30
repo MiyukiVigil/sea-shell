@@ -114,7 +114,7 @@ Scope {
         22: { l: "Default Apps",   i: "apps" },
         23: { l: "Your profile", i: "account_circle" }
     })
-    readonly property var pageDescriptions: ({"0": "Output, input and individual application volume.", "1": "Arrange monitors and choose resolution, refresh rate and scaling.", "2": "Manage wired, wireless and VPN connections.", "3": "Choose your location, units and weather information.", "4": "Preview your desktop look before applying colors, fonts and icons.", "5": "Configure desktop actions and shortcuts to common tools.", "6": "Choose power profiles and session actions.", "7": "Find and edit your keyboard shortcuts.", "8": "Inspect your system and available maintenance actions.", "9": "Pair devices and manage Bluetooth connections.", "10": "Configure screen locking, dimming and idle behavior.", "11": "Manage calendars, events and reminders.", "12": "Choose the information shown in your bar.", "13": "Save a desktop look or switch between theme profiles.", "14": "Connect your phone and manage sharing features.", "15": "Configure keyboard, pointer and touchpad behavior.", "16": "Customize dock placement, sizing and behavior.", "17": "Set behavior for matching application windows.", "18": "Review application activity and screen-time preferences.", "19": "Inspect storage devices and available space.", "20": "Set bar placement, appearance and visibility.", "21": "Manage wallpaper and desktop layout.", "23": "Personalize your picture, display name and lock screen.", "22": "Choose which applications open folders, links and files."})
+    readonly property var pageDescriptions: ({"0": "Output, input and individual application volume.", "1": "Arrange monitors and choose resolution, refresh rate and scaling.", "2": "Manage wired, wireless and VPN connections.", "3": "Choose your location, units and weather information.", "4": "Preview your desktop look before applying colors, fonts and icons.", "5": "Configure desktop actions and shortcuts to common tools.", "6": "Choose power profiles and session actions.", "7": "Find and edit your keyboard shortcuts.", "8": "Inspect your system and available maintenance actions.", "9": "Pair devices and manage Bluetooth connections.", "10": "Your lock screen, the login screen, and when the screen dims, locks and sleeps.", "11": "Manage calendars, events and reminders.", "12": "Choose the information shown in your bar.", "13": "Save a desktop look or switch between theme profiles.", "14": "Connect your phone and manage sharing features.", "15": "Configure keyboard, pointer and touchpad behavior.", "16": "Customize dock placement, sizing and behavior.", "17": "Set behavior for matching application windows.", "18": "Review application activity and screen-time preferences.", "19": "Inspect storage devices and available space.", "20": "Set bar placement, appearance and visibility.", "21": "Manage wallpaper and desktop layout.", "23": "Your picture and display name, as Settings, the power menu and the lock screen show them.", "22": "Choose which applications open folders, links and files."})
     function pageEffectNote(t) {
         if (t === 1) return "Monitor changes use Apply. Keep a working display connected while testing.";
         if (t === 4 || t === 13) return "Appearance saves automatically; app icons may need an app restart.";
@@ -330,7 +330,8 @@ Scope {
         if (t === 18) { usageReadProc.running = true; ulimReadProc.running = true }   // screen time
         if (t === 8) { sysProc.running = true; bkListProc.running = true; otaProc.running = true }   // system: stats + backups + update check
         if (t === 19) diskProc.running = true         // disks
-        if (t === 10) { idleChk.running = true; lockSettingsGet.running = true }   // idle & lock
+        if (t === 10) { idleChk.running = true; lockSettingsGet.running = true; lockProfileEditor.reload() }   // idle & lock
+        if (t === 23) userProfileEditor.reload()
         if (t === 6) { ppGet.running = true; lockSettingsGet.running = true; battProc.running = true }   // power: profile, lid settings, battery wear
         if (t === 11) { reloadEventsProc.running = true; calCfgLoad.running = true }  // calendar
     }
@@ -2742,7 +2743,9 @@ Scope {
     }
     // Network tab open → keep re-probing so the list stays live instead of freezing on whatever
     // the tab-open scan happened to catch. refreshTab() already fires the scan on open.
-    Timer { interval: 10000; running: root.shown && root.tab === 2; repeat: true; onTriggered: root.rescanWifi() }
+    // Paused while a password row is open: the rows are rebuilt from each scan, and the field
+    // you were typing into went with them, half a password and all.
+    Timer { interval: 10000; running: root.shown && root.tab === 2 && root.wifiPwFor === ""; repeat: true; onTriggered: root.rescanWifi() }
 
     // saved (known) wifi connections — for the forget button + "saved" tag
     property var savedCons: []
@@ -2773,7 +2776,7 @@ Scope {
     function wifiJoinHidden(ssid, pw) {
         if (!ssid.length) return;
         var e = ssid.replace(/'/g, ""), p = pw.replace(/'/g, "'\\''");
-        root.wifiMsg = "connecting to hidden “" + e + "”…"; root.hidOpen = false; root.wifiRetry = "";
+        root.wifiMsg = "connecting to hidden “" + e + "”…"; root.hidOpen = false; root.wifiRetry = ""; root.wifiAsked = ssid;
         wifiJoin.command = ["sh","-c","nmcli dev wifi connect '" + e + "'" + (pw.length ? " password '" + p + "'" : "") + " hidden yes 2>&1"];
         wifiJoin.running = true;
     }
@@ -2786,23 +2789,40 @@ Scope {
         stdout: StdioCollector { id: wrOut; onStreamFinished: root.wifiRadio = wrOut.text.trim() === "enabled" } }
     function setWifiRadio(on) { root.wifiRadio = on; root.wifiMsg = on ? "" : "wi-fi off"; run("nmcli radio wifi " + (on ? "on" : "off")); wifiRefresh.start() }
     property string wifiRetry: ""     // ssid whose saved profile we're trying before prompting
+    // The join in flight, ours or NetworkManager's own (auto-reconnect), so the row can say so.
+    // Before this the only sign was a grey line of text above the list; the row you clicked
+    // looked untouched until the scan after the handshake.
+    property string wifiAsked: ""
+    property string wifiDevConnecting: ""
+    readonly property string wifiConnectingTo: root.wifiAsked !== "" ? root.wifiAsked : root.wifiDevConnecting
+    property int wifiPhase: 0
+    Timer { interval: 420; repeat: true; running: root.shown && root.wifiConnectingTo !== ""
+        onTriggered: root.wifiPhase = (root.wifiPhase + 1) % 3 }
+    Process { id: wifiDevState
+        command: ["sh","-c","nmcli -t -f TYPE,STATE,CONNECTION dev status 2>/dev/null | awk -F: '$1==\"wifi\"{print $2 \"\\t\" $3; exit}'"]
+        stdout: StdioCollector { id: wdsOut; onStreamFinished: {
+            var p = wdsOut.text.replace(/\n$/, "").split("\t");
+            root.wifiDevConnecting = (p[0] || "").indexOf("connecting") === 0 ? (p[1] || "network") : "";
+        } } }
+    Timer { interval: root.wifiConnectingTo !== "" ? 1000 : 4000; repeat: true; triggeredOnStart: true
+        running: root.shown && root.tab === 2; onTriggered: wifiDevState.running = true }
     function wifiConnect(ssid, secure) {
         var e = ssid.replace(/'/g, "");
         if (secure && root.savedCons.indexOf(ssid) >= 0) {
             // known network → reconnect with the STORED password; prompt only on failure
-            root.wifiMsg = "connecting…"; root.wifiRetry = ssid;
+            root.wifiMsg = "connecting…"; root.wifiRetry = ssid; root.wifiAsked = ssid;
             wifiJoin.command = ["sh","-c","nmcli con up id '" + e + "' 2>&1"];
             wifiJoin.running = true; return;
         }
         if (secure) { root.wifiPwFor = ssid; root.wifiMsg = ""; return }
-        root.wifiMsg = "connecting…"; root.wifiRetry = "";
+        root.wifiMsg = "connecting…"; root.wifiRetry = ""; root.wifiAsked = ssid;
         wifiJoin.command = ["sh","-c","nmcli dev wifi connect '" + e + "' 2>&1"];
         wifiJoin.running = true;
     }
     function wifiJoinPw(ssid, pw) {
         if (!pw.length) return;
         var e = ssid.replace(/'/g, ""), p = pw.replace(/'/g, "'\\''");
-        root.wifiMsg = "connecting…"; root.wifiPwFor = ""; root.wifiRetry = "";
+        root.wifiMsg = "connecting…"; root.wifiPwFor = ""; root.wifiRetry = ""; root.wifiAsked = ssid;
         wifiJoin.command = ["sh","-c","nmcli dev wifi connect '" + e + "' password '" + p + "' 2>&1"];
         wifiJoin.running = true;
     }
@@ -2815,6 +2835,7 @@ Scope {
         stdout: StdioCollector { id: wjOut; onStreamFinished: {
             var t = wjOut.text.trim();
             var ok = t.indexOf("successfully") >= 0;
+            root.wifiAsked = ""; wifiDevState.running = true;
             if (!ok && root.wifiRetry !== "") {           // stored secret failed → ask inline
                 root.wifiPwFor = root.wifiRetry; root.wifiRetry = "";
                 root.wifiMsg = "saved password didn't work — enter it again";
@@ -3863,7 +3884,7 @@ Scope {
                         border.width: root.tab === 23 ? 1 : 0; border.color: theme.a(theme.iris, 0.35)
                         Behavior on color { ColorAnimation { duration: Tok.mFast } }
                         ProfileCard { id: meCard; width: parent.width; compact: true; flat: true
-                            profile: root.userProfile; subtitle: "profile & lock screen" }
+                            profile: root.userProfile; subtitle: "your profile" }
                         MouseArea { id: meMa; anchors.fill: parent; hoverEnabled: true; preventStealing: true; cursorShape: Qt.PointingHandCursor; onClicked: root.tab = 23 }
                     }
                 }
@@ -4131,7 +4152,10 @@ Scope {
                 id: contentFlick
                 anchors { left: sidebarPane.right; leftMargin: 1; right: parent.right; rightMargin: 14; top: pageHead.bottom; topMargin: 4; bottom: parent.bottom; bottomMargin: 14 }
                 contentWidth: width
-                contentHeight: pane.implicitHeight
+                // The last section's panel hangs 12px past the page's end (Section.reach), so a
+                // scroll that stopped at implicitHeight clipped its bottom edge and corners off:
+                // every page ended on a box with no floor. The extra is that overhang plus air.
+                contentHeight: pane.implicitHeight + 36
                 clip: true
                 boundsBehavior: Flickable.StopAtBounds
 
@@ -4474,11 +4498,12 @@ Scope {
                                         id: wrow
                                         required property var modelData
                                         readonly property bool asking: root.wifiPwFor === modelData.ssid
+                                        readonly property bool joining: root.wifiConnectingTo === modelData.ssid
                                         onAskingChanged: if (asking) pwIn.forceActiveFocus()
                                         Layout.fillWidth: true; implicitHeight: asking ? 80 : 40; radius: Tok.r
                                         Behavior on implicitHeight { NumberAnimation { duration: 110; easing.type: Easing.OutCubic } }
-                                        color: modelData.active ? Tok.accentWash : (wma.containsMouse || asking ? root.rowHover : "transparent")
-                                        border.width: asking || modelData.active ? 1 : 0; border.color: theme.a(theme.iris, 0.45)
+                                        color: modelData.active || joining ? Tok.accentWash : (wma.containsMouse || asking ? root.rowHover : "transparent")
+                                        border.width: asking || joining || modelData.active ? 1 : 0; border.color: theme.a(theme.iris, 0.45)
                                         clip: true
                                         ColumnLayout {
                                             anchors { fill: parent; leftMargin: 12; rightMargin: 12; topMargin: 4; bottomMargin: 6 }
@@ -4488,6 +4513,7 @@ Scope {
                                                 // base click zone UNDER the icon buttons
                                                 MouseArea { id: wma; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
                                                     onClicked: {
+                                                        if (wrow.joining) return;
                                                         if (modelData.active) { root.wifiDisconnect(modelData.ssid); return }
                                                         if (wrow.asking) { root.wifiPwFor = ""; return }
                                                         root.wifiConnect(modelData.ssid, modelData.secure)
@@ -4496,11 +4522,13 @@ Scope {
                                                     anchors.fill: parent; spacing: 9
                                                     readonly property bool saved: root.savedCons.indexOf(modelData.ssid) >= 0
                                                     Sym {
-                                                        text: modelData.signal > 66 ? "signal_wifi_4_bar" : modelData.signal > 33 ? "network_wifi_3_bar" : "network_wifi_1_bar"
-                                                        sz: 17; color: modelData.active ? theme.iris : theme.frost
+                                                        text: wrow.joining ? ["wifi_1_bar", "wifi_2_bar", "wifi"][root.wifiPhase]
+                                                            : modelData.signal > 66 ? "signal_wifi_4_bar" : modelData.signal > 33 ? "network_wifi_3_bar" : "network_wifi_1_bar"
+                                                        sz: 17; color: modelData.active || wrow.joining ? theme.iris : theme.frost
                                                     }
                                                     Text { text: modelData.ssid; color: theme.text; font.pixelSize: 12; font.family: Tok.mono; elide: Text.ElideRight; Layout.fillWidth: true }
-                                                    Text { text: modelData.signal + "%"; color: theme.faint; font.pixelSize: 10; font.family: Tok.mono }
+                                                    Text { text: wrow.joining ? "connecting…" : modelData.signal + "%"
+                                                        color: wrow.joining ? theme.iris : theme.faint; font.pixelSize: 10; font.family: Tok.mono }
                                                     // forget (saved networks) — its own hitbox, sits above the row's click zone
                                                     Sym { visible: wma.containsMouse && parent.saved; text: "delete"; sz: 15; color: fgm.containsMouse ? theme.bad : theme.faint
                                                         MouseArea { id: fgm; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
@@ -6858,7 +6886,8 @@ Scope {
                             property int tabIdx: 23
                             visible: root.tab === 23; Layout.fillWidth: true; spacing: 14
                             Section { title: "Your profile"; icon: "account_circle" }
-                            ProfileSettings { id: userProfileEditor; Layout.fillWidth: true
+                            ProfileSettings { id: userProfileEditor; Layout.fillWidth: true; part: "identity"
+                                onSaved: lockProfileEditor.reload()
                                 onBrowseRequested: root.pickFile("Choose profile picture", "*.png *.jpg *.jpeg *.webp", function(path) { userProfileEditor.setAvatar(path) })
                             }
                         }
@@ -7956,7 +7985,7 @@ Scope {
                                 Repeater {
                                     model: [
                                         { i: "timer", l: "timeouts" },
-                                        { i: "security", l: "lockscreen style" }
+                                        { i: "security", l: "lock screen" }
                                     ]
                                     delegate: Rectangle {
                                         required property var modelData; required property int index
@@ -8148,6 +8177,9 @@ Scope {
                             // SUB-TAB 1: Style & Wallpaper
                             ColumnLayout {
                                 visible: root.idlSubTab === 1; Layout.fillWidth: true; spacing: 14
+                                Section { title: "lock screen"; icon: "lock" }
+                                ProfileSettings { id: lockProfileEditor; Layout.fillWidth: true; part: "lock"
+                                    onSaved: userProfileEditor.reload() }
                                 Section { title: "lock screen options"; icon: "security" }
 
                                 // Grace period

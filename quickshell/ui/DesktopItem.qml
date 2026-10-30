@@ -108,8 +108,28 @@ Item {
     readonly property int hAlign: item.align === "centre" ? Text.AlignHCenter
                                 : item.align === "right"  ? Text.AlignRight : Text.AlignLeft
 
-    x: (item.spec ? item.spec.x : 0) * item.fieldW
-    y: (item.spec ? item.spec.y : 0) * item.fieldH + item.fieldY
+    // Where the record says it lives. x and y follow it with a glide, so a widget the new
+    // wallpaper nudges travels there instead of jumping. A drag writes x and y directly, which
+    // breaks the binding; it is put back once the record has caught up with the drop, so the
+    // widget never springs back to its old spot first.
+    readonly property real homeX: (item.spec ? item.spec.x : 0) * item.fieldW
+    readonly property real homeY: (item.spec ? item.spec.y : 0) * item.fieldH + item.fieldY
+    x: item.homeX
+    y: item.homeY
+    property bool glide: false
+    Component.onCompleted: Qt.callLater(() => item.glide = true)
+    Behavior on x { enabled: item.glide && !dragArea.drag.active
+        NumberAnimation { duration: 560; easing.type: Easing.OutQuint } }
+    Behavior on y { enabled: item.glide && !dragArea.drag.active
+        NumberAnimation { duration: 560; easing.type: Easing.OutQuint } }
+    function land() {
+        landTimer.stop();
+        item.x = Qt.binding(() => item.homeX);
+        item.y = Qt.binding(() => item.homeY);
+    }
+    onHomeXChanged: if (landTimer.running) item.land()
+    onHomeYChanged: if (landTimer.running) item.land()
+    Timer { id: landTimer; interval: 1500; onTriggered: item.land() }
     width: Math.max(40, (item.spec ? item.spec.w : 0.1) * item.fieldW)
     height: Math.max(30, (item.spec ? item.spec.h : 0.08) * item.fieldH)
 
@@ -525,6 +545,7 @@ Item {
             if (!item.editing) return;
             var fx = Math.max(0, Math.min(1, item.x / item.fieldW));
             var fy = Math.max(0, Math.min(1, (item.y - item.fieldY) / item.fieldH));
+            landTimer.restart();
             item.moved(fx, fy, dragArea.exact);
         }
         onClicked: mouse => {

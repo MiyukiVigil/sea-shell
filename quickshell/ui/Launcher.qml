@@ -261,7 +261,7 @@ Scope {
     // be reused after a `cliphist wipe`, so a stale cache would show the wrong image.
     Process { id: clipThumbProc
         command: ["sh","-c",
-            "d=" + root.clipThumbDir + "; mkdir -p \"$d\"; " +
+            "d=" + root.clipThumbDir + "; mkdir -p \"$d\"; rm -f \"$d\"/big-*.png; " +
             "cliphist list 2>/dev/null | head -80 | awk -F'\\t' '$2 ~ /^\\[\\[ binary data/{print $1}' | " +
             "while read -r id; do cliphist decode \"$id\" 2>/dev/null | " +
             "magick - -thumbnail 120x120^ -gravity center -extent 120x120 png:\"$d/$id.png\" 2>/dev/null; done; echo ok"]
@@ -375,9 +375,12 @@ Scope {
                 var match = q === "" ? {score:0} : fuzzy(q, cls + " " + title);
                 if (!match) continue;
                 var ws = win.workspace ? win.workspace.id : (ipc.workspace ? ipc.workspace.id : "?");
-                windowHits.push({type:"window", title:esc(cls || title),
-                    sub:"Window · " + esc(title) + " · workspace " + esc(String(ws)),
-                    mi:"window", address:ipc.address, score:match.score});
+                // the app's own name and icon, not its class: "Visual Studio Code", not
+                // "com.microsoft.VSCode"
+                var went = cls ? DesktopEntries.heuristicLookup(cls) : null;
+                windowHits.push({type:"window", title:esc(went ? went.name : (cls || title)),
+                    sub:esc(title), mi:"window", address:ipc.address, score:match.score,
+                    top:win, ws:String(ws), wtitle:title, cls:cls, wicon: went ? went.icon : ""});
             }
             windowHits.sort((a,b) => b.score - a.score);
             windowHits.forEach(w => out.push(w));
@@ -417,6 +420,57 @@ Scope {
         : (query.startsWith("~")||query.startsWith("/")) ? "FILES" : query.startsWith("?") ? "WEB"
         : query.startsWith(";") ? "CLIP" : query.startsWith(":") ? "SYS" : query.startsWith(".") ? "EMOJI" : "APPS"
 
+    // ---------- the selected result, and what the detail pane says about it ----------
+    readonly property var cur: root.results[root.sel] || null
+    readonly property string curType: root.cur ? root.cur.type : ""
+    function groupOf(t) {
+        return ({ window: "Open windows", app: "Apps", calc: "Answer", file: "Files", clip: "Clipboard",
+                  web: "Web", act: "System", emoji: "Emoji", run: "Run", term: "Run" })[t] || "";
+    }
+    // a row's second line, minus the "⏎ copy …" hints the footer now states once
+    function subOf(r) { var t = root.plain(r ? r.sub : ""); return t.indexOf("⏎") >= 0 ? "" : t }
+    function plain(html) { return ("" + (html || "")).replace(/<[^>]*>/g, "").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&") }
+    function ago(t) {
+        var d = Date.now() / 1000 - t;
+        if (d < 90) return "just now";
+        if (d < 3600) return Math.round(d / 60) + " min ago";
+        if (d < 86400) return Math.round(d / 3600) + " h ago";
+        if (d < 86400 * 30) return Math.round(d / 86400) + " days ago";
+        return "a while ago";
+    }
+    readonly property string enterVerb: ({ window: "switch to", app: "open", calc: "copy", emoji: "copy", clip: "copy",
+        file: "open", web: "search", act: "run", run: "run", term: "run in kitty" })[root.curType] || "open"
+    function isImage(p) { return /\.(png|jpe?g|webp|gif|bmp|svg|avif)$/i.test(p || "") }
+
+    // A peek at what is selected: the full text of a clipboard entry, the head of a text file,
+    // or a folder's first entries. Debounced so holding an arrow key does not fork per row.
+    property string peekText: ""
+    property string peekFor: ""
+    property string peekImage: ""   // a large decode of the selected clipboard image
+    Timer { id: peekDebounce; interval: 90; onTriggered: {
+        var c = root.cur; root.peekText = ""; root.peekImage = "";
+        if (!c || !root.shown) return;
+        var key = c.type + ":" + c.exec;
+        root.peekFor = key;
+        if (c.type === "clip" && c.clipImg)
+            peekProc.command = ["sh", "-c", "o=\"$2/big-$1.png\"; [ -s \"$o\" ] || cliphist decode \"$1\" 2>/dev/null "
+                + "| magick - -thumbnail '900x560>' png:\"$o\" 2>/dev/null; [ -s \"$o\" ] && printf 'IMG:%s' \"$o\"", "sh", "" + c.exec, root.clipThumbDir];
+        else if (c.type === "clip")
+            peekProc.command = ["sh", "-c", "cliphist decode \"$1\" 2>/dev/null | head -c 1600", "sh", "" + c.exec];
+        else if (c.type === "file" && !root.isImage(c.exec))
+            peekProc.command = ["sh", "-c", "f=\"$HOME/$1\"; if [ -d \"$f\" ]; then ls -1p \"$f\" 2>/dev/null | head -16; "
+                + "else case \"$(file -b --mime-type \"$f\" 2>/dev/null)\" in text/*|application/json|application/x-shellscript) head -c 1400 \"$f\";; esac; fi", "sh", "" + c.exec];
+        else return;
+        peekProc.key = key; peekProc.running = false; peekProc.running = true;
+    } }
+    Process { id: peekProc; property string key: ""
+        stdout: StdioCollector { id: peekOut; onStreamFinished: {
+            if (peekProc.key !== root.peekFor) return;
+            if (peekOut.text.indexOf("IMG:") === 0) root.peekImage = Tok.fileUrl(peekOut.text.slice(4));
+            else root.peekText = peekOut.text;
+        } } }
+    onCurChanged: peekDebounce.restart()
+
     PanelWindow {
         id: win
         readonly property real ui: root.uiFor(win.screen)
@@ -435,18 +489,17 @@ Scope {
         Rectangle { anchors.fill: parent; color: Qt.rgba(0,0,0,0.35); opacity: card.openF
             MouseArea { anchors.fill: parent; onClicked: root.close() } }
 
+        // ONE FIXED SIZE. The old card grew and shrank with every keystroke; with a detail pane
+        // beside the list that would move the thing you are reading, so the frame holds still
+        // and only what is inside it changes.
         Rectangle {
             id: card
-            width: 640
-            height: head.height + 12 + Math.min(8, Math.max(1, root.results.length)) * 52 + hints.height + 26
+            width: 860; height: 520
             anchors.horizontalCenter: parent.horizontalCenter
-            y: parent.height * 0.16
+            y: Math.max(24, (parent.height - height * win.ui) * 0.32)
             radius: Tok.rCard
-            // glassy matte — translucent so the compositor blur (sea-shell:launcher
-            // Solid material keeps text independent of the wallpaper and other windows.
             color: theme.bg
-            border.width: 1; border.color: theme.a(theme.frost, 0.26)
-            Behavior on height { NumberAnimation { duration: 110; easing.type: Easing.OutCubic } }
+            border.width: 1; border.color: theme.a(theme.frost, 0.22)
 
             readonly property real openF: launcherMotion.progress
             opacity: openF
@@ -456,22 +509,23 @@ Scope {
             transform: Translate { y: -12 * (1 - card.openF) }
 
             Rectangle { anchors { top: parent.top; left: parent.left; right: parent.right; topMargin: 1; leftMargin: parent.radius; rightMargin: parent.radius }
-                height: 1; color: Qt.rgba(1, 1, 1, theme.light ? 0.45 : 0.12) }
+                height: 1; color: Qt.rgba(1, 1, 1, theme.light ? 0.45 : 0.10) }
 
             // ---------- search field ----------
             Item {
                 id: head
-                width: parent.width; height: 54
-                Text { id: lens; text: "search"; font.family: "Material Symbols Outlined"; font.pixelSize: 20
-                    color: theme.iris; anchors { left: parent.left; leftMargin: 18; verticalCenter: parent.verticalCenter } }
+                width: parent.width; height: 60
+                Text { id: lens; text: "search"; font.family: "Material Symbols Outlined"; font.pixelSize: 22
+                    color: theme.iris; anchors { left: parent.left; leftMargin: 22; verticalCenter: parent.verticalCenter } }
                 TextInput {
                     id: field
-                    anchors { left: lens.right; leftMargin: 12; right: badge.left; rightMargin: 10; verticalCenter: parent.verticalCenter }
-                    color: theme.text; font.pixelSize: 16; font.family: Tok.mono
+                    anchors { left: lens.right; leftMargin: 14; right: badge.left; rightMargin: 12; verticalCenter: parent.verticalCenter }
+                    color: theme.text; font.pixelSize: 18; font.family: Tok.sans
+                    selectionColor: theme.a(theme.iris, 0.35); selectedTextColor: theme.text
                     clip: true
                     onTextChanged: root.query = text
-                    Text { text: "apps  ·  >run  =calc  ~files  ?web  ;clip  :sys  .emoji"; visible: field.text===""
-                        color: theme.sub; font.pixelSize: 14; font.family: Tok.mono; anchors.verticalCenter: parent.verticalCenter }
+                    Text { text: "Search apps, windows and more"; visible: field.text===""
+                        color: theme.faint; font: field.font; anchors.verticalCenter: parent.verticalCenter }
                     Keys.onEscapePressed: root.close()
                     Keys.onReturnPressed: (e)=> {
                         if ((e.modifiers & Qt.ControlModifier) && root.results[root.sel] && root.results[root.sel].type==="run")
@@ -488,101 +542,322 @@ Scope {
                 }
                 Rectangle {
                     id: badge
-                    anchors { right: parent.right; rightMargin: 16; verticalCenter: parent.verticalCenter }
-                    width: badgeTxt.width + 16; height: 22; radius: Tok.r
+                    anchors { right: parent.right; rightMargin: 18; verticalCenter: parent.verticalCenter }
+                    width: badgeTxt.width + 16; height: 22; radius: Tok.rSmall
                     color: theme.a(theme.iris, 0.14); border.width: 1; border.color: theme.a(theme.iris, 0.3)
                     Text { id: badgeTxt; anchors.centerIn: parent; text: root.modeBadge
-                        color: theme.frost; font.pixelSize: 10; font.family: Tok.mono; font.bold: true }
+                        color: theme.frost; font.pixelSize: 10; font.family: Tok.mono; font.bold: true; font.letterSpacing: 0.6 }
                 }
-                Rectangle { width: parent.width - 28; height: 1; color: theme.a(theme.iris, 0.22)
-                    anchors { bottom: parent.bottom; horizontalCenter: parent.horizontalCenter } }
+                Rectangle { width: parent.width; height: 1; color: theme.a(theme.line, 0.55); anchors.bottom: parent.bottom }
             }
 
-            // ---------- results ----------
+            // ---------- results (left) ----------
             ListView {
                 id: list
-                anchors { top: head.bottom; topMargin: 6; left: parent.left; right: parent.right; leftMargin: 8; rightMargin: 8 }
-                height: Math.min(8, Math.max(1, root.results.length)) * 52
-                // The panel breathes as the result count changes instead of snapping to a
-                // new size on every keystroke.
-                Behavior on height { NumberAnimation { duration: Tok.mFast
-                                                       easing.type: Easing.Bezier
-                                                       easing.bezierCurve: Tok.mMove } }
+                anchors { top: head.bottom; topMargin: 6; bottom: hints.top; bottomMargin: 6
+                          left: parent.left; leftMargin: 8 }
+                width: 380
                 clip: true
                 model: root.results
-                interactive: true
-                // A REAL highlight, so the selection travels down the list instead of one row
-                // switching off and another switching on. The delegate keeps only its hover
-                // shade; ListView draws the highlight underneath, which is exactly where a
-                // selection belongs. `sel` stays the source of truth — currentIndex follows it
-                // rather than replacing it, because the arrow keys, the mouse and alt+1–9 all
-                // write sel and none of them know about ListView.
+                boundsBehavior: Flickable.StopAtBounds
                 currentIndex: root.sel
-                highlight: Rectangle { radius: Tok.r; color: theme.a(theme.iris, 0.15) }
+                // The highlight follows the row, not the delegate: a delegate that opens a group
+                // carries its header above the row, so the shade sits headH below its top.
+                highlight: Item {
+                    Rectangle {
+                        width: parent.width; height: 42; radius: Tok.r
+                        y: list.currentItem ? list.currentItem.headH : 0
+                        Behavior on y { NumberAnimation { duration: Tok.mMicro } }
+                        color: theme.a(theme.iris, 0.16)
+                        Rectangle { width: 3; height: 18; radius: 1.5; color: theme.iris
+                            anchors { left: parent.left; leftMargin: 3; verticalCenter: parent.verticalCenter } }
+                    }
+                }
                 highlightMoveDuration: Tok.mMicro
                 highlightResizeDuration: 0
                 highlightMoveVelocity: -1
-                delegate: Rectangle {
+                delegate: Item {
+                    id: row
                     required property var modelData
                     required property int index
-                    width: list.width; height: 52; radius: Tok.r
-                    color: false ? theme.a(theme.iris, 0.07)
-                                                                     : "transparent"
-                    Behavior on color { ColorAnimation { duration: Tok.mFast } }
-                    // icon: real app icon when we have one, Material glyph otherwise, letter-tile fallback
-                    Item {
-                        id: ic; width: 30; height: 30
-                        anchors { left: parent.left; leftMargin: 12; verticalCenter: parent.verticalCenter }
-                        property string ip: modelData.entry ? Quickshell.iconPath(modelData.entry.icon, true) : ""
-                        IconImage { anchors.fill: parent; visible: ic.ip!=="" && !modelData.emoji; source: ic.ip }
-                        // clipboard image entry → live thumbnail (decoded from cliphist); falls back to the glyph until it's ready
-                        Rectangle { visible: !!modelData.clipImg; anchors.fill: parent; radius: Tok.r; clip: true
-                            color: theme.a(theme.iris, 0.10); border.width: 1; border.color: theme.a(theme.iris, 0.35)
-                            Image { id: thumbImg; anchors.fill: parent; anchors.margins: 1; asynchronous: true; cache: false
-                                fillMode: Image.PreserveAspectCrop; sourceSize.width: 60; sourceSize.height: 60
-                                source: modelData.clipImg ? (Tok.fileUrl(root.clipThumbDir + "/" + modelData.exec + ".png") + "?t=" + root.clipThumbTick) : "" }
-                            Text { anchors.centerIn: parent; visible: thumbImg.status !== Image.Ready
-                                text: "image"; font.family: "Material Symbols Outlined"; font.pixelSize: 18; color: theme.iris } }
-                        // emoji glyph (from the . picker) rendered in the system emoji font
-                        Text { anchors.centerIn: parent; visible: !!modelData.emoji; text: modelData.emoji||""; font.pixelSize: 24 }
-                        Text { anchors.centerIn: parent; visible: ic.ip==="" && !!modelData.mi && !modelData.emoji && !modelData.clipImg; text: modelData.mi||""
-                            font.family: "Material Symbols Outlined"; font.pixelSize: 22
-                            color: modelData.warn ? theme.bad : theme.iris }
-                        Rectangle { anchors.fill: parent; radius: Tok.r; visible: ic.ip==="" && !modelData.mi && !modelData.emoji
-                            color: theme.a(theme.iris,0.18); border.width: 1; border.color: theme.a(theme.iris,0.4)
-                            Text { anchors.centerIn: parent; text: (modelData.entry?modelData.entry.name:"?").charAt(0).toUpperCase()
-                                color: theme.frost; font.pixelSize: 15; font.bold: true; font.family: Tok.mono } }
+                    readonly property string group: root.groupOf(modelData.type)
+                    readonly property bool opens: group !== "" && (index === 0
+                        || root.groupOf((root.results[index - 1] || {}).type) !== group)
+                    readonly property real headH: opens ? (index === 0 ? 26 : 34) : 0
+                    width: list.width; height: headH + 42
+                    Text {
+                        visible: row.opens
+                        anchors { left: parent.left; leftMargin: 12; bottom: rowBox.top; bottomMargin: 6 }
+                        text: row.group.toUpperCase()
+                        color: theme.faint; font.pixelSize: 10; font.family: Tok.mono; font.letterSpacing: 1.2; font.bold: true
                     }
-                    Column {
-                        anchors { left: ic.right; leftMargin: 12; right: favStar.left; rightMargin: 8; verticalCenter: parent.verticalCenter }
-                        spacing: 1
-                        Text { width: parent.width; elide: Text.ElideRight; textFormat: Text.StyledText
-                            text: modelData.title; color: theme.text; font.pixelSize: 14; font.family: Tok.mono }
-                        Text { width: parent.width; elide: Text.ElideRight; visible: text!==""
-                            text: modelData.sub||""; color: theme.sub; font.pixelSize: 11; font.family: Tok.mono }
+                    Rectangle {
+                        id: rowBox
+                        y: row.headH; width: parent.width; height: 42; radius: Tok.r
+                        color: rowMa.containsMouse && index !== root.sel ? theme.a(theme.line, 0.35) : "transparent"
+                        // icon: real app icon when we have one, Material glyph otherwise, letter-tile fallback
+                        Item {
+                            id: ic; width: 26; height: 26
+                            anchors { left: parent.left; leftMargin: 14; verticalCenter: parent.verticalCenter }
+                            property string ip: modelData.entry ? Quickshell.iconPath(modelData.entry.icon, true)
+                                : (modelData.type === "window" ? Quickshell.iconPath(modelData.wicon || (modelData.cls || "").toLowerCase(), true) : "")
+                            IconImage { anchors.fill: parent; visible: ic.ip!=="" && !modelData.emoji; source: ic.ip }
+                            Rectangle { visible: !!modelData.clipImg; anchors.fill: parent; radius: Tok.rSmall; clip: true
+                                color: theme.a(theme.iris, 0.10); border.width: 1; border.color: theme.a(theme.iris, 0.35)
+                                Image { id: thumbImg; anchors.fill: parent; anchors.margins: 1; asynchronous: true; cache: false
+                                    fillMode: Image.PreserveAspectCrop; sourceSize.width: 52; sourceSize.height: 52
+                                    source: modelData.clipImg ? (Tok.fileUrl(root.clipThumbDir + "/" + modelData.exec + ".png") + "?t=" + root.clipThumbTick) : "" }
+                                Text { anchors.centerIn: parent; visible: thumbImg.status !== Image.Ready
+                                    text: "image"; font.family: "Material Symbols Outlined"; font.pixelSize: 16; color: theme.iris } }
+                            Text { anchors.centerIn: parent; visible: !!modelData.emoji; text: modelData.emoji||""; font.pixelSize: 21 }
+                            Text { anchors.centerIn: parent; visible: ic.ip==="" && !!modelData.mi && !modelData.emoji && !modelData.clipImg; text: modelData.mi||""
+                                font.family: "Material Symbols Outlined"; font.pixelSize: 20
+                                color: modelData.warn ? theme.bad : theme.iris }
+                            Rectangle { anchors.fill: parent; radius: Tok.rSmall; visible: ic.ip==="" && !modelData.mi && !modelData.emoji
+                                color: theme.a(theme.iris,0.18); border.width: 1; border.color: theme.a(theme.iris,0.4)
+                                Text { anchors.centerIn: parent; text: (modelData.entry?modelData.entry.name:"?").charAt(0).toUpperCase()
+                                    color: theme.frost; font.pixelSize: 13; font.bold: true; font.family: Tok.sans } }
+                        }
+                        Text {
+                            id: rowTitle
+                            anchors { left: ic.right; leftMargin: 12; verticalCenter: parent.verticalCenter }
+                            width: Math.min(implicitWidth, parent.width - 70 - (rowKey.visible ? rowKey.width + 8 : 0))
+                            elide: Text.ElideRight; textFormat: Text.StyledText
+                            text: modelData.title; color: theme.text; font.pixelSize: 14; font.family: Tok.sans
+                            font.weight: index === root.sel ? Font.DemiBold : Font.Normal
+                        }
+                        Text {
+                            anchors { left: rowTitle.right; leftMargin: 8; right: rowKey.visible ? rowKey.left : parent.right
+                                      rightMargin: 12; verticalCenter: parent.verticalCenter }
+                            elide: Text.ElideRight; visible: modelData.type !== "app" || index !== root.sel
+                            text: root.subOf(modelData); color: theme.faint; font.pixelSize: 12; font.family: Tok.sans
+                        }
+                        // alt+N quick-launch, shown on the first nine rows so the shortcut is findable
+                        Text { id: rowKey
+                            visible: index < 9 && (rowMa.containsMouse || index === root.sel)
+                            anchors { right: parent.right; rightMargin: 12; verticalCenter: parent.verticalCenter }
+                            text: index === root.sel ? "⏎" : "alt " + (index + 1)
+                            color: theme.faint; font.pixelSize: 11; font.family: Tok.mono }
+                        MouseArea { id: rowMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                            // one click selects, so the detail pane can be read; a second opens
+                            onClicked: { if (root.sel === index) root.activate(index); else root.sel = index }
+                            onDoubleClicked: root.activate(index) }
                     }
-                    Text { id: favStar
-                        anchors { right: parent.right; rightMargin: 14; verticalCenter: parent.verticalCenter }
-                        text: modelData.fav ? "star" : (index===root.sel ? "keyboard_return" : "")
-                        font.family: "Material Symbols Outlined"; font.pixelSize: 14
-                        color: modelData.fav ? theme.warn : theme.faint }
-                    MouseArea { id: rowMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
-                        // Hover never changes the keyboard selection while searching.
-                        onClicked: root.activate(index) }
+                }
+                Text {
+                    anchors.centerIn: parent; visible: root.results.length === 0
+                    text: "Nothing matches"; color: theme.faint; font.pixelSize: 13; font.family: Tok.sans
                 }
             }
 
-            // ---------- footer hints ----------
+            Rectangle { id: split; x: list.x + list.width + 8; width: 1
+                anchors { top: head.bottom; bottom: hints.top }
+                color: theme.a(theme.line, 0.55) }
+
+            // ---------- detail (right) ----------
+            Item {
+                id: detail
+                anchors { top: head.bottom; bottom: hints.top; left: split.right; right: parent.right
+                          margins: 22 }
+                clip: true
+                readonly property var c: root.cur
+                readonly property string t: root.curType
+
+                // the window itself, captured once when it is selected
+                Rectangle {
+                    id: shot
+                    visible: detail.t === "window"
+                    width: parent.width; height: Math.round(width * 9 / 16)
+                    radius: Tok.r; color: Tok.sunken
+                    border.width: 1; border.color: theme.a(theme.line, 0.6)
+                    // An FBO, so the capture's texture node cannot escape the frame (see shell.qml).
+                    layer.enabled: visible
+                    ScreencopyView {
+                        id: scv
+                        readonly property real ar: (scv.sourceSize && scv.sourceSize.height > 0)
+                            ? scv.sourceSize.width / scv.sourceSize.height : 16 / 9
+                        anchors.centerIn: parent
+                        width: Math.min(parent.width - 12, (parent.height - 12) * ar); height: width / ar
+                        captureSource: (root.shown && detail.t === "window" && detail.c && detail.c.top && detail.c.top.wayland)
+                            ? detail.c.top.wayland : null
+                        live: false
+                    }
+                    Text { anchors.centerIn: parent; visible: !scv.hasContent; text: "window"
+                        font.family: "Material Symbols Outlined"; font.pixelSize: 40; color: theme.faint }
+                }
+
+                // big glyph: app icon, emoji, image preview or Material symbol
+                Item {
+                    id: hero
+                    visible: detail.t !== "window" && detail.t !== "calc" && detail.t !== ""
+                    width: parent.width
+                    height: (detail.t === "clip" && detail.c.clipImg) || (detail.t === "file" && root.isImage(detail.c.exec)) ? 200 : 72
+                    readonly property string ip: (detail.c && detail.c.entry) ? Quickshell.iconPath(detail.c.entry.icon, true) : ""
+                    IconImage { width: 64; height: 64; visible: hero.ip !== ""; source: hero.ip }
+                    Text { visible: detail.t === "emoji"; text: detail.c ? (detail.c.emoji || "") : ""; font.pixelSize: 60 }
+                    Rectangle {
+                        visible: hero.ip === "" && detail.t !== "emoji" && hero.height < 100
+                        width: 64; height: 64; radius: Tok.r + 4
+                        color: detail.c && detail.c.warn ? theme.a(theme.bad, 0.14) : theme.a(theme.iris, 0.14)
+                        Text { anchors.centerIn: parent; text: detail.c ? (detail.c.mi || "apps") : ""
+                            font.family: "Material Symbols Outlined"; font.pixelSize: 32
+                            color: detail.c && detail.c.warn ? theme.bad : theme.iris }
+                    }
+                    Rectangle {
+                        visible: hero.height >= 100
+                        anchors.fill: parent; radius: Tok.r; color: Tok.sunken; clip: true
+                        border.width: 1; border.color: theme.a(theme.line, 0.6)
+                        Image {
+                            anchors.fill: parent; anchors.margins: 8
+                            fillMode: Image.PreserveAspectFit; asynchronous: true; cache: false
+                            sourceSize.width: 640
+                            source: !hero.visible || hero.height < 100 ? ""
+                                : detail.t === "clip" ? (root.peekImage || Tok.fileUrl(root.clipThumbDir + "/" + detail.c.exec + ".png") + "?t=" + root.clipThumbTick)
+                                : Tok.fileUrl(Quickshell.env("HOME") + "/" + detail.c.exec)
+                        }
+                    }
+                }
+
+                Column {
+                    id: words
+                    anchors { top: shot.visible ? shot.bottom : (hero.visible ? hero.bottom : parent.top)
+                              topMargin: shot.visible || hero.visible ? 18 : 0; left: parent.left; right: parent.right }
+                    spacing: 6
+
+                    // the answer, when the query was a sum or a conversion
+                    Text {
+                        visible: detail.t === "calc"
+                        width: parent.width; wrapMode: Text.WrapAnywhere; maximumLineCount: 3
+                        text: detail.c ? root.plain(detail.c.title).replace(/^=\s*/, "") : ""
+                        color: theme.text; font.pixelSize: Tok.tHero; font.family: Tok.sans; font.weight: Font.DemiBold
+                    }
+                    Text {
+                        visible: detail.t === "calc"
+                        width: parent.width; elide: Text.ElideRight
+                        text: root.query.replace(/^=/, "") + " ="
+                        color: theme.faint; font.pixelSize: 13; font.family: Tok.mono
+                    }
+
+                    Text {
+                        visible: detail.t !== "calc" && detail.t !== ""
+                        width: parent.width; wrapMode: Text.Wrap; maximumLineCount: 2; elide: Text.ElideRight
+                        text: !detail.c ? ""
+                            : detail.t === "app" && detail.c.entry ? detail.c.entry.name
+                            : detail.t === "window" ? (detail.c.wtitle || root.plain(detail.c.title))
+                            : root.plain(detail.c.title)
+                        color: theme.text; font.pixelSize: Tok.tTitle; font.family: Tok.sans; font.weight: Font.DemiBold
+                    }
+                    Text {
+                        width: parent.width; wrapMode: Text.Wrap; maximumLineCount: 3; elide: Text.ElideRight
+                        visible: text !== ""
+                        text: !detail.c ? ""
+                            : detail.t === "app" && detail.c.entry ? (detail.c.entry.comment || detail.c.entry.genericName || "")
+                            : detail.t === "window" ? root.plain(detail.c.title) + "  ·  workspace " + detail.c.ws
+                            : detail.t === "file" ? "~/" + detail.c.exec
+                            : detail.t === "web" ? detail.c.exec
+                            : detail.t === "run" || detail.t === "term" ? ""
+                            : detail.t === "calc" ? "" : root.subOf(detail.c)
+                        color: theme.sub; font.pixelSize: 13; font.family: Tok.sans
+                    }
+
+                    // facts, as label / value pairs
+                    Item { width: 1; height: 6 }
+                    Repeater {
+                        model: {
+                            var c = detail.c, out = [];
+                            if (!c) return out;
+                            if (c.type === "app" && c.entry) {
+                                var h = root.hist[c.entry.id];
+                                if (h) out.push({ k: "Opened", v: h.n + (h.n === 1 ? " time" : " times") + ", last " + root.ago(h.t) });
+                                if (c.entry.genericName && c.entry.comment) out.push({ k: "Kind", v: c.entry.genericName });
+                                var bin = (c.entry.execString || "").split(" ")[0].split("/").pop();
+                                if (bin) out.push({ k: "Runs", v: bin });
+                            } else if (c.type === "run" || c.type === "term") {
+                                out.push({ k: "Command", v: c.exec });
+                                out.push({ k: "Where", v: c.type === "term" ? "a kitty window that stays open" : "in the background" });
+                            }
+                            return out;
+                        }
+                        delegate: Row {
+                            required property var modelData
+                            spacing: 10; width: words.width
+                            Text { width: 72; text: modelData.k; color: theme.faint; font.pixelSize: 12; font.family: Tok.sans }
+                            Text { width: parent.width - 82; text: modelData.v; color: theme.sub; font.pixelSize: 12
+                                font.family: modelData.k === "Command" || modelData.k === "Runs" ? Tok.mono : Tok.sans
+                                wrapMode: Text.WrapAnywhere; maximumLineCount: 3; elide: Text.ElideRight }
+                        }
+                    }
+
+                    // a peek inside: clipboard text, a text file's head, a folder's first entries
+                    Rectangle {
+                        visible: root.peekText !== "" && (detail.t === "clip" || detail.t === "file")
+                        width: parent.width; height: Math.min(peekT.implicitHeight + 20, 200)
+                        radius: Tok.r; color: Tok.sunken; clip: true
+                        border.width: 1; border.color: theme.a(theme.line, 0.6)
+                        Text { id: peekT; x: 10; y: 10; width: parent.width - 20
+                            text: root.peekText; textFormat: Text.PlainText; wrapMode: Text.WrapAnywhere
+                            color: theme.sub; font.pixelSize: 11; font.family: Tok.mono; lineHeight: 1.15 }
+                    }
+
+                    // an app's own actions (New private window, …), straight from its .desktop file
+                    Repeater {
+                        model: (detail.t === "app" && detail.c && detail.c.entry && detail.c.entry.actions) ? detail.c.entry.actions : []
+                        delegate: Rectangle {
+                            required property var modelData
+                            required property int index
+                            width: words.width; height: 34; radius: Tok.r
+                            color: actMa.containsMouse ? theme.a(theme.iris, 0.14) : theme.a(theme.line, 0.28)
+                            Text { anchors { left: parent.left; leftMargin: 12; verticalCenter: parent.verticalCenter }
+                                text: "subdirectory_arrow_right"; font.family: "Material Symbols Outlined"; font.pixelSize: 16; color: theme.faint }
+                            Text { anchors { left: parent.left; leftMargin: 36; right: parent.right; rightMargin: 12; verticalCenter: parent.verticalCenter }
+                                text: modelData.name; elide: Text.ElideRight
+                                color: theme.text; font.pixelSize: 13; font.family: Tok.sans }
+                            MouseArea { id: actMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                onClicked: { root.bump(detail.c.entry.id); modelData.execute(); root.close() } }
+                        }
+                    }
+                }
+            }
+
+            // ---------- footer ----------
             Item {
                 id: hints
-                width: parent.width; height: 24
-                anchors.bottom: parent.bottom; anchors.bottomMargin: 8
-                Text { anchors { left: parent.left; leftMargin: 18; verticalCenter: parent.verticalCenter }
-                    text: root.results.length + (root.results.length===1 ? " result" : " results")
-                    color: theme.sub; font.pixelSize: 10; font.family: Tok.mono }
-                Text { anchors { right: parent.right; rightMargin: 18; verticalCenter: parent.verticalCenter }
-                    text: "↑↓ move · ⏎ open · alt+1–9 quick · esc close"
-                    color: theme.sub; font.pixelSize: 10; font.family: Tok.mono }
+                width: parent.width; height: 40
+                anchors.bottom: parent.bottom
+                Rectangle { width: parent.width; height: 1; color: theme.a(theme.line, 0.55) }
+                // the prefixes, as buttons, while nothing is typed; the count once something is
+                Row {
+                    visible: root.query === ""
+                    anchors { left: parent.left; leftMargin: 14; verticalCenter: parent.verticalCenter }
+                    spacing: 4
+                    Repeater {
+                        model: [{ p: ">", l: "run" }, { p: "=", l: "calc" }, { p: "~", l: "files" }, { p: "?", l: "web" },
+                                { p: ";", l: "clipboard" }, { p: ":", l: "system" }, { p: ".", l: "emoji" }]
+                        delegate: Rectangle {
+                            required property var modelData
+                            width: pfx.implicitWidth + 14; height: 22; radius: Tok.rSmall
+                            color: pfxMa.containsMouse ? theme.a(theme.iris, 0.16) : "transparent"
+                            Text { id: pfx; anchors.centerIn: parent
+                                text: "<b>" + modelData.p + "</b> " + modelData.l; textFormat: Text.StyledText
+                                color: pfxMa.containsMouse ? theme.text : theme.faint; font.pixelSize: 11; font.family: Tok.mono }
+                            MouseArea { id: pfxMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                onClicked: { field.text = modelData.p; field.cursorPosition = field.text.length; field.forceActiveFocus() } }
+                        }
+                    }
+                }
+                Text { visible: root.query !== ""
+                    anchors { left: parent.left; leftMargin: 22; verticalCenter: parent.verticalCenter }
+                    text: root.results.length + (root.results.length === 1 ? " result" : " results")
+                    color: theme.faint; font.pixelSize: 11; font.family: Tok.mono }
+                Row {
+                    anchors { right: parent.right; rightMargin: 18; verticalCenter: parent.verticalCenter }
+                    spacing: 16
+                    Text { text: "↑↓  move"; color: theme.faint; font.pixelSize: 11; font.family: Tok.mono }
+                    Text { visible: root.cur !== null && root.curType !== "hint"
+                        text: "<b>⏎</b>  " + root.enterVerb; textFormat: Text.StyledText
+                        color: theme.sub; font.pixelSize: 11; font.family: Tok.mono }
+                    Text { text: "esc  close"; color: theme.faint; font.pixelSize: 11; font.family: Tok.mono }
+                }
             }
         }
     }

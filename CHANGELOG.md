@@ -5,6 +5,34 @@ All notable changes to **sea-shell** are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] - 7.1.0
+
+### Changed
+
+- **A new launcher.** Results sit on the left in groups (open windows, apps, files,
+  clipboard, system), and the right side shows the selected one: a capture of the window,
+  an app’s description, history and its own actions (New private window, …), a large
+  copy of a clipboard image or the text inside it, the start of a text file, or a sum’s
+  answer in large type. The frame keeps one size while you type, the footer names what
+  Enter will do, and the prefixes are buttons along the bottom. One click selects a row,
+  a second click opens it.
+- **The lock screen is set under Idle & lock.** Its preview, the notification choice and
+  the clock options moved from Your profile to Idle & lock → lock screen, next to the
+  other locking settings. Your profile keeps the picture and name.
+
+### Fixed
+
+- **Desktop widgets glide when the wallpaper moves them.** A widget nudged out of the way
+  of a new wallpaper used to jump; it now travels there, and a dropped widget no longer
+  flickers back to its old spot first.
+- **Wi-Fi shows that it is connecting.** The bar icon steps through its bars, the dropdown
+  and Settings mark the network being joined, and NetworkManager’s own reconnects show
+  too. Before, nothing changed until the handshake was over.
+- **The last panel on each Settings page is no longer cut off.** Pages scroll far enough
+  to show its bottom edge.
+- **Typing a Wi-Fi password in Settings survives the background scan.** The list used to
+  be rebuilt every 10 seconds, taking the half-typed password with it.
+
 ## [7.0.0] - 2026-10-30
 
 The lock screen, power menu and password prompts now share the shell’s design.

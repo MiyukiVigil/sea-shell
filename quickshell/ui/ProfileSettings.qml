@@ -8,7 +8,13 @@ ColumnLayout {
     id: panel
     property var profile: ({})
     property string message: ""
+    // The lock screen half used to live under Your profile, but it is set where the rest of
+    // locking is: Idle & lock shows "lock", Your profile shows "identity". Both save the one
+    // profile.json, so each re-reads it when shown and after the other saves (reload()).
+    property string part: "all"
     signal browseRequested()
+    signal saved()
+    function reload() { reader.running = true }
     function setAvatar(path) { picture.text = path }
     function draft() { return {name: name.text, avatar: picture.text, font: family.text, color: tint.text, glow: glow.checked, nameSize: size.value, clockSize: clockSize.value, clock24: clock24.checked, showDate: date.checked, showMedia: media.checked, showAvatar: avatar.checked} }
     spacing: 14
@@ -17,6 +23,7 @@ ColumnLayout {
         stdout: StdioCollector { onStreamFinished: { try { var p=JSON.parse(text); panel.profile=p; name.text=p.name;picture.text=p.avatar;family.text=p.font;tint.text=p.color;glow.checked=p.glow;size.value=p.nameSize;clockSize.value=p.clockSize;clock24.checked=p.clock24;date.checked=p.showDate;media.checked=p.showMedia;avatar.checked=p.showAvatar } catch(e){} } }
     }
     Process { id: writer
+        onExited: code => { if (code === 0) panel.saved() }
         stdout: StdioCollector { onStreamFinished: panel.message=text.trim() }
         stderr: StdioCollector { onStreamFinished: panel.message=text.trim() }
     }
@@ -104,6 +111,25 @@ ColumnLayout {
         selectByMouse: true
         background: Rectangle { radius: 10; color: Tok.surface; border.width: 1; border.color: parent.activeFocus ? Tok.accent : Tok.ruleHard }
     }
+    property bool previewLogin: false
+    FontLoader { id: rhPreview; source: "file:///usr/share/sddm/themes/sea-silent/fonts/redhat/RedHatDisplay-SemiBold.otf" }
+    readonly property var sampleNotes: [
+        { appName: "Messages", appIcon: "internet-chat", summary: "Alex", body: "Are we still on for tonight? I can bring the cables.", time: "21:42", urgency: 1 },
+        { appName: "Messages", appIcon: "internet-chat", summary: "Sam", body: "ok", time: "21:40", urgency: 1 },
+        { appName: "Firefox", appIcon: "firefox", summary: "Download complete", body: "cachyos-desktop-linux.iso", time: "21:20", urgency: 1 } ]
+    // lock.json: which lock runs and how much of a notification it shows
+    property var lockCfg: ({})
+    FileView { id: lockFile; path: Quickshell.env("HOME") + "/.config/sea-shell/lock.json"; watchChanges: true
+        onLoaded: { try { panel.lockCfg = JSON.parse(text()) } catch (e) { panel.lockCfg = {} } }
+        onLoadFailed: panel.lockCfg = {}
+        onFileChanged: reload() }
+    function setLock(k, v) {
+        var c = Object.assign({}, panel.lockCfg); c[k] = v; panel.lockCfg = c;
+        Quickshell.execDetached(["python3", "-c",
+            "import sys,os,pathlib; p=pathlib.Path(os.path.expanduser('~/.config/sea-shell/lock.json')); p.parent.mkdir(parents=True,exist_ok=True); p.write_text(sys.argv[1])",
+            JSON.stringify(c)]);
+    }
+    ColumnLayout { Layout.fillWidth: true; spacing: 14; visible: panel.part !== "lock"
     ProfileCard { Layout.fillWidth: true; profile: panel.draft(); subtitle: "Preview · settings, power menu and lock screen" }
     Label { text: "Identity"; font.pixelSize: 15; font.weight: Font.DemiBold }
     Label { text: "Display name" }
@@ -124,11 +150,11 @@ ColumnLayout {
         Item { Layout.preferredWidth: 14 }
         Switch { id: glow; text: "Name glow" }
     }
-    Label { text: "Lock screen"; font.pixelSize: 15; font.weight: Font.DemiBold }
+    }
+    ColumnLayout { Layout.fillWidth: true; spacing: 14; visible: panel.part !== "identity"
+    Label { visible: panel.part === "all"; text: "Lock screen"; font.pixelSize: 15; font.weight: Font.DemiBold }
     // The real lock screen, drawn small with sample notifications; Unlocking shows the state
     // a key press brings up. It follows the fields above before they are saved.
-    property bool previewLogin: false
-    FontLoader { id: rhPreview; source: "file:///usr/share/sddm/themes/sea-silent/fonts/redhat/RedHatDisplay-SemiBold.otf" }
     Rectangle {
         id: lockFrame
         Layout.fillWidth: true; Layout.preferredHeight: width * 9 / 16
@@ -158,23 +184,7 @@ ColumnLayout {
             MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: panel.previewLogin = !panel.previewLogin }
         }
     }
-    readonly property var sampleNotes: [
-        { appName: "Messages", appIcon: "internet-chat", summary: "Alex", body: "Are we still on for tonight? I can bring the cables.", time: "21:42", urgency: 1 },
-        { appName: "Messages", appIcon: "internet-chat", summary: "Sam", body: "ok", time: "21:40", urgency: 1 },
-        { appName: "Firefox", appIcon: "firefox", summary: "Download complete", body: "cachyos-desktop-linux.iso", time: "21:20", urgency: 1 } ]
 
-    // lock.json: which lock runs and how much of a notification it shows
-    property var lockCfg: ({})
-    FileView { id: lockFile; path: Quickshell.env("HOME") + "/.config/sea-shell/lock.json"; watchChanges: true
-        onLoaded: { try { panel.lockCfg = JSON.parse(text()) } catch (e) { panel.lockCfg = {} } }
-        onLoadFailed: panel.lockCfg = {}
-        onFileChanged: reload() }
-    function setLock(k, v) {
-        var c = Object.assign({}, panel.lockCfg); c[k] = v; panel.lockCfg = c;
-        Quickshell.execDetached(["python3", "-c",
-            "import sys,os,pathlib; p=pathlib.Path(os.path.expanduser('~/.config/sea-shell/lock.json')); p.parent.mkdir(parents=True,exist_ok=True); p.write_text(sys.argv[1])",
-            JSON.stringify(c)]);
-    }
     RowLayout { Layout.fillWidth: true; spacing: 14
         ColumnLayout { Layout.fillWidth: true
             Label { text: "Lock screen" }
@@ -199,11 +209,13 @@ ColumnLayout {
         Range { id: clockSize; from: 40; to: 120; stepSize: 1; Layout.preferredWidth: 240 }
         Label { text: Math.round(clockSize.value) }
     }
+    }
     RowLayout {
-        Action { text: "Save profile"; primary: true; enabled: !writer.running
+        Action { text: panel.part === "lock" ? "Save lock screen" : "Save profile"; primary: true; enabled: !writer.running
             onClicked: { writer.command=["python3",Qt.resolvedUrl("sea-profile.py").toString().replace("file://",""),"set",JSON.stringify(panel.draft())];writer.running=true }
         }
-        Label { text: "Applies to the next lock screen. Your account name stays unchanged."; color: Tok.ink3; Layout.fillWidth: true; wrapMode: Text.WordWrap }
+        Label { text: panel.part === "identity" ? "Shown in Settings, the power menu and the lock screen. Your account name stays unchanged."
+                    : "Applies to the next lock screen."; color: Tok.ink3; Layout.fillWidth: true; wrapMode: Text.WordWrap }
     }
     Label { Layout.fillWidth: true; wrapMode: Text.WordWrap; text: panel.message }
 }
