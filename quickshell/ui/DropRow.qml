@@ -22,9 +22,10 @@ Rectangle {
 
     width: parent ? parent.width : 280
     height: r.sub !== "" ? 44 : 36
-    radius: Tok.rSmall
-    color: r.current ? Tok.accentWash : (ma.containsMouse || ha.containsMouse ? Tok.sunken : "transparent")
-    border.width: r.current ? 1 : 0; border.color: Qt.rgba(Tok.accent.r, Tok.accent.g, Tok.accent.b, 0.35)
+    // tints, not solid steps: the row sits on glass, where an opaque fill reads as a patch
+    radius: 8
+    color: r.current ? Tok.alpha(Tok.accent, 0.16) : (ma.containsMouse || ha.containsMouse ? Tok.alpha(Tok.ink, 0.07) : "transparent")
+    border.width: 0
     opacity: r.dim ? 0.55 : 1
     Behavior on color { ColorAnimation { duration: Tok.mFast } }
 
@@ -47,7 +48,7 @@ Rectangle {
         visible: !(r.hoverIcon !== "" && (ma.containsMouse || ha.containsMouse))
         IndChip { anchors.verticalCenter: parent.verticalCenter; visible: r.chip !== ""; text: r.chip; tone: r.chipTone }
         Text { anchors.verticalCenter: parent.verticalCenter; visible: r.value !== ""
-            text: r.value; color: r.current ? Tok.ink : Tok.ink2; font.family: Tok.mono; font.pixelSize: 11; font.features: { "tnum": 1 } }
+            text: r.value; color: r.current ? Tok.ink : Tok.ink2; font.family: Tok.sans; font.pixelSize: 11; font.features: { "tnum": 1 } }
     }
     Column {
         anchors.left: ic.right; anchors.leftMargin: 10
@@ -63,8 +64,8 @@ Rectangle {
         id: hov
         visible: r.hoverIcon !== "" && (ma.containsMouse || ha.containsMouse)
         anchors.right: parent.right; anchors.rightMargin: 6; anchors.verticalCenter: parent.verticalCenter
-        width: 24; height: 24; radius: Tok.rSmall
-        color: ha.containsMouse ? (r.hoverTone === "crit" ? Tok.critWash : Tok.accentWash) : "transparent"
+        width: 24; height: 24; radius: 12
+        color: ha.containsMouse ? (r.hoverTone === "crit" ? Tok.alpha(Tok.crit, 0.16) : Tok.alpha(Tok.ink, 0.09)) : "transparent"
         Text { anchors.centerIn: parent; text: r.hoverIcon; font.family: "Material Symbols Outlined"; font.pixelSize: 15
             color: ha.containsMouse ? (r.hoverTone === "crit" ? Tok.crit : Tok.ink) : Tok.ink3 }
         MouseArea { id: ha; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: r.hoverAction() }

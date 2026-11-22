@@ -130,7 +130,17 @@ hold_pair() {
     return 0
 }
 
+gamemode_on() {
+    grep -q '"on"[[:space:]]*:[[:space:]]*true' "${XDG_RUNTIME_DIR:-/tmp}/sea-gamemode.json" 2>/dev/null
+}
+
 while :; do
+    # Stay dormant while Game Mode is active — no Python fork, no mid-game wallpaper/matugen reload.
+    if gamemode_on; then
+        nap 30
+        continue
+    fi
+
     cfg="$(read_cfg)"
     on="$(cfg_field "$cfg" 1)";     secs="$(cfg_field "$cfg" 2)"
     mode="$(cfg_field "$cfg" 3)";   stills="$(cfg_field "$cfg" 4)"
@@ -150,6 +160,9 @@ while :; do
     fi
 
     nap "$secs"
+
+    # Skip if Game Mode turned on while we were sleeping.
+    gamemode_on && continue
 
     # re-check AFTER the sleep — the switch may have been turned off, or the pair pinned,
     # while we waited

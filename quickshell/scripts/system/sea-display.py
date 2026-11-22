@@ -58,7 +58,8 @@ def _apply_monitor(spec):
         name, parts[1], parts[2], parts[3])
     if len(parts) > 5 and parts[4] == "transform":
         lua += ", transform = %s" % parts[5]
-    _hypr("eval", lua + " })")
+    # without `disabled = false` a rule leaves an output that is currently disabled off
+    _hypr("eval", lua + ", disabled = false })")
 
 
 def _live_monitors():

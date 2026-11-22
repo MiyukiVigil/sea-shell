@@ -34,6 +34,10 @@ Scope {
     // machine, so it is read when that screen is reached rather than at startup.
     onStepChanged: if (step === 5 && root.defRoles.length === 0) root.defRefresh()
     readonly property int steps: 7
+    readonly property var stepNames: ["Welcome", "Look", "Wallpaper", "The bar", "Menus", "Default apps", "All set"]
+    readonly property color groupFill: Tok.surface
+    readonly property color groupRule: Tok.alpha(Tok.ink, Tok.light ? 0.085 : 0.11)
+    readonly property color rowHover:  Tok.alpha(Tok.ink, Tok.light ? 0.05 : 0.075)
 
     readonly property string setScript:  Qt.resolvedUrl("sea-set-appearance.py").toString().replace("file://", "")
     readonly property string wpSet:      Qt.resolvedUrl("sea-wallpaper-set.sh").toString().replace("file://", "")
@@ -47,12 +51,7 @@ Scope {
     // should not read as "cancel".
     function finish() { root.set("welcomed=true"); root.shown = false }
 
-    IpcHandler {
-        target: "welcome"
-        function open(): void { root.open() }
-        function close(): void { root.close() }
-        function toggle(): void { root.shown ? root.close() : root.open() }
-    }
+    // IPC target "welcome" lives in shell.qml so this file can unload while it is closed.
 
     // one or more `key=value` pairs, merged into appearance.json
     function set() {
@@ -236,9 +235,9 @@ Scope {
         id: gmCfg
         path: Quickshell.env("HOME") + "/.config/sea-shell/appmenu.json"
         watchChanges: true
-        function apply() {
+        function apply(refresh) {
             try {
-                reload();
+                if (refresh !== false) reload();
                 var t = text();
                 if (!t || !t.trim()) return;
                 var j = JSON.parse(t);
@@ -248,7 +247,7 @@ Scope {
             } catch (e) {}
         }
         onFileChanged: apply()
-        onLoaded: apply()
+        onLoaded: apply(false)
         Component.onCompleted: apply()
     }
     // Round-trips the two keys it does not offer instead of writing only its own: settings.qml
@@ -300,7 +299,7 @@ Scope {
         // Clicking outside the card leaves. Without this the only ways out were the finish
         // button and Escape, which is a modal you can be stuck in if it opens over your work.
         Rectangle {
-            anchors.fill: parent; color: Qt.rgba(0, 0, 0, 0.55)
+            anchors.fill: parent; color: Qt.rgba(0, 0, 0, Tok.light ? 0.30 : 0.50)
             MouseArea { anchors.fill: parent; onClicked: root.finish() }
         }
         Item {
@@ -330,37 +329,29 @@ Scope {
         Rectangle {
             anchors.centerIn: parent
             visible: !root.whatsNew
-            width: 760; height: 580
-            radius: Tok.rCard
+            width: 760; height: 600
+            radius: Tok.rCard + 6
             color: Tok.bg
-            border.width: 1; border.color: Tok.ruleHard
+            border.width: 1; border.color: root.groupRule
             MouseArea { anchors.fill: parent }
 
             ColumnLayout {
-                anchors.fill: parent; anchors.margins: 26; spacing: 16
+                anchors.fill: parent; anchors.margins: 30; spacing: 18
 
-                // ---- header: the mark, the name, and which step ----
+                // ---- header: the mark, the name, and where you are ----
                 RowLayout {
                     Layout.fillWidth: true; spacing: 12
                     BarLogo {
-                        size: 30; kind: "sea"
+                        size: 34; kind: "sea"
                         card: Tok.surface; accent: Tok.accent; highlight: Tok.ink; rim: Tok.accent
                     }
                     ColumnLayout {
-                        spacing: 0; Layout.fillWidth: true
-                        IndText { text: "sea-shell"; mono: true; sz: Tok.tTitle; font.weight: 700; color: Tok.ink }
-                        IndText { text: "first-run setup"; mono: true; sz: Tok.tLabel; color: Tok.ink3
-                                  font.letterSpacing: 1.2; font.capitalization: Font.AllUppercase }
-                    }
-                    // The counter, in the deck's language: which of how many.
-                    Row {
-                        spacing: 3
-                        IndText { anchors.baseline: ofN.baseline; mono: true; sz: Tok.tKpi
-                                  font.weight: 700; color: Tok.accent; text: "0" + (root.step + 1) }
-                        IndText { id: ofN; mono: true; sz: Tok.tDense; color: Tok.ink3; text: "/ " + root.steps }
+                        spacing: 1; Layout.fillWidth: true
+                        IndText { text: root.stepNames[root.step]; sz: Tok.tTitle; font.weight: Font.Bold; color: Tok.ink }
+                        IndText { text: "sea-shell setup · step " + (root.step + 1) + " of " + root.steps
+                                  sz: Tok.tDense; color: Tok.ink3 }
                     }
                 }
-                Rectangle { Layout.fillWidth: true; height: 1; color: Tok.ruleHard }
 
                 // ---- the step ----
                 Item {
@@ -378,16 +369,17 @@ Scope {
                         }
                         IndText {
                             Layout.alignment: Qt.AlignHCenter
-                            text: "a desktop for Hyprland"; mono: true; sz: Tok.tPanel; color: Tok.ink
+                            text: "A desktop for Hyprland"; sz: 24; font.weight: Font.Bold; color: Tok.ink
                         }
                         IndText {
                             Layout.fillWidth: true
                             horizontalAlignment: Text.AlignHCenter
                             wrapMode: Text.WordWrap
-                            mono: true; sz: Tok.tDense; color: Tok.ink3
+                            Layout.leftMargin: 60; Layout.rightMargin: 60
+                            sz: Tok.tBody; color: Tok.ink2; lineHeight: 1.2
                             // Derived, not written out: the header beside it counts "01 / 5", and a
                             // hardcoded "Four screens" beside that reads as one of them being wrong.
-                            text: (root.steps - 1) + " more screens, about a minute. Everything you pick applies "
+                            text: (root.steps - 1) + " short screens, about a minute. Everything you pick applies "
                                 + "straight away — you can watch the bar change behind this — and everything "
                                 + "here is in the control center afterwards if you change your mind."
                         }
@@ -398,25 +390,25 @@ Scope {
                     ColumnLayout {
                         anchors.fill: parent; spacing: 12
                         visible: root.step === 1
-                        WSection { title: "light or dark" }
+                        WSection { title: "Appearance" }
                         RowLayout {
                             spacing: 8
-                            WChip { label: "dark";  on: root.curMode === "dark"
+                            WChip { label: "Dark";  on: root.curMode === "dark"
                                     onPicked: root.set("mode=dark") }
-                            WChip { label: "light"; on: root.curMode === "light"
+                            WChip { label: "Light"; on: root.curMode === "light"
                                     onPicked: root.set("mode=light") }
                             Item { Layout.fillWidth: true }
                         }
 
-                        WSection { title: "accent" }
+                        WSection { title: "Accent colour" }
                         IndText {
-                            mono: true; sz: Tok.tLabel; color: Tok.ink3; Layout.fillWidth: true
+                            sz: Tok.tDense; color: Tok.ink2; Layout.fillWidth: true
                             wrapMode: Text.WordWrap
-                            text: "match colours pulls a palette out of your wallpaper and re-themes the shell, "
+                            text: "Match colours pulls a palette out of your wallpaper and re-themes the shell, "
                                 + "kitty, starship and the window borders every time it changes."
                         }
                         WToggle {
-                            label: "match colours from the wallpaper"
+                            label: "Match colours from the wallpaper"
                             on: root.curMatugen
                             onToggled: {
                                 root.set("matugen=" + (root.curMatugen ? "false" : "true"));
@@ -424,17 +416,22 @@ Scope {
                             }
                         }
                         Flow {
-                            Layout.fillWidth: true; spacing: 8
+                            Layout.fillWidth: true; Layout.leftMargin: 5; Layout.topMargin: 4; spacing: 16
                             visible: !root.curMatugen
                             Repeater {
                                 model: ["#63c7dd", "#8fb9ff", "#a6da95", "#eed49f", "#f5a97f", "#f0a0c0", "#c6a0f6"]
                                 Rectangle {
                                     required property var modelData
                                     readonly property bool sel: root.curAccent.toLowerCase() === modelData.toLowerCase()
-                                    width: 34; height: 34; radius: Tok.r
+                                    width: 34; height: 34; radius: 17
                                     color: modelData
-                                    border.width: sel ? 3 : 1
-                                    border.color: sel ? Tok.ink : Tok.alpha(Tok.ink, 0.2)
+                                    border.width: 1; border.color: Tok.alpha("#000", 0.12)
+                                    // the chosen one wears a ring with a gap, as macOS draws it
+                                    Rectangle { anchors.centerIn: parent; width: 44; height: 44; radius: 22
+                                        color: "transparent"; border.width: 2; border.color: parent.modelData
+                                        visible: parent.sel }
+                                    Text { anchors.centerIn: parent; visible: parent.sel; text: "check"
+                                        font.family: "Material Symbols Outlined"; font.pixelSize: 18; color: "#1b1b1b" }
                                     MouseArea {
                                         anchors.fill: parent; cursorShape: Qt.PointingHandCursor
                                         onClicked: {
@@ -452,15 +449,15 @@ Scope {
                     ColumnLayout {
                         anchors.fill: parent; spacing: 12
                         visible: root.step === 2
-                        WSection { title: "wallpaper" }
+                        WSection { title: "Wallpaper" }
                         IndText {
-                            mono: true; sz: Tok.tLabel; color: Tok.ink3; Layout.fillWidth: true
+                            sz: Tok.tDense; color: Tok.ink2; Layout.fillWidth: true
                             wrapMode: Text.WordWrap
                             text: root.papers.length
                                   ? (root.papers.length + " in " + root.curWpDir
-                                     + "  ·  SUPER+SHIFT+W opens the picker, SUPER+N cycles")
-                                  : ("nothing in " + root.curWpDir
-                                     + "  ·  point it somewhere else in Settings → Bar → wallpaper")
+                                     + ". Super Shift W opens the picker, Super N cycles.")
+                                  : ("Nothing in " + root.curWpDir
+                                     + ". Point it somewhere else in Settings → Bar → Wallpaper.")
                         }
                         GridLayout {
                             Layout.fillWidth: true
@@ -471,15 +468,17 @@ Scope {
                                     required property int index
                                     readonly property var w: root.papers[index]
                                     Layout.fillWidth: true
-                                    Layout.preferredHeight: 88
-                                    radius: Tok.rSmall
+                                    Layout.preferredHeight: 96
+                                    radius: 12
                                     clip: true
-                                    color: Tok.sunken
-                                    border.width: 1
-                                    border.color: wma.containsMouse ? Tok.accent : Tok.ruleHard
+                                    color: root.groupFill
+                                    border.width: wma.containsMouse ? 2 : 0
+                                    border.color: Tok.accent
+                                    scale: wma.pressed ? 0.97 : 1
+                                    Behavior on scale { NumberAnimation { duration: Tok.mMicro } }
                                     Behavior on border.color { ColorAnimation { duration: Tok.mFast } }
                                     Image {
-                                        anchors.fill: parent; anchors.margins: 1
+                                        anchors.fill: parent; anchors.margins: parent.border.width
                                         source: Tok.fileUrl(root.still(parent.w))
                                         fillMode: Image.PreserveAspectCrop
                                         asynchronous: true; cache: true
@@ -501,29 +500,29 @@ Scope {
                     ColumnLayout {
                         anchors.fill: parent; spacing: 10
                         visible: root.step === 3
-                        WSection { title: "bar shape" }
+                        WSection { title: "Bar shape" }
                         RowLayout {
                             spacing: 8
-                            WChip { label: "one bar"; on: root.curBarShape === "bar"
+                            WChip { label: "One bar"; on: root.curBarShape === "bar"
                                     onPicked: root.set("barShape=bar") }
-                            WChip { label: "pills";   on: root.curBarShape === "pills"
+                            WChip { label: "Pills";   on: root.curBarShape === "pills"
                                     onPicked: root.set("barShape=pills") }
                             Item { Layout.fillWidth: true }
                         }
 
-                        WSection { title: "workspaces" }
+                        WSection { title: "Workspaces" }
                         RowLayout {
                             spacing: 8
-                            WChip { label: "grow";    on: root.curWsStyle === "grow"
+                            WChip { label: "Grow";    on: root.curWsStyle === "grow"
                                     onPicked: root.set("wsStyle=grow") }
-                            WChip { label: "pills";   on: root.curWsStyle === "pill"
+                            WChip { label: "Pills";   on: root.curWsStyle === "pill"
                                     onPicked: root.set("wsStyle=pill") }
-                            WChip { label: "circles"; on: root.curWsStyle === "circle"
+                            WChip { label: "Circles"; on: root.curWsStyle === "circle"
                                     onPicked: root.set("wsStyle=circle") }
                             Item { Layout.fillWidth: true }
                         }
 
-                        WSection { title: "numbering" }
+                        WSection { title: "Numbering" }
                         Flow {
                             Layout.fillWidth: true; spacing: 7
                             Repeater {
@@ -539,7 +538,7 @@ Scope {
                             }
                         }
 
-                        WSection { title: "the mark" }
+                        WSection { title: "Logo" }
                         Flow {
                             Layout.fillWidth: true; spacing: 7
                             Repeater {
@@ -547,9 +546,9 @@ Scope {
                                 Rectangle {
                                     required property var modelData
                                     readonly property bool sel: root.curBarLogo === modelData
-                                    width: 42; height: 34; radius: Tok.r
-                                    color: sel ? Tok.accentWash : Tok.surface
-                                    border.width: 1; border.color: sel ? Tok.accent : Tok.ruleHard
+                                    width: 46; height: 38; radius: 12
+                                    color: sel ? Tok.accentWash : root.groupFill
+                                    border.width: sel ? 2 : 0; border.color: Tok.accent
                                     BarLogo {
                                         anchors.centerIn: parent
                                         kind: modelData === "auto" ? root.autoLogo : modelData
@@ -579,34 +578,34 @@ Scope {
                     ColumnLayout {
                         anchors.fill: parent; spacing: 12
                         visible: root.step === 4
-                        WSection { title: "the menu bar" }
+                        WSection { title: "Menu bar" }
                         IndText {
                             Layout.fillWidth: true; wrapMode: Text.WordWrap
-                            mono: true; sz: Tok.tLabel; color: Tok.ink3
-                            text: "the bar can carry the focused window's own menus — file, edit, view — "
-                                + "instead of every window drawing its own. the workspace numbers step "
+                            sz: Tok.tDense; color: Tok.ink2
+                            text: "The bar can carry the focused window's own menus — file, edit, view — "
+                                + "instead of every window drawing its own. The workspace numbers step "
                                 + "aside while there is a menu to show and come straight back when there "
-                                + "isn't. SUPER+M opens it from the keyboard; SUPER+SHIFT+M searches every "
+                                + "isn't. Super M opens it from the keyboard; Super Shift M searches every "
                                 + "command in it."
                         }
                         WToggle {
-                            label: "show the focused window's menus"
+                            label: "Show the focused window's menus"
                             on: root.gmEnabled
                             onToggled: root.gmSet(!root.gmEnabled)
                         }
 
-                        WSection { title: "apps"; visible: root.gmEnabled }
+                        WSection { title: "Apps"; visible: root.gmEnabled }
                         IndText {
                             visible: root.gmEnabled
                             Layout.fillWidth: true; wrapMode: Text.WordWrap
-                            mono: true; sz: Tok.tLabel; color: Tok.ink3
+                            sz: Tok.tDense; color: Tok.ink2
                             text: root.gmApps.length === 0
-                                  ? "looking at what is installed…"
+                                  ? "Looking at what is installed…"
                                   : (root.gmNeeds === 0
-                                     ? "every app found here can already publish its menu. qt and gtk apps need nothing at all."
+                                     ? "Every app found here can already publish its menu. Qt and GTK apps need nothing at all."
                                      : root.gmNeeds + " of " + root.gmApps.length + " apps need one small change first — "
-                                       + "firefox two prefs, electron apps a flag that runs them under xwayland so they can "
-                                       + "hand the menu over as data. nothing else about them changes, and each one has to be "
+                                       + "Firefox two prefs, Electron apps a flag that runs them under XWayland so they can "
+                                       + "hand the menu over as data. Nothing else about them changes, and each one has to be "
                                        + "restarted afterwards.")
                         }
                         RowLayout {
@@ -617,8 +616,8 @@ Scope {
                                 enabled: !root.gmSetupBusy
                                 opacity: root.gmSetupBusy ? 0.6 : 1
                                 label: root.gmSetupBusy
-                                       ? "setting up…"
-                                       : "set up " + root.gmNeeds + " app" + (root.gmNeeds === 1 ? "" : "s")
+                                       ? "Setting up…"
+                                       : "Set up " + root.gmNeeds + " app" + (root.gmNeeds === 1 ? "" : "s")
                                 onTapped: { root.gmSetupBusy = true; gmApply.running = true }
                             }
                             Item { Layout.fillWidth: true }
@@ -626,14 +625,14 @@ Scope {
                         IndText {
                             visible: root.gmEnabled && root.gmSetupDone && root.gmNeeds === 0
                             Layout.fillWidth: true; wrapMode: Text.WordWrap
-                            mono: true; sz: Tok.tLabel; color: Tok.ok
-                            text: "done — restart those apps and their menus turn up in the bar."
+                            sz: Tok.tDense; color: Tok.ok
+                            text: "Done. Restart those apps and their menus turn up in the bar."
                         }
                         IndText {
                             visible: root.gmEnabled
                             Layout.fillWidth: true; wrapMode: Text.WordWrap
-                            mono: true; sz: Tok.tLabel; color: Tok.ink3
-                            text: "app by app — and why each one is or is not ready — lives in Settings → Bar."
+                            sz: Tok.tDense; color: Tok.ink2
+                            text: "App by app, and why each one is or is not ready, lives in Settings → Bar."
                         }
                         Item { Layout.fillHeight: true }
                     }
@@ -642,12 +641,12 @@ Scope {
                     ColumnLayout {
                         anchors.fill: parent; spacing: 12
                         visible: root.step === 5
-                        WSection { title: "which app opens what" }
+                        WSection { title: "Which app opens what" }
                         IndText {
                             Layout.fillWidth: true; wrapMode: Text.WordWrap
-                            mono: true; sz: Tok.tLabel; color: Tok.ink3
-                            text: "these are the machine's own associations — every application that asks "
-                                + "the system will follow them, not just this shell. the terminal is the "
+                            sz: Tok.tDense; color: Tok.ink2
+                            text: "These are the machine's own associations — every application that asks "
+                                + "the system will follow them, not just this shell. The terminal is the "
                                 + "one exception: no standard covers it, so sea-shell keeps that answer "
                                 + "itself and uses it for “open in terminal”."
                         }
@@ -666,13 +665,13 @@ Scope {
                                 RowLayout {
                                     Layout.fillWidth: true; spacing: 8
                                     IndText {
-                                        mono: true; sz: Tok.tLabel; color: Tok.ink2
-                                        text: wRole.info ? wRole.info.label.toLowerCase() : ""
+                                        sz: Tok.tDense; font.weight: Font.Medium; color: Tok.ink
+                                        text: wRole.info ? wRole.info.label : ""
                                     }
                                     Item { Layout.fillWidth: true }
                                     IndText {
-                                        mono: true; sz: Tok.tLabel; color: Tok.ink3
-                                        text: root.defBusy === wRole.modelData ? "setting…" : ""
+                                        sz: Tok.tDense; color: Tok.ink2
+                                        text: root.defBusy === wRole.modelData ? "Setting…" : ""
                                     }
                                 }
 
@@ -686,13 +685,12 @@ Scope {
                                             required property var modelData
                                             readonly property bool chosen: !!wRole.info
                                                 && modelData.id === wRole.info.current
-                                            implicitHeight: 28
-                                            implicitWidth: wChipRow.implicitWidth + 18
-                                            radius: Tok.r
-                                            color: wChip.chosen ? Tok.accentWash
-                                                 : (wChipMa.containsMouse ? Tok.hover : Tok.sunken)
-                                            border.width: 1
-                                            border.color: wChip.chosen ? Tok.accent : Tok.ruleHard
+                                            implicitHeight: 30
+                                            implicitWidth: wChipRow.implicitWidth + 22
+                                            radius: 15
+                                            color: wChip.chosen ? Tok.accent
+                                                 : (wChipMa.containsMouse ? root.rowHover : root.groupFill)
+                                            Behavior on color { ColorAnimation { duration: Tok.mFast } }
                                             RowLayout {
                                                 id: wChipRow
                                                 anchors.centerIn: parent; spacing: 6
@@ -703,8 +701,8 @@ Scope {
                                                             ? Quickshell.iconPath(wChip.modelData.icon, true) : ""
                                                 }
                                                 IndText {
-                                                    mono: true; sz: Tok.tLabel
-                                                    color: wChip.chosen ? Tok.accent : Tok.ink2
+                                                    sz: Tok.tDense
+                                                    color: wChip.chosen ? Tok.accentInk : Tok.ink
                                                     text: wChip.modelData.name
                                                 }
                                             }
@@ -722,8 +720,8 @@ Scope {
 
                         IndText {
                             Layout.fillWidth: true; wrapMode: Text.WordWrap
-                            mono: true; sz: Tok.tLabel; color: Tok.ink3
-                            text: "the rest — images, video, music, documents — are on the same page in "
+                            sz: Tok.tDense; color: Tok.ink2
+                            text: "The rest (images, video, music, documents) are on the same page in "
                                 + "Settings → Default Apps, whenever you want them."
                         }
                         Item { Layout.fillHeight: true }
@@ -736,30 +734,29 @@ Scope {
                         Item { Layout.fillHeight: true }
                         IndText {
                             Layout.alignment: Qt.AlignHCenter
-                            text: "that's it"; mono: true; sz: Tok.tTitle; font.weight: 700; color: Tok.ink
+                            text: "You're all set"; sz: 24; font.weight: Font.Bold; color: Tok.ink
                         }
-                        WHint { k: "SUPER+K";       v: "every keybind, with a description" }
-                        WHint { k: "SUPER+M";       v: "the focused window's menus, from the keyboard" }
-                        WHint { k: "SUPER+S";       v: "the control center — everything here, and the rest" }
-                        WHint { k: "SUPER+SHIFT+W"; v: "the wallpaper picker" }
-                        WHint { k: "Hub Moon";      v: "parametric EQ and DAC control, if you want them" }
+                        WHint { k: "Super K";       v: "Every shortcut, with a description" }
+                        WHint { k: "Super M";       v: "The focused window's menus, from the keyboard" }
+                        WHint { k: "Super S";       v: "Settings: everything here, and the rest" }
+                        WHint { k: "Super Shift W"; v: "The wallpaper picker" }
+                        WHint { k: "Hub Moon";      v: "Parametric EQ and DAC control, if you want them" }
                         IndText {
                             Layout.fillWidth: true; Layout.topMargin: 6
                             horizontalAlignment: Text.AlignHCenter
-                            mono: true; sz: Tok.tLabel; color: Tok.ink3
+                            sz: Tok.tDense; color: Tok.ink2
                             wrapMode: Text.WordWrap
-                            text: "you can open this again from Settings → System"
+                            text: "You can open this again from Settings → System."
                         }
                         Item { Layout.fillHeight: true }
                     }
                 }
 
                 // ---- footer ----
-                Rectangle { Layout.fillWidth: true; height: 1; color: Tok.ruleHard }
                 RowLayout {
                     Layout.fillWidth: true; spacing: 10
                     WBtn {
-                        label: "back"; visible: root.step > 0
+                        label: "Back"; visible: root.step > 0
                         onTapped: root.step--
                     }
                     Item { Layout.fillWidth: true }
@@ -770,15 +767,16 @@ Scope {
                             model: root.steps
                             Rectangle {
                                 required property int index
-                                width: 7; height: 7; radius: 3.5
-                                color: index === root.step ? Tok.accent : Tok.alpha(Tok.ink3, 0.4)
+                                width: index === root.step ? 18 : 7; height: 7; radius: 3.5
+                                color: index === root.step ? Tok.accent : Tok.alpha(Tok.ink3, 0.35)
                                 Behavior on color { ColorAnimation { duration: Tok.mFast } }
+                                Behavior on width { NumberAnimation { duration: Tok.mFast; easing.type: Easing.OutCubic } }
                             }
                         }
                     }
                     Item { Layout.fillWidth: true }
                     WBtn {
-                        label: root.step < root.steps - 1 ? "next" : "finish"
+                        label: root.step === 0 ? "Get started" : root.step < root.steps - 1 ? "Continue" : "Done"
                         primary: true
                         onTapped: { if (root.step < root.steps - 1) root.step++; else root.finish() }
                     }
@@ -789,16 +787,12 @@ Scope {
 
     // ---------- local controls ----------
     // Deliberately not settings.qml's: those are inline components of that file and cannot be
-    // reached from here. Four small ones is less than making a component library for two users.
-    component WSection: ColumnLayout {
+    // reached from here. Drawn in the same language: quiet fills, no outlines, pills.
+    component WSection: IndText {
         property string title: ""
         Layout.fillWidth: true
-        spacing: 3
-        IndText {
-            text: parent.title; mono: true; sz: Tok.tLabel; color: Tok.ink2
-            font.weight: 600; font.letterSpacing: 1.15; font.capitalization: Font.AllUppercase
-        }
-        Rectangle { Layout.fillWidth: true; height: 1; color: Tok.rule }
+        Layout.topMargin: 4
+        text: title; sz: Tok.tDense; font.weight: Font.DemiBold; color: Tok.ink
     }
 
     component WChip: Rectangle {
@@ -806,12 +800,13 @@ Scope {
         property string label: ""
         property bool on: false
         signal picked()
-        implicitWidth: chT.implicitWidth + 24; implicitHeight: 32; radius: Tok.r
-        color: ch.on ? Tok.accentWash : (chM.containsMouse ? Tok.raised : Tok.surface)
-        border.width: 1; border.color: ch.on ? Tok.accent : Tok.ruleHard
+        implicitWidth: chT.implicitWidth + 30; implicitHeight: 32; radius: 16
+        color: ch.on ? Tok.accent : (chM.containsMouse ? root.rowHover : root.groupFill)
+        scale: chM.pressed ? 0.96 : 1
         Behavior on color { ColorAnimation { duration: Tok.mFast } }
-        IndText { id: chT; anchors.centerIn: parent; text: ch.label; mono: true; sz: Tok.tData
-                  color: ch.on ? Tok.ink : Tok.ink2; font.weight: ch.on ? 700 : 400 }
+        Behavior on scale { NumberAnimation { duration: Tok.mMicro } }
+        IndText { id: chT; anchors.centerIn: parent; text: ch.label; sz: Tok.tDense
+                  color: ch.on ? Tok.accentInk : Tok.ink; font.weight: ch.on ? Font.DemiBold : Font.Normal }
         MouseArea { id: chM; anchors.fill: parent; hoverEnabled: true
                     cursorShape: Qt.PointingHandCursor; onClicked: ch.picked() }
     }
@@ -822,25 +817,23 @@ Scope {
         property bool on: false
         signal toggled()
         Layout.fillWidth: true
-        implicitHeight: 44; radius: Tok.r
-        color: tgM.containsMouse ? Tok.raised : Tok.surface
-        border.width: 1; border.color: tg.on ? Tok.accent : Tok.ruleHard
+        implicitHeight: 46; radius: 12
+        color: tgM.containsMouse ? root.rowHover : root.groupFill
         Behavior on color { ColorAnimation { duration: Tok.mFast } }
         IndText {
-            anchors { left: parent.left; leftMargin: 14; verticalCenter: parent.verticalCenter }
-            text: tg.label; mono: true; sz: Tok.tDense; color: Tok.ink
+            anchors { left: parent.left; leftMargin: 16; verticalCenter: parent.verticalCenter }
+            text: tg.label; sz: Tok.tBody; color: Tok.ink
         }
         Rectangle {
             anchors { right: parent.right; rightMargin: 14; verticalCenter: parent.verticalCenter }
-            width: 42; height: 22; radius: Tok.r
-            color: tg.on ? Tok.accent : Tok.sunken
-            border.width: 1; border.color: tg.on ? Tok.accent : Tok.ruleHard
+            width: 40; height: 24; radius: 12
+            color: tg.on ? Tok.accent : Tok.alpha(Tok.ink, 0.16)
             Behavior on color { ColorAnimation { duration: Tok.mFast } }
             Rectangle {
-                width: 16; height: 16; radius: Tok.rSmall; y: 3
-                x: tg.on ? parent.width - width - 3 : 3
-                color: tg.on ? Tok.accentInk : Tok.ink3
-                Behavior on x { NumberAnimation { duration: 130; easing.type: Easing.OutCubic } }
+                width: 20; height: 20; radius: 10; y: 2
+                x: tg.on ? parent.width - width - 2 : 2
+                color: "white"
+                Behavior on x { NumberAnimation { duration: 140; easing.type: Easing.OutCubic } }
             }
         }
         MouseArea { id: tgM; anchors.fill: parent; hoverEnabled: true
@@ -852,15 +845,16 @@ Scope {
         property string label: ""
         property bool primary: false
         signal tapped()
-        implicitWidth: btT.implicitWidth + 34; implicitHeight: 36; radius: Tok.r
-        color: bt.primary ? (btM.containsMouse ? Tok.accent : Tok.accentWash)
-                          : (btM.containsMouse ? Tok.raised : Tok.surface)
-        border.width: 1; border.color: bt.primary ? Tok.accent : Tok.ruleHard
+        implicitWidth: Math.max(96, btT.implicitWidth + 36); implicitHeight: 36; radius: 18
+        color: bt.primary ? (btM.containsMouse ? Qt.lighter(Tok.accent, 1.08) : Tok.accent)
+                          : (btM.containsMouse ? root.rowHover : root.groupFill)
+        scale: btM.pressed ? 0.97 : 1
         Behavior on color { ColorAnimation { duration: Tok.mFast } }
+        Behavior on scale { NumberAnimation { duration: Tok.mMicro } }
         IndText {
-            id: btT; anchors.centerIn: parent; text: bt.label; mono: true; sz: Tok.tData
-            font.weight: bt.primary ? 700 : 400
-            color: (bt.primary && btM.containsMouse) ? Tok.accentInk : Tok.ink
+            id: btT; anchors.centerIn: parent; text: bt.label; sz: Tok.tDense
+            font.weight: bt.primary ? Font.DemiBold : Font.Medium
+            color: bt.primary ? Tok.accentInk : Tok.ink
         }
         MouseArea { id: btM; anchors.fill: parent; hoverEnabled: true
                     cursorShape: Qt.PointingHandCursor; onClicked: bt.tapped() }
@@ -870,13 +864,18 @@ Scope {
         property string k: ""
         property string v: ""
         Layout.fillWidth: true
-        spacing: 12
-        Rectangle {
-            Layout.preferredWidth: 150; implicitHeight: 26; radius: Tok.rSmall
-            color: Tok.surface; border.width: 1; border.color: Tok.ruleHard
-            IndText { anchors.centerIn: parent; text: parent.parent.k; mono: true; sz: Tok.tData
-                      color: Tok.accent; font.weight: 600 }
+        Layout.leftMargin: 110; Layout.rightMargin: 60
+        spacing: 14
+        Item {
+            Layout.preferredWidth: 130; implicitHeight: 28
+            Rectangle {
+                anchors.right: parent.right
+                width: hk.implicitWidth + 18; height: 28; radius: 8
+                color: root.groupFill
+                IndText { id: hk; anchors.centerIn: parent; text: parent.parent.parent.k; sz: Tok.tDense
+                          color: Tok.ink; font.weight: Font.Medium }
+            }
         }
-        IndText { Layout.fillWidth: true; text: parent.v; mono: true; sz: Tok.tDense; color: Tok.ink2 }
+        IndText { Layout.fillWidth: true; text: parent.v; sz: Tok.tBody; color: Tok.ink2 }
     }
 }

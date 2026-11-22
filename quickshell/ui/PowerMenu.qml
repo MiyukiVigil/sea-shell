@@ -21,13 +21,26 @@ Scope {
     // a picture stuck on the card's corner, chosen in Settings → Appearance → stickers
     property url sticker: ""
     signal closed()
-    function open() {
-        // Select the active output each time; the warm surface otherwise stays on its first output.
-        var focused = Hyprland.focusedMonitor;
-        var screens = Quickshell.screens;
-        for (var i = 0; focused && i < screens.length; i++) {
-            if (screens[i].name === focused.name) { win.screen = screens[i]; break; }
+    // A warm window whose output went away (lid shut, monitor unplugged) is closed by the
+    // compositor and hidden by Quickshell for good; moving it to another screen alone leaves it
+    // hidden. So open() takes the active output (where the cursor is) and, whenever the window is
+    // not alive there, rebuilds it: hide, move, show again.
+    property bool screensMoved: false
+    Connections { target: Quickshell; function onScreensChanged() { root.screensMoved = true } }
+    function placeOn(w) {
+        var f = Hyprland.focusedMonitor, s = Quickshell.screens, t = null;
+        for (var i = 0; f && i < s.length; i++) if (s[i].name === f.name) t = s[i];
+        if (!t && s.length) t = s[0];
+        if (t && (t !== w.screen || root.screensMoved || !w.backingWindowVisible || !w.visible)) {
+            w.visible = false;
+            w.screen = t;
+            w.visible = true;
         }
+        root.screensMoved = false;
+    }
+    function open() {
+        // on the active output each time; the warm surface otherwise stays on its first one
+        root.placeOn(win);
 
         root.sel = 0; root.holding = null; root.holdP = 0;
         upProc.running = true; appsProc.running = true; laterProc.running = true;
@@ -64,6 +77,7 @@ Scope {
         {i:"power_settings_new", l:"Shut down", k:Qt.Key_P, c:"systemctl poweroff", hold:true, crit:true, what:"Turns the computer off."}
     ]
     readonly property var firmware: ({i:"memory", l:"restart into firmware setup", k:Qt.Key_F, c:"systemctl reboot --firmware-setup", hold:true, what:"Restarts into the UEFI firmware setup."})
+    readonly property var bigPic:   ({i:"sports_esports", l:"Big picture", k:Qt.Key_G, c:"qs -c sea-shell ipc call bigpicture open", what:"Opens the controller-friendly Big Picture gaming view."})
     function run(c) { Quickshell.execDetached(["sh","-c",c]); root.close() }
 
     // ---------- hold to confirm ----------
@@ -145,7 +159,18 @@ Scope {
         Region { id: allInput; item: win.contentItem }
         color: "transparent"
         WlrLayershell.namespace: "sea-shell:power"
-        WlrLayershell.layer: WlrLayer.Overlay
+        // Keep closed panels warm without blocking fullscreen presentation.
+        WlrLayershell.layer: (win.live) ? WlrLayer.Overlay : WlrLayer.Bottom
+        // Quickshell applies the new layer when the native surface is mapped again.
+        // Keep the QML content resident and preserve the window's visibility policy.
+        Connections {
+            target: win.WlrLayershell
+            function onLayerChanged() {
+                if (!win.visible) return;
+                win.visible = false;
+                win.visible = Qt.binding(function() { return true; });
+            }
+        }
         WlrLayershell.keyboardFocus: root.shown ? WlrKeyboardFocus.Exclusive : WlrKeyboardFocus.None
         exclusionMode: ExclusionMode.Ignore
         // scale the whole overlay up on big displays; centred content stays centred
@@ -166,6 +191,7 @@ Scope {
                 function keyAction(k) {
                     for (var i = 0; i < root.actions.length; i++) if (k === root.actions[i].k) return root.actions[i];
                     if (root.efi && k === root.firmware.k) return root.firmware;
+                    if (k === root.bigPic.k) return root.bigPic;
                     return null;
                 }
                 Keys.onPressed: (e) => {
@@ -351,27 +377,43 @@ Scope {
 
                     Rectangle { width: parent.width; height: 1; color: Tok.rule }
 
-                    // the rarer two: firmware setup on the left, shut down later on the right
+                    // the rarer shortcuts on the left (Firmware setup + Big Picture), shut down later on the right
                     Item {
                         width: parent.width; height: 32
-                        Rectangle {
-                            id: fwBtn
-                            visible: root.efi
-                            readonly property bool held: root.holding === root.firmware
+                        Row {
                             anchors.left: parent.left; anchors.verticalCenter: parent.verticalCenter
-                            width: fwRow.implicitWidth + 24; height: 32; radius: 16
-                            color: held ? Tok.warnWash : fwMa.containsMouse ? Tok.surface : "transparent"
-                            border.width: 1; border.color: held ? Tok.warn : Tok.rule
-                            clip: true
-                            Rectangle { visible: fwBtn.held; width: parent.width * root.holdP; height: parent.height; radius: 16
-                                color: Qt.rgba(Tok.warn.r, Tok.warn.g, Tok.warn.b, 0.25) }
-                            Row { id: fwRow; anchors.centerIn: parent; spacing: 6
-                                Text { text: "memory"; font.family: "Material Symbols Outlined"; font.pixelSize: 16; color: fwBtn.held ? Tok.warn : Tok.ink2; anchors.verticalCenter: parent.verticalCenter }
-                                Text { text: "Firmware setup"; color: Tok.ink; font.pixelSize: 12; font.family: Tok.sans; anchors.verticalCenter: parent.verticalCenter }
-                                Text { text: "hold f"; color: Tok.ink3; font.pixelSize: 10; font.family: Tok.sans; anchors.verticalCenter: parent.verticalCenter }
+                            spacing: 6
+                            Rectangle {
+                                id: fwBtn
+                                visible: root.efi
+                                readonly property bool held: root.holding === root.firmware
+                                width: fwRow.implicitWidth + 22; height: 32; radius: 16
+                                color: held ? Tok.warnWash : fwMa.containsMouse ? Tok.surface : "transparent"
+                                border.width: 1; border.color: held ? Tok.warn : Tok.rule
+                                clip: true
+                                Rectangle { visible: fwBtn.held; width: parent.width * root.holdP; height: parent.height; radius: 16
+                                    color: Qt.rgba(Tok.warn.r, Tok.warn.g, Tok.warn.b, 0.25) }
+                                Row { id: fwRow; anchors.centerIn: parent; spacing: 6
+                                    Text { text: "memory"; font.family: "Material Symbols Outlined"; font.pixelSize: 16; color: fwBtn.held ? Tok.warn : Tok.ink2; anchors.verticalCenter: parent.verticalCenter }
+                                    Text { text: "UEFI"; color: Tok.ink; font.pixelSize: 12; font.family: Tok.sans; anchors.verticalCenter: parent.verticalCenter }
+                                    Text { text: "hold f"; color: Tok.ink3; font.pixelSize: 10; font.family: Tok.sans; anchors.verticalCenter: parent.verticalCenter }
+                                }
+                                MouseArea { id: fwMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                    onPressed: root.press(root.firmware); onReleased: root.release(); onCanceled: root.release() }
                             }
-                            MouseArea { id: fwMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
-                                onPressed: root.press(root.firmware); onReleased: root.release(); onCanceled: root.release() }
+                            Rectangle {
+                                id: bpBtn
+                                width: bpRow.implicitWidth + 22; height: 32; radius: 16
+                                color: bpMa.containsMouse ? Tok.accentWash : "transparent"
+                                border.width: 1; border.color: bpMa.containsMouse ? Tok.accent : Tok.rule
+                                Row { id: bpRow; anchors.centerIn: parent; spacing: 6
+                                    Text { text: "sports_esports"; font.family: "Material Symbols Outlined"; font.pixelSize: 16; color: bpMa.containsMouse ? Tok.accent : Tok.ink2; anchors.verticalCenter: parent.verticalCenter }
+                                    Text { text: "Big Picture"; color: Tok.ink; font.pixelSize: 12; font.family: Tok.sans; anchors.verticalCenter: parent.verticalCenter }
+                                    Text { text: "g"; color: Tok.ink3; font.pixelSize: 10; font.family: Tok.sans; anchors.verticalCenter: parent.verticalCenter }
+                                }
+                                MouseArea { id: bpMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                    onClicked: root.press(root.bigPic) }
+                            }
                         }
                         Row {
                             anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter

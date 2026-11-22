@@ -44,7 +44,7 @@ Rectangle {
             Image {
                 id: ic
                 width: 18 * card.u; height: width; anchors.verticalCenter: parent.verticalCenter
-                source: card.iconSrc; sourceSize.width: 48; asynchronous: true
+                source: card.iconSrc; sourceSize.width: 48; sourceSize.height: 48; asynchronous: true
                 visible: status === Image.Ready
             }
             Text {

@@ -5,7 +5,10 @@ import unittest
 from unittest.mock import patch
 from pathlib import Path
 
-spec = importlib.util.spec_from_file_location('sea_fm', Path(__file__).resolve().parents[1] / 'quickshell/scripts/system/sea-fm.py')
+LEGACY_FM = Path(__file__).resolve().parents[1] / 'legacy/quickshell-fm/sea-fm.py'
+if not LEGACY_FM.is_file():
+    raise unittest.SkipTest('legacy/quickshell-fm/sea-fm.py not present')
+spec = importlib.util.spec_from_file_location('sea_fm', LEGACY_FM)
 fm = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(fm)
 

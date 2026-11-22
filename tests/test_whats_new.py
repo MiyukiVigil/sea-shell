@@ -19,6 +19,15 @@ class WhatsNewTests(unittest.TestCase):
             self.assertFalse(module.claim(cfg, '7.0.0'))
             self.assertEqual((cfg / 'whats-new-7.0').read_text(), '7.0.0\n')
 
+    def test_each_minor_release_gets_its_own_page(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = Path(tmp)
+            (cfg / 'appearance.json').write_text('{"welcomed":true}')
+            self.assertTrue(module.claim(cfg, '7.0.0'))
+            self.assertTrue(module.claim(cfg, '7.1.0'))
+            self.assertFalse(module.claim(cfg, '7.1.2'))
+            self.assertEqual((cfg / 'whats-new-7.1').read_text(), '7.1.0\n')
+
     def test_first_run_and_unreadable_config_are_skipped(self):
         with tempfile.TemporaryDirectory() as tmp:
             cfg = Path(tmp)

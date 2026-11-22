@@ -10,7 +10,7 @@ local mod       = "SUPER"
 local term      = "kitty"
 local menu      = "qs -c sea-shell ipc call launcher toggle"   -- resident launcher (instant)
 local browser   = "xdg-open https://"
-local settings  = "qs -c sea-shell ipc call settings toggle"   -- resident in the bar process
+local settings  = "qs -c sea-shell ipc call shell toggleSettings"   -- resident in the bar process
 local wallpick  = "~/.config/quickshell/sea-shell/sea-toggle.sh wallpaper"
 local powermenu = "~/.config/quickshell/sea-shell/sea-toggle.sh power"
 local keybinds  = "~/.config/quickshell/sea-shell/sea-toggle.sh keybinds"
@@ -22,14 +22,14 @@ hl.bind(mod .. " + T",         hl.dsp.exec_cmd(term),                           
 hl.bind(mod .. " + Q",         hl.dsp.window.close(),                                          { description = "Close window" })
 hl.bind("CTRL + Space",        hl.dsp.exec_cmd(menu),                                          { description = "App launcher" })
 hl.bind(mod .. " + Space",     hl.dsp.exec_cmd(menu),                                          { description = "App launcher" })
-hl.bind(mod .. " + E",         hl.dsp.exec_cmd("python3 ~/.config/quickshell/sea-shell/sea-fm.py"),             { description = "File manager (sea-fm)" })
+hl.bind(mod .. " + E",         hl.dsp.exec_cmd("sh -c '\"$HOME/.config/quickshell/sea-shell/sea-files-launch.sh\" \"$HOME\"'"), { description = "File manager (Files)" })
 hl.bind(mod .. " + B",         hl.dsp.exec_cmd(browser),                                       { description = "Browser" })
 hl.bind(mod .. " + A",         hl.dsp.exec_cmd(browser),                                       { description = "Browser" })
 hl.bind(mod .. " + S",         hl.dsp.exec_cmd(settings),                                      { description = "Control center" })
 hl.bind(mod .. " + SHIFT + W", hl.dsp.exec_cmd(wallpick),                                      { description = "Wallpaper picker" })
 -- Routed through the shell rather than straight at the script so the switch gets a dip-to-black
--- transition. Animated wallpapers run on mpvpaper, which cannot transition at all — the shell
--- draws the fade over the swap instead. Falls back to the bare script if the bar isn't running.
+-- transition. A video wallpaper has no backend transition — the shell draws the fade over the
+-- swap instead. Falls back to the bare script if the bar isn't running.
 hl.bind(mod .. " + N",         hl.dsp.exec_cmd("qs -c sea-shell ipc call wallpaper next 2>/dev/null || ~/.config/quickshell/sea-shell/sea-wallpaper-cycle.sh next"), { description = "Next wallpaper" })
 hl.bind(mod .. " + SHIFT + N", hl.dsp.exec_cmd("qs -c sea-shell ipc call wallpaper prev 2>/dev/null || ~/.config/quickshell/sea-shell/sea-wallpaper-cycle.sh prev"), { description = "Previous wallpaper" })
 hl.bind(mod .. " + SHIFT + D", hl.dsp.exec_cmd("~/.config/quickshell/sea-shell/sea-toggle-theme.sh"),        { description = "Toggle light/dark" })
@@ -38,13 +38,20 @@ hl.bind(mod .. " + Escape",    hl.dsp.exec_cmd(powermenu),                      
 hl.bind(mod .. " + ALT + L",   hl.dsp.exec_cmd("~/.config/quickshell/sea-shell/sea-lock.sh"),  { description = "Lock screen" })
 hl.bind(mod .. " + SHIFT + R", hl.dsp.exec_cmd("hyprctl reload"),                              { description = "Reload Hyprland" })
 hl.bind(mod .. " + SHIFT + B", hl.dsp.exec_cmd("sh ~/.config/quickshell/sea-shell/sea-bar-supervisor.sh --restart"), { description = "Restart bar" })
+hl.bind(mod .. " + SHIFT + C", hl.dsp.exec_cmd("sh ~/.config/quickshell/sea-shell/sea-colorpick.sh"), { description = "Pick a colour" })
 
 -- ---------------- window switcher (alt-tab) ----------------
--- hold ALT, press Tab to cycle a visual switcher; release ALT to focus. Escape cancels.
-hl.bind("ALT + Tab",         hl.dsp.exec_cmd("qs -c sea-shell ipc call switcher next"),   { description = "Window switcher" })
-hl.bind("ALT + SHIFT + Tab", hl.dsp.exec_cmd("qs -c sea-shell ipc call switcher prev"),   { description = "Window switcher (back)" })
-hl.bind("ALT + Escape",      hl.dsp.exec_cmd("qs -c sea-shell ipc call switcher cancel"))
-hl.bind("ALT + Alt_L",       hl.dsp.exec_cmd("qs -c sea-shell ipc call switcher commit"), { release = true })
+-- hold ALT, press Tab to cycle a visual switcher, or ` among this app; release ALT to focus. Escape cancels.
+-- The release binds must stay transparent: Hyprland otherwise drops a release bind when another
+-- key (Tab) went down in between, so it never fires. Left Alt goes by keycode because its name
+-- does not match on release. The SHIFT forms cover Shift having gone down before Alt.
+hl.bind("ALT + Tab",         hl.dsp.global("sea-shell:switcher-next"), { description = "Window switcher" })
+hl.bind("ALT + SHIFT + Tab", hl.dsp.global("sea-shell:switcher-prev"), { description = "Window switcher (back)" })
+hl.bind("ALT + grave",       hl.dsp.global("sea-shell:switcher-app"),  { description = "Window switcher (this app)" })
+hl.bind("ALT + Escape",      hl.dsp.global("sea-shell:switcher-cancel"))
+for _, key in ipairs({ "ALT + code:64", "ALT + SHIFT + Alt_L", "ALT + Alt_R", "ALT + SHIFT + Alt_R" }) do
+    hl.bind(key, hl.dsp.global("sea-shell:switcher-commit"), { release = true, transparent = true, non_consuming = true })
+end
 
 -- ---------------- global menu ----------------
 -- The focused window's own menu bar, drawn in the bar. Opens at the first menu; arrows walk
@@ -125,8 +132,19 @@ hl.bind(mod .. " + SHIFT + S", hl.dsp.exec_cmd([[pgrep -x slurp >/dev/null || { 
 -- screenshot binds above: a second selection while one is already open just cancels both.
 hl.bind(mod .. " + SHIFT + O", hl.dsp.exec_cmd([[pgrep -x slurp >/dev/null || ~/.config/quickshell/sea-shell/sea-ocr.sh eng]]), { description = "OCR region to clipboard" })
 
--- ---------------- clipboard history (needs cliphist + wl-clipboard) ----------------
-hl.bind(mod .. " + V", hl.dsp.exec_cmd("qs -c sea-shell ipc call launcher clipboard"), { description = "Clipboard history" })
+-- ---------------- clipboard history & emoji picker (needs cliphist + wl-clipboard) ----------------
+hl.bind(mod .. " + V", hl.dsp.exec_cmd("qs -c sea-shell ipc call clipboard toggle"), { description = "Clipboard history" })
+hl.bind(mod .. " + period", hl.dsp.exec_cmd("qs -c sea-shell ipc call clipboard emoji"), { description = "Emoji & symbols picker" })
+
+-- ---------------- quick overlays & window layout helpers ----------------
+hl.bind(mod .. " + ALT + N", hl.dsp.exec_cmd("qs -c sea-shell ipc call notes toggle"), { description = "Scratchpad notes" })
+hl.bind(mod .. " + ALT + C", hl.dsp.exec_cmd("qs -c sea-shell ipc call colors toggle"), { description = "Color studio" })
+hl.bind(mod .. " + ALT + S", hl.dsp.exec_cmd("qs -c sea-shell ipc call dropzone toggle"), { description = "Drop shelf & QR share" })
+hl.bind(mod .. " + ALT + L", hl.dsp.exec_cmd("qs -c sea-shell ipc call sessions toggle"), { description = "Workspace sessions" })
+hl.bind(mod .. " + ALT + R", hl.dsp.exec_cmd("qs -c sea-shell ipc call ruler toggle"), { description = "Screen ruler" })
+hl.bind(mod .. " + SHIFT + T", hl.dsp.exec_cmd("qs -c sea-shell ipc call translate ocr"), { description = "OCR & translate region" })
+hl.bind(mod .. " + ALT + P", hl.dsp.exec_cmd("sh ~/.config/quickshell/sea-shell/sea-win-layout.sh pip"), { description = "Toggle Picture-in-Picture" })
+hl.bind(mod .. " + ALT + F", hl.dsp.exec_cmd("sh ~/.config/quickshell/sea-shell/sea-win-layout.sh focus"), { description = "Toggle centered 75% focus window" })
 
 -- ---------------- sea-shell 2.0 ----------------
 hl.bind(mod .. " + W", hl.dsp.exec_cmd("qs -c sea-shell ipc call shell toggleExpose"),           { description = "Mission Control" })
@@ -155,4 +173,4 @@ hl.bind(mod .. " + CTRL + 0",    hl.dsp.exec_cmd("qs -c sea-shell ipc call zoom 
 hl.bind("SUPER + ALT + W", hl.dsp.exec_cmd("qs -c sea-shell ipc call widgets toggle"), { description = "Widget drawer" })
 
 
-hl.bind("SUPER + SHIFT + c", hl.dsp.exec_cmd("code"), { description = "Code" })
+

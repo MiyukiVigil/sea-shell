@@ -46,7 +46,7 @@ opt_check wf-recorder   "screen recording"
 opt_check tesseract     "OCR"
 opt_check checkupdates  "update count"
 opt_check matugen       "wallpaper colour matching"
-opt_check ncat          "wallpaper auto-pause"
+opt_check ffmpeg        "video wallpaper re-encode"
 opt_check powerprofilesctl "power profiles"
 opt_check udisksctl     "disk mount/unmount"
 
@@ -57,8 +57,9 @@ else row warn optional PySide6 "missing — file manager (SUPER+E) unavailable (
 
 if have swww || have awww; then row ok optional "swww/awww" "static wallpapers"
 else row warn optional "swww/awww" "missing — static wallpapers unavailable"; fi
-if have mpvpaper; then row ok optional mpvpaper "animated wallpapers"
-else row warn optional mpvpaper "missing — animated wallpapers unavailable"; fi
+if [ -d /usr/lib/qt6/qml/QtMultimedia ] && [ -e /usr/lib/qt6/plugins/multimedia/libffmpegmediaplugin.so ]; then
+    row ok optional qt6-multimedia "animated wallpapers"
+else row warn optional qt6-multimedia "missing — animated wallpapers unavailable (sudo pacman -S qt6-multimedia qt6-multimedia-ffmpeg)"; fi
 
 # ---- fonts (bar icons are unreadable boxes without these) ----
 if fc-list 2>/dev/null | grep -qi "material symbols"; then
@@ -118,7 +119,9 @@ else
 fi
 
 # ---- the bar itself ----
-barpid=$(pgrep -xf "qs -c sea-shell" 2>/dev/null | head -1)
+# any flags before -c: the supervisor runs it as `qs -n -c sea-shell`, and an exact match on
+# `qs -c sea-shell` reported a running bar as NOT RUNNING
+barpid=$(pgrep -f '(^|/)(seashell|qs|quickshell)( -[a-zA-Z]+)* -c sea-shell( |$)' 2>/dev/null | head -1)
 if [ -n "$barpid" ]; then
     up=$(ps -o etimes= -p "$barpid" 2>/dev/null | tr -d ' ')
     row ok bar process "running (pid $barpid, up ${up:-?}s)"

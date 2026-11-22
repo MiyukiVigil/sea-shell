@@ -93,13 +93,7 @@ Item {
     }
     Text {
         visible: frame.mascotWidth > 0
-        x: frame.width-frame.mascotWidth; y: 20; width: frame.mascotWidth
-        text: "Miku"; horizontalAlignment: Text.AlignHCenter
-        color: frame.accent; font.family: frame.uiFont; font.pixelSize: 15; font.weight: Font.DemiBold
-    }
-    Text {
-        visible: frame.mascotWidth > 0
-        x: frame.width-frame.mascotWidth; y: 43; width: frame.mascotWidth
+        x: frame.width-frame.mascotWidth; y: 24; width: frame.mascotWidth
         text: frame.player ? (frame.player.isPlaying ? "Playing" : "Paused") : "Music buddy"
         horizontalAlignment: Text.AlignHCenter; color: frame.secondary; font.family: frame.uiFont; font.pixelSize: 11
     }

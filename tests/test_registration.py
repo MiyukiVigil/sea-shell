@@ -13,7 +13,7 @@ class RegistrationTests(unittest.TestCase):
             entry=register.register(script,root/'data');text=entry.read_text()
             self.assertIn('MimeType=inode/directory;',text)
             line=next(line[5:] for line in text.splitlines() if line.startswith('Exec='))
-            self.assertEqual(defaults._exec_words(line)[1],str(script))
+            self.assertEqual(defaults._exec_words(line)[0],str(script))
             self.assertTrue(text.startswith(register.STAMP))
     def test_existing_entry_is_backed_up(self):
         with tempfile.TemporaryDirectory() as root:

@@ -66,6 +66,62 @@ Window { width: 760; height: 680; visible: true; color: "#edeaf3"
             QTest.qWait(160);w.grabWindow().save('/tmp/sea-material-widgets-preview.png')
         finally:w.close();APP.processEvents()
 
+    def test_switching_widget_kinds_and_sizes_keeps_content_valid(self):
+        engine = QQmlApplicationEngine()
+        errors = []
+        engine.warnings.connect(lambda ws: errors.extend(str(w) for w in ws))
+        uri = (Path(__file__).resolve().parents[1] / 'quickshell/ui').as_uri()
+        code = ('import QtQuick\nimport QtQuick.Window\nimport "' + uri + '" as Sea\n'
+                'Window { visible:true; width:400; height:420;'
+                ' Sea.MaterialWidget { objectName:"card"; width:360; height:376; active:false } }')
+        engine.loadData(code.encode(), QUrl('file:///tmp/widget-kinds-test.qml'))
+        self.assertTrue(engine.rootObjects(), errors)
+        window = engine.rootObjects()[0]
+        try:
+            card = window.findChild(QQuickItem, 'card')
+            for kind in ('clock', 'weather', 'system', 'media', 'calendar', 'battery',
+                         'network', 'notifications', 'quote', 'photo'):
+                for size in ('s', 'm', 'l'):
+                    card.setProperty('kind', kind)
+                    card.setProperty('size', size)
+                    APP.processEvents(); QTest.qWait(10)
+                    self.assertFalse(errors, (kind, size, errors))
+                    loaders = [o for o in card.childItems()
+                               if o.metaObject().className().startswith('QQuickLoader')]
+                    self.assertEqual(sum(bool(o.property('active')) for o in loaders), 1,
+                                     (kind, size))
+        finally:
+            window.close(); APP.processEvents()
+
+    def test_hidden_widget_releases_repeated_content_and_restores_it(self):
+        engine = QQmlApplicationEngine()
+        errors = []
+        engine.warnings.connect(lambda ws: errors.extend(str(w) for w in ws))
+        uri = (Path(__file__).resolve().parents[1] / 'quickshell/ui').as_uri()
+        code = ('import QtQuick\nimport QtQuick.Window\nimport "' + uri + '" as Sea\n'
+                'Window { visible:true; width:400; height:420;'
+                ' Sea.MaterialWidget { objectName:"card"; kind:"calendar"; size:"l"; width:360; height:376 } }')
+        engine.loadData(code.encode(), QUrl('file:///tmp/widget-visibility-test.qml'))
+        self.assertTrue(engine.rootObjects(), errors)
+        window = engine.rootObjects()[0]
+        try:
+            card = window.findChild(QQuickItem, 'card')
+            APP.processEvents(); QTest.qWait(30)
+            def repeated_count():
+                return sum(obj.property('count') for obj in card.findChildren(QObject)
+                           if obj.metaObject().className() == 'QQuickRepeater')
+            count = repeated_count()
+            self.assertGreater(count, 0)
+            card.setVisible(False)
+            APP.processEvents(); QTest.qWait(30)
+            self.assertEqual(repeated_count(), 0)
+            card.setVisible(True)
+            APP.processEvents(); QTest.qWait(30)
+            self.assertEqual(repeated_count(), count)
+            self.assertFalse(errors, errors)
+        finally:
+            window.close(); APP.processEvents()
+
     def test_calendar_and_batteries_render_in_all_sizes(self):
         uri=(Path(__file__).resolve().parents[1]/'quickshell/ui').as_uri()
         for kind in ('calendar','battery'):

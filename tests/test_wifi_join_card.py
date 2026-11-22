@@ -44,3 +44,37 @@ Window { width: 360; height: 400; visible: true; property int scan: 2
             self.assertEqual(submitted,[text])
             self.assertFalse(errors,errors)
         finally:w.close();APP.processEvents()
+
+    def test_enterprise_needs_username_before_join(self):
+        engine=QQmlApplicationEngine();errors=[]
+        engine.warnings.connect(lambda ws:errors.extend(str(w) for w in ws))
+        uri=(Path(__file__).resolve().parents[1]/'quickshell/ui').as_uri()
+        code='''import QtQuick
+import QtQuick.Window
+import "'''+uri+'''" as Sea
+Window { width: 360; height: 400; visible: true
+ Sea.WifiJoinCard { id: card; objectName: "card"; width: parent.width; ssid: "eduroam"; enterprise: true
+ onIdentityEdited: value => identityDraft = value }
+}'''
+        engine.loadData(code.encode(),QUrl('file:///tmp/sea-wifi-eap-test.qml'))
+        self.assertTrue(engine.rootObjects(),errors)
+        w=engine.rootObjects()[0];c=w.findChild(QQuickItem,'card')
+        ident=w.findChild(QQuickItem,'wifiIdentity');pw=w.findChild(QQuickItem,'wifiPassword')
+        try:
+            w.requestActivate();APP.processEvents();QTest.qWait(30)
+            self.assertTrue(ident.isVisible())
+            self.assertTrue(ident.hasActiveFocus())
+            def type_(s):
+                for char in s:
+                    APP.sendEvent(w,QKeyEvent(QEvent.KeyPress,0,Qt.NoModifier,char))
+                    APP.sendEvent(w,QKeyEvent(QEvent.KeyRelease,0,Qt.NoModifier,char))
+            submitted=[];c.submitted.connect(submitted.append)
+            pw.forceActiveFocus();type_('secret');QTest.keyClick(w,Qt.Key_Return)
+            self.assertEqual(submitted,[])
+            self.assertTrue(ident.hasActiveFocus())
+            type_('me@uni.edu')
+            self.assertEqual(c.property('identityDraft'),'me@uni.edu')
+            QTest.keyClick(w,Qt.Key_Return)
+            self.assertEqual(submitted,['secret'])
+            self.assertFalse(errors,errors)
+        finally:w.close();APP.processEvents()

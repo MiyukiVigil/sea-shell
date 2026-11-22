@@ -75,13 +75,13 @@ ColumnLayout {
             elide: Text.ElideRight
         }
         indicator: Text { x: parent.width - 25; anchors.verticalCenter: parent.verticalCenter; text: "⌄"; color: Tok.ink3; font.pixelSize: 17 }
-        background: Rectangle { radius: 9; color: Tok.sunken; border.width: 1; border.color: choice.activeFocus ? Tok.accent : Tok.ruleHard }
+        background: Rectangle { radius: 9; color: Tok.alpha(Tok.ink, 0.06); border.width: choice.activeFocus ? 2 : 0; border.color: Tok.accent }
         delegate: C.ItemDelegate {
             required property var modelData
             required property int index
             width: choice.width; height: 34
             contentItem: Text { text: modelData; color: Tok.ink; font: choice.font; verticalAlignment: Text.AlignVCenter; elide: Text.ElideRight }
-            background: Rectangle { radius: 6; color: choice.highlightedIndex === index ? Tok.sunken : Tok.surface }
+            background: Rectangle { radius: 6; color: choice.highlightedIndex === index ? Tok.alpha(Tok.ink, 0.06) : Tok.surface }
             highlighted: choice.highlightedIndex === index
         }
         popup: C.Popup {
@@ -94,7 +94,7 @@ ColumnLayout {
                 currentIndex: choice.highlightedIndex
                 C.ScrollIndicator.vertical: C.ScrollIndicator {}
             }
-            background: Rectangle { color: Tok.surface; radius: 10; border.width: 1; border.color: Tok.ruleHard }
+            background: Rectangle { color: Tok.surface; radius: 10; border.width: 1; border.color: Tok.alpha(Tok.ink, 0.10) }
         }
     }
     component Action: C.Button {
@@ -103,7 +103,7 @@ ColumnLayout {
         implicitHeight: 36; leftPadding: 16; rightPadding: 16
         font.family: Tok.sans; font.pixelSize: 12
         contentItem: Text { text: button.text; font: button.font; color: button.primary ? Tok.accentInk : Tok.ink; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
-        background: Rectangle { radius: 9; color: button.primary ? Tok.accent : (button.hovered ? Tok.sunken : Tok.surface); border.width: button.primary ? 0 : 1; border.color: Tok.ruleHard }
+        background: Rectangle { radius: 9; color: button.primary ? Tok.accent : (button.hovered ? Tok.alpha(Tok.ink, 0.11) : Tok.alpha(Tok.ink, 0.06)); border.width: button.primary ? 0 : 1; border.color: Tok.alpha(Tok.ink, 0.10) }
         opacity: enabled ? 1 : 0.5
     }
     component Switch: C.AbstractButton {
@@ -114,8 +114,8 @@ ColumnLayout {
             Text { id: switchLabel; text: toggle.text; color: Tok.ink; font.family: Tok.sans; font.pixelSize: 12; anchors.verticalCenter: parent.verticalCenter }
             Rectangle {
                 anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
-                width: 36; height: 20; radius: 10; color: toggle.checked ? Tok.accent : Tok.sunken
-                border.width: 1; border.color: toggle.checked ? Tok.accent : Tok.ruleHard
+                width: 36; height: 20; radius: 10; color: toggle.checked ? Tok.accent : Tok.alpha(Tok.ink, 0.06)
+                border.width: 0
                 Rectangle { x: toggle.checked ? 18 : 3; y: 3; width: 14; height: 14; radius: 7; color: toggle.checked ? Tok.accentInk : Tok.ink3
                     Behavior on x { NumberAnimation { duration: Tok.reducedMotion ? 0 : 120 } }
                 }
@@ -159,7 +159,7 @@ ColumnLayout {
                     placeholderText: "Image or video path · leave empty to use the preset"
                     selectByMouse: true; color: Tok.ink; placeholderTextColor: Tok.ink3
                     font.family: Tok.sans; font.pixelSize: 12; leftPadding: 12; rightPadding: 12
-                    background: Rectangle { radius: 9; color: Tok.sunken; border.width: 1; border.color: background.activeFocus ? Tok.accent : Tok.ruleHard }
+                    background: Rectangle { radius: 9; color: Tok.alpha(Tok.ink, 0.06); border.width: background.activeFocus ? 2 : 0; border.color: Tok.accent }
                 }
                 Action { text: "Browse…"; onClicked: panel.browseRequested() }
                 }
@@ -172,7 +172,7 @@ ColumnLayout {
                     onEditingFinished: panel.restage()
                     placeholderText: "Choose your login avatar"; selectByMouse: true
                     color: Tok.ink; placeholderTextColor: Tok.ink3; font.family: Tok.sans; font.pixelSize: 12; leftPadding: 12
-                    background: Rectangle { radius: 9; color: Tok.sunken; border.width: 1; border.color: Tok.ruleHard }
+                    background: Rectangle { radius: 9; color: Tok.alpha(Tok.ink, 0.06); border.width: 0 }
                 }
                 Action { text: "Browse…"; onClicked: panel.avatarBrowseRequested() }
             }
@@ -185,7 +185,7 @@ ColumnLayout {
                 C.Slider {
                     id: blur; from: 0; to: 100; stepSize: 1; Layout.preferredWidth: 120
                     onMoved: panel.restage()
-                    background: Rectangle { x: blur.leftPadding; y: (blur.height-height)/2; width: blur.availableWidth; height: 4; radius: 2; color: Tok.sunken
+                    background: Rectangle { x: blur.leftPadding; y: (blur.height-height)/2; width: blur.availableWidth; height: 4; radius: 2; color: Tok.alpha(Tok.ink, 0.06)
                         Rectangle { width: blur.visualPosition * parent.width; height: parent.height; radius: 2; color: Tok.accent }
                     }
                     handle: Rectangle { x: blur.leftPadding + blur.visualPosition * (blur.availableWidth-width); y: (blur.height-height)/2; width: 14; height: 14; radius: 7; color: Tok.accent }
@@ -203,8 +203,8 @@ ColumnLayout {
                         required property var modelData
                         readonly property bool on: preview.showLogin === modelData.login
                         implicitHeight: 26; implicitWidth: segT.implicitWidth + 22; radius: 13
-                        color: on ? Tok.accent : (segMa.containsMouse ? Tok.sunken : "transparent")
-                        border.width: on ? 0 : 1; border.color: Tok.ruleHard
+                        color: on ? Tok.accent : (segMa.containsMouse ? Tok.alpha(Tok.ink, 0.06) : "transparent")
+                        border.width: 0
                         Text { id: segT; anchors.centerIn: parent; text: modelData.l; color: on ? Tok.accentInk : Tok.ink2; font.family: Tok.sans; font.pixelSize: 11 }
                         MouseArea { id: segMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: preview.showLogin = modelData.login }
                     }
@@ -214,7 +214,7 @@ ColumnLayout {
                 Layout.fillWidth: true
                 visible: panel.values.installed === true
                 implicitHeight: preview.implicitHeight + 2
-                radius: 12; color: "transparent"; border.width: 1; border.color: Tok.ruleHard
+                radius: 12; color: "transparent"; border.width: 1; border.color: Tok.alpha(Tok.ink, 0.10)
                 SddmPreview {
                     id: preview
                     anchors { left: parent.left; right: parent.right; top: parent.top; margins: 1 }
@@ -223,7 +223,7 @@ ColumnLayout {
                     live: panel.previewLive
                 }
             }
-            Rectangle { Layout.fillWidth: true; height: 1; color: Tok.ruleHard }
+            Rectangle { Layout.fillWidth: true; height: 1; color: Tok.alpha(Tok.ink, 0.10) }
             RowLayout {
                 Layout.fillWidth: true; spacing: 8
                 Label { text: "The preview follows your changes. Apply requires authentication."; color: Tok.ink3; Layout.fillWidth: true; wrapMode: Text.WordWrap }

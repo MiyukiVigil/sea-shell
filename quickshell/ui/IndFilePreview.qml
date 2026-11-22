@@ -10,6 +10,11 @@ import QtMultimedia
 Rectangle {
     id: previewPanel
 
+    // A path as a URL. Glued on as "file://" + path, a name with # ? or % in it
+    // ("photo #2.jpg", "100%.png") became a URL with a fragment or a bad escape, and
+    // the picture silently never loaded.
+    function fileUrl(p) { return p ? "file://" + ("" + p).split("/").map(encodeURIComponent).join("/") : "" }
+
     property var previewData: ({})
     property bool panelVisible: true
     property real targetWidth: 460
@@ -29,15 +34,15 @@ Rectangle {
                                                1.0)
     readonly property string iconFont: "Material Symbols Rounded"
     readonly property var iconFilled: ({ "FILL": 1, "wght": 400 })
-    readonly property color bgDark: isDark ? "#0c0c10" : "#f0f2f6"
-    readonly property color bgCard: isDark ? "#13131b" : "#ffffff"
-    readonly property color bgSurface: isDark ? "#191923" : "#e6e9f0"
-    readonly property color bgHover: isDark ? "#232330" : "#d8dce6"
-    readonly property color textPrimary: isDark ? "#ffffff" : "#0f172a"
-    readonly property color textSecondary: isDark ? "#9a9ab2" : "#475569"
-    readonly property color textMuted: isDark ? "#606076" : "#64748b"
-    readonly property color borderSoft: isDark ? "#22222e" : "#cbd5e1"
-    readonly property color borderHard: isDark ? "#323246" : "#94a3b8"
+    property color bgDark: isDark ? "#0c0c10" : "#f0f2f6"
+    property color bgCard: isDark ? "#13131b" : "#ffffff"
+    property color bgSurface: isDark ? "#191923" : "#e6e9f0"
+    property color bgHover: isDark ? "#232330" : "#d8dce6"
+    property color textPrimary: isDark ? "#ffffff" : "#0f172a"
+    property color textSecondary: isDark ? "#9a9ab2" : "#475569"
+    property color textMuted: isDark ? "#606076" : "#64748b"
+    property color borderSoft: isDark ? "#22222e" : "#cbd5e1"
+    property color borderHard: isDark ? "#323246" : "#94a3b8"
 
     signal closeRequested()
     signal actionRequested(string action, string path)
@@ -106,13 +111,12 @@ Rectangle {
             ColumnLayout {
                 spacing: 1
                 Text {
-                    text: (previewData && previewData.category === "pdf") ? "PDF DOCUMENT VIEWER"
-                          : (previewData && previewData.pdfPages && previewData.pdfPages.length > 0) ? "DOCUMENT VIEWER"
-                        : ((previewData && previewData.category === "video") ? "VIDEO PLAYER"
-                        : ((previewData && previewData.category === "audio") ? "AUDIO PLAYER" : "INSPECTOR"))
-                    font.pixelSize: 10
-                    font.bold: true
-                    font.letterSpacing: 1.2
+                    text: (previewData && previewData.category === "pdf") ? "PDF document"
+                          : (previewData && previewData.pdfPages && previewData.pdfPages.length > 0) ? "Document"
+                        : ((previewData && previewData.category === "video") ? "Video"
+                        : ((previewData && previewData.category === "audio") ? "Audio" : "Info"))
+                    font.pixelSize: 11
+                    font.weight: Font.DemiBold
                     color: textMuted
                 }
                 Text {
@@ -282,7 +286,7 @@ Rectangle {
                         radius: 8
                         color: "#ffffff"
                         border.width: 1
-                        border.color: isDark ? "#282838" : "#cbd5e1"
+                        border.color: borderSoft
 
                         Column {
                             anchors.fill: parent
@@ -292,7 +296,10 @@ Rectangle {
                             Image {
                                 id: pdfPageImg
                                 width: parent.width * pdfZoom
-                                source: "file://" + modelData
+                                source: previewPanel.fileUrl(modelData)
+                                // by the panel's width, not the zoomed one, so zooming does
+                                // not re-decode every page; capped at the render's own size
+                                sourceSize.width: Math.min(1700, Math.max(600, parent.width * 2))
                                 fillMode: Image.PreserveAspectFit
                                 smooth: true
                                 mipmap: true
@@ -338,7 +345,7 @@ Rectangle {
 
                     MediaPlayer {
                         id: internalPlayer
-                        source: (previewData && previewData.path) ? ("file://" + previewData.path) : ""
+                        source: (previewData && previewData.path) ? previewPanel.fileUrl(previewData.path) : ""
                         audioOutput: AudioOutput {
                             volume: previewPanel.isMuted ? 0.0 : 0.8
                         }
@@ -434,10 +441,14 @@ Rectangle {
                 Image {
                     id: mainThumbImage
                     anchors.centerIn: parent
-                    source: (previewData && previewData.thumbnailPath) ? "file://" + previewData.thumbnailPath : ""
+                    source: (previewData && previewData.thumbnailPath) ? previewPanel.fileUrl(previewData.thumbnailPath) : ""
                     fillMode: Image.PreserveAspectFit
                     width: previewCanvas.width - 16
                     height: previewCanvas.height - 16
+                    // decoded near the size it is drawn: a 48-megapixel photo unpacked
+                    // whole (plus mipmaps) was the seconds-long wait on big pictures
+                    sourceSize.width: Math.max(512, width * 2)
+                    sourceSize.height: Math.max(512, height * 2)
                     smooth: true
                     mipmap: true
                     asynchronous: true
@@ -467,7 +478,7 @@ Rectangle {
                     text: (previewData && previewData.text) ? previewData.text : "Empty file"
                     font.family: backend && backend.theme ? backend.theme.fontMono : "monospace"
                     font.pixelSize: 12
-                    color: isDark ? "#e2e8f0" : "#1e293b"
+                    color: textPrimary
                     wrapMode: Text.NoWrap
                 }
             }
@@ -607,7 +618,7 @@ Rectangle {
                         width: scrubSlider.availableWidth
                         height: 5
                         radius: 2.5
-                        color: isDark ? "#282838" : "#cbd5e1"
+                        color: borderSoft
 
                         Rectangle {
                             width: scrubSlider.visualPosition * parent.width
@@ -742,7 +753,8 @@ Rectangle {
                     }
 
                     Repeater {
-                        model: (previewData && previewData.meta) ? Object.keys(previewData.meta) : []
+                        // Size has its own row above; the workers' meta repeated it below
+                        model: (previewData && previewData.meta) ? Object.keys(previewData.meta).filter(function(k) { return k !== "Size" }) : []
                         delegate: RowLayout {
                             required property string modelData
                             Layout.fillWidth: true
@@ -772,7 +784,7 @@ Rectangle {
             Rectangle {
                 Layout.fillWidth: true
                 height: 34
-                radius: 6
+                radius: 16
                 visible: previewData && previewData.category === "archive"
                 color: extractMa.containsMouse ? catInk("archive", "#f59e0b") : Qt.rgba(0.96, 0.62, 0.04, 0.2)
                 border.width: 1
@@ -801,14 +813,14 @@ Rectangle {
                 Rectangle {
                     Layout.fillWidth: true
                     height: 34
-                    radius: 6
+                    radius: 16
                     color: openMa.containsMouse ? Qt.lighter(accentColor, 1.1) : accentColor
 
                     RowLayout {
                         anchors.centerIn: parent
                         spacing: 6
-                        Text { text: "open_in_new"; font.family: iconFont; color: "#000000"; font.pixelSize: 16 }
-                        Text { text: "Open"; font.bold: true; font.pixelSize: 12; color: "#000000" }
+                        Text { text: "open_in_new"; font.family: iconFont; color: onAccent; font.pixelSize: 16 }
+                        Text { text: "Open"; font.bold: true; font.pixelSize: 12; color: onAccent }
                     }
 
                     MouseArea {
@@ -823,10 +835,8 @@ Rectangle {
                 Rectangle {
                     Layout.fillWidth: true
                     height: 34
-                    radius: 6
-                    color: termMa.containsMouse ? bgHover : bgDark
-                    border.width: 1
-                    border.color: borderSoft
+                    radius: 16
+                    color: termMa.containsMouse ? fillHover : fillSoft
 
                     RowLayout {
                         anchors.centerIn: parent
@@ -852,10 +862,8 @@ Rectangle {
                 Rectangle {
                     Layout.fillWidth: true
                     height: 30
-                    radius: 6
-                    color: compMa.containsMouse ? bgHover : bgDark
-                    border.width: 1
-                    border.color: borderSoft
+                    radius: 16
+                    color: compMa.containsMouse ? fillHover : fillSoft
 
                     RowLayout {
                         anchors.centerIn: parent
@@ -876,16 +884,14 @@ Rectangle {
                 Rectangle {
                     Layout.fillWidth: true
                     height: 30
-                    radius: 6
-                    color: copyMa.containsMouse ? bgHover : bgDark
-                    border.width: 1
-                    border.color: borderSoft
+                    radius: 16
+                    color: copyMa.containsMouse ? fillHover : fillSoft
 
                     RowLayout {
                         anchors.centerIn: parent
                         spacing: 4
                         Text { text: "content_copy"; font.family: iconFont; color: textSecondary; font.pixelSize: 14 }
-                        Text { text: "Copy Path"; font.pixelSize: 11; color: textSecondary }
+                        Text { text: "Copy path"; font.pixelSize: 11; color: textSecondary }
                     }
 
                     MouseArea {
@@ -900,10 +906,8 @@ Rectangle {
                 Rectangle {
                     Layout.fillWidth: true
                     height: 30
-                    radius: 6
-                    color: dupMa.containsMouse ? bgHover : bgDark
-                    border.width: 1
-                    border.color: borderSoft
+                    radius: 16
+                    color: dupMa.containsMouse ? fillHover : fillSoft
 
                     RowLayout {
                         anchors.centerIn: parent
@@ -923,10 +927,8 @@ Rectangle {
                 // Move to Trash
                 Rectangle {
                     width: 30; height: 30
-                    radius: 6
-                    color: trashMa.containsMouse ? Qt.rgba(0.93, 0.27, 0.27, 0.2) : bgDark
-                    border.width: 1
-                    border.color: trashMa.containsMouse ? dangerInk : borderSoft
+                    radius: 16
+                    color: trashMa.containsMouse ? Qt.rgba(0.93, 0.27, 0.27, 0.2) : fillSoft
 
                     Text {
                         anchors.centerIn: parent

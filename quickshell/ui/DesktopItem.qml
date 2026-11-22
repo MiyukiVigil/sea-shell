@@ -58,6 +58,9 @@ Item {
 
     // how busy the wallpaper is under a rectangle (fractions), for the drag hint
     property var busyFn: null
+    // Desktop.snapDrag: pulls a dragged widget onto its neighbours' edges and draws the guide
+    property var snapFn: null
+    signal dragEnded()
     property real busyLimit: 0.3
     // fx, fy are fractions; `exact` means the user asked for no nudging (shift held).
     signal moved(real fx, real fy, bool exact)
@@ -81,7 +84,16 @@ Item {
     // the same content with no tile at all, a faint ground fading in only where the wallpaper is
     // busy. "classic": the original read-out below, a label, a hairline and the figure.
     readonly property string look: (item.spec && item.spec.look) ? item.spec.look : "card"
-    readonly property bool clear: item.look === "classic" && item.kind !== "launch"
+    // photo: which folder, by name, so desktop.json stays portable between machines
+    readonly property string photoSrc: (item.spec && item.spec.src) ? item.spec.src : "wallpapers"
+    readonly property string photoDir: {
+        var h = Quickshell.env("HOME");
+        return item.photoSrc === "pictures" ? h + "/Pictures"
+             : item.photoSrc === "screenshots" ? h + "/Pictures/Screenshots" : h + "/Pictures/wallpapers";
+    }
+    // the kinds the original read-out ("classic") was written for
+    readonly property bool hasClassic: ["clock", "weather", "media", "system"].indexOf(item.kind) >= 0
+    readonly property bool clear: item.look === "classic" && item.hasClassic
     readonly property real cardFill: item.look === "glass" ? 0.55
         : item.look === "clear" ? Math.max(0, Math.min(0.6, (item.busy - 0.18) * 2.2)) : 1
     readonly property color accent: {
@@ -117,7 +129,8 @@ Item {
     x: item.homeX
     y: item.homeY
     property bool glide: false
-    Component.onCompleted: Qt.callLater(() => item.glide = true)
+    // a widget can be removed before this runs (the desktop rebuilds its list), so check it is still there
+    Component.onCompleted: Qt.callLater(() => { if (item) item.glide = true })
     Behavior on x { enabled: item.glide && !dragArea.drag.active
         NumberAnimation { duration: 560; easing.type: Easing.OutQuint } }
     Behavior on y { enabled: item.glide && !dragArea.drag.active
@@ -176,9 +189,12 @@ Item {
         Behavior on color { ColorAnimation { duration: Tok.mFast } }
     }
 
+    WallStills { id: stills; active: item.kind === "photo" && item.photoSrc === "wallpapers" }
     MaterialWidget {
         anchors.fill: parent; visible: item.kind !== "launch" && !item.clear; enabled: !item.editing
         face: (item.spec && item.spec.face) ? item.spec.face : "dial"
+        photoDir: item.photoDir
+        photoList: item.kind === "photo" && item.photoSrc === "wallpapers" ? stills.list : []
         fill: item.cardFill
         Behavior on fill { NumberAnimation { duration: Tok.mSlow } }
         kind: item.kind; readings: item.readings; player: item.player; viz: item.viz; active: item.visible
@@ -190,6 +206,7 @@ Item {
         bare: item.ground === "bare"
               || (item.kind === "clock" && ((item.spec && item.spec.size) || "small") === "small" && item.ground !== "panel")
         surface: Tok.surface; container: Tok.accentWash; accent: Tok.accent
+        warn: Tok.warn; crit: Tok.crit; ok: Tok.ok
         // On its own tile the text follows the theme. With little or no tile (clear, bare) it
         // sits on the photo, so it follows the photo instead: dark on a light patch, light on
         // a dark one. The light-mode theme's dark ink was unreadable on a night wallpaper.
@@ -457,7 +474,7 @@ Item {
         property real minuteFrac: 0
     }
     Timer {
-        running: item.kind === "clock"
+        running: item.visible && item.kind === "clock"
         interval: 1000
         repeat: true
         triggeredOnStart: true
@@ -541,7 +558,15 @@ Item {
         // Holding shift means "exactly here" — the nudge is help, not a rule.
         property bool exact: false
         onPressed: mouse => { dragArea.exact = (mouse.modifiers & Qt.ShiftModifier) !== 0 }
+        onPositionChanged: mouse => {
+            if (!drag.active || !item.snapFn) return;
+            dragArea.exact = (mouse.modifiers & Qt.ShiftModifier) !== 0;
+            if (dragArea.exact) { item.dragEnded(); return }
+            var p = item.snapFn(item.spec ? item.spec.id : "", item.x, item.y, item.width, item.height);
+            item.x = p.x; item.y = p.y;
+        }
         onReleased: {
+            item.dragEnded();
             if (!item.editing) return;
             var fx = Math.max(0, Math.min(1, item.x / item.fieldW));
             var fy = Math.max(0, Math.min(1, (item.y - item.fieldY) / item.fieldH));
@@ -564,7 +589,7 @@ Item {
         anchors.right: parent.right; anchors.top: parent.top; anchors.margins: -2
         width: 30; height: 30; radius: 15
         color: gearMa.containsMouse || item.optionsOpen ? Tok.accent : Tok.bg
-        border.width: 1; border.color: Tok.ruleHard
+        border.width: 1; border.color: Tok.alpha(Tok.ink, 0.12)
         Text { anchors.centerIn: parent; text: item.optionsOpen ? "close" : "settings"; font.family: "Material Symbols Rounded"; font.pixelSize: 17
             color: gearMa.containsMouse || item.optionsOpen ? Tok.accentInk : Tok.ink }
         MouseArea { id: gearMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: item.optionsOpen = !item.optionsOpen }
@@ -577,17 +602,19 @@ Item {
         x: item.x + item.width / 2 > item.fieldW / 2 ? item.width - width : 0
         y: gear.y + gear.height + 6
         width: optCol.implicitWidth + 24; height: optCol.implicitHeight + 24
-        radius: 18; color: Tok.bg; border.width: 1; border.color: Tok.ruleHard
+        radius: 18; color: Tok.bg; border.width: 1; border.color: Tok.alpha(Tok.ink, 0.10)
         MouseArea { anchors.fill: parent }      // clicks here are not drags of the widget
         Column {
             id: optCol
             anchors.centerIn: parent; spacing: 8
             DesktopOption { item: item; label: "Size"; key: "size"; current: (item.spec && item.spec.size) || (item.kind === "clock" ? "small" : "medium")
                 choices: [{ v: "small", l: "S" }, { v: "medium", l: "M" }, { v: "large", l: "L" }] }
-            DesktopOption { item: item; label: "Look"; key: "look"; current: item.look
+            DesktopOption { item: item; visible: item.kind !== "photo"; label: "Look"; key: "look"; current: item.look
                 // Classic is the original read-out, which only knows the first four kinds
                 choices: [{ v: "card", l: "Card" }, { v: "glass", l: "Glass" }, { v: "clear", l: "Clear" }]
-                    .concat(item.kind === "calendar" || item.kind === "battery" ? [] : [{ v: "classic", l: "Classic" }]) }
+                    .concat(item.hasClassic ? [{ v: "classic", l: "Classic" }] : []) }
+            DesktopOption { item: item; visible: item.kind === "photo"; label: "Folder"; key: "src"; current: item.photoSrc
+                choices: [{ v: "wallpapers", l: "Wallpapers" }, { v: "pictures", l: "Pictures" }, { v: "screenshots", l: "Screenshots" }] }
             DesktopOption { item: item; visible: item.kind === "clock"; label: "Face"; key: "face"; current: (item.spec && item.spec.face) || "dial"
                 choices: [{ v: "dial", l: "Dial" }, { v: "cookie", l: "Cookie" }, { v: "digital", l: "Digital" }, { v: "stacked", l: "Stack" }] }
             DesktopOption { item: item; visible: item.look === "classic"; label: "Ground"; key: "ground"; current: item.ground
@@ -598,7 +625,7 @@ Item {
                 spacing: 6
                 Rectangle {
                     implicitWidth: pinT.implicitWidth + 40; implicitHeight: 28; radius: 14
-                    color: pinMa.containsMouse ? Tok.accentWash : Tok.sunken
+                    color: pinMa.containsMouse ? Tok.alpha(Tok.ink, 0.12) : Tok.alpha(Tok.ink, 0.06)
                     Row { id: pinT; anchors.centerIn: parent; spacing: 4
                         Text { text: "push_pin"; font.family: "Material Symbols Rounded"; font.pixelSize: 15; color: Tok.ink; anchors.verticalCenter: parent.verticalCenter }
                         Text { text: item.spec && item.spec.pinned ? "Pinned" : "Pin here"; font.family: Tok.sans; font.pixelSize: 11; color: Tok.ink; anchors.verticalCenter: parent.verticalCenter } }
@@ -608,7 +635,7 @@ Item {
                 }
                 Rectangle {
                     implicitWidth: rmT.implicitWidth + 40; implicitHeight: 28; radius: 14
-                    color: rmMa.containsMouse ? Tok.critWash : Tok.sunken
+                    color: rmMa.containsMouse ? Tok.alpha(Tok.crit, 0.16) : Tok.alpha(Tok.ink, 0.06)
                     Row { id: rmT; anchors.centerIn: parent; spacing: 4
                         Text { text: "delete"; font.family: "Material Symbols Rounded"; font.pixelSize: 15; color: Tok.crit; anchors.verticalCenter: parent.verticalCenter }
                         Text { text: "Remove"; font.family: Tok.sans; font.pixelSize: 11; color: Tok.crit; anchors.verticalCenter: parent.verticalCenter } }
@@ -657,7 +684,7 @@ Item {
         anchors.right: parent.right; anchors.bottom: parent.bottom; anchors.margins: -4
         width: 26; height: 26; radius: 13
         color: gripMa.containsMouse || gripMa.pressed ? Tok.accent : Tok.bg
-        border.width: 1; border.color: Tok.ruleHard
+        border.width: 1; border.color: Tok.alpha(Tok.ink, 0.12)
         Text { anchors.centerIn: parent; text: "open_in_full"; rotation: 90; font.family: "Material Symbols Rounded"; font.pixelSize: 15
             color: gripMa.containsMouse || gripMa.pressed ? Tok.accentInk : Tok.ink }
         MouseArea {

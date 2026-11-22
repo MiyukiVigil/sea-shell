@@ -27,11 +27,16 @@ ShellRoot {
     property int imgH: 0
 
     // annotation state
-    property string tool: "brush"          // brush | arrow | rect | text | crop
+    property string tool: "brush"          // brush | arrow | rect | redact | step | text | crop
     property color penColor: "#f38ba8"
     property int penSize: 6
     property var objects: []               // committed annotation objects
     property var draft: null               // in-progress object, drawn live
+    function nextStepNumber() {
+        var n = 1;
+        for (var i = 0; i < root.objects.length; i++) if (root.objects[i].type === "step") n++;
+        return n;
+    }
 
     // crop state — all in native image pixels
     property int cropX: 0
@@ -75,14 +80,15 @@ ShellRoot {
         cropCanvas.requestPaint();
     }
 
-    // grab the stage at native resolution, then hand off to finishProc
-    function exportShot(saveToPictures) {
+    // grab the stage at native resolution, then hand off to finishProc (mode: "copy" | "save" | "pin")
+    function exportShot(mode) {
         if (root.imgW <= 0) return;
+        var m = (mode === true) ? "save" : (mode === false ? "copy" : ("" + mode));
         root.exporting = true;                     // hide crop mask from the grab
         stage.grabToImage(function(res) {
             res.saveToFile(root.rawPath);
             root.exporting = false;
-            finishProc.run(saveToPictures);
+            finishProc.run(m);
         }, Qt.size(root.imgW, root.imgH));
     }
 
@@ -155,10 +161,10 @@ ShellRoot {
             }
         } } }
 
-    // ---- export: crop the native grab (if any), copy to clipboard, optionally save ----
+    // ---- export: crop the native grab (if any), copy to clipboard, optionally save or pin ----
     Process {
         id: finishProc
-        function run(saveToPictures) {
+        function run(mode) {
             var cropExpr = (root.hasCrop && root.cropW > 4 && root.cropH > 4)
                 ? "-crop " + root.cropW + "x" + root.cropH + "+" + root.cropX + "+" + root.cropY + " +repage "
                 : "";
@@ -166,7 +172,12 @@ ShellRoot {
             var base = "magick " + root.rawPath + " " + cropExpr + out;
             var copy = "wl-copy --type image/png < " + out;
             var cmd;
-            if (saveToPictures) {
+            if (mode === "pin") {
+                var pinPath = "/tmp/sea-shot-pin-" + Date.now() + ".png";
+                var pinQml = Qt.resolvedUrl("PinImage.qml").toString().replace("file://", "");
+                cmd = base + " && cp " + out + " " + pinPath + " && " + copy +
+                      " && SEA_PIN_IMAGE='" + pinPath + "' setsid quickshell -n -p '" + pinQml + "' >/dev/null 2>&1 &";
+            } else if (mode === "save") {
                 var f = "$HOME/Pictures/Screenshot-" + Qt.formatDateTime(new Date(), "yyyyMMdd-HHmmss") + ".png";
                 cmd = base + " && cp " + out + " " + f + " && " + copy + " && notify-send 'sea-shell' 'Saved to ~/Pictures · copied to clipboard'";
             } else {
@@ -182,23 +193,30 @@ ShellRoot {
         property int sz: 16
         font.family: "Material Symbols Outlined"
         font.pixelSize: sz
-        color: theme.frost
+        color: Tok.ink2
         horizontalAlignment: Text.AlignHCenter
         verticalAlignment: Text.AlignVCenter
     }
 
-    // a toolbar button with hover tooltip
+    // a hairline between toolbar sections
+    component Divider: Rectangle { Layout.alignment: Qt.AlignVCenter; width: 1; height: 24
+        color: Tok.alpha(Tok.ink, 0.10) }
+
+    // a toolbar button with hover tooltip: round, and the chosen tool filled with the accent,
+    // as macOS Markup marks its current tool
     component TBtn: Rectangle {
         id: tb
         property string icon: ""
         property string tip: ""
         property bool active: false
-        property color tint: theme.sub
+        property color tint: Tok.ink2
         signal act()
-        width: 34; height: 34; radius: Tok.r
-        color: active ? theme.a(theme.iris, 0.28) : (tbm.containsMouse ? theme.a(theme.iris, 0.14) : "transparent")
-        Behavior on color { ColorAnimation { duration: 90 } }
-        Sym { anchors.centerIn: parent; text: tb.icon; sz: 18; color: tb.active ? theme.frost : tb.tint }
+        width: 36; height: 36; radius: 18
+        color: active ? Tok.accent : (tbm.containsMouse ? Tok.alpha(Tok.ink, 0.08) : "transparent")
+        scale: tbm.pressed ? 0.94 : 1
+        Behavior on color { ColorAnimation { duration: Tok.mFast } }
+        Behavior on scale { NumberAnimation { duration: Tok.mMicro; easing.type: Easing.OutCubic } }
+        Sym { anchors.centerIn: parent; text: tb.icon; sz: 19; color: tb.active ? Tok.accentInk : tb.tint }
         MouseArea { id: tbm; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
             onClicked: tb.act()
             onEntered: root.hoverTip = tb.tip
@@ -230,8 +248,11 @@ ShellRoot {
                     case Qt.Key_B: root.tool = "brush"; e.accepted = true; break;
                     case Qt.Key_A: root.tool = "arrow"; e.accepted = true; break;
                     case Qt.Key_R: root.tool = "rect"; e.accepted = true; break;
+                    case Qt.Key_M: root.tool = "redact"; e.accepted = true; break;
+                    case Qt.Key_N: root.tool = "step"; e.accepted = true; break;
                     case Qt.Key_T: root.tool = "text"; e.accepted = true; break;
                     case Qt.Key_C: root.tool = "crop"; e.accepted = true; break;
+                    case Qt.Key_P: root.exportShot("pin"); e.accepted = true; break;
                     case Qt.Key_X: root.clearAll(); e.accepted = true; break;
                     case Qt.Key_Return:
                     case Qt.Key_Enter: root.exportShot(false); e.accepted = true; break;
@@ -302,8 +323,38 @@ ShellRoot {
                                 } else if (o.type === "rect") {
                                     var x = Math.min(o.start[0], o.end[0]), y = Math.min(o.start[1], o.end[1]);
                                     ctx.strokeRect(x, y, Math.abs(o.end[0] - o.start[0]), Math.abs(o.end[1] - o.start[1]));
+                                } else if (o.type === "redact") {
+                                    var rx = Math.min(o.start[0], o.end[0]), ry = Math.min(o.start[1], o.end[1]);
+                                    var rw = Math.abs(o.end[0] - o.start[0]), rh = Math.abs(o.end[1] - o.start[1]);
+                                    var cell = Math.max(10, o.size * 2);
+                                    var shades = ["#141821", "#1e2433", "#293145", "#191f2c"];
+                                    for (var py = 0; py < rh; py += cell) {
+                                        for (var px = 0; px < rw; px += cell) {
+                                            var idx = (Math.floor(px / cell) * 7 + Math.floor(py / cell) * 13) & 3;
+                                            ctx.fillStyle = shades[idx];
+                                            ctx.fillRect(rx + px, ry + py, Math.min(cell, rw - px), Math.min(cell, rh - py));
+                                        }
+                                    }
+                                    ctx.strokeStyle = "rgba(255,255,255,0.16)";
+                                    ctx.lineWidth = 1;
+                                    ctx.strokeRect(rx, ry, rw, rh);
+                                } else if (o.type === "step") {
+                                    var rad = Math.max(15, o.size * 2.8);
+                                    ctx.beginPath();
+                                    ctx.arc(o.pos[0], o.pos[1], rad, 0, Math.PI * 2);
+                                    ctx.fillStyle = o.color;
+                                    ctx.fill();
+                                    ctx.lineWidth = 2.5;
+                                    ctx.strokeStyle = "#ffffff";
+                                    ctx.stroke();
+                                    ctx.fillStyle = "#11111b";
+                                    ctx.font = "bold " + Math.round(rad * 1.15) + "px '" + Tok.sans + "'";
+                                    ctx.textAlign = "center";
+                                    ctx.textBaseline = "middle";
+                                    ctx.fillText("" + o.num, o.pos[0], o.pos[1] + 1);
+                                    ctx.textAlign = "start";
                                 } else if (o.type === "text") {
-                                    ctx.font = "bold " + Math.max(16, o.size * 4) + "px monospace";
+                                    ctx.font = "bold " + Math.max(16, o.size * 4) + "px '" + Tok.sans + "'";
                                     ctx.textBaseline = "top";
                                     ctx.fillText(o.text, o.pos[0], o.pos[1]);
                                 }
@@ -346,6 +397,14 @@ ShellRoot {
                                     root.draft = { type: "arrow", color: root.penColor, size: root.penSize, start: [m.x, m.y], end: [m.x, m.y] };
                                 } else if (root.tool === "rect") {
                                     root.draft = { type: "rect", color: root.penColor, size: root.penSize, start: [m.x, m.y], end: [m.x, m.y] };
+                                } else if (root.tool === "redact") {
+                                    root.draft = { type: "redact", color: root.penColor, size: root.penSize, start: [m.x, m.y], end: [m.x, m.y] };
+                                } else if (root.tool === "step") {
+                                    var sl = root.objects.slice();
+                                    sl.push({ type: "step", color: root.penColor, size: root.penSize, pos: [m.x, m.y], num: root.nextStepNumber() });
+                                    root.objects = sl;
+                                    annotationCanvas.requestPaint();
+                                    return;
                                 } else if (root.tool === "text") {
                                     textEdit.startAt(m.x, m.y);
                                     return;
@@ -386,7 +445,7 @@ ShellRoot {
                             id: textEdit
                             visible: false
                             color: root.penColor
-                            font.family: Tok.mono; font.bold: true
+                            font.family: Tok.sans; font.bold: true
                             font.pixelSize: Math.max(16, root.penSize * 4)
                             selectByMouse: true
                             function startAt(x, y) { textEdit.x = x; textEdit.y = y; text = ""; visible = true; forceActiveFocus(); }
@@ -405,107 +464,119 @@ ShellRoot {
                 }
 
                 // ---------- floating toolbar ----------
+                // One bar along the foot, in the shell's language: round tools, round swatches,
+                // and the two ways out (Copy, Save) as named buttons rather than three more icons.
                 Rectangle {
                     id: toolbar
-                    anchors { horizontalCenter: parent.horizontalCenter; bottom: parent.bottom; bottomMargin: 26 }
+                    anchors { horizontalCenter: parent.horizontalCenter; bottom: parent.bottom; bottomMargin: 28 }
                     scale: root.uiFor(mainWin.screen)
                     transformOrigin: Item.Bottom
-                    width: bar.implicitWidth + 28; height: 52; radius: Tok.rCard
-                    color: theme.bg
-                    border.width: 1; border.color: theme.a(theme.iris, 0.35)
+                    width: bar.implicitWidth + 20; height: 56; radius: 28
+                    color: Tok.bg
+                    border.width: 1; border.color: Tok.alpha(Tok.ink, 0.10)
 
-                    // tooltip
+                    // tooltip: dark on any capture, so it reads over a white page or a black one
                     Rectangle {
                         visible: root.hoverTip !== ""
-                        anchors { bottom: parent.top; bottomMargin: 8; horizontalCenter: parent.horizontalCenter }
-                        width: tipTxt.implicitWidth + 18; height: 24; radius: Tok.r
-                        color: theme.bg; border.width: 1; border.color: theme.a(theme.iris, 0.3)
-                        Text { id: tipTxt; anchors.centerIn: parent; text: root.hoverTip
-                            color: theme.text; font.pixelSize: 11; font.family: Tok.mono }
+                        anchors { bottom: parent.top; bottomMargin: 10; horizontalCenter: parent.horizontalCenter }
+                        width: tipTxt.implicitWidth + 22; height: 28; radius: 14
+                        color: Tok.light ? Tok.ink : Tok.raised
+                        IndText { id: tipTxt; anchors.centerIn: parent; text: root.hoverTip; sz: Tok.tData
+                            color: Tok.light ? Tok.bg : Tok.ink }
                     }
 
                     RowLayout {
                         id: bar
                         anchors.centerIn: parent
-                        spacing: 10
+                        spacing: 8
 
                         // tools
                         Row { spacing: 2
-                            TBtn { icon: "brush";          tip: "brush · b";     active: root.tool === "brush"; onAct: root.tool = "brush" }
-                            TBtn { icon: "arrow_right_alt"; tip: "arrow · a";     active: root.tool === "arrow"; onAct: root.tool = "arrow" }
-                            TBtn { icon: "crop_square";    tip: "rectangle · r"; active: root.tool === "rect";  onAct: root.tool = "rect" }
-                            TBtn { icon: "title";          tip: "text · t";      active: root.tool === "text";  onAct: root.tool = "text" }
-                            TBtn { icon: "crop";           tip: "crop · c";      active: root.tool === "crop";  onAct: root.tool = "crop" }
+                            TBtn { icon: "brush";           tip: "Brush  (B)";          active: root.tool === "brush";  onAct: root.tool = "brush" }
+                            TBtn { icon: "arrow_right_alt"; tip: "Arrow  (A)";          active: root.tool === "arrow";  onAct: root.tool = "arrow" }
+                            TBtn { icon: "crop_square";     tip: "Rectangle  (R)";      active: root.tool === "rect";   onAct: root.tool = "rect" }
+                            TBtn { icon: "blur_on";         tip: "Redact / Mosaic (M)"; active: root.tool === "redact"; onAct: root.tool = "redact" }
+                            TBtn { icon: "looks_one";       tip: "Step badge  (N)";     active: root.tool === "step";   onAct: root.tool = "step" }
+                            TBtn { icon: "title";           tip: "Text  (T)";           active: root.tool === "text";   onAct: root.tool = "text" }
+                            TBtn { icon: "crop";            tip: "Crop  (C)";           active: root.tool === "crop";   onAct: root.tool = "crop" }
                         }
 
-                        Rectangle { Layout.alignment: Qt.AlignVCenter; width: 1; height: 26; color: theme.a(theme.line, 0.6) }
+                        Divider {}
 
-                        // colours
-                        Row { spacing: 6; Layout.alignment: Qt.AlignVCenter
+                        // colours: round swatches, the chosen one ringed
+                        Row { spacing: 4; Layout.alignment: Qt.AlignVCenter
                             Repeater {
                                 model: ["#f38ba8", "#fab387", "#f9e2af", "#a6e3a1", "#89b4fa", "#cba6f7", "#ffffff", "#11111b"]
-                                delegate: Rectangle {
+                                delegate: Item {
                                     required property var modelData
                                     readonly property bool sel: root.penColor.toString().toLowerCase() === modelData.toLowerCase()
-                                    width: 18; height: 18; radius: Tok.r; color: modelData
-                                    border.width: sel ? 3 : 1
-                                    border.color: sel ? theme.frost : theme.a(theme.line, 0.7)
+                                    width: 24; height: 24
+                                    Rectangle { anchors.fill: parent; radius: 12; color: "transparent"
+                                        border.width: 2; border.color: parent.sel ? Tok.accent : "transparent" }
+                                    Rectangle { anchors.centerIn: parent; width: 16; height: 16; radius: 8; color: modelData
+                                        border.width: 1; border.color: Tok.alpha(Tok.ink, 0.18) }
                                     MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.penColor = modelData }
                                 }
                             }
                         }
 
-                        Rectangle { Layout.alignment: Qt.AlignVCenter; width: 1; height: 26; color: theme.a(theme.line, 0.6) }
+                        Divider {}
 
                         // stroke sizes
-                        Row { spacing: 4; Layout.alignment: Qt.AlignVCenter
+                        Row { spacing: 2; Layout.alignment: Qt.AlignVCenter
                             Repeater {
                                 model: [3, 6, 11]
                                 delegate: Rectangle {
                                     required property var modelData
                                     readonly property bool sel: root.penSize === modelData
-                                    width: 26; height: 26; radius: Tok.r
-                                    color: sel ? theme.a(theme.iris, 0.28) : "transparent"
+                                    width: 30; height: 30; radius: 15
+                                    color: sel ? Tok.alpha(Tok.accent, 0.16) : "transparent"
                                     Rectangle { anchors.centerIn: parent; width: 3 + modelData; height: 3 + modelData; radius: width / 2
-                                        color: sel ? theme.frost : theme.faint }
+                                        color: parent.sel ? Tok.accent : Tok.ink3 }
                                     MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.penSize = modelData }
                                 }
                             }
                         }
 
-                        Rectangle { Layout.alignment: Qt.AlignVCenter; width: 1; height: 26; color: theme.a(theme.line, 0.6) }
+                        Divider {}
 
                         // edit actions
                         Row { spacing: 2
-                            TBtn { icon: "undo";        tip: "undo · ⌃z";           tint: theme.sub;  onAct: root.undo() }
-                            TBtn { icon: "restart_alt"; tip: "clear all · x";       tint: theme.warn; onAct: root.clearAll() }
-                            TBtn { icon: "text_fields"; tip: "extract text (OCR)";  tint: theme.frost; onAct: ocrProc.run() }
+                            TBtn { icon: "undo";         tip: "Undo  (Ctrl Z)";            onAct: root.undo() }
+                            TBtn { icon: "delete_sweep"; tip: "Clear all  (X)";            onAct: root.clearAll() }
+                            TBtn { icon: "text_fields";  tip: "Copy the text in it (OCR)"; onAct: ocrProc.run() }
+                            TBtn { icon: "keep";         tip: "Pin to screen  (P)";        onAct: root.exportShot("pin") }
                         }
 
-                        Rectangle { Layout.alignment: Qt.AlignVCenter; width: 1; height: 26; color: theme.a(theme.line, 0.6) }
+                        Divider {}
 
-                        // output
-                        Row { spacing: 2
-                            TBtn { icon: "content_copy"; tip: "copy · ⌃c";            tint: theme.frost; onAct: root.exportShot(false) }
-                            TBtn { icon: "save";         tip: "save + copy · ⌃s";     tint: theme.good;  onAct: root.exportShot(true) }
-                            TBtn { icon: "close";        tip: "cancel · esc";         tint: theme.bad;   onAct: root.closeEditor() }
+                        // the ways out, named
+                        Row { spacing: 6; Layout.alignment: Qt.AlignVCenter
+                            Rectangle {
+                                width: cpT.implicitWidth + 28; height: 36; radius: 18
+                                color: cpMa.containsMouse ? Tok.alpha(Tok.ink, 0.10) : Tok.alpha(Tok.ink, 0.05)
+                                scale: cpMa.pressed ? 0.96 : 1
+                                Behavior on scale { NumberAnimation { duration: Tok.mMicro } }
+                                IndText { id: cpT; anchors.centerIn: parent; text: "Copy"; sz: Tok.tDense; font.weight: Font.DemiBold }
+                                MouseArea { id: cpMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                    onClicked: root.exportShot(false)
+                                    onEntered: root.hoverTip = "Copy to the clipboard  (Ctrl C)"
+                                    onExited: root.hoverTip = "" }
+                            }
+                            Rectangle {
+                                width: svT.implicitWidth + 28; height: 36; radius: 18
+                                color: svMa.containsMouse ? Qt.lighter(Tok.accent, 1.1) : Tok.accent
+                                scale: svMa.pressed ? 0.96 : 1
+                                Behavior on scale { NumberAnimation { duration: Tok.mMicro } }
+                                IndText { id: svT; anchors.centerIn: parent; text: "Save"; sz: Tok.tDense; font.weight: Font.DemiBold
+                                    color: Tok.accentInk }
+                                MouseArea { id: svMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                    onClicked: root.exportShot(true)
+                                    onEntered: root.hoverTip = "Save to ~/Pictures and copy  (Ctrl S)"
+                                    onExited: root.hoverTip = "" }
+                            }
+                            TBtn { icon: "close"; tip: "Discard  (Esc)"; onAct: root.closeEditor() }
                         }
-                    }
-                }
-
-                // shortcut hint — solid pill so it stays legible over any capture
-                Rectangle {
-                    anchors { horizontalCenter: parent.horizontalCenter; top: parent.top; topMargin: 18 }
-                    scale: root.uiFor(mainWin.screen)
-                    transformOrigin: Item.Top
-                    width: hintTxt.implicitWidth + 24; height: 28; radius: Tok.rCard
-                    color: theme.bg
-                    border.width: 1; border.color: theme.a(theme.iris, 0.3)
-                    Text {
-                        id: hintTxt
-                        anchors.centerIn: parent
-                        text: "b brush · a arrow · r rect · t text · c crop   ·   ⌃z undo · x clear   ·   ⌃c copy · ⌃s save · esc cancel"
-                        color: theme.sub; font.pixelSize: 11; font.family: Tok.mono
                     }
                 }
             }

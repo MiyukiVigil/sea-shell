@@ -6,6 +6,7 @@ from PySide6.QtQml import QQmlApplicationEngine
 from PySide6.QtTest import QTest
 from test_clipboard import APP,fm
 
+@unittest.skip('legacy/quickshell-fm is retired: its QML no longer sits beside the shared Ind* components')
 class UiSmoke(unittest.TestCase):
     def wait(self,predicate):
         end=time.monotonic()+5
@@ -23,7 +24,7 @@ class UiSmoke(unittest.TestCase):
             engine.addImageProvider('fileicon',fm.ThemeIconProvider())
             for name,value in {'be1':first,'be2':second,'backend':first,'undo':fm.UNDO(),'tagstore':fm.TAGS(),'ops':fm.OPS(),'stars':fm.STARS(),'prefs':fm.PREFS(),'appmenu':None}.items():
                 engine.rootContext().setContextProperty(name,value)
-            engine.load(QUrl.fromLocalFile(str(Path(__file__).resolve().parents[1]/'quickshell/ui/FileManager.qml')))
+            engine.load(QUrl.fromLocalFile(str(Path(__file__).resolve().parents[1]/'legacy/quickshell-fm/FileManager.qml')))
             self.assertTrue(engine.rootObjects(),warnings)
             window=engine.rootObjects()[0]
             try:

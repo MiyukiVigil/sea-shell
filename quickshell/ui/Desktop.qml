@@ -33,6 +33,8 @@ PanelWindow {
     property string uiFont: "sans"
     property real ui: 1.0
     property bool editing: false
+    property bool suspended: false
+    visible: !suspended
     signal doneRequested()
     // Readings for the widgets, supplied by the bar (see shell.qml).
     property var readings: ({})
@@ -45,9 +47,10 @@ PanelWindow {
     property var cpuHistory: []
     property var memHistory: []
     property var gpuHistory: []
+    property bool seen: true
     Timer {
         interval: 2000
-        running: true
+        running: !root.suspended && root.seen
         repeat: true
         triggeredOnStart: true
         onTriggered: {
@@ -75,6 +78,40 @@ PanelWindow {
 
     readonly property real sw: root.width / root.ui
     readonly property real sh: root.height / root.ui
+
+    // ---------- live snapping ----------
+    // While a widget is dragged its edges and centre are pulled onto other widgets' edges and
+    // centres, the middle of the screen, and a margin in from each side, within SNAP pixels.
+    // The drop still goes through settle(), so the wallpaper map has the last word unless
+    // Shift says "exactly here" (which also turns the snapping off).
+    property real guideX: -1
+    property real guideY: -1
+    readonly property real snapDist: 8
+    readonly property real snapMargin: 24
+    function snapDrag(id, x, y, w, h) {
+        var fh = root.sh - root.insetTop - root.insetBottom, top = root.insetTop;
+        var cx = [root.sw / 2, root.snapMargin, root.sw - root.snapMargin];
+        var cy = [top + fh / 2, top + root.snapMargin, top + fh - root.snapMargin];
+        for (var i = 0; i < root.items.length; i++) {
+            var o = root.items[i];
+            if (!o || "" + o.id === "" + id) continue;
+            var ox = o.x * root.sw, oy = o.y * fh + top, ow = o.w * root.sw, oh = o.h * fh;
+            cx.push(ox, ox + ow / 2, ox + ow);
+            cy.push(oy, oy + oh / 2, oy + oh);
+        }
+        function best(pos, size, cands) {
+            var edges = [pos, pos + size / 2, pos + size], out = { p: pos, g: -1, d: root.snapDist + 1 };
+            for (var e = 0; e < 3; e++)
+                for (var c = 0; c < cands.length; c++) {
+                    var d = cands[c] - edges[e];
+                    if (Math.abs(d) < out.d) out = { p: pos + d, g: cands[c], d: Math.abs(d) };
+                }
+            return out;
+        }
+        var bx = best(x, w, cx), by = best(y, h, cy);
+        root.guideX = bx.g; root.guideY = by.g;
+        return Qt.point(bx.p, by.p);
+    }
 
     // ---------- the arrangement ----------
     property var items: []
@@ -326,6 +363,8 @@ PanelWindow {
                 fieldY: root.insetTop
                 busyFn: root.busyAt
                 busyLimit: root.busyLimit
+                snapFn: root.snapDrag
+                onDragEnded: { root.guideX = -1; root.guideY = -1 }
                 onRemoved: root.removeItem(entry.id)
                 onMoved: (fx, fy, exact) => {
                     // SHIFT is one statement, not two: "put it exactly here" and "stop
@@ -336,6 +375,21 @@ PanelWindow {
                     root.moveItem(entry.id, p.x, p.y, exact);
                 }
             }
+        }
+
+        // Alignment guides while a widget is dragged: the line it has locked onto, across
+        // the whole field, as a drawing app shows it.
+        Rectangle {
+            visible: root.editing && root.guideX >= 0
+            x: root.guideX - 0.5; y: root.insetTop; z: 50
+            width: 1; height: root.sh - root.insetTop - root.insetBottom
+            color: Tok.accent
+        }
+        Rectangle {
+            visible: root.editing && root.guideY >= 0
+            x: 0; y: root.guideY - 0.5; z: 50
+            width: root.sw; height: 1
+            color: Tok.accent
         }
     }
 }

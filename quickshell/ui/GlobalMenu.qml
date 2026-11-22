@@ -50,14 +50,16 @@ Item {
     property string barEdge: "top"
     property real maxWidth: 0
     property real dropOpacity: 1.0
-    readonly property color cardBg: root.pal ? root.pal.panel
-                                             : "#181818"
+    // glass, like the bar's other menus (Tok's glass tokens; Hyprland blurs behind sea-shell:drop)
+    readonly property color cardBg: Tok.alpha(root.pal ? Tok.glassTint : "#181818", Tok.glassAlpha)
     property bool featureOn: true
     property bool showKeys: true
     signal toggleRequested()
 
     property string focusHint: ""
     onFocusHintChanged: {
+        root.close();
+        root.cache = {};
         root.showManualMenu = false;
         reread.restart();
     }
@@ -127,7 +129,29 @@ Item {
         return false;
     }
 
-    readonly property bool hasNativeMenu: !!(root.snap && root.snap.menus && root.snap.menus.length > 0 && root.hasWindow)
+    // THE SNAPSHOT DESCRIBES THE LAST WINDOW UNTIL THE DAEMON HAS CAUGHT UP. Focus moves on the
+    // frame it happens, and the daemon can take a quarter of a second over an app it has to ask
+    // (Firefox to TwintailLauncher, measured), so for that long the strip said "TwintailLauncher"
+    // over Firefox's File, Edit, View. The bar fades out while this is true, whichever way it
+    // resolves, and the name holds with the menus so the two never disagree on the way.
+    readonly property bool snapStale: {
+        if (!root.snap || !root.snap["class"] || root.snapSaysNoWindow) return false;
+        try {
+            var t = Hyprland.activeToplevel;
+            if (!t) return false;
+            var o = t.lastIpcObject;
+            if (o && o.pid && root.snap.pid && o.pid === root.snap.pid) return false;
+            var c = (o && o.class) ? "" + o.class : (t.wayland && t.wayland.appId) ? "" + t.wayland.appId : "";
+            return c.length > 0 && c.toLowerCase() !== ("" + root.snap["class"]).toLowerCase();
+        } catch (e) { return false }
+    }
+    // A daemon that never answers must not leave the bar blank: give up and stand down.
+    property bool staleExpired: false
+    onSnapStaleChanged: root.staleExpired = false
+    Timer { interval: 700; running: root.snapStale && !root.staleExpired; onTriggered: root.staleExpired = true }
+    readonly property bool switching: root.snapStale && !root.staleExpired
+
+    readonly property bool hasNativeMenu: !!(root.snap && root.snap.menus && root.snap.menus.length > 0 && root.hasWindow && !root.staleExpired)
 
     readonly property string activeClass: {
         if (!root.hasWindow) return "";
@@ -180,7 +204,7 @@ Item {
         var toolsItems = [
             { label: "Area Screenshot", key: "Super+Shift+S", command: ["sh", "-c", "grim -g \"$(slurp)\" - | wl-copy"] },
             { label: "Full Screenshot", command: ["sh", "-c", "grim - | wl-copy"] },
-            { label: "Color Picker", command: ["hyprpicker", "-a"] },
+            { label: "Color Picker", command: ["sh", Quickshell.env("HOME") + "/.config/quickshell/sea-shell/sea-colorpick.sh"] },
             { sep: true },
             { label: "Toggle Dark / Light Theme", command: ["sh", "-c", "$HOME/.config/quickshell/sea-shell/sea-toggle-theme.sh"] },
             { label: "Toggle Night Light", command: ["sh", "-c", "$HOME/.config/quickshell/sea-shell/sea-toggle-night.sh"] },
@@ -195,12 +219,12 @@ Item {
                     label: "File",
                     enabled: true,
                     items: [
-                        { label: "New Window", key: "Ctrl+N", command: ["python3", Quickshell.env("HOME") + "/.config/quickshell/sea-shell/sea-fm.py"] },
+                        { label: "New Window", key: "Ctrl+N", command: ["sh", "-c", "\"$HOME/.config/quickshell/sea-shell/sea-files-launch.sh\""] },
                         { label: "Open in Terminal", key: "Ctrl+Alt+T", command: ["kitty"] },
                         { sep: true },
-                        { label: "Home Directory", command: ["python3", Quickshell.env("HOME") + "/.config/quickshell/sea-shell/sea-fm.py", Quickshell.env("HOME")] },
-                        { label: "Downloads", command: ["python3", Quickshell.env("HOME") + "/.config/quickshell/sea-shell/sea-fm.py", Quickshell.env("HOME") + "/Downloads"] },
-                        { label: "Documents", command: ["python3", Quickshell.env("HOME") + "/.config/quickshell/sea-shell/sea-fm.py", Quickshell.env("HOME") + "/Documents"] }
+                        { label: "Home Directory", command: ["sh", "-c", "\"$HOME/.config/quickshell/sea-shell/sea-files-launch.sh\" \"$HOME\""] },
+                        { label: "Downloads", command: ["sh", "-c", "\"$HOME/.config/quickshell/sea-shell/sea-files-launch.sh\" \"$HOME/Downloads\""] },
+                        { label: "Documents", command: ["sh", "-c", "\"$HOME/.config/quickshell/sea-shell/sea-files-launch.sh\" \"$HOME/Documents\""] }
                     ]
                 },
                 {
@@ -238,7 +262,7 @@ Item {
                 { label: "Split Horizontal", dispatch: "layoutmsg, splith" },
                 { label: "Split Vertical", dispatch: "layoutmsg, splitv" },
                 { sep: true },
-                { label: "Open File Manager", key: "Super+E", command: ["python3", Quickshell.env("HOME") + "/.config/quickshell/sea-shell/sea-fm.py"] },
+                { label: "Open File Manager", key: "Super+E", command: ["sh", "-c", "\"$HOME/.config/quickshell/sea-shell/sea-files-launch.sh\" \"$HOME\""] },
                 { label: "Toggle Floating", key: "Super+V", dispatch: "hl.dsp.window.float({ action = 'toggle' })" }
             ];
         } else if (isBrowser) {
@@ -273,7 +297,7 @@ Item {
         } else {
             actionsItems = [
                 { label: "Launch Terminal", key: "Super+Return", command: ["kitty"] },
-                { label: "File Manager", key: "Super+E", command: ["python3", Quickshell.env("HOME") + "/.config/quickshell/sea-shell/sea-fm.py"] },
+                { label: "File Manager", key: "Super+E", command: ["sh", "-c", "\"$HOME/.config/quickshell/sea-shell/sea-files-launch.sh\" \"$HOME\""] },
                 { label: "Wallpaper Picker", key: "Super+Alt+W", command: ["sh", "-c", "quickshell -p $HOME/.config/quickshell/sea-shell/WallpaperPicker.qml"] },
                 { label: "System Monitor", command: ["sh", "-c", "quickshell -p $HOME/.config/quickshell/sea-shell/Dashboard.qml"] },
                 { sep: true },
@@ -296,7 +320,7 @@ Item {
     readonly property int pid: (root.snap && root.snap.pid) ? root.snap.pid : 0
 
     // ---- who this menu belongs to ----
-    readonly property string appClass: root.activeClass
+    readonly property string appClass: root.switching ? "" + root.snap["class"] : root.activeClass
     readonly property string appName: {
         var c = root.appClass;
         if (!c.length) return "Desktop";
@@ -439,7 +463,7 @@ Item {
     visible: root.available
     onAvailableChanged: if (!root.available) root.close()
 
-    onPidChanged: root.close()
+    onPidChanged: { root.close(); root.cache = {}; }
 
     FileView {
         id: snapFile
@@ -453,21 +477,23 @@ Item {
         // is thirty rows, it was a visible flash. Comparing the text first makes an unchanged
         // heartbeat free, which is what a heartbeat is supposed to be.
         property string lastText: ""
-        function apply() {
+        function apply(refresh) {
             try {
-                reload();
+                if (refresh !== false) reload();
                 var t = text() || "";
                 if (t === snapFile.lastText) return;
                 snapFile.lastText = t;
                 if (!t.trim()) { root.snap = { "menus": [], "mode": "none" }; return }
-                root.snap = JSON.parse(t);
+                var parsed = JSON.parse(t);
+                parsed.menus = root.cleanMenu(parsed.menus);
+                root.snap = parsed;
             } catch (e) {
                 snapFile.lastText = "";
                 root.snap = { "menus": [], "mode": "none" };
             }
         }
         onFileChanged: apply()
-        onLoaded: apply()
+        onLoaded: apply(false)
         Component.onCompleted: apply()
     }
 
@@ -477,8 +503,21 @@ Item {
     // serve one's menu under the other, and a nested path ("View/Toolbars") is remembered
     // separately from its parent. Pruned on focus change: a session's worth of menus for
     // windows that no longer exist is memory nobody asked for.
+    function cleanMenu(items) {
+        var out = [];
+        for (var i = 0; i < (items || []).length; i++) {
+            var item = items[i];
+            if (!item) continue;
+            if (item.sep && (!out.length || out[out.length - 1].sep)) continue;
+            if (item.items) item.items = root.cleanMenu(item.items);
+            out.push(item);
+        }
+        if (out.length && out[out.length - 1].sep) out.pop();
+        return out;
+    }
     property var cache: ({})
     property string loadingPath: ""
+    property int readerPid: 0
     function cacheKey(parts) { return root.pid + " " + parts.join("/") }
     function cached(parts) { var v = root.cache[root.cacheKey(parts)]; return v ? v : null }
     // NOT PRUNED ON FOCUS CHANGE. It used to keep only the focused window's entries, which
@@ -501,6 +540,7 @@ Item {
             id: readerOut
             onStreamFinished: {
                 root.loadingPath = "";
+                if (root.readerPid !== root.pid) return;
                 try {
                     var j = JSON.parse((readerOut.text || "").trim() || "{}");
                     if (!j.path) return;
@@ -508,7 +548,7 @@ Item {
                     for (var k in root.cache) next[k] = root.cache[k];
                     // An empty answer is still an answer — remember it, or every click
                     // on an unreachable submenu would ask the application again.
-                    next[root.pid + " " + j.path] = j.items || [];
+                    if (j.items && j.items.length) next[root.readerPid + " " + j.path] = root.cleanMenu(j.items);
                     root.cache = next;
                     root.pruneCache();
                 } catch (e) {}
@@ -520,9 +560,10 @@ Item {
     function load(parts) {
         if (!root.script.length) return;
         var key = root.cacheKey(parts);
-        if (root.cache[key] !== undefined || root.loadingPath.length) return;
+        if (root.cache[key] !== undefined || reader.running || root.loadingPath.length) return;
+        root.readerPid = root.pid;
         root.loadingPath = parts.join("/");
-        reader.command = ["python3", root.script, "--submenu", root.loadingPath, "--pid", String(root.pid)];
+        reader.command = [root.script, "--submenu", root.loadingPath, "--pid", String(root.pid)];
         reader.running = true;
     }
 
@@ -960,14 +1001,14 @@ Item {
         var m = root.menuAt(root.openIndex);
         if (!m) return out;
         var parts = [m.label];
-        var items = (m.items && m.items.length) ? m.items : root.cached(parts);
+        var items = root.cached(parts) || ((m.items && m.items.length) ? m.items : null);
         if (!items || !items.length) return out;
         out.push(items);
         for (var k = 0; k < root.openPath.length; k++) {
             var it = items[root.openPath[k]];
             if (!it) break;
             parts = parts.concat([it.label]);
-            var sub = (it.items && it.items.length) ? it.items : root.cached(parts);
+            var sub = root.cached(parts) || ((it.items && it.items.length) ? it.items : null);
             if (!sub || !sub.length) break;
             items = sub;
             out.push(items);
@@ -1036,6 +1077,8 @@ Item {
     function openAt(i, host) {
         var m = root.menuAt(i);
         if (!m) return;
+        root.holdOpen();
+        root.cache = {};
         root.openIndex = i;
         root.openHost = host;
         root.openPath = [];
@@ -1044,7 +1087,7 @@ Item {
         drop.shown = true;
         // A menu whose contents nobody knows yet gets read here, on this click, and
         // never anywhere else.
-        if (!(m.items && m.items.length)) root.load([m.label]);
+        if (root.hasNativeMenu || !(m.items && m.items.length)) root.load([m.label]);
     }
 
     // Open item `index` of level `level`, discarding anything deeper — walking back up a
@@ -1079,7 +1122,7 @@ Item {
         // build one on request; Firefox only builds nested menus while their parent is open
         // and hovered, which AT-SPI cannot do, so that one comes back empty and is then
         // remembered as empty rather than asked for again.
-        if (it && !(it.items && it.items.length))
+        if (it && (root.hasNativeMenu || !(it.items && it.items.length)))
             root.load(root.pathTo(level).concat([it.label]));
     }
     function truncate(level) {
@@ -1133,7 +1176,7 @@ Item {
             }
         }
         if (it) {
-            if (!it.dispatch && !it.command && !it.action && root.activateShortcut(it.key)) return;
+            if (!root.hasNativeMenu && !it.dispatch && !it.command && !it.action && root.activateShortcut(it.key)) return;
             if (it.dispatch) {
                 root.close();
                 Hyprland.dispatch(it.dispatch);
@@ -1158,7 +1201,7 @@ Item {
     function activatePath(parts) {
         if (!root.script.length || !parts || !parts.length) return;
         root.close();
-        invoker.command = ["python3", root.script, "--invoke", parts.join("/"), "--pid", String(root.pid)];
+        invoker.command = [root.script, "--invoke", parts.join("/"), "--pid", String(root.pid)];
         invoker.running = true;
     }
     function activateHit(hit) {
@@ -1225,7 +1268,7 @@ Item {
     property bool priming: false
     Process {
         id: primeAll
-        command: ["python3", root.script, "--prime-all"]
+        command: [root.script, "--prime-all"]
         onExited: {
             root.priming = false;
             snapFile.apply();
@@ -1552,7 +1595,7 @@ Item {
                         // card sits one surface above the bar and is outlined, full stop.
                         color: root.cardBg
                         border.width: 1
-                        border.color: root.pal ? root.pal.line : "#333"
+                        border.color: Tok.glassy ? Tok.glassEdge : (root.pal ? root.pal.line : "#333")
 
                         // The rows live in a Flickable so a menu taller than the screen can
                         // still be read. It only takes the wheel when there is somewhere to
@@ -1726,7 +1769,7 @@ Item {
                                         // A dot for one-of-these, a tick for this-is-on.
                                         // Drawing both as a tick said a set of mutually
                                         // exclusive options could all be chosen at once.
-                                        text: rowIt.modelData.radio ? "radio_button_checked" : "check"
+                                        text: rowIt.modelData.radio ? "radio_button_checked" : "Check"
                                         font.family: "Material Symbols Outlined"
                                         font.pixelSize: rowIt.modelData.radio ? 11 : 12
                                         color: rowIt.lit ? Tok.accentInk
@@ -1892,14 +1935,14 @@ Item {
                 radius: Tok.r
                 color: root.cardBg
                 border.width: 1
-                border.color: root.pal ? root.pal.line : "#333"
+                border.color: Tok.glassy ? Tok.glassEdge : (root.pal ? root.pal.line : "#333")
                 Column {
                     anchors.verticalCenter: parent.verticalCenter
                     x: root.cardPadX
                     width: parent.width - root.cardPadX * 2
                     spacing: 2
                     Text {
-                        text: root.loadingPath.length ? "reading this menu" : "this submenu is not readable"
+                        text: root.loadingPath.length ? "Reading this menu" : "This submenu is not readable"
                         color: root.pal ? root.pal.sub : "#aaa"
                         font.pixelSize: 12
                         font.italic: root.loadingPath.length > 0
@@ -1909,7 +1952,7 @@ Item {
                         visible: !root.loadingPath.length && root.mode === "lazy"
                         width: parent.width
                         wrapMode: Text.WordWrap
-                        text: "turn on the global-menu prefs in about:config"
+                        text: "Turn on the global-menu prefs in about:config"
                         color: root.pal ? root.pal.faint : "#777"
                         font.pixelSize: 10
                         font.family: root.uiFont
@@ -1928,10 +1971,10 @@ Item {
                 radius: Math.min(12, Tok.rCard)
                 color: root.cardBg
                 border.width: 1
-                border.color: root.pal ? root.pal.line : "#333"
+                border.color: Tok.glassy ? Tok.glassEdge : (root.pal ? root.pal.line : "#333")
                 Text {
                     anchors.centerIn: parent
-                    text: root.loadingPath.length ? "" : "menu not available yet"
+                    text: root.loadingPath.length ? "" : "Menu not available yet"
                     color: root.pal ? root.pal.faint : "#777"
                     font.pixelSize: 12
                     font.italic: root.loadingPath.length > 0
@@ -1950,7 +1993,7 @@ Item {
                 radius: Math.min(12, Tok.rCard)
                 color: root.cardBg
                 border.width: 1
-                border.color: root.pal ? root.pal.line : "#333"
+                border.color: Tok.glassy ? Tok.glassEdge : (root.pal ? root.pal.line : "#333")
 
                 Item {
                     id: fieldRow
@@ -1984,7 +2027,7 @@ Item {
                             anchors.fill: parent
                             verticalAlignment: Text.AlignVCenter
                             visible: !field.text.length
-                            text: "search menus"
+                            text: "Search menus"
                             color: root.pal ? root.pal.faint : "#777"
                             font: field.font
                         }
@@ -2031,7 +2074,7 @@ Item {
                     Text {
                         id: readAllTxt
                         anchors.centerIn: parent
-                        text: root.priming ? "reading…" : "read all"
+                        text: root.priming ? "reading…" : "Read all"
                         color: (raMa.containsMouse && !root.priming) ? Tok.accentInk
                                                                      : (root.pal ? root.pal.sub : "#aaa")
                         font.pixelSize: 10
@@ -2049,7 +2092,7 @@ Item {
                 Text {
                     visible: root.query.length > 0 && root.hits.length === 0
                     x: 10; y: 35
-                    text: "nothing matches"
+                    text: "Nothing matches"
                     color: root.pal ? root.pal.faint : "#777"
                     font.pixelSize: 11
                     font.family: root.uiFont

@@ -9,7 +9,9 @@ arrange with a mouse.
 
     --list                          print the arrangement
     --ensure                        create an empty arrangement if absent
-    --add-clock | --add-weather | --add-media | --add-system
+    --add-clock | --add-weather | --add-media | --add-system | --add-calendar | --add-battery
+    --add-notifications | --add-network | --add-quote | --add-photo | --add-ai
+    --add-github | --add-pomodoro | --add-clipboard | --add-tide
                  [--x F --y F] [--size small|medium|large] [--face F] [--look card|glass|clear|classic]
                                     add a widget
     --add-entry ID [--label L] [--icon I]
@@ -22,6 +24,7 @@ arrange with a mouse.
     --move ID --x F --y F           put one widget somewhere (fractions)
     --set ID [--ground bare|rule|panel] [--tone accent|frost|green|amber|red|plain]
              [--look card|glass|clear|classic] [--face dial|cookie|digital|stacked]
+             [--src wallpapers|pictures|screenshots]  (photo: which folder it shows)
             [--align left|centre|right] [--size small|medium|large]
     --resettle                      move whatever the new wallpaper covers
     --auto off|rescue|arrange       how hard the desktop follows the wallpaper
@@ -48,7 +51,10 @@ QUIET = os.path.join(os.environ.get("XDG_CACHE_HOME", os.path.join(HOME, ".cache
 FOOTPRINTS = {"small": {"w": 0.0885, "h": 0.17}, "medium": {"w": 0.1875, "h": 0.17},
               "large": {"w": 0.1875, "h": 0.376}}
 DEFAULT_SIZE = {"clock": "small", "weather": "medium", "media": "medium", "system": "medium",
-                "calendar": "medium", "battery": "small"}
+                "calendar": "medium", "battery": "small",
+                "notifications": "medium", "network": "small", "quote": "medium", "photo": "small",
+                "ai": "medium", "github": "medium", "pomodoro": "small", "clipboard": "medium",
+                "tide": "medium"}
 DEFAULTS = {
     "clock":   FOOTPRINTS["small"],
     "weather": FOOTPRINTS["medium"],
@@ -56,6 +62,15 @@ DEFAULTS = {
     "system":  FOOTPRINTS["medium"],
     "calendar": FOOTPRINTS["medium"],
     "battery": FOOTPRINTS["small"],
+    "notifications": FOOTPRINTS["medium"],
+    "network": FOOTPRINTS["small"],
+    "quote":   FOOTPRINTS["medium"],
+    "photo":   FOOTPRINTS["small"],
+    "ai":      FOOTPRINTS["medium"],
+    "github":  FOOTPRINTS["medium"],
+    "pomodoro": FOOTPRINTS["small"],
+    "clipboard": FOOTPRINTS["medium"],
+    "tide":    FOOTPRINTS["medium"],
     "launch":  {"w": 0.055, "h": 0.085},
 }
 # Which pre-solved zone list in wallquiet.json best matches each footprint. Widgets with a size
@@ -70,12 +85,14 @@ def zone_list(zones, kind, size=None):
     if size and zones.get(size):
         return zones[size]
     return zones.get(ZONE_FOR.get(kind, "16x9"), [])
-KINDS = ("clock", "weather", "media", "system", "calendar", "battery")
+KINDS = ("clock", "weather", "media", "system", "calendar", "battery",
+         "notifications", "network", "quote", "photo", "ai",
+         "github", "pomodoro", "clipboard", "tide")
 SIZES = {"small": 0.75, "medium": 1.0, "large": 1.4}
 
 
 AUTO_MODES = ("off", "rescue", "arrange")
-FOOTPRINTS_KINDS = ("clock", "weather", "media", "system", "calendar", "battery")
+FOOTPRINTS_KINDS = KINDS
 
 
 def auto_arrange():
@@ -172,7 +189,9 @@ def place(kind, items):
     while any(overlaps({"x": 0.03, "y": y, "w": size["w"], "h": size["h"]}, o)
               for o in items) and y < 0.85:
         y += size["h"] + 0.02
-    return 0.03, y
+    # The step can walk past the last legal row. A widget whose top is below the
+    # screen is not placed, it is missing.
+    return 0.03, clamp(y, size["h"])
 
 
 # ---------------------------------------------------------------- resettling ----
@@ -244,57 +263,194 @@ def zone_for(q, it, others):
         return nx, ny
     return None
 
+# ---------------------------------------------------------------- composing ----
+#
+# ONE BLOCK, NOT FIVE SPOTS. Placing each widget in its own calmest cell found five good
+# spots and no arrangement: the clock at one height, the weather at another, the system card
+# halfway across the picture, nothing lined up with anything. A desktop reads as designed when
+# its widgets share edges and gaps. So the unpinned widgets are laid out as one block of
+# columns with even gutters, small widgets paired side by side into a medium-width row, and it
+# is the BLOCK that is placed: slid over the quiet map, and put where the picture is calmest,
+# with a lean towards the edges and corners a desktop's furniture belongs in.
+
+ORDER = {"clock": 0, "weather": 1, "calendar": 2, "system": 3, "battery": 4, "media": 5,
+         "network": 6, "notifications": 7, "photo": 8, "quote": 9}
+GAP_X = 20 / 1920          # the gutter, about 20px each way on a 1080p field
+GAP_Y = 20 / 1040
+COL_W = FOOTPRINTS["medium"]["w"]
+
+
+def block_layout(items, ncols):
+    """Offsets inside the block for `items` in `ncols` columns: ({id: (dx, dy)}, w, h)."""
+    rows, pending = [], None
+    for it in sorted(items, key=lambda i: ORDER.get(i.get("kind"), 9)):
+        w, h = it.get("w", COL_W), it.get("h", 0.17)
+        if w < COL_W * 0.7 and it.get("kind") != "launch":
+            if pending is None:
+                pending = {"items": [it], "h": h}
+                rows.append(pending)
+            else:
+                pending["items"].append(it); pending["h"] = max(pending["h"], h); pending = None
+        else:
+            rows.append({"items": [it], "h": h})
+    total = sum(r["h"] for r in rows) + GAP_Y * max(0, len(rows) - 1)
+    per = total / ncols
+    cols, cur, used = [[]], 0, 0.0
+    for r in rows:
+        if cols[cur] and used + r["h"] > per + 1e-6 and cur < ncols - 1:
+            cur += 1; cols.append([]); used = 0.0
+        cols[cur].append(r); used += r["h"] + GAP_Y
+    pos, bh = {}, 0.0
+    for c, col in enumerate(cols):
+        y = 0.0
+        for r in col:
+            x = c * (COL_W + GAP_X)
+            for it in r["items"]:
+                pos[id(it)] = (x, y)
+                x += it.get("w", COL_W) + GAP_X
+            y += r["h"] + GAP_Y
+        bh = max(bh, y - GAP_Y)
+    bw = len(cols) * COL_W + (len(cols) - 1) * GAP_X
+    return pos, bw, bh
+
+
+def compose(q, items):
+    """Lay the unpinned widgets out as one block in the calmest place. Returns what moved."""
+    free = [it for it in items if not it.get("pinned")]
+    fixed = [it for it in items if it.get("pinned")]
+    if not free:
+        return []
+    best = None
+    for ncols in range(1, min(3, len(free)) + 1):
+        pos, bw, bh = block_layout(free, ncols)
+        if bw > 1 - 2 * MARGIN or bh > 1 - 2 * MARGIN:
+            continue
+        xs = [MARGIN + i * 0.01 for i in range(int((1 - 2 * MARGIN - bw) / 0.01) + 1)]
+        ys = [MARGIN + i * 0.02 for i in range(int((1 - 2 * MARGIN - bh) / 0.02) + 1)]
+        for bx in xs:
+            for by in ys:
+                rects = [{"x": bx + pos[id(it)][0], "y": by + pos[id(it)][1],
+                          "w": it.get("w", COL_W), "h": it.get("h", 0.17)} for it in free]
+                if any(overlaps(r, f) for r in rects for f in fixed):
+                    continue
+                busy = [busy_at(q, r["x"], r["y"], r["w"], r["h"]) for r in rects]
+                score = sum(busy) / len(busy) + 0.6 * max(busy)
+                # furniture belongs at the edges: distance from the nearest side, and less so
+                # from the nearest top or bottom
+                score += 0.18 * min(bx - MARGIN, 1 - MARGIN - bx - bw)
+                score += 0.06 * min(by - MARGIN, 1 - MARGIN - by - bh)
+                if best is None or score < best[0]:
+                    best = (score, bx, by, pos)
+    if best is None:
+        return []
+    _, bx, by, pos = best
+    moved = []
+    for it in free:
+        nx, ny = round(bx + pos[id(it)][0], 4), round(by + pos[id(it)][1], 4)
+        if abs(nx - it["x"]) > 1e-4 or abs(ny - it["y"]) > 1e-4:
+            moved.append({"id": it.get("id"), "from": [it["x"], it["y"]], "to": [nx, ny]})
+            it["x"], it["y"] = nx, ny
+    return moved
+
+
+# THE NUDGE, TUNED. Rescue moves only what the new picture covers, each widget on its own and
+# only as far as it must, so a desktop you arranged keeps its character. Three things it used
+# to get wrong, all of which left widgets looking dropped rather than placed:
+#
+#   * it measured only the rectangle under a widget, so a card could sit flush against a face
+#     or a strand of hair and count as clear. Clearance is now measured with a margin round it.
+#   * it accepted a spot at exactly the limit, so the next wallpaper with the subject a pixel
+#     closer moved it again. A destination has to be comfortably clear, not just clear.
+#   * it never lined anything up. A widget that has to move now snaps to a neighbour's edge
+#     when one is close, so a rescued widget joins the arrangement instead of floating near it.
+CLEAR_X, CLEAR_Y = 0.012, 0.02    # the margin a widget wants round it
+SETTLE_LIMIT = BUSY_LIMIT - 0.05  # how clear a destination has to be
+NEIGHBOUR_PAD = 0.01              # gap kept between widgets (under GAP_X, so a snap fits)
+
+
+def busy_round(q, x, y, w, h):
+    return busy_at(q, x - CLEAR_X, y - CLEAR_Y, w + 2 * CLEAR_X, h + 2 * CLEAR_Y)
+
+
+def snap(q, it, nx, ny, others):
+    """Line (nx, ny) up with a neighbour's edge if one is close and the spot stays clear."""
+    w, h = it.get("w", 0.1), it.get("h", 0.08)
+    xs, ys = [], []
+    for o in others:
+        ow, oh = o.get("w", 0.1), o.get("h", 0.08)
+        xs += [o["x"], o["x"] + ow - w, o["x"] + ow + GAP_X, o["x"] - w - GAP_X]
+        ys += [o["y"], o["y"] + oh - h, o["y"] + oh + GAP_Y, o["y"] - h - GAP_Y]
+    def nearest(v, opts, reach):
+        best = None
+        for c in opts:
+            if abs(c - v) <= reach and (best is None or abs(c - v) < abs(best - v)):
+                best = c
+        return best
+    for sx, sy in ((nearest(nx, xs, 0.05), nearest(ny, ys, 0.1)),
+                   (nearest(nx, xs, 0.05), None), (None, nearest(ny, ys, 0.1))):
+        cx = clamp(sx, w) if sx is not None else nx
+        cy = clamp(sy, h) if sy is not None else ny
+        if (cx, cy) == (nx, ny):
+            continue
+        r = {"x": cx, "y": cy, "w": w, "h": h}
+        if busy_round(q, cx, cy, w, h) <= SETTLE_LIMIT and \
+                not any(overlaps(r, o, NEIGHBOUR_PAD) for o in others):
+            return cx, cy
+    return nx, ny
+
 
 def resettle(mode="rescue"):
-    """Move what the new wallpaper covers. Returns what moved."""
+    """Follow the wallpaper. Returns what moved.
+
+    rescue   the tuned nudge above, per widget.
+    arrange  every unpinned widget to a pre-solved quiet zone.
+    tidy     compose(): one aligned block in the calmest place (on request, not automatic).
+    """
     q = quiet_map()
     items = load()
     if q is None or not items or mode == "off":
         return []
+    if mode == "tidy":
+        moved = compose(q, items)
+        if moved:
+            save(items)
+        return moved
     gw, gh, _ = q
     moved = []
     for i, it in enumerate(items):
         if it.get("pinned"):
             continue
         w, h = it.get("w", 0.1), it.get("h", 0.08)
-        here = busy_at(q, it["x"], it["y"], w, h)
-        if mode == "rescue" and here <= BUSY_LIMIT:
-            continue
         others = [o for k, o in enumerate(items) if k != i]
-        # Every position on the grid, nearest first. 5184 candidates is nothing, and
-        # sorting by distance is what makes this a nudge rather than a re-layout.
+        if mode == "rescue" and busy_round(q, it["x"], it["y"], w, h) <= BUSY_LIMIT:
+            continue
+        if mode == "arrange":
+            # Sorting every cell by calmness does NOT work here: on a typical wallpaper
+            # thousands of cells tie at the same rounded score, the distance tie-break then
+            # wins, and nothing ever moves. The zones the map already solved are a LAYOUT
+            # rather than an argmin.
+            placed = zone_for(q, it, others)
+            if placed is not None:
+                nx, ny = placed
+                if abs(nx - it["x"]) > 1e-4 or abs(ny - it["y"]) > 1e-4:
+                    moved.append({"id": it.get("id"), "from": [it["x"], it["y"]], "to": [nx, ny]})
+                    it["x"], it["y"] = round(nx, 4), round(ny, 4)
+                continue
+        # Every position on the grid, nearest first: a nudge, not a re-layout.
         cands = []
         for gy in range(gh):
             for gx in range(gw):
                 nx, ny = clamp(gx / gw, w), clamp(gy / gh, h)
-                d = (nx - it["x"]) ** 2 + (ny - it["y"]) ** 2
-                cands.append((d, nx, ny))
-        if mode == "arrange":
-            # Sorting every cell by calmness does NOT work here, and it is worth saying why:
-            # on a typical wallpaper thousands of cells tie at the same rounded score, the
-            # distance tie-break then wins, and the widget stays exactly where it was — an
-            # "arrange" mode that provably never moves anything. So arrange uses the composed
-            # zones the map already solved: a handful of genuinely separated quiet rectangles
-            # per footprint, which is a LAYOUT rather than an argmin.
-            placed = zone_for(q, it, others)
-            if placed is None:
-                cands.sort()
-            else:
-                nx, ny = placed
-                if abs(nx - it["x"]) > 1e-4 or abs(ny - it["y"]) > 1e-4:
-                    moved.append({"id": it.get("id"), "from": [it["x"], it["y"]],
-                                  "to": [nx, ny]})
-                    it["x"], it["y"] = round(nx, 4), round(ny, 4)
-                continue
-        else:
-            cands.sort()
+                cands.append(((nx - it["x"]) ** 2 + (ny - it["y"]) ** 2, nx, ny))
+        cands.sort()
         for _, nx, ny in cands:
-            if busy_at(q, nx, ny, w, h) > BUSY_LIMIT:
+            if busy_round(q, nx, ny, w, h) > SETTLE_LIMIT:
                 continue
-            if any(overlaps({"x": nx, "y": ny, "w": w, "h": h}, o) for o in others):
+            if any(overlaps({"x": nx, "y": ny, "w": w, "h": h}, o, NEIGHBOUR_PAD) for o in others):
                 continue
+            nx, ny = snap(q, it, nx, ny, others)
             if abs(nx - it["x"]) < 1e-4 and abs(ny - it["y"]) < 1e-4:
-                break                                    # already the right place
+                break
             moved.append({"id": it.get("id"), "from": [it["x"], it["y"]], "to": [nx, ny]})
             it["x"], it["y"] = round(nx, 4), round(ny, 4)
             break
@@ -368,7 +524,7 @@ def main(argv):
             if it.get("id") != wid:
                 continue
             hit = True
-            for key in ("ground", "tone", "align", "look", "face"):
+            for key in ("ground", "tone", "align", "look", "face", "src"):
                 v = arg(argv, "--" + key)
                 if v:
                     it[key] = v
@@ -422,6 +578,9 @@ def main(argv):
         save(items)
         print("%s %s" % ("pinned" if want else "unpinned", wid))
         return 0
+    if "--tidy" in argv:
+        print(json.dumps({"moved": resettle("tidy")}))
+        return 0
     if "--resettle" in argv:
         mode = arg(argv, "--mode") or auto_arrange()
         print(json.dumps({"mode": mode, "moved": resettle(mode)}))
@@ -461,7 +620,7 @@ def main(argv):
             sz = arg(argv, "--size")
             if sz in FOOTPRINTS:
                 extra.update({"size": sz, "w": FOOTPRINTS[sz]["w"], "h": FOOTPRINTS[sz]["h"]})
-            for key in ("face", "look"):
+            for key in ("face", "look", "src"):
                 v = arg(argv, "--" + key)
                 if v:
                     extra[key] = v

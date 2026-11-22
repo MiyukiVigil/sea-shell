@@ -87,6 +87,11 @@ ShellRoot {
         }
         return best;
     }
+    // weather and the next events, written by the bar (shell.qml writeGlance); stale after a day
+    property var glance: ({})
+    FileView { path: (Quickshell.env("XDG_RUNTIME_DIR") || "/tmp") + "/sea-glance.json"; watchChanges: true
+        onLoaded: { try { var g = JSON.parse(text()); root.glance = (Date.now() - (g.at || 0)) < 86400000 ? g : ({}) } catch (e) {} }
+        onFileChanged: reload() }
     readonly property var battery: {
         var d = UPower.displayDevice;
         return d && d.isLaptopBattery ? { pct: (d.percentage || 0) * 100, charging: !UPower.onBattery } : null;
@@ -223,6 +228,7 @@ ShellRoot {
                 showContent: root.cfg.notifications !== "names"
                 player: root.player
                 battery: root.battery
+                glance: root.cfg.glance === false ? ({}) : root.glance
                 leaving: root.leaving
                 onKey: e => root.onKey(e)
                 onWake: root.wake()

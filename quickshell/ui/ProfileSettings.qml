@@ -40,13 +40,13 @@ ColumnLayout {
             elide: Text.ElideRight
         }
         indicator: Text { x: parent.width - 25; anchors.verticalCenter: parent.verticalCenter; text: "⌄"; color: Tok.ink3; font.pixelSize: 17 }
-        background: Rectangle { radius: 9; color: Tok.sunken; border.width: 1; border.color: choice.activeFocus ? Tok.accent : Tok.ruleHard }
+        background: Rectangle { radius: 9; color: Tok.alpha(Tok.ink, 0.06); border.width: choice.activeFocus ? 2 : 0; border.color: Tok.accent }
         delegate: C.ItemDelegate {
             required property var modelData
             required property int index
             width: choice.width; height: 34
             contentItem: Text { text: modelData; color: Tok.ink; font: choice.font; verticalAlignment: Text.AlignVCenter; elide: Text.ElideRight }
-            background: Rectangle { radius: 6; color: choice.highlightedIndex === index ? Tok.sunken : Tok.surface }
+            background: Rectangle { radius: 6; color: choice.highlightedIndex === index ? Tok.alpha(Tok.ink, 0.06) : Tok.surface }
             highlighted: choice.highlightedIndex === index
         }
         popup: C.Popup {
@@ -59,7 +59,7 @@ ColumnLayout {
                 currentIndex: choice.highlightedIndex
                 C.ScrollIndicator.vertical: C.ScrollIndicator {}
             }
-            background: Rectangle { color: Tok.surface; radius: 10; border.width: 1; border.color: Tok.ruleHard }
+            background: Rectangle { color: Tok.surface; radius: 10; border.width: 1; border.color: Tok.alpha(Tok.ink, 0.10) }
         }
     }
     component Action: C.Button {
@@ -68,7 +68,7 @@ ColumnLayout {
         implicitHeight: 36; leftPadding: 16; rightPadding: 16
         font.family: Tok.sans; font.pixelSize: 12
         contentItem: Text { text: button.text; font: button.font; color: button.primary ? Tok.accentInk : Tok.ink; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
-        background: Rectangle { radius: 9; color: button.primary ? Tok.accent : (button.hovered ? Tok.sunken : Tok.surface); border.width: button.primary ? 0 : 1; border.color: Tok.ruleHard }
+        background: Rectangle { radius: 9; color: button.primary ? Tok.accent : (button.hovered ? Tok.alpha(Tok.ink, 0.11) : Tok.alpha(Tok.ink, 0.06)); border.width: button.primary ? 0 : 1; border.color: Tok.alpha(Tok.ink, 0.10) }
         opacity: enabled ? 1 : 0.5
     }
     component Switch: C.AbstractButton {
@@ -79,8 +79,8 @@ ColumnLayout {
             Text { id: switchLabel; text: toggle.text; color: Tok.ink; font.family: Tok.sans; font.pixelSize: 12; anchors.verticalCenter: parent.verticalCenter }
             Rectangle {
                 anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
-                width: 36; height: 20; radius: 10; color: toggle.checked ? Tok.accent : Tok.sunken
-                border.width: 1; border.color: toggle.checked ? Tok.accent : Tok.ruleHard
+                width: 36; height: 20; radius: 10; color: toggle.checked ? Tok.accent : Tok.alpha(Tok.ink, 0.06)
+                border.width: 0
                 Rectangle { x: toggle.checked ? 18 : 3; y: 3; width: 14; height: 14; radius: 7; color: toggle.checked ? Tok.accentInk : Tok.ink3
                     Behavior on x { NumberAnimation { duration: Tok.reducedMotion ? 0 : 120 } }
                 }
@@ -94,7 +94,7 @@ ColumnLayout {
         stepSize: 1
         background: Rectangle {
             x: range.leftPadding; y: (range.height - height) / 2
-            width: range.availableWidth; height: 5; radius: 2.5; color: Tok.sunken
+            width: range.availableWidth; height: 5; radius: 2.5; color: Tok.alpha(Tok.ink, 0.06)
             Rectangle { width: range.visualPosition * parent.width; height: parent.height; radius: parent.radius; color: Tok.accent }
         }
         handle: Rectangle {
@@ -109,7 +109,7 @@ ColumnLayout {
     component Field: C.TextField {
         implicitHeight: 38; color: Tok.ink; placeholderTextColor: Tok.ink3; font.family: Tok.sans; font.pixelSize: 13; leftPadding: 12
         selectByMouse: true
-        background: Rectangle { radius: 10; color: Tok.surface; border.width: 1; border.color: parent.activeFocus ? Tok.accent : Tok.ruleHard }
+        background: Rectangle { radius: 10; color: Tok.alpha(Tok.ink, 0.05); border.width: parent.activeFocus ? 2 : 0; border.color: Tok.accent }
     }
     property bool previewLogin: false
     FontLoader { id: rhPreview; source: "file:///usr/share/sddm/themes/sea-silent/fonts/redhat/RedHatDisplay-SemiBold.otf" }
@@ -119,7 +119,7 @@ ColumnLayout {
         { appName: "Firefox", appIcon: "firefox", summary: "Download complete", body: "cachyos-desktop-linux.iso", time: "21:20", urgency: 1 } ]
     // lock.json: which lock runs and how much of a notification it shows
     property var lockCfg: ({})
-    FileView { id: lockFile; path: Quickshell.env("HOME") + "/.config/sea-shell/lock.json"; watchChanges: true
+    FileView { id: lockFile; printErrors: false; path: Quickshell.env("HOME") + "/.config/sea-shell/lock.json"; watchChanges: true
         onLoaded: { try { panel.lockCfg = JSON.parse(text()) } catch (e) { panel.lockCfg = {} } }
         onLoadFailed: panel.lockCfg = {}
         onFileChanged: reload() }
@@ -175,6 +175,8 @@ ColumnLayout {
             notes: panel.lockCfg.notifications === "off" ? [] : panel.sampleNotes
             showContent: panel.lockCfg.notifications !== "names"
             battery: ({ pct: 76, charging: false })
+            glance: panel.lockCfg.glance === false ? ({}) : ({ wxTemp: "24°C", wxCond: "Partly cloudy",
+                events: [{ title: "Dinner with Alex", date: Qt.formatDate(new Date(), "yyyy-MM-dd"), time: "19:30" }] })
         }
         Rectangle {
             anchors.right: parent.right; anchors.top: parent.top; anchors.margins: 10
@@ -203,6 +205,10 @@ ColumnLayout {
         Switch { id: clock24; text: "24-hour clock" }
         Switch { id: date; text: "Date" }
         Switch { id: media; text: "Now playing" }
+        // lock.json, not the profile: saved on the spot like the choices above
+        Switch { text: "Weather and events"; visible: panel.lockCfg.engine !== "hyprlock"
+            checked: panel.lockCfg.glance !== false
+            onClicked: panel.setLock("glance", !(panel.lockCfg.glance !== false)) }
     }
     RowLayout { Layout.fillWidth: true; spacing: 16
         Label { text: "Clock size"; Layout.preferredWidth: 84 }

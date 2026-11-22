@@ -18,6 +18,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 import Quickshell
 import Quickshell.Wayland
+import Quickshell.Hyprland
 import Quickshell.Io
 import QtQuick
 import QtQuick.Layouts
@@ -61,8 +62,24 @@ Scope {
     property int  ticking: 0              // countdown seconds remaining; 0 = not counting
     property string pendingGeom: ""
 
-    function open()   { if (root.recording) return; apReadProc.running = true;  // appearance may have changed while closed
-                        root.load(); root.probe(); root.shown = true }
+    // A warm window whose output went away (lid shut, monitor unplugged) is closed by the
+    // compositor and hidden by Quickshell for good; moving it to another screen alone leaves it
+    // hidden. So open() takes the active output (where the cursor is) and, whenever the window is
+    // not alive there, rebuilds it: hide, move, show again.
+    property bool screensMoved: false
+    Connections { target: Quickshell; function onScreensChanged() { root.screensMoved = true } }
+    function placeOn(w) {
+        var f = Hyprland.focusedMonitor, s = Quickshell.screens, t = null;
+        for (var i = 0; f && i < s.length; i++) if (s[i].name === f.name) t = s[i];
+        if (!t && s.length) t = s[0];
+        if (t && (t !== w.screen || root.screensMoved || !w.backingWindowVisible || !w.visible)) {
+            w.visible = false;
+            w.screen = t;
+            w.visible = true;
+        }
+        root.screensMoved = false;
+    }
+    function open()   { if (root.recording) return; root.placeOn(win); root.load(); root.probe(); root.shown = true }
     function close()  { root.shown = false }
     // SUPER+R is one key for the whole feature: it stops a running recording, otherwise
     // it opens the chooser. So the "already recording" case never opens a window you'd
@@ -74,14 +91,7 @@ Scope {
     function stop()   { Quickshell.execDetached([root.script, "stop"]) }
     function cancel() { Quickshell.execDetached([root.script, "cancel"]) }
 
-    IpcHandler {
-        target: "recorder"
-        function toggle(): void { root.toggle() }
-        function open(): void   { root.open() }
-        function close(): void  { root.close() }
-        function stop(): void   { root.stop() }
-        function cancel(): void { root.cancel() }
-    }
+    // IPC target "recorder" is owned by shell.qml so SUPER+R works before this panel loads.
 
     // ---- persistence ----
     // Written via argv rather than a shell string so a device name with a space or a
@@ -227,194 +237,326 @@ Scope {
     // Say so before the recording rather than after.
     readonly property bool exclusiveWarn: root.exclusiveHold && (root.audio === "system" || root.audio === "both")
 
-    // ---- theme (reads the shared appearance.json so it matches the rice) ----
-    property string apAccent: "#63c7dd"
-    property bool   apLight: false
-    // Re-run on every open() — matugen rewrites `accent` whenever the wallpaper changes, and a
-    // panel that only read this at bar startup would sit on a stale colour while the bar recoloured.
-    Process { id: apReadProc; running: true; command: ["sh","-c","cat ~/.config/sea-shell/appearance.json 2>/dev/null || echo '{}'"]
-        stdout: StdioCollector { id: apOut; onStreamFinished: { try { var j = JSON.parse(apOut.text.trim() || "{}");
-            if (j.accent) root.apAccent = j.accent; if (j.mode !== undefined) root.apLight = ("" + j.mode === "light"); } catch(e){} } } }
-    // ---------- industrial token shim ----------
-    // Colours come from the shared Tok singleton (see shell.qml). This surface used to carry its
-    // own copy of the ramp AND its own appearance.json parse, so it drifted from the bar every
-    // time the palette changed. The `theme.*` vocabulary is kept because the call sites below
-    // speak it; only the source of the values moved.
-    QtObject {
-        id: theme
-        readonly property bool  light: Tok.light
-        readonly property color bg:    Tok.bg
-        readonly property color panel: Tok.surface
-        readonly property color line:  Tok.ruleHard
-        readonly property color text:  Tok.ink
-        readonly property color sub:   Tok.ink2
-        readonly property color faint: Tok.ink3
-        readonly property color iris:  Tok.accent
-        readonly property color frost: Tok.ink2
-        readonly property color good:  Tok.ok
-        readonly property color warn:  Tok.warn
-        readonly property color bad:   Tok.crit
-        function a(c, al) { return Qt.rgba(c.r, c.g, c.b, al) }
+
+    // ---------------- look ----------------
+    // The control centre's language, as the dashboard and the shortcuts sheet speak it: titled
+    // groups on thin ink panels, macOS segmented controls for one-of-several choices, and the
+    // capture targets as tiles.
+    readonly property color groupFill: Tok.surface
+    readonly property color groupRule: Tok.alpha(Tok.ink, Tok.light ? 0.085 : 0.11)
+    readonly property color rowHover:  Tok.alpha(Tok.ink, Tok.light ? 0.05 : 0.075)
+    readonly property color track:     Tok.sunken
+    SurfaceMotion { id: motion; opened: root.shown; reduced: Tok.reducedMotion; enterDuration: 180; exitDuration: 110 }
+
+    component Sym: Text {
+        property int sz: 18
+        font.family: "Material Symbols Outlined"
+        font.pixelSize: sz
+        color: Tok.ink2
+        horizontalAlignment: Text.AlignHCenter
+        verticalAlignment: Text.AlignVCenter
     }
 
-    component Sym: Text { property int sz: 18; font.family: "Material Symbols Outlined"; font.pixelSize: sz
-        color: theme.iris; verticalAlignment: Text.AlignVCenter }
-
-    component Head: Text {
-        color: theme.faint; font.pixelSize: 9; font.family: Tok.mono; font.bold: true; font.letterSpacing: 1
+    // a titled group: the title above, a rounded panel holding the rows
+    component Group: ColumnLayout {
+        id: grp
+        property string title: ""
+        default property alias content: gBody.data
+        Layout.fillWidth: true
+        spacing: Tok.s2
+        IndText { text: grp.title; sz: Tok.tDense; font.weight: Font.Bold; Layout.leftMargin: Tok.s1 }
+        Rectangle {
+            Layout.fillWidth: true
+            implicitHeight: gBody.implicitHeight + Tok.s3 * 2
+            radius: Tok.r + 4
+            color: root.groupFill
+            border.width: 1; border.color: root.groupRule
+            ColumnLayout {
+                id: gBody
+                anchors { left: parent.left; right: parent.right; top: parent.top; margins: Tok.s3 }
+                anchors.leftMargin: Tok.s4; anchors.rightMargin: Tok.s3
+                spacing: Tok.s3
+            }
+        }
     }
 
-    // A segmented choice. Carries no anchors of its own so it can live inside a Flow
-    // or a RowLayout without fighting the positioner for its geometry.
-    component Seg: Rectangle {
-        id: sg
+    // a labelled row inside a group: name on the left, the control on the right
+    component Line: RowLayout {
+        id: ln
+        property string label: ""
+        default property alias content: lnSlot.data
+        Layout.fillWidth: true
+        spacing: Tok.s3
+        IndText { text: ln.label; sz: Tok.tDense; Layout.fillWidth: true }
+        Row { id: lnSlot; spacing: Tok.s2 }
+    }
+
+    // macOS segmented control: one track, the chosen segment raised out of it
+    component Segmented: Rectangle {
+        id: sc
+        property var options: []          // [{ label, value, enabled }]
+        property var value
+        signal picked(var v)
+        implicitWidth: scRow.implicitWidth + 4
+        implicitHeight: 30
+        radius: 15
+        color: root.track
+        Row {
+            id: scRow
+            anchors.centerIn: parent
+            Repeater {
+                model: sc.options
+                delegate: Rectangle {
+                    required property var modelData
+                    readonly property bool on: sc.value === modelData.value
+                    readonly property bool ok: modelData.enabled !== false
+                    width: Math.max(52, scT.implicitWidth + 24)
+                    height: 26
+                    radius: 13
+                    color: on ? (Tok.light ? "#ffffff" : Tok.alpha(Tok.ink, 0.16)) : (scMa.containsMouse && ok ? root.rowHover : "transparent")
+                    border.width: on ? 1 : 0
+                    border.color: root.groupRule
+                    opacity: ok ? 1 : 0.4
+                    Behavior on color { ColorAnimation { duration: Tok.mFast } }
+                    IndText { id: scT; anchors.centerIn: parent; text: modelData.label; sz: Tok.tData + 1
+                        font.weight: parent.on ? Font.DemiBold : Font.Normal
+                        color: parent.on ? Tok.ink : Tok.ink2 }
+                    MouseArea { id: scMa; anchors.fill: parent; hoverEnabled: true; enabled: parent.ok
+                        cursorShape: Qt.PointingHandCursor; onClicked: sc.picked(modelData.value) }
+                }
+            }
+        }
+    }
+
+    // a device to pick (microphone, output) — a pill, filled when chosen
+    component Pick: Rectangle {
+        id: pk
+        property string label: ""
+        property bool on: false
+        signal tapped()
+        implicitWidth: Math.min(260, pkT.implicitWidth + 26)
+        implicitHeight: 28
+        radius: 14
+        color: pk.on ? Tok.accentWash : (pkMa.containsMouse ? root.rowHover : "transparent")
+        border.width: 1
+        border.color: pk.on ? Tok.alpha(Tok.accent, 0.5) : root.groupRule
+        Behavior on color { ColorAnimation { duration: Tok.mFast } }
+        IndText { id: pkT; anchors.centerIn: parent; width: Math.min(implicitWidth, pk.width - 20)
+            elide: Text.ElideRight; text: pk.label; sz: Tok.tData + 1
+            color: pk.on ? Tok.accent : Tok.ink2; font.weight: pk.on ? Font.DemiBold : Font.Normal }
+        MouseArea { id: pkMa; anchors.fill: parent; hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor; onClicked: pk.tapped() }
+    }
+
+    // what to capture, as a tile
+    component CaptureTile: Rectangle {
+        id: tg
+        property string icon: ""
         property string label: ""
         property string sub: ""
         property bool on: false
-        property int maxW: 0
         signal tapped()
-        implicitHeight: 28
-        implicitWidth: Math.min(sg.maxW > 0 ? sg.maxW : 9999, sgt.implicitWidth + 20)
-        radius: Tok.r
-        opacity: sg.enabled ? 1 : 0.4
-        color: sg.on ? theme.iris : (sgm.containsMouse ? theme.a(theme.iris, 0.18) : theme.a(theme.line, 0.4))
-        border.width: 1; border.color: theme.a(theme.iris, sg.on ? 0.6 : 0.18)
-        Behavior on color { ColorAnimation { duration: 110 } }
-        Text {
-            id: sgt
+        Layout.fillWidth: true
+        implicitHeight: 82
+        radius: Tok.r + 4
+        color: tg.on ? Tok.accentWash : (tgMa.containsMouse ? root.rowHover : root.groupFill)
+        border.width: 1
+        border.color: tg.on ? Tok.alpha(Tok.accent, 0.55) : root.groupRule
+        scale: tgMa.pressed ? 0.97 : 1
+        Behavior on color { ColorAnimation { duration: Tok.mFast } }
+        Behavior on scale { NumberAnimation { duration: Tok.mMicro; easing.type: Easing.OutCubic } }
+        Column {
             anchors.centerIn: parent
-            width: Math.min(implicitWidth, sg.width - 16)
-            elide: Text.ElideRight
-            text: sg.label; color: sg.on ? theme.bg : theme.sub
-            font.pixelSize: 11; font.family: Tok.mono; font.bold: sg.on
+            width: parent.width - 16
+            spacing: 3
+            Sym { anchors.horizontalCenter: parent.horizontalCenter; text: tg.icon; sz: 26
+                color: tg.on ? Tok.accent : Tok.ink }
+            IndText { anchors.horizontalCenter: parent.horizontalCenter; text: tg.label; sz: Tok.tDense
+                font.weight: Font.Medium; color: tg.on ? Tok.accent : Tok.ink }
+            IndText { width: parent.width; horizontalAlignment: Text.AlignHCenter; elide: Text.ElideRight
+                visible: tg.sub !== ""; text: tg.sub; sz: Tok.tData - 1; color: Tok.ink3 }
         }
-        MouseArea { id: sgm; anchors.fill: parent; enabled: sg.enabled
-            hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: sg.tapped() }
+        MouseArea { id: tgMa; anchors.fill: parent; hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor; onClicked: tg.tapped() }
     }
 
-    component IconBtn: Rectangle {
-        id: ib
-        property string icon: ""; property int sz: 30; signal tapped()
-        implicitWidth: sz + 4; implicitHeight: sz + 4; radius: Tok.r
-        color: ibm.containsMouse ? theme.a(theme.iris, 0.18) : "transparent"
-        Sym { anchors.centerIn: parent; text: ib.icon; sz: Math.round(ib.sz * 0.6); color: theme.sub }
-        MouseArea { id: ibm; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: ib.tapped() }
-    }
-
-    component TextBtn: Rectangle {
-        id: tb
-        property string label: ""; property string icon: ""; property bool primary: false; signal tapped()
-        implicitHeight: 32; implicitWidth: tbr.width + 22; radius: Tok.r
-        opacity: tb.enabled ? 1 : 0.4
-        color: tb.primary ? (tbm.containsMouse ? theme.frost : theme.iris) : (tbm.containsMouse ? theme.a(theme.iris, 0.18) : theme.a(theme.line, 0.4))
-        border.width: 1; border.color: theme.a(theme.iris, tb.primary ? 0.5 : 0.2)
-        RowLayout { id: tbr; anchors.centerIn: parent; spacing: 7
-            Sym { text: tb.icon; sz: 15; color: tb.primary ? theme.bg : theme.frost }
-            Text { text: tb.label; color: tb.primary ? theme.bg : theme.sub; font.pixelSize: 11; font.family: Tok.mono; font.bold: tb.primary } }
-        MouseArea { id: tbm; anchors.fill: parent; enabled: tb.enabled; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: tb.tapped() }
+    component Btn: Rectangle {
+        id: bt
+        property string text: ""
+        property string icon: ""
+        property bool primary: false
+        signal tapped()
+        implicitWidth: btRow.implicitWidth + 30
+        implicitHeight: 36
+        radius: 18
+        opacity: bt.enabled ? 1 : 0.45
+        color: bt.primary ? (btMa.containsMouse ? Qt.lighter(Tok.crit, 1.08) : Tok.crit)
+                          : (btMa.containsMouse ? root.rowHover : root.groupFill)
+        border.width: bt.primary ? 0 : 1
+        border.color: root.groupRule
+        scale: btMa.pressed ? 0.97 : 1
+        Behavior on scale { NumberAnimation { duration: Tok.mMicro; easing.type: Easing.OutCubic } }
+        Row {
+            id: btRow
+            anchors.centerIn: parent
+            spacing: 7
+            Rectangle { visible: bt.primary; anchors.verticalCenter: parent.verticalCenter
+                width: 10; height: 10; radius: 5; color: "white" }
+            IndText { anchors.verticalCenter: parent.verticalCenter; text: bt.text; sz: Tok.tDense
+                font.weight: Font.DemiBold; color: bt.primary ? "white" : Tok.ink }
+        }
+        MouseArea { id: btMa; anchors.fill: parent; enabled: bt.enabled; hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor; onClicked: bt.tapped() }
     }
 
     // ---------------- the chooser ----------------
+    // KEPT WARM, like the dashboard and settings: closed, the window stays mapped as one
+    // transparent pixel that takes no input or keys, so SUPER+R is a resize, not a new surface.
     PanelWindow {
         id: win
-        visible: root.shown
-        anchors { top: true; bottom: true; left: true; right: true }
+        readonly property real ui: Tok.uiFor(win.screen)
+        readonly property bool live: root.shown || motion.presenting
+        // Keep fullscreen geometry stable when the compositor maps the panel.
+        anchors { top: true; left: true; bottom: true; right: true }
+        visible: win.live
+        implicitWidth: 1
+        implicitHeight: 1
+        mask: win.live ? allInput : noInput
+        Region { id: noInput }
+        Region { id: allInput; item: win.contentItem }
         color: "transparent"
-        WlrLayershell.layer: WlrLayer.Overlay
-        WlrLayershell.keyboardFocus: WlrKeyboardFocus.Exclusive
+        WlrLayershell.namespace: "sea-shell:recorder"
+        // Keep closed panels warm without blocking fullscreen presentation.
+        WlrLayershell.layer: (win.live) ? WlrLayer.Overlay : WlrLayer.Bottom
+        // Quickshell applies the new layer when the native surface is mapped again.
+        // Keep the QML content resident and preserve the window's visibility policy.
+        Connections {
+            target: win.WlrLayershell
+            function onLayerChanged() {
+                if (!win.visible) return;
+                win.visible = false;
+                win.visible = Qt.binding(function() { return win.live; });
+            }
+        }
+        WlrLayershell.keyboardFocus: root.shown ? WlrKeyboardFocus.Exclusive : WlrKeyboardFocus.None
         exclusionMode: ExclusionMode.Ignore
+        Binding { target: win.contentItem; property: "scale"; value: win.ui }
 
-        Rectangle { anchors.fill: parent; color: Qt.rgba(0, 0, 0, 0.5)
-            MouseArea { anchors.fill: parent; onClicked: root.close() } }
-        Item { anchors.fill: parent; focus: root.shown
+        Rectangle {
+            id: scrim
+            anchors.centerIn: parent
+            width: win.width / win.ui; height: win.height / win.ui
+            color: Qt.rgba(0, 0, 0, Tok.light ? 0.30 : 0.50)
+            opacity: motion.progress
+            MouseArea { anchors.fill: parent; onClicked: root.close() }
+        }
+        Item { anchors.fill: scrim; focus: root.shown
             Keys.onEscapePressed: root.close()
             Keys.onReturnPressed: root.begin()
             Keys.onEnterPressed: root.begin() }
 
         Rectangle {
-            anchors.centerIn: parent
-            width: 560
-            height: card.implicitHeight + 40
+            anchors.centerIn: scrim
+            anchors.verticalCenterOffset: (1 - motion.progress) * 14
+            width: 600
+            height: card.implicitHeight + Tok.s6 * 2
             radius: Tok.rCard
-            color: theme.bg
-            border.width: 1; border.color: theme.a(theme.iris, 0.34)
+            color: Tok.bg
+            border.width: 1; border.color: root.groupRule
+            opacity: motion.progress
+            scale: 0.98 + 0.02 * motion.progress
             MouseArea { anchors.fill: parent }
 
             ColumnLayout {
                 id: card
-                anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top
-                anchors.margins: 20
-                spacing: 14
+                anchors { left: parent.left; right: parent.right; top: parent.top; margins: Tok.s6 }
+                spacing: Tok.s4
 
                 // ---- header ----
                 RowLayout {
-                    Layout.fillWidth: true; spacing: 12
-                    Sym { text: "videocam"; sz: 26; color: theme.iris }
-                    ColumnLayout { spacing: 1; Layout.fillWidth: true
-                        Text { text: "record"; color: theme.text; font.pixelSize: 20; font.family: Tok.mono; font.bold: true }
-                        Text {
-                            text: root.wfAvail
-                                  ? (root.captureLabel + " · " + (root.audio === "none" ? "no audio"
-                                     : root.audio === "mic" ? "microphone"
-                                     : root.audio === "system" ? "system audio" : "mic + system")
-                                     + " · " + root.fps + "fps " + root.format)
-                                  : "wf-recorder is not installed"
-                            color: root.wfAvail ? theme.faint : theme.bad
-                            font.pixelSize: 11; font.family: Tok.mono
+                    Layout.fillWidth: true
+                    spacing: Tok.s3
+                    Rectangle {
+                        implicitWidth: 40; implicitHeight: 40; radius: Tok.r + 4
+                        color: Tok.crit
+                        Sym { anchors.centerIn: parent; text: "videocam"; sz: 22; color: "white" }
+                    }
+                    ColumnLayout {
+                        spacing: 1
+                        Layout.fillWidth: true
+                        IndText { text: "Record screen"; sz: Tok.tTitle; font.weight: Font.Bold }
+                        IndText {
                             Layout.fillWidth: true; elide: Text.ElideRight
+                            sz: Tok.tDense; color: root.wfAvail ? Tok.ink3 : Tok.crit
+                            text: root.wfAvail
+                                ? (root.audio === "none" ? "No audio" : root.audio === "mic" ? "Microphone"
+                                   : root.audio === "system" ? "System audio" : "Microphone and system audio")
+                                  + ", " + root.fps + " fps " + root.format.toUpperCase()
+                                : "wf-recorder is not installed: pacman -S wf-recorder"
                         }
                     }
-                    IconBtn { icon: "refresh"; onTapped: root.probe() }
-                    IconBtn { icon: "close"; onTapped: root.close() }
+                    Rectangle {
+                        implicitWidth: 34; implicitHeight: 34; radius: 17
+                        color: rfMa.containsMouse ? root.rowHover : "transparent"
+                        Sym { anchors.centerIn: parent; text: "refresh"; sz: 18 }
+                        MouseArea { id: rfMa; anchors.fill: parent; hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor; onClicked: root.probe() }
+                    }
+                    Rectangle {
+                        implicitWidth: 34; implicitHeight: 34; radius: 17
+                        color: clMa.containsMouse ? root.rowHover : root.groupFill
+                        border.width: 1; border.color: root.groupRule
+                        Sym { anchors.centerIn: parent; text: "close"; sz: 18 }
+                        MouseArea { id: clMa; anchors.fill: parent; hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor; onClicked: root.close() }
+                    }
                 }
 
                 // ---- capture ----
-                ColumnLayout {
-                    Layout.fillWidth: true; spacing: 6
-                    Head { text: "CAPTURE" }
-                    Flow {
-                        Layout.fillWidth: true; spacing: 6
-                        Seg { label: "region"; on: root.capture === "region"; onTapped: root.capture = "region" }
-                        Seg { label: "this screen"; on: root.capture === "screen"; onTapped: root.capture = "screen" }
-                        Repeater {
-                            model: root.outputs
-                            delegate: Seg {
-                                required property var modelData
-                                label: modelData.name + " · " + modelData.desc
-                                on: root.capture === ("output:" + modelData.name)
-                                onTapped: root.capture = "output:" + modelData.name
-                            }
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: Tok.s2
+                    CaptureTile { icon: "crop"; label: "Region"; sub: "Drag to select"
+                        on: root.capture === "region"; onTapped: root.capture = "region" }
+                    CaptureTile { icon: "desktop_windows"; label: "This screen"; sub: "Where the pointer is"
+                        on: root.capture === "screen"; onTapped: root.capture = "screen" }
+                    Repeater {
+                        model: root.outputs.length > 1 ? root.outputs : []
+                        delegate: CaptureTile {
+                            required property var modelData
+                            icon: "monitor"; label: modelData.name; sub: modelData.desc
+                            on: root.capture === ("output:" + modelData.name)
+                            onTapped: root.capture = "output:" + modelData.name
                         }
                     }
                 }
 
                 // ---- audio ----
-                ColumnLayout {
-                    Layout.fillWidth: true; spacing: 6
-                    Head { text: "AUDIO" }
-                    Flow {
-                        Layout.fillWidth: true; spacing: 6
-                        Seg { label: "none";   on: root.audio === "none";   onTapped: root.audio = "none" }
-                        Seg { label: "mic";    on: root.audio === "mic";    onTapped: root.audio = "mic" }
-                        Seg { label: "system"; on: root.audio === "system"; onTapped: root.audio = "system" }
-                        Seg { label: "mic + system"; on: root.audio === "both"; onTapped: root.audio = "both"
-                              enabled: root.mics.length > 0 }
+                Group {
+                    title: "Audio"
+                    Segmented {
+                        value: root.audio
+                        options: [{ label: "None", value: "none" }, { label: "Microphone", value: "mic" },
+                                  { label: "System", value: "system" },
+                                  { label: "Both", value: "both", enabled: root.mics.length > 0 }]
+                        onPicked: (v) => root.audio = v
                     }
-
-                    // Device pickers appear only for the sources actually being recorded.
+                    // device pickers only for the sources actually being recorded
                     ColumnLayout {
-                        Layout.fillWidth: true; spacing: 6
+                        Layout.fillWidth: true
+                        spacing: Tok.s1
                         visible: root.audio === "mic" || root.audio === "both"
-                        Head { text: "MICROPHONE" }
+                        IndText { text: "Microphone"; sz: Tok.tData; color: Tok.ink3 }
                         Flow {
-                            Layout.fillWidth: true; spacing: 6
-                            Seg { label: root.micLabel.indexOf("Default") === 0 ? root.micLabel : "Default"
-                                  maxW: 250; on: root.mic === ""; onTapped: root.mic = "" }
+                            Layout.fillWidth: true
+                            spacing: 6
+                            Pick { label: root.micLabel.indexOf("Default") === 0 ? root.micLabel.replace("Default · ", "Default: ") : "Default"
+                                on: root.mic === ""; onTapped: root.mic = "" }
                             Repeater {
                                 model: root.mics
-                                delegate: Seg {
+                                delegate: Pick {
                                     required property var modelData
-                                    label: root.labelFor(root.mics, modelData); maxW: 220
+                                    label: root.labelFor(root.mics, modelData)
                                     on: root.mic === modelData.name
                                     onTapped: root.mic = modelData.name
                                 }
@@ -422,110 +564,119 @@ Scope {
                         }
                     }
                     ColumnLayout {
-                        Layout.fillWidth: true; spacing: 6
+                        Layout.fillWidth: true
+                        spacing: Tok.s1
                         visible: root.audio === "system" || root.audio === "both"
-                        Head { text: "SYSTEM AUDIO — RECORDED FROM AN OUTPUT'S MONITOR" }
+                        IndText { text: "System audio, recorded from this output"; sz: Tok.tData; color: Tok.ink3 }
                         Flow {
-                            Layout.fillWidth: true; spacing: 6
+                            Layout.fillWidth: true
+                            spacing: 6
                             // "Default" is not just a shortcut: it re-reads the default sink at
                             // start, so recordings follow the DAC when it's plugged in.
-                            Seg { label: root.sysLabel.indexOf("Default") === 0 ? root.sysLabel : "Default"
-                                  maxW: 280; on: root.sys === ""; onTapped: root.sys = "" }
+                            Pick { label: root.sysLabel.indexOf("Default") === 0 ? root.sysLabel.replace("Default · ", "Default: ") : "Default"
+                                on: root.sys === ""; onTapped: root.sys = "" }
                             Repeater {
                                 model: root.sinks
-                                delegate: Seg {
+                                delegate: Pick {
                                     required property var modelData
-                                    label: root.labelFor(root.sinks, modelData); maxW: 220
+                                    label: root.labelFor(root.sinks, modelData)
                                     on: root.sys === modelData.name
                                     onTapped: root.sys = modelData.name
                                 }
                             }
                         }
                     }
-
-                    // The one thing that silently produces a dead audio track.
+                    // the one thing that silently produces a dead audio track
                     Rectangle {
-                        Layout.fillWidth: true; visible: root.exclusiveWarn
-                        implicitHeight: exw.implicitHeight + 16; radius: Tok.r
-                        color: theme.a(theme.warn, 0.14)
-                        border.width: 1; border.color: theme.a(theme.warn, 0.4)
+                        Layout.fillWidth: true
+                        visible: root.exclusiveWarn
+                        implicitHeight: exw.implicitHeight + 18
+                        radius: Tok.r + 2
+                        color: Tok.warnWash
                         RowLayout {
                             id: exw
-                            anchors.left: parent.left; anchors.right: parent.right
-                            anchors.verticalCenter: parent.verticalCenter
-                            anchors.leftMargin: 10; anchors.rightMargin: 10
-                            spacing: 8
-                            Sym { text: "warning"; sz: 15; color: theme.warn }
-                            Text {
+                            anchors { left: parent.left; right: parent.right; verticalCenter: parent.verticalCenter
+                                      leftMargin: 12; rightMargin: 12 }
+                            spacing: 10
+                            Sym { text: "warning"; sz: 17; color: Tok.warn; Layout.alignment: Qt.AlignTop }
+                            IndText {
                                 Layout.fillWidth: true; wrapMode: Text.WordWrap
                                 text: (root.exclusiveName || "A DAC") + " is playing bit-perfect, straight to ALSA. "
-                                      + "That bypasses pipewire, so the monitor this records from will be silent. "
-                                      + "Record the mic, or take the player out of exclusive mode."
-                                color: theme.warn; font.pixelSize: 10; font.family: Tok.mono; lineHeight: 1.3
+                                      + "That bypasses PipeWire, so system audio will record as silence. "
+                                      + "Record the microphone, or take the player out of exclusive mode."
+                                color: Tok.warn; sz: Tok.tData; lineHeight: 1.25
                             }
                         }
                     }
                 }
 
                 // ---- quality ----
-                ColumnLayout {
-                    Layout.fillWidth: true; spacing: 6
-                    Head { text: "QUALITY" }
-                    Flow {
-                        Layout.fillWidth: true; spacing: 6
-                        Seg { label: "30 fps"; on: root.fps === 30; onTapped: root.fps = 30 }
-                        Seg { label: "60 fps"; on: root.fps === 60; onTapped: root.fps = 60 }
-                        Seg { label: "120 fps"; on: root.fps === 120; onTapped: root.fps = 120 }
-                        Item { implicitWidth: 10; implicitHeight: 1 }
-                        Seg { label: "mp4"; on: root.format === "mp4"; onTapped: root.format = "mp4" }
-                        Seg { label: "mkv"; on: root.format === "mkv"; onTapped: root.format = "mkv" }
-                        Seg { label: "webm"; on: root.format === "webm"; onTapped: root.format = "webm" }
-                        Item { implicitWidth: 10; implicitHeight: 1 }
-                        Seg { label: "cpu"; on: root.encoder === "sw"; onTapped: root.encoder = "sw" }
-                        Seg { label: "gpu"; on: root.encoder === "hw"; onTapped: root.encoder = "hw"
-                              enabled: root.hwAvail }
-                    }
-                    Text {
+                Group {
+                    title: "Quality"
+                    Line { label: "Frame rate"
+                        Segmented { value: root.fps; onPicked: (v) => root.fps = v
+                            options: [{ label: "30", value: 30 }, { label: "60", value: 60 }, { label: "120", value: 120 }] } }
+                    Line { label: "Format"
+                        Segmented { value: root.format; onPicked: (v) => root.format = v
+                            options: [{ label: "MP4", value: "mp4" }, { label: "MKV", value: "mkv" }, { label: "WebM", value: "webm" }] } }
+                    Line { label: "Encoder"
+                        Segmented { value: root.encoder; onPicked: (v) => root.encoder = v
+                            options: [{ label: "CPU", value: "sw" }, { label: "GPU", value: "hw", enabled: root.hwAvail }] } }
+                    IndText {
                         Layout.fillWidth: true; wrapMode: Text.WordWrap
                         // mkv is the honest recommendation, not a preference: mp4 keeps its index
                         // at the end of the file, so a recording that dies with the machine is a
                         // write-off. mkv can be cut short and still plays.
                         text: root.format === "mp4"
-                              ? "mp4 finalises its index on stop — a crash mid-recording loses the file. mkv survives that."
+                              ? "MP4 writes its index when you stop, so a crash mid-recording loses the file. MKV survives that."
                               : root.format === "webm"
-                              ? "webm/VP9 is the slowest to encode; on a long capture the CPU may not keep up."
-                              : "mkv keeps every frame written so far, even if the recording never stops cleanly."
-                        color: theme.faint; font.pixelSize: 10; font.family: Tok.mono; lineHeight: 1.3
+                              ? "WebM (VP9) is the slowest to encode; on a long capture the CPU may not keep up."
+                              : "MKV keeps every frame written so far, even if the recording never stops cleanly."
+                        sz: Tok.tData; color: Tok.ink3; lineHeight: 1.25
                     }
                 }
 
-                // ---- countdown ----
-                RowLayout {
-                    Layout.fillWidth: true; spacing: 6
-                    Head { text: "COUNTDOWN"; Layout.rightMargin: 4 }
-                    Seg { label: "off"; on: root.countdown === 0; onTapped: root.countdown = 0 }
-                    Seg { label: "3s";  on: root.countdown === 3; onTapped: root.countdown = 3 }
-                    Seg { label: "5s";  on: root.countdown === 5; onTapped: root.countdown = 5 }
-                    Item { Layout.fillWidth: true }
-                    Text {
-                        // whatever the script will really use, not a hardcoded guess
-                        text: root.dir !== "" ? root.dir : "~/Videos/Recordings"
-                        color: theme.faint; font.pixelSize: 10; font.family: Tok.mono
-                        elide: Text.ElideLeft; Layout.maximumWidth: 220
+                // ---- countdown + destination ----
+                Group {
+                    title: "Start"
+                    Line { label: "Countdown"
+                        Segmented { value: root.countdown; onPicked: (v) => root.countdown = v
+                            options: [{ label: "Off", value: 0 }, { label: "3 s", value: 3 }, { label: "5 s", value: 5 }] } }
+                    Line { label: "Saved to"
+                        Rectangle {
+                            implicitWidth: dirRow.implicitWidth + 16; implicitHeight: 26; radius: 13
+                            color: dirMa.containsMouse ? Tok.raised : Tok.sunken
+                            border.width: 1; border.color: root.groupRule
+                            Row {
+                                id: dirRow; anchors.centerIn: parent; spacing: 6
+                                Sym { anchors.verticalCenter: parent.verticalCenter; text: "folder_open"; sz: 14; color: dirMa.containsMouse ? Tok.accent : Tok.ink3 }
+                                IndText { anchors.verticalCenter: parent.verticalCenter; text: root.dir !== "" ? root.dir : "~/Videos/Recordings"; mono: true
+                                    sz: Tok.tData; color: Tok.ink2; elide: Text.ElideLeft; width: Math.min(implicitWidth, 230) }
+                            }
+                            MouseArea {
+                                id: dirMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                onClicked: {
+                                    var d = root.dir !== "" ? root.dir : "$HOME/Videos/Recordings";
+                                    Quickshell.execDetached(["sh", "-c", "mkdir -p \"" + d + "\" && xdg-open \"" + d + "\""]);
+                                    root.close();
+                                }
+                            }
+                        }
                     }
                 }
 
                 // ---- actions ----
                 RowLayout {
-                    Layout.fillWidth: true; spacing: 8
-                    Text {
+                    Layout.fillWidth: true
+                    Layout.topMargin: Tok.s1
+                    spacing: Tok.s2
+                    IndText {
                         Layout.fillWidth: true
-                        text: root.capture === "region" ? "enter → drag a region" : "enter → record"
-                        color: theme.faint; font.pixelSize: 10; font.family: Tok.mono
+                        text: root.capture === "region" ? "Enter to choose a region and record" : "Enter to record"
+                        sz: Tok.tData; color: Tok.ink3
                     }
-                    TextBtn { label: "cancel"; icon: "close"; onTapped: root.close() }
-                    TextBtn { label: "record"; icon: "fiber_manual_record"; primary: true
-                              enabled: root.wfAvail; onTapped: root.begin() }
+                    Btn { text: "Cancel"; onTapped: root.close() }
+                    Btn { text: "Record"; primary: true; enabled: root.wfAvail; onTapped: root.begin() }
                 }
             }
         }
@@ -546,17 +697,32 @@ Scope {
         mask: Region {}
 
         Rectangle {
+            id: cdDisc
             anchors.centerIn: parent
-            width: 132; height: 132; radius: Tok.rCard
-            color: theme.bg
-            border.width: 2; border.color: theme.a(theme.bad, 0.8)
-            Text {
-                anchors.centerIn: parent
-                text: "" + root.ticking
-                color: theme.text; font.pixelSize: 64; font.family: Tok.mono; font.bold: true
+            width: 148; height: 148; radius: 74
+            color: Tok.bg
+            border.width: 1; border.color: root.groupRule
+            // the second draining away round the rim
+            Canvas {
+                id: cdRing
+                anchors.fill: parent
+                property real p: 0
+                NumberAnimation on p { id: cdSweep; from: 1; to: 0; duration: 1000; running: false }
+                onPChanged: requestPaint()
+                onPaint: {
+                    var c = getContext("2d"), r = width / 2 - 5;
+                    c.clearRect(0, 0, width, height);
+                    c.lineWidth = 5; c.lineCap = "round";
+                    c.beginPath(); c.arc(width / 2, height / 2, r, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * p);
+                    c.strokeStyle = Tok.crit; c.stroke();
+                }
             }
-            scale: root.ticking > 0 ? 1 : 0.8
-            Behavior on scale { NumberAnimation { duration: 160; easing.type: Easing.OutBack } }
+            IndText { anchors.centerIn: parent; text: "" + root.ticking; sz: 64; font.weight: Font.DemiBold
+                font.features: ({ "tnum": 1 }) }
+        }
+        Connections {
+            target: root
+            function onTickingChanged() { if (root.ticking > 0) cdSweep.restart() }
         }
     }
 }

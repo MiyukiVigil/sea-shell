@@ -24,8 +24,6 @@ Rectangle {
         sz: 10
         text: c.text
         font.weight: 600
-        font.letterSpacing: 0.9
-        font.capitalization: Font.AllUppercase
         color: c.tone === "ok"     ? Tok.ok
              : c.tone === "warn"   ? Tok.warn
              : c.tone === "crit"   ? Tok.crit

@@ -40,7 +40,8 @@ if [ -z "$text" ]; then
     exit 0
 fi
 
-printf '%s' "$text" | wl-copy
+# Prefix so the clipboard desktop widget can mark OCR grabs distinctly from normal copies.
+printf 'OCR %s' "$text" | wl-copy
 
 # preview the first couple of lines so it is obvious WHAT got copied
 preview="$(printf '%s' "$text" | head -c 140)"

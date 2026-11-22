@@ -1,0 +1,15 @@
+[package]
+name = "sea-fand"
+version = "0.1.0"
+edition = "2024"
+description = "Acer fan curve for sea-shell. Same behaviour as sea-fand.py."
+publish = false
+
+[dependencies]
+libc = "0.2"
+
+[profile.release]
+lto = "thin"
+codegen-units = 4
+strip = true
+opt-level = 3

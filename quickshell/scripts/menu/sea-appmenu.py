@@ -334,8 +334,16 @@ def find_menubar(node, depth=0):
             return node
         if depth > MAX_BAR_DEPTH:
             return None
-        for i in range(min(node.get_child_count(), 60)):
-            c = node.get_child_at_index(i)
+        kids = children(node)[:60]
+        # One process can own several windows. Search the active frame first.
+        def active_frame(child):
+            try:
+                states = child.get_state_set()
+                return states.contains(Atspi.StateType.ACTIVE) or states.contains(Atspi.StateType.FOCUSED)
+            except Exception:
+                return False
+        kids.sort(key=lambda child: not active_frame(child))
+        for c in kids:
             if c is not None:
                 r = find_menubar(c, depth + 1)
                 if r is not None:
@@ -956,13 +964,15 @@ def invoke(path, pid=None):
     win = focused()
     if pid is not None:
         clients = hyprctl("clients") or []
-        match = next((c for c in clients if c.get("pid") == pid), None)
+        match = hyprctl("activewindow")
+        if not isinstance(match, dict) or match.get("pid") != pid:
+            match = next((c for c in clients if c.get("pid") == pid), None)
         if match is None:
             return False
         win = {"pid": pid, "class": match.get("class", "")}
     if win is None:
         return False
-    dm = dbm_for_pid(win["pid"], None if pid is not None else x11_active_window())
+    dm = dbm_for_pid(win["pid"], x11_active_window() if is_xwayland(win["pid"]) else None)
     if dm is not None and dbm_invoke(dm, path):
         return True
     app = app_for_pid(win["pid"])
@@ -1046,13 +1056,15 @@ def submenu(path, pid=None):
     win = focused()
     if pid is not None:
         clients = hyprctl("clients") or []
-        match = next((c for c in clients if c.get("pid") == pid), None)
+        match = hyprctl("activewindow")
+        if not isinstance(match, dict) or match.get("pid") != pid:
+            match = next((c for c in clients if c.get("pid") == pid), None)
         if match is None:
             return {"path": path, "items": [], "ok": False}
         win = {"pid": pid, "class": match.get("class", "")}
     if win is None:
         return {"path": path, "items": [], "primed": False, "ok": False}
-    dm = dbm_for_pid(win["pid"], None if pid is not None else x11_active_window())
+    dm = dbm_for_pid(win["pid"], x11_active_window() if is_xwayland(win["pid"]) else None)
     if dm is not None:
         items = dbm_submenu(dm, path)
         if items:
@@ -1390,6 +1402,13 @@ def dbm_find(target, path):
         remaining = remaining[len(label):]
         if remaining.startswith("/"): remaining = remaining[1:]
         node = found
+        if remaining and node[1].get("children-display") == "submenu":
+            dbus_call(target[0], target[1], "com.canonical.dbusmenu", "AboutToShow",
+                      (int(node[0]),), "(i)")
+            fresh = dbus_call(target[0], target[1], "com.canonical.dbusmenu", "GetLayout",
+                              (int(node[0]), -1, []), "(iias)", timeout=4000)
+            if fresh:
+                node = fresh[1]
     try:
         return int(node[0])
     except Exception:
@@ -1780,7 +1799,10 @@ def registrar_menu(pid, xid):
     # that a perfectly well registered window has no menu.
     if xid is not None:
         r = dbus_call(REG_NAME, REG_PATH, REG_NAME, "GetMenuForWindow", (xid,), "(u)")
-        if r and r[0] and r[1] and r[1] != "/":
+        # The same check as above, for the same reason. It was missing on this side, which is
+        # the side --submenu and --invoke use, so Firefox's File could draw VS Code's rows
+        # and clicking one fired it in VS Code.
+        if r and r[0] and r[1] and r[1] != "/" and owner_pid(r[0]) == pid:
             return (r[0], r[1])
     r = dbus_call(REG_NAME, REG_PATH, REG_NAME, "GetMenus", (), "()")
     if r:
@@ -2358,7 +2380,10 @@ def daemon():
                 addrmap[addr.lower()] = (snap["pid"], snap.get("class"))
                 if len(addrmap) > 128:
                     addrmap.clear()
-            if snap.get("menus") and snap.get("pid"):
+            # "This one has no menu" is worth remembering as much as a menu is. Finding that out
+            # is the slowest answer there is (~230ms asking the accessibility bus for Twintail),
+            # and the bar has nothing to show for as long as it takes, on every single visit.
+            if snap.get("pid"):
                 snapcache[snap["pid"]] = snap
                 if len(snapcache) > 64:
                     live = set()
@@ -2389,6 +2414,13 @@ def daemon():
 
 
 def main(argv):
+    if "--registrar" in argv:
+        # Prefer the tiny Gio-only sidecar; this path remains as a fallback.
+        # Do NOT Atspi.init() — that alone is tens of MB of RSS.
+        registrar_start()
+        while True:
+            time.sleep(3600)
+        return 0
     # GTK applications only publish their menus when accessibility is enabled.
     # Restore it on startup so a session reset does not silently disable menus.
     try:

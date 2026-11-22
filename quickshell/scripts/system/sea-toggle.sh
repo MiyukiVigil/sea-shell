@@ -10,6 +10,14 @@ pidf="/tmp/sea-${name}.pid"
 if [ "$name" = power ] && qs -c sea-shell ipc call power toggle >/dev/null 2>&1; then
     exit 0
 fi
+# so is the dashboard: opening the resident copy is instant, a new process is not
+if [ "$name" = Dashboard ] && qs -c sea-shell ipc call dashboard toggle >/dev/null 2>&1; then
+    exit 0
+fi
+# and the screenshot picker
+if [ "$name" = screenshot ] && qs -c sea-shell ipc call screenshot toggle >/dev/null 2>&1; then
+    exit 0
+fi
 
 if [ -f "$pidf" ] && kill -0 "$(cat "$pidf" 2>/dev/null)" 2>/dev/null; then
     kill "$(cat "$pidf")" 2>/dev/null

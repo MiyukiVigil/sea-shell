@@ -10,6 +10,7 @@
 #
 # Usage:  sea-bar-supervisor.sh             start supervising (from hyprland.lua)
 #         sea-bar-supervisor.sh --restart   stop the old supervisor+bar, start fresh
+#         sea-bar-supervisor.sh --stop      stop the running supervisor+bar and helpers
 #
 # The bar is killed via the child PID we own, never `pkill` — a pattern like
 # 'qs -c sea-shell' also matches the very sh -c that runs it, which has bitten this
@@ -22,17 +23,18 @@ PIDFILE="${XDG_RUNTIME_DIR:-/tmp}/sea-shell-supervisor.pid"
 LOCK="${XDG_RUNTIME_DIR:-/tmp}/sea-shell-supervisor-${WAYLAND_DISPLAY:-default}.lock"
 LOG="${XDG_RUNTIME_DIR:-/tmp}/sea-shell-supervisor.log"
 
-# ---- restart: hand over to a fresh supervisor -------------------------------
-if [ "$1" = "--restart" ]; then
+# ---- stop / restart: stop the running supervisor+bar cleanly ----------------
+if [ "$1" = "--stop" ] || [ "$1" = "--restart" ]; then
     if [ -f "$PIDFILE" ]; then
         old=$(cat "$PIDFILE" 2>/dev/null)
         # TERM makes the old supervisor kill its bar and stand down (trap below)
         [ -n "$old" ] && kill "$old" 2>/dev/null
         i=0
-        while [ -n "$old" ] && kill -0 "$old" 2>/dev/null && [ "$i" -lt 20 ]; do
+        while [ -n "$old" ] && kill -0 "$old" 2>/dev/null && [ "$i" -lt 30 ]; do
             i=$((i + 1)); sleep 0.1
         done
     fi
+    [ "$1" = "--stop" ] && exit 0
     # through sh: the script is installed without the execute bit, and a failed exec here
     # would leave the old bar stopped with nothing taking its place
     exec sh "$0"
@@ -47,11 +49,28 @@ flock -n 9 || exit 0
 echo $$ > "$PIDFILE"
 
 child=""
+# Helpers the bar spawns and that outlive it (they are not in its process group),
+# so a restart used to leave a gamepad/panel/appmenu behind and start another.
+reap_helpers() {
+    pkill -x sea-gamepad 2>/dev/null || true
+    pkill -x sea-panel 2>/dev/null || true
+    pkill -x sea-appmenu 2>/dev/null || true
+    pkill -f 'sea-kdeconnect\.py' 2>/dev/null || true
+    # only the wallpaper player this bar started (pidfile or our cached wallvideo), not a user's own mpvpaper
+    pidf="${XDG_RUNTIME_DIR:-/tmp}/sea-wallpaper-play.pid"
+    if [ -f "$pidf" ]; then
+        kill "$(cat "$pidf" 2>/dev/null)" 2>/dev/null || true
+        rm -f "$pidf"
+    fi
+    pkill -f 'mpvpaper.*sea-shell/wallvideo' 2>/dev/null || true
+    pkill -KILL -f 'mpvpaper.*sea-shell/wallvideo' 2>/dev/null || true
+}
 cleanup() {
     if [ -n "$child" ]; then
         kill "$child" 2>/dev/null
         wait "$child" 2>/dev/null
     fi
+    reap_helpers
     [ "$(cat "$PIDFILE" 2>/dev/null)" = "$$" ] && rm -f "$PIDFILE"
     exit 0
 }
@@ -74,6 +93,21 @@ for v in $(env | sed -n 's/^\(VSCODE_[A-Z_]*\)=.*/\1/p'); do unset "$v"; done
 # LD_LIBRARY_PATH pointed at an editor's bundled electron would break any app that loads
 # a different one; the bar itself has never needed it.
 case "$LD_LIBRARY_PATH" in *code*|*electron*) unset LD_LIBRARY_PATH ;; esac
+# Packaged editors (Cursor's AppImage layout) set XDG_DATA_DIRS to their own share dir
+# alone, which hides /usr/share: the launcher then finds no icon theme and no system
+# .desktop files, and every app falls back to a letter. Drop editor entries from it and
+# from PATH, and keep the spec default dirs in.
+unset APPDIR APPIMAGE ARGV0 OWD
+strip_editor_dirs() {
+    printf '%s' "$1" | tr ':' '\n' | grep -vE '^$|/opt/cursor|/\.mount_|/(code|cursor|electron)[^/]*/' | paste -sd: -
+}
+data_dirs=$(strip_editor_dirs "$XDG_DATA_DIRS")
+for d in /usr/local/share /usr/share; do
+    case ":$data_dirs:" in *":$d:"*) ;; *) data_dirs="${data_dirs:+$data_dirs:}$d" ;; esac
+done
+XDG_DATA_DIRS="$data_dirs"
+PATH=$(strip_editor_dirs "$PATH")
+export XDG_DATA_DIRS PATH
 
 # A long-lived editor or supervisor can retain a retired compositor signature.
 # Resolve the live instance for this display before each launch, including respawns.
@@ -91,7 +125,35 @@ except (ValueError, KeyError): pass
     fi
 }
 
+# GLVND loads every vendor's EGL into every process, so on a hybrid laptop the bar carried
+# NVIDIA's libraries (about 30 MB) while drawing on the integrated GPU. Only when there is a
+# Mesa GPU to draw on: on an NVIDIA-only machine this would leave no driver at all.
+mesa_egl=/usr/share/glvnd/egl_vendor.d/50_mesa.json
+if [ -z "$__EGL_VENDOR_LIBRARY_FILENAMES" ] && [ -f "$mesa_egl" ] &&
+    readlink /sys/class/drm/renderD*/device/driver 2>/dev/null | grep -qE '/(i915|xe|amdgpu)$'; then
+    export __EGL_VENDOR_LIBRARY_FILENAMES="$mesa_egl"
+fi
+
+# Quickshell links libjemalloc.so.2. On high-core-count CPUs jemalloc defaults to 4*ncpus
+# arenas (64+ arenas) with 10s lazy decay and no background thread, stranding freed panel
+# heap in idle arenas. Keep arena count small and return dirty pages promptly.
+if [ -z "${MALLOC_CONF:-}" ]; then
+    export MALLOC_CONF="narenas:2,dirty_decay_ms:1000,muzzy_decay_ms:0,background_thread:true"
+fi
+
+# Run quickshell through a symlink named `seashell` so the kernel sets /proc/<pid>/comm
+# (shown by ps, btop, htop, and the Dashboard) to `seashell` instead of `qs`.
+# Quickshell IPC (`qs -c sea-shell ipc ...`) keys on the config path, not argv[0].
+SEA_BIN="${XDG_RUNTIME_DIR:-/tmp}/seashell"
+qs_target=$(command -v quickshell || command -v qs || true)
+if [ -n "$qs_target" ]; then
+    ln -sfn "$qs_target" "$SEA_BIN" 2>/dev/null || SEA_BIN="$qs_target"
+else
+    SEA_BIN="qs"
+fi
+
 fails=0
+reap_helpers
 while :; do
     refresh_session
     start=$(date +%s)
@@ -99,11 +161,17 @@ while :; do
     # (sea-kdeconnect.py, the cliphist wl-paste watchers) inherits it otherwise and
     # keeps the lock held long after the bar is gone, so every later supervisor sees
     # a taken lock and exits silently — leaving no bar at all.
-    qs -n -c sea-shell 9<&- &
+    # The gaming session (hypr/gaming.lua) runs big picture on its own instead of the bar.
+    if [ "$SEA_SESSION" = gaming ]; then
+        "$SEA_BIN" -n -p "$HOME/.config/quickshell/sea-shell/gaming.qml" 9<&- &
+    else
+        "$SEA_BIN" -n -c sea-shell 9<&- &
+    fi
     child=$!
     wait "$child"
     rc=$?
     child=""
+    reap_helpers
     run=$(( $(date +%s) - start ))
 
     # 143 = SIGTERM: something killed the bar deliberately. Respawn it anyway —

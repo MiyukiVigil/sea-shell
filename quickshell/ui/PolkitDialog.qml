@@ -52,6 +52,9 @@ Scope {
         return "" + (id.displayName || id.name || id.toString());
     }
     readonly property bool asRoot: dlg.who === "root"
+    readonly property color groupFill: Tok.sunken
+    readonly property color groupRule: Tok.alpha(Tok.ink, Tok.light ? 0.085 : 0.11)
+    readonly property color rowHover:  Tok.alpha(Tok.ink, Tok.light ? 0.05 : 0.08)
 
     PanelWindow {
         id: win
@@ -70,65 +73,67 @@ Scope {
             opacity: dlg.asking ? 1 : 0
             Behavior on opacity { NumberAnimation { duration: Tok.reducedMotion ? 0 : 140; easing.type: Easing.OutCubic } }
 
-            Rectangle { anchors.fill: parent; color: Qt.rgba(0, 0, 0, 0.55)
+            Rectangle { anchors.fill: parent; color: Qt.rgba(0, 0, 0, Tok.light ? 0.30 : 0.50)
                 MouseArea { anchors.fill: parent } }      // a click outside does not cancel by accident
 
+            // a centred sheet in settings' language, as macOS asks for an administrator: who,
+            // what, the field, then two equal buttons
             Rectangle {
                 id: card
                 anchors.centerIn: parent
                 anchors.verticalCenterOffset: dlg.asking ? 0 : 12
                 Behavior on anchors.verticalCenterOffset { NumberAnimation { duration: Tok.reducedMotion ? 0 : 180; easing.type: Easing.OutCubic } }
-                width: 440; height: body.implicitHeight + 48
-                radius: 24; color: Tok.bg; border.width: 1; border.color: Tok.ruleHard
+                scale: dlg.asking ? 1 : 0.97
+                Behavior on scale { NumberAnimation { duration: Tok.reducedMotion ? 0 : 180; easing.type: Easing.OutCubic } }
+                width: 380; height: body.implicitHeight + 52
+                radius: Tok.rCard + 6; color: Tok.surface
+                border.width: 1; border.color: dlg.groupRule
 
                 Column {
                     id: body
-                    x: 24; y: 24; width: parent.width - 48
-                    spacing: 16
+                    x: 26; y: 30; width: parent.width - 52
+                    spacing: 14
 
                     // who is being asked for: your face, or a shield when it is another account
-                    Row {
-                        spacing: 14
+                    Item {
+                        width: parent.width; height: 68
                         Rectangle {
-                            width: 52; height: 52; radius: 26; color: Tok.sunken
+                            anchors.horizontalCenter: parent.horizontalCenter
+                            width: 68; height: 68; radius: 34; color: dlg.groupFill
                             Text { anchors.centerIn: parent; text: dlg.asRoot ? "shield_person" : "person"
-                                font.family: "Material Symbols Outlined"; font.pixelSize: 26; color: Tok.ink3 }
+                                font.family: "Material Symbols Outlined"; font.pixelSize: 32; color: Tok.ink3 }
                             Image { id: faceImg; anchors.fill: parent; visible: false
                                 source: !dlg.asRoot && dlg.profile.avatar ? "file://" + dlg.profile.avatar : ""
-                                fillMode: Image.PreserveAspectCrop; asynchronous: true; sourceSize.width: 128 }
+                                fillMode: Image.PreserveAspectCrop; asynchronous: true; sourceSize.width: 160 }
                             MultiEffect { anchors.fill: parent; source: faceImg; visible: faceImg.status === Image.Ready
                                 maskEnabled: true; maskSource: faceMask; maskThresholdMin: 0.5; maskSpreadAtMin: 1 }
-                            Rectangle { id: faceMask; anchors.fill: parent; radius: 26; visible: false; layer.enabled: true }
+                            Rectangle { id: faceMask; anchors.fill: parent; radius: 34; visible: false; layer.enabled: true }
                             // the small lock badge says what kind of prompt this is
-                            Rectangle { anchors.right: parent.right; anchors.bottom: parent.bottom; anchors.margins: -3
-                                width: 22; height: 22; radius: 11; color: Tok.accent; border.width: 2; border.color: Tok.bg
-                                Text { anchors.centerIn: parent; text: "lock"; font.family: "Material Symbols Outlined"; font.pixelSize: 13; color: Tok.accentInk } }
-                        }
-                        Column {
-                            anchors.verticalCenter: parent.verticalCenter
-                            spacing: 3
-                            Text { text: "Allow this change?"; color: Tok.ink; font.family: Tok.sans; font.pixelSize: 17; font.weight: Font.DemiBold }
-                            Text { text: "Enter the password for " + dlg.who; color: Tok.ink3; font.family: Tok.sans; font.pixelSize: 12 }
+                            Rectangle { anchors.right: parent.right; anchors.bottom: parent.bottom; anchors.margins: -2
+                                width: 26; height: 26; radius: 13; color: Tok.accent; border.width: 3; border.color: Tok.bg
+                                Text { anchors.centerIn: parent; text: "lock"; font.family: "Material Symbols Outlined"; font.pixelSize: 14; color: Tok.accentInk } }
                         }
                     }
-
-                    Text {
-                        width: parent.width
-                        // with the program shown whole below, the sentence need not repeat it
-                        text: !dlg.flow ? "" : dlg.program === "" ? dlg.flow.message
-                            : /super ?user/i.test(dlg.flow.message) ? "This will run as the super user:" : "This will run:"
-                        wrapMode: Text.Wrap; color: Tok.ink2; font.family: Tok.sans; font.pixelSize: 13; lineHeight: 1.15
+                    Column {
+                        width: parent.width; spacing: 4
+                        Text { width: parent.width; horizontalAlignment: Text.AlignHCenter
+                            text: "Allow this change?"; color: Tok.ink; font.family: Tok.sans; font.pixelSize: 17; font.weight: Font.DemiBold }
+                        Text { width: parent.width; horizontalAlignment: Text.AlignHCenter; wrapMode: Text.Wrap
+                            text: !dlg.flow ? "" : dlg.program === "" ? dlg.flow.message
+                                : /super ?user/i.test(dlg.flow.message) ? "This will run as the super user."
+                                : "Enter the password for " + dlg.who + " to run it."
+                            color: Tok.ink2; font.family: Tok.sans; font.pixelSize: 13; lineHeight: 1.15 }
                     }
                     // the program, whole, so you can see exactly what will run
                     Rectangle {
                         visible: dlg.program !== ""
-                        width: parent.width; height: progT.implicitHeight + 18; radius: 12
-                        color: Tok.sunken; border.width: 1; border.color: Tok.rule
+                        width: parent.width; height: progT.implicitHeight + 18; radius: 10
+                        color: dlg.groupFill
                         Text {
                             id: progT
                             x: 12; anchors.verticalCenter: parent.verticalCenter; width: parent.width - 24
-                            text: "<span style='color:" + Tok.accent + "'>$</span> " + dlg.program
-                            textFormat: Text.StyledText
+                            text: dlg.program
+                            horizontalAlignment: implicitWidth < width ? Text.AlignHCenter : Text.AlignLeft
                             wrapMode: Text.WrapAnywhere; color: Tok.ink; font.family: Tok.mono; font.pixelSize: 12
                         }
                     }
@@ -136,13 +141,13 @@ Scope {
                     // the field: real text input (paste works), dots drawn by Qt
                     Item {
                         id: fieldBox
-                        width: parent.width; height: 46
+                        width: parent.width; height: 42
                         property real shakeX: 0
                         Rectangle {
-                            x: fieldBox.shakeX; width: parent.width; height: parent.height; radius: 23
-                            color: Tok.surface
+                            x: fieldBox.shakeX; width: parent.width; height: parent.height; radius: 12
+                            color: dlg.groupFill
                             border.width: field.activeFocus || dlg.fails > 0 ? 2 : 1
-                            border.color: dlg.fails > 0 && field.text === "" ? Tok.crit : field.activeFocus ? Tok.accent : Tok.ruleHard
+                            border.color: dlg.fails > 0 && field.text === "" ? Tok.crit : field.activeFocus ? Tok.accent : dlg.groupRule
                             Behavior on border.color { ColorAnimation { duration: Tok.mFast } }
                             TextInput {
                                 id: field
@@ -214,33 +219,31 @@ Scope {
                         }
                     }
 
-                    Item {
-                        width: parent.width; height: 38
-                        Text {
-                            anchors.left: parent.left; anchors.verticalCenter: parent.verticalCenter
-                            text: dlg.details ? "Hide details" : "Details"
-                            color: detMa.containsMouse ? Tok.accent : Tok.ink3; font.family: Tok.sans; font.pixelSize: 12
-                            MouseArea { id: detMa; anchors.fill: parent; anchors.margins: -6; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
-                                onClicked: dlg.details = !dlg.details }
+                    Text {
+                        anchors.horizontalCenter: parent.horizontalCenter
+                        text: dlg.details ? "Hide details" : "Details"
+                        color: detMa.containsMouse ? Tok.accent : Tok.ink3; font.family: Tok.sans; font.pixelSize: 12
+                        MouseArea { id: detMa; anchors.fill: parent; anchors.margins: -6; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                            onClicked: dlg.details = !dlg.details }
+                    }
+                    // two equal buttons, the default one filled
+                    Row {
+                        width: parent.width; spacing: 10
+                        Rectangle {
+                            width: (parent.width - 10) / 2; height: 36; radius: 18
+                            color: cMa.containsMouse ? dlg.rowHover : dlg.groupFill
+                            Behavior on color { ColorAnimation { duration: Tok.mFast } }
+                            Text { anchors.centerIn: parent; text: "Cancel"; color: Tok.ink; font.family: Tok.sans; font.pixelSize: 13; font.weight: Font.Medium }
+                            MouseArea { id: cMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: dlg.cancel() }
                         }
-                        Row {
-                            anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
-                            spacing: 8
-                            Rectangle {
-                                width: 96; height: 38; radius: 19
-                                color: cMa.containsMouse ? Tok.sunken : Tok.surface; border.width: 1; border.color: Tok.ruleHard
-                                Text { anchors.centerIn: parent; text: "Cancel"; color: Tok.ink; font.family: Tok.sans; font.pixelSize: 13 }
-                                MouseArea { id: cMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: dlg.cancel() }
-                            }
-                            Rectangle {
-                                width: 112; height: 38; radius: 19
-                                readonly property bool ready: field.text !== "" && !dlg.busy
-                                color: ready ? (aMa.containsMouse ? Qt.lighter(Tok.accent, 1.08) : Tok.accent) : Tok.sunken
-                                Behavior on color { ColorAnimation { duration: Tok.mFast } }
-                                Text { anchors.centerIn: parent; text: dlg.busy ? "Checking…" : "Allow"
-                                    color: parent.ready ? Tok.accentInk : Tok.ink3; font.family: Tok.sans; font.pixelSize: 13; font.weight: Font.DemiBold }
-                                MouseArea { id: aMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: dlg.submit() }
-                            }
+                        Rectangle {
+                            width: (parent.width - 10) / 2; height: 36; radius: 18
+                            readonly property bool ready: field.text !== "" && !dlg.busy
+                            color: ready ? (aMa.containsMouse ? Qt.lighter(Tok.accent, 1.08) : Tok.accent) : dlg.groupFill
+                            Behavior on color { ColorAnimation { duration: Tok.mFast } }
+                            Text { anchors.centerIn: parent; text: dlg.busy ? "Checking…" : "Allow"
+                                color: parent.ready ? Tok.accentInk : Tok.ink3; font.family: Tok.sans; font.pixelSize: 13; font.weight: Font.DemiBold }
+                            MouseArea { id: aMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: dlg.submit() }
                         }
                     }
                 }

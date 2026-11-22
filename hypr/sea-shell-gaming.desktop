@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=sea-shell Gaming
+Comment=Big picture mode only, for controllers and TVs
+Exec=/usr/local/bin/sea-gaming-session
+TryExec=/usr/local/bin/sea-gaming-session
+Type=Application
+DesktopNames=Hyprland
+Keywords=gaming;steam;console;bigpicture;

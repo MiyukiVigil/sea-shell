@@ -3,10 +3,11 @@
 #
 #   sea-perf.sh auto | quiet | max | status
 #
-#   auto    balanced profile, fans on the firmware's own curve (sea-fancurve auto)
-#   quiet   balanced profile, low fancontrol curve (sea-fancurve quiet)
-#   max     performance profile, fans pinned at full speed (sea-fancurve max)
-#   status  prints auto, quiet, max or custom, read from fancontrol and the fan's pwm mode
+#   auto    balanced profile, fans follow temperature smoothly (sea-fand)
+#   quiet   power saver profile, CPU capped, slow fans. The firmware will not let the fans run
+#           below its own curve, so less heat is what actually makes this quieter
+#   max     performance profile, fast fans, full speed once hot
+#   status  prints auto, quiet, max or custom, read from sea-fand or the fan's pwm mode
 #
 # The last preset set is saved to ~/.config/sea-shell/gaming-fans, and game mode applies it
 # when a game starts (sea-gamemode.sh).
@@ -19,6 +20,10 @@
 HELPER=/usr/local/bin/sea-fancurve
 
 status() {
+    if systemctl is-active -q sea-fand; then
+        cat /var/lib/sea-fan/mode 2>/dev/null || echo auto
+        return
+    fi
     if systemctl is-active -q fancontrol; then
         pwm=$(sed -n 's/^MAXPWM=[^=]*=\([0-9]*\).*/\1/p' /etc/fancontrol 2>/dev/null)
         [ "$pwm" = 120 ] && echo quiet || echo custom
@@ -33,7 +38,8 @@ status() {
 }
 
 case "$1" in
-    auto|quiet) prof=balanced ;;
+    auto)       prof=balanced ;;
+    quiet)      prof=power-saver ;;
     max)        prof=performance ;;
     status)     status; exit 0 ;;
     *)          echo "usage: $0 auto|quiet|max|status" >&2; exit 2 ;;

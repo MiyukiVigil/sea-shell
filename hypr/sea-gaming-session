@@ -1,0 +1,5 @@
+#!/bin/sh
+# sea-shell — the login screen's "sea-shell Gaming" entry runs this (installed to
+# /usr/local/bin by install.sh). SDDM passes Exec= through an unquoted $@, so the entry
+# itself can carry no quotes or $HOME; the real launcher lives in the user's config.
+exec sh "$HOME/.config/quickshell/sea-shell/sea-gaming-session.sh"

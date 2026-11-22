@@ -29,7 +29,12 @@ PanelWindow {
     readonly property real reveal: Math.max(motion.progress, pull)
     SurfaceMotion { id: motion; opened: drawer.opened; reduced: Tok.reducedMotion }
     Behavior on pull { enabled: !drawer.dragging; NumberAnimation { duration: Tok.mFast; easing.type: Easing.OutCubic } }
-    anchors { top: true; bottom: true; left: true; right: true }
+    // At rest only the edge tab is there, so the window is only as big as the tab. A full-screen
+    // surface holds full-screen buffers even when nothing on it is drawn.
+    readonly property bool resting: !opened && !motion.presenting && !dragging && pull <= 0
+    anchors { top: !resting; bottom: true; left: true; right: !resting }
+    implicitWidth: 220 * ui
+    implicitHeight: 40 * ui
     color: "transparent"
     WlrLayershell.namespace: "sea-shell:widgets"
     WlrLayershell.layer: WlrLayer.Overlay
@@ -40,11 +45,18 @@ PanelWindow {
     // widget is being carried, the whole screen does, so the drop is seen wherever it lands.
     mask: Region { item: drawer.opened ? (drawer.carrying ? drawer.contentItem : drawer.tucked ? tuckPill : sheet) : edgeTab }
 
+    // the photo widget's folders, as DesktopItem resolves a widget's `src`
+    function photoDirOf(src) {
+        var h = Quickshell.env("HOME");
+        return src === "pictures" ? h + "/Pictures" : src === "screenshots" ? h + "/Pictures/Screenshots" : h + "/Pictures/wallpapers";
+    }
+    WallStills { id: stills; active: drawer.opened && drawer.tab === "photo" }
     component Widget: MaterialWidget {
         readings: drawer.readings; player: drawer.player; viz: drawer.viz
         active: drawer.opened; reducedMotion: Tok.reducedMotion; uiFont: Tok.sans
         surface: Tok.surface; container: Tok.accentWash; accent: Tok.accent
         ink: Tok.ink; secondary: Tok.ink2; accentInk: Tok.accentInk
+        warn: Tok.warn; crit: Tok.crit; ok: Tok.ok
     }
 
     // ---------- carrying a widget out ----------
@@ -67,12 +79,15 @@ PanelWindow {
         var cmd = ["python3", Qt.resolvedUrl("sea-desktop.py").toString().replace("file://", ""), "--add-" + c.kind,
                    "--x", "" + fx.toFixed(4), "--y", "" + fy.toFixed(4), "--size", c.size];
         if (c.face) cmd.push("--face", c.face);
+        if (c.src) cmd.push("--src", c.src);
         Quickshell.execDetached(cmd);
     }
 
     Item { anchors.fill: parent; focus: drawer.opened; Keys.onEscapePressed: drawer.requested(false) }
-    // a light veil, so the desktop is still there to drop onto
+    // a light veil, so the desktop is still there to drop onto (never paint while the surface is still
+    // at its resting 220x40 bottom-left corner size, or a grey rectangle flashes in from bottom-left)
     Rectangle {
+        visible: !drawer.resting && drawer.width > 400 * drawer.ui && drawer.height > 200 * drawer.ui
         anchors.fill: parent; color: Qt.rgba(0, 0, 0, drawer.carrying ? 0.08 : 0.16); opacity: drawer.reveal
         Behavior on color { ColorAnimation { duration: Tok.mFast } }
     }
@@ -99,11 +114,24 @@ PanelWindow {
                  { size: "large", face: "dial", l: "With calendar" } ],
         weather: [ { size: "small", l: "Now" }, { size: "medium", l: "Three days" }, { size: "large", l: "With details" } ],
         system: [ { size: "small", l: "Processor" }, { size: "medium", l: "Gauges" }, { size: "large", l: "With details" } ],
-        media: [ { size: "small", l: "Cover" }, { size: "medium", l: "Player" }, { size: "large", l: "Big cover" } ],
+        media: [ { size: "small", l: "Cover" }, { size: "medium", l: "Player" }, { size: "large", l: "Big cover" },
+                 { size: "large", face: "stage", l: "Now playing" } ],
         calendar: [ { size: "small", l: "Today" }, { size: "medium", l: "Up next" }, { size: "large", l: "Month" } ],
-        battery: [ { size: "small", l: "This computer" }, { size: "medium", l: "Devices" }, { size: "large", l: "With time left" } ] })
+        battery: [ { size: "small", l: "This computer" }, { size: "medium", l: "Devices" }, { size: "large", l: "With time left" } ],
+        network: [ { size: "small", l: "Connection" }, { size: "medium", l: "Traffic" }, { size: "large", l: "Interfaces" } ],
+        notifications: [ { size: "small", l: "Count" }, { size: "medium", l: "Latest" }, { size: "large", l: "Recent" } ],
+        photo: [ { size: "small", src: "wallpapers", l: "Wallpapers" }, { size: "medium", src: "wallpapers", l: "Wide" },
+                 { size: "large", src: "wallpapers", l: "Big" }, { size: "small", src: "pictures", l: "Pictures" },
+                 { size: "small", src: "screenshots", l: "Screenshots" } ],
+        quote: [ { size: "small", l: "Short" }, { size: "medium", l: "Quote" }, { size: "large", l: "Big" } ],
+        ai: [ { size: "small", l: "Left" }, { size: "medium", l: "Each plan" }, { size: "large", l: "Resets" } ],
+        github: [ { size: "small", l: "Today" }, { size: "medium", l: "Grid" }, { size: "large", l: "Grid and CI" } ],
+        pomodoro: [ { size: "small", l: "Ring" }, { size: "medium", l: "Session" }, { size: "large", l: "Session" } ],
+        clipboard: [ { size: "small", l: "Latest" }, { size: "medium", l: "Recent" }, { size: "large", l: "History" } ],
+        tide: [ { size: "small", l: "Puddle" }, { size: "medium", l: "Pool" }, { size: "large", l: "Lagoon" } ] })
     Rectangle {
         id: sheet
+        visible: !drawer.resting && drawer.width > 400 * drawer.ui && drawer.height > 200 * drawer.ui
         // the shelf's height: a large widget fills it, small and medium ones stand at 62% of it,
         // the way macOS's gallery sets mixed sizes side by side
         readonly property real shelf: 150 * drawer.ui
@@ -114,7 +142,7 @@ PanelWindow {
         property real shown: drawer.reveal * (drawer.carrying || drawer.tucked ? 0 : 1)
         Behavior on shown { enabled: drawer.opened; NumberAnimation { duration: Tok.mBase; easing.type: Easing.OutCubic } }
         y: drawer.height + 12 - (height + 30 * drawer.ui) * shown
-        radius: 24 * drawer.ui; color: Tok.bg; border.width: 1; border.color: Tok.rule
+        radius: 24 * drawer.ui; color: Tok.bg; border.width: 1; border.color: Tok.alpha(Tok.ink, 0.075)
         enabled: drawer.opened
         MouseArea { anchors.fill: parent }
         ColumnLayout {
@@ -122,28 +150,54 @@ PanelWindow {
             anchors { left: parent.left; right: parent.right; top: parent.top; margins: 16 * drawer.ui }
             spacing: 12 * drawer.ui
             RowLayout {
+                // Lift the whole header above the preview shelf: a tooltip's own
+                // z only orders it within its tab, not above the sibling Flickable.
+                z: 1
                 Layout.fillWidth: true; spacing: 6 * drawer.ui
                 Text { text: "Widgets"; color: Tok.ink; font.family: Tok.sans; font.pixelSize: 17 * drawer.ui; font.bold: true; Layout.rightMargin: 10 * drawer.ui }
                 Repeater {
                     model: [{ k: "clock", l: "Clock", i: "schedule" }, { k: "weather", l: "Weather", i: "partly_cloudy_day" },
                             { k: "system", l: "System", i: "monitor_heart" }, { k: "media", l: "Music", i: "graphic_eq" },
-                            { k: "calendar", l: "Calendar", i: "calendar_month" }, { k: "battery", l: "Batteries", i: "battery_full" }]
+                            { k: "calendar", l: "Calendar", i: "calendar_month" }, { k: "battery", l: "Batteries", i: "battery_full" },
+                            { k: "network", l: "Network", i: "wifi" }, { k: "notifications", l: "Notifications", i: "notifications" },
+                            { k: "photo", l: "Photos", i: "photo_library" }, { k: "quote", l: "Quote", i: "format_quote" },
+                            { k: "ai", l: "AI", i: "auto_awesome" }, { k: "github", l: "GitHub", i: "commit" },
+                            { k: "pomodoro", l: "Focus", i: "timer" }, { k: "clipboard", l: "Clipboard", i: "content_paste" },
+                            { k: "tide", l: "Tide", i: "waves" }]
                     delegate: Rectangle {
                         required property var modelData
                         readonly property bool on: drawer.tab === modelData.k
-                        implicitWidth: tabRow.implicitWidth + 24 * drawer.ui; implicitHeight: 32 * drawer.ui; radius: height / 2
-                        color: on ? Tok.accent : (tabMa.containsMouse ? Tok.accentWash : Tok.sunken)
+                        // ten kinds do not fit as words: the chosen one says its name, the rest are icons
+                        implicitWidth: tabRow.implicitWidth + (on ? 24 : 16) * drawer.ui; implicitHeight: 32 * drawer.ui; radius: height / 2
+                        Behavior on implicitWidth { NumberAnimation { duration: Tok.mFast; easing.type: Easing.OutCubic } }
+                        color: on ? Tok.accent : (tabMa.containsMouse ? Tok.alpha(Tok.ink, 0.11) : Tok.alpha(Tok.ink, 0.055))
                         Row { id: tabRow; anchors.centerIn: parent; spacing: 5 * drawer.ui
                             Text { text: modelData.i; font.family: "Material Symbols Rounded"; font.pixelSize: 16 * drawer.ui; color: parent.parent.on ? Tok.accentInk : Tok.ink2; anchors.verticalCenter: parent.verticalCenter }
-                            Text { text: modelData.l; font.family: Tok.sans; font.pixelSize: 12 * drawer.ui; color: parent.parent.on ? Tok.accentInk : Tok.ink; anchors.verticalCenter: parent.verticalCenter } }
+                            Text { visible: parent.parent.on; text: modelData.l; font.family: Tok.sans; font.pixelSize: 12 * drawer.ui; color: parent.parent.on ? Tok.accentInk : Tok.ink; anchors.verticalCenter: parent.verticalCenter } }
                         MouseArea { id: tabMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: drawer.tab = modelData.k }
+                        // the name, for the ones shown as icons
+                        Rectangle {
+                            visible: tabMa.containsMouse && !parent.on
+                            anchors.horizontalCenter: parent.horizontalCenter; anchors.top: parent.bottom; anchors.topMargin: 6 * drawer.ui
+                            width: tipT.implicitWidth + 16 * drawer.ui; height: 24 * drawer.ui; radius: height / 2; z: 10
+                            color: Qt.rgba(0.1, 0.1, 0.12, 0.92)
+                            Text { id: tipT; anchors.centerIn: parent; text: modelData.l; color: "white"; font.family: Tok.sans; font.pixelSize: 11 * drawer.ui }
+                        }
                     }
                 }
                 Item { Layout.fillWidth: true }
-                Rectangle { implicitWidth: moreT.implicitWidth + 24 * drawer.ui; implicitHeight: 32 * drawer.ui; radius: height / 2; color: moreMa.containsMouse ? Tok.accentWash : Tok.sunken
+                // Lays every unpinned widget out as one aligned block in the calmest part of
+                // the wallpaper (sea-desktop.py --tidy). Pinned ones stay where you put them.
+                Rectangle { implicitWidth: tidyRow.implicitWidth + 24 * drawer.ui; implicitHeight: 32 * drawer.ui; radius: height / 2; color: tidyMa.containsMouse ? Tok.alpha(Tok.ink, 0.11) : Tok.alpha(Tok.ink, 0.055)
+                    Row { id: tidyRow; anchors.centerIn: parent; spacing: 5 * drawer.ui
+                        Text { text: "dashboard"; font.family: "Material Symbols Rounded"; font.pixelSize: 16 * drawer.ui; color: Tok.ink2; anchors.verticalCenter: parent.verticalCenter }
+                        Text { text: "Tidy up"; color: Tok.ink; font.family: Tok.sans; font.pixelSize: 12 * drawer.ui; anchors.verticalCenter: parent.verticalCenter } }
+                    MouseArea { id: tidyMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                        onClicked: Quickshell.execDetached(["python3", Qt.resolvedUrl("sea-desktop.py").toString().replace("file://", ""), "--tidy"]) } }
+                Rectangle { implicitWidth: moreT.implicitWidth + 24 * drawer.ui; implicitHeight: 32 * drawer.ui; radius: height / 2; color: moreMa.containsMouse ? Tok.alpha(Tok.ink, 0.11) : Tok.alpha(Tok.ink, 0.055)
                     Text { id: moreT; anchors.centerIn: parent; text: "Desktop settings"; color: Tok.ink; font.family: Tok.sans; font.pixelSize: 12 * drawer.ui }
                     MouseArea { id: moreMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: { drawer.requested(false); drawer.settingsRequested() } } }
-                Rectangle { implicitWidth: 32 * drawer.ui; implicitHeight: 32 * drawer.ui; radius: width / 2; color: tuckMa.containsMouse ? Tok.accentWash : Tok.sunken
+                Rectangle { implicitWidth: 32 * drawer.ui; implicitHeight: 32 * drawer.ui; radius: width / 2; color: tuckMa.containsMouse ? Tok.alpha(Tok.ink, 0.11) : Tok.alpha(Tok.ink, 0.055)
                     Text { anchors.centerIn: parent; text: "keyboard_arrow_down"; color: Tok.ink; font.family: "Material Symbols Rounded"; font.pixelSize: 21 * drawer.ui }
                     MouseArea { id: tuckMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: drawer.tucked = true } }
                 Rectangle { implicitWidth: 32 * drawer.ui; implicitHeight: 32 * drawer.ui; radius: width / 2; color: Tok.accent
@@ -160,7 +214,8 @@ PanelWindow {
                     id: previews
                     spacing: 14 * drawer.ui
                     Repeater {
-                        model: drawer.groups[drawer.tab]
+                        // Release preview trees after the closing animation finishes.
+                        model: drawer.opened || motion.presenting ? drawer.groups[drawer.tab] : []
                         delegate: Column {
                             id: tile
                             required property var modelData
@@ -174,6 +229,8 @@ PanelWindow {
                                     width: tile.dw; height: tile.dh; scale: tile.k; transformOrigin: Item.TopLeft
                                     kind: drawer.tab; size: tile.modelData.size.charAt(0)
                                     face: tile.modelData.face || "dial"
+                                    photoDir: drawer.photoDirOf(tile.modelData.src)
+                                    photoList: drawer.tab === "photo" && tile.modelData.src === "wallpapers" ? stills.list : []
                                     active: drawer.opened && !drawer.carrying
                                 }
                                 Rectangle { anchors.fill: parent; radius: 10 * drawer.ui; color: "transparent"
@@ -188,7 +245,7 @@ PanelWindow {
                                         if (!pressed) return;
                                         var p = mapToItem(drawer.contentItem, e.x, e.y);
                                         if (!drawer.carrying && Math.abs(e.x - start.x) + Math.abs(e.y - start.y) > 6)
-                                            drawer.carried = { kind: drawer.tab, size: tile.modelData.size, face: tile.modelData.face || "" };
+                                            drawer.carried = { kind: drawer.tab, size: tile.modelData.size, face: tile.modelData.face || "", src: tile.modelData.src || "" };
                                         drawer.carryAt = p;
                                     }
                                     onReleased: drawer.drop()
@@ -212,6 +269,8 @@ PanelWindow {
         kind: drawer.carried ? drawer.carried.kind : "clock"
         size: drawer.carried ? drawer.carried.size.charAt(0) : "s"
         face: drawer.carried && drawer.carried.face ? drawer.carried.face : "dial"
+        photoDir: drawer.photoDirOf(drawer.carried ? drawer.carried.src : "")
+        photoList: drawer.carried && drawer.carried.src === "wallpapers" ? stills.list : []
         opacity: drawer.overCancel ? 0.4 : 0.92
         active: drawer.carrying
     }
@@ -222,7 +281,7 @@ PanelWindow {
         visible: drawer.opened && drawer.tucked && !drawer.carrying
         width: tuckRow.implicitWidth + 30 * drawer.ui; height: 38 * drawer.ui; radius: height / 2
         x: (drawer.width - width) / 2; y: drawer.height - height - 14 * drawer.ui
-        color: tuckPillMa.containsMouse ? Tok.accent : Tok.bg; border.width: 1; border.color: Tok.rule
+        color: tuckPillMa.containsMouse ? Tok.accent : Tok.bg; border.width: 1; border.color: Tok.alpha(Tok.ink, 0.10)
         Row { id: tuckRow; anchors.centerIn: parent; spacing: 6 * drawer.ui
             Text { text: "keyboard_arrow_up"; font.family: "Material Symbols Rounded"; font.pixelSize: 20 * drawer.ui; color: tuckPillMa.containsMouse ? Tok.accentInk : Tok.ink; anchors.verticalCenter: parent.verticalCenter }
             Text { text: "Widgets"; font.family: Tok.sans; font.pixelSize: 13 * drawer.ui; font.bold: true; color: tuckPillMa.containsMouse ? Tok.accentInk : Tok.ink; anchors.verticalCenter: parent.verticalCenter } }
@@ -236,7 +295,7 @@ PanelWindow {
         width: 170 * drawer.ui; height: 44 * drawer.ui; radius: height / 2
         x: (drawer.width - width) / 2
         y: drawer.height - height - 40 * drawer.ui
-        color: drawer.overCancel ? Tok.critWash : Tok.bg; border.width: 1; border.color: drawer.overCancel ? Tok.crit : Tok.rule
+        color: drawer.overCancel ? Tok.critWash : Tok.bg; border.width: 1; border.color: drawer.overCancel ? Tok.crit : Tok.alpha(Tok.ink, 0.10)
         Row { anchors.centerIn: parent; spacing: 6 * drawer.ui
             Text { text: "close"; color: drawer.overCancel ? Tok.crit : Tok.ink2; font.family: "Material Symbols Rounded"; font.pixelSize: 18 * drawer.ui; anchors.verticalCenter: parent.verticalCenter }
             Text { text: "Drop here to cancel"; color: drawer.overCancel ? Tok.crit : Tok.ink2; font.family: Tok.sans; font.pixelSize: 12 * drawer.ui; anchors.verticalCenter: parent.verticalCenter } }

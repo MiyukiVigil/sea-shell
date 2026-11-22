@@ -31,22 +31,19 @@
 // the bottom is the only chrome.  You are always looking at the thing you are choosing,
 // at the size and the speed you will get it.
 //
-// THE COMMIT.  The switch used to read as two separate events with a gap between them:
-// the modal blinked out, then swww faded from the old wallpaper to the new one.  Now it is
-// a cartridge going into a console, and two things make that read.
+// THE SEA.  The rail floats on a waterline along the bottom of the screen. Each frame bobs a
+// little, out of step with its neighbours, and throws a rippled reflection into the water under
+// it; the water is the ground the readout sits on, so the old legibility gradient became a sea.
+// It is a live one: light comes down through it, the crest glints, bubbles rise, the frame you
+// land on splashes, the frames throw a wake while the rail moves, and a fish swims along under
+// them to wherever you are in the folder.
 //
-// The card NEVER CHANGES SIZE.  Growing it to fill the screen is a zoom, which is what the
-// first attempt looked like; a cartridge is a fixed object that travels and is swallowed.
-//
-// And the machine is at the BOTTOM, where the rail already was — not floating in the middle
-// of the screen, which was the second attempt and read as a slot in the sky.  A console sits
-// on the desk in front of you: you pick the cartridge up, hold it over the slot, and push it
-// DOWN.  So the picked frame pops up out of the rail, hangs clear for a beat, drops into the
-// slot until the clip has eaten all of it, the console takes the impact, and the lid lifts.
-//
-// The daemon runs its own transition under all of that, so the flourish costs no time the
-// switch was not already going to spend, and what the lid opens on is the same full-bleed
-// preview that was behind the picker the whole time.
+// THE COMMIT is the tide. The frame you chose sinks into the water, a swell rises up the screen
+// until the sea covers it, and as it drains away it leaves the new wallpaper behind. The daemon
+// runs its own transition under the water, so the flourish costs no time the switch was not
+// already going to spend, and what the ebb uncovers is the full-bleed preview that was behind
+// the picker the whole time. (It used to be a cartridge going into a console, which was a
+// fine machine but not this shell's sea.)
 //
 // The frames keep their own aspect ratio and share a baseline, so a folder of portrait
 // and landscape wallpapers packs into a skyline rather than being cropped to a uniform
@@ -55,7 +52,9 @@
 import Quickshell
 import Quickshell.Wayland
 import Quickshell.Io
+import Quickshell.Widgets
 import QtQuick
+import QtQuick.Shapes
 import QtMultimedia
 
 Item {
@@ -101,8 +100,8 @@ Item {
         root.committing = false;
         root.importWanted = "";
         hold.stop(); insert.stop();
-        win.phase = ""; win.entered = false; win.deckShift = 0; win.guides = true;
-        win.shutter = 0; win.ring = 0; win.jolt = 0;
+        win.phase = ""; win.entered = false;
+        win.sink = 0; win.surge = 0; win.ebb = 0;
         preview.stopVideo();
         fadeOut.stop();
         win.contentItem.opacity = 1;
@@ -121,7 +120,7 @@ Item {
     //
     // Not the window's own `opacity` — a PanelWindow has no such property, and asking for one is
     // a load error. contentItem is the item everything in here is parented to, so fading that
-    // fades the picture, the deck and the rail together, and what comes up through it is the
+    // fades the picture, the sea and the rail together, and what comes up through it is the
     // desktop underneath.
     function leave() {
         if (fadeOut.running) return;
@@ -139,7 +138,7 @@ Item {
     function park() {
         hop.stop(); vidHop.stop(); hold.stop(); insert.stop(); enter.stop();
         preview.stopVideo();
-        imgA.source = ""; imgB.source = "";
+        imgA.source = ""; imgB.source = ""; imgA.want = ""; imgB.want = "";
         vidLoad.active = false;
         win.entered = false;
     }
@@ -462,33 +461,10 @@ Item {
         if (root.committing || !root.item) return;
         var p = root.item.path;
         var vid = root.item.vid;
+        win.sink = 0; win.surge = 0; win.ebb = 0;
+        win.phase = "sink";
 
-        // Seed the card on the focused frame's exact place on screen, in window pixels
-        // rather than the chrome's scaled ones. The focused frame is always horizontally
-        // centred in the rail — that is the whole layout — so the position is arithmetic
-        // and needs no lookup into the view's delegates.
-        //
-        // `bay` is everything ABOVE the opening, and it clips. The card's coordinates are
-        // plain screen coordinates, and pushing its y down to the slot line is the console
-        // swallowing it — no fade, no shrink, just an object going somewhere it cannot be
-        // seen any more.
-        var ui = win.ui;
-        cart.width  = rail.frameW(root.cur) * ui;
-        cart.height = win.railH * ui;
-        cart.x = win.holoX;
-        cart.y = win.holoTop;                      // exactly where the hologram is projected
-        lid.y = 0;
-        lid.height = win.gapTop;
-        win.deckShift = 0;
-        win.phase = "ready";
-        win.jolt = 0;
-        win.shutter = 0;
-        win.ring = 0;
-        cart.plateH = 0;
-        cartImg.source = root.bigStillFor(root.item).length
-                       ? Tok.fileUrl(root.bigStillFor(root.item)) : "";
-
-        // Hand our decoder back before mpvpaper asks for one. Two 4K decoders competing
+        // Hand our decoder back before the wallpaper asks for one. Two 4K decoders competing
         // during the handover is the one moment this surface could stutter.
         preview.stopVideo();
 
@@ -501,8 +477,7 @@ Item {
         Quickshell.execDetached(["sh", root.setScript, p, "--quiet",
                                  root.matchColors ? "--match" : "--no-match"]);
 
-        // The daemon transition runs UNDER the insert rather than after it, so the
-        // flourish costs nothing it was not already going to wait for. Quitting before
+        // The daemon transition runs UNDER the water rather than after it. Quitting before
         // either finishes would show the old wallpaper for the length of the fade — the
         // picker racing the very transition it just started.
         var daemon = vid ? 260 : Math.round(Math.min(root.wpDur, 1.2) * 1000) + 140;
@@ -515,58 +490,63 @@ Item {
         id: win
         visible: root.showing
         readonly property real ui: Tok.uiFor(win.screen)
-        // THE DECK. A console across the bottom, present the whole time rather than
-        // conjured at commit: slot, vent grille, status lamp, readout. The holograms are
-        // projected above it and the cartridge drops into it, so the machine is the one
-        // fixed thing on screen and everything else happens in relation to it.
-        readonly property real deckH:    176            // the console, logical px
-        readonly property real bezelH:   52             // the raised top face the slot is cut in
-        readonly property real slotHL:   20             // the opening, logical
-        readonly property real holoGap:  60             // daylight between projection and deck
-        readonly property real holoDrop: 14             // the tick lane under the panels
-        readonly property real railH:    196            // a focused hologram's height
-        readonly property real slotH:    win.slotHL * win.ui
 
-        // The slot line and the projection's resting place, in real pixels — the chrome is
-        // laid out in logical ones and scaled, but the card has to travel out of it. The slot
-        // is centred in the bezel, which is what makes the bezel read as a face with an
-        // opening cut into it rather than as another stripe.
-        readonly property real slotInset: (win.bezelH - win.slotHL) / 2
-        readonly property real gapTop: win.height - (win.deckH - win.slotInset) * win.ui
-        readonly property real gapBot: win.gapTop + win.slotH
-        readonly property real holoTop: win.height
-                                      - (win.deckH + win.holoGap + win.holoDrop + win.railH) * win.ui
-        // Where the card rises to when it solidifies, before it drops.
-        readonly property real gateY: win.holoTop - 56 * win.ui
-        // The held panel's own geometry. It has to be a binding, not something apply() sets:
-        // the guide rails and the slot are sized off it while the picker is still idle, and
-        // reading it from `cart` — which only gets a position at commit — put the rails hard
-        // against the left edge of the screen and the slot under nothing.
-        readonly property real holoW: rail.frameW(root.cur) * win.ui
-        readonly property real holoX: (win.width - win.holoW) / 2
-        // The deck slides away on the output. Animating its `y` would need `y` to be free of
-        // a binding, and a deck with no binding sits at zero — which drew the console across
-        // the TOP of the screen, over the header, for the whole time the picker was idle.
-        property real deckShift: 0
+        // ---- the sea, in logical px (scaled with the chrome) ----
+        readonly property real seaH:   214          // surface line to the bottom of the screen
+        readonly property real railH:  188          // a focused frame's height
+        readonly property real sinkIn: 20           // how far the frames sit in the water
+        readonly property real reflH:  66           // the reflection under each frame
+        readonly property real amp:    6            // the swell's height at rest
+        readonly property real lambda: 280          // and its length
+        readonly property real lw: win.width / win.ui
+        readonly property real lh: win.height / win.ui
+        readonly property real restTop: win.lh - win.seaH
+
+        // Where the water's surface is. At rest it is the waterline; the commit's surge lifts it
+        // past the top of the screen and the ebb drains it out through the bottom.
+        property real sink: 0                       // the chosen frame going under, 0..1
+        property real surge: 0                      // the swell coming up, 0..1
+        property real ebb: 0                        // the water going out, 0..1
+        readonly property real swell: win.amp * (1 + 2.2 * win.surge * (1 - win.ebb))
+        readonly property real waterTop: win.ebb > 0
+            ? -win.swell * 3 + win.ebb * (win.lh + win.swell * 6)
+            : win.restTop - win.surge * (win.restTop + win.swell * 3)
         property string phase: ""
-        // "Every colour applied must earn its place through function" — so the accent marks
-        // exactly one thing, and which thing depends on what the machine is doing. Choosing:
-        // the index, because which of N you are on is the fact that matters. Loading: the
-        // step. Never the two together, and never a third.
-        readonly property bool loading: root.committing
-        property real jolt: 0                                       // the recoil, in px
-        // The guide rails serve twice: the column the holograms are projected up, and the
-        // channel the cartridge runs down. One element, two readings, always present.
-        property bool guides: true
-        // The shutter across the slot: 0 closed, 1 fully parted. Driven by the insert
-        // sequence rather than by a Behavior, because opening and closing are not the same
-        // gesture — the machine opens for the cartridge and snaps shut behind it.
-        property real shutter: 0
-        // The contact ring, fired once when the cartridge seats. 0 unfired, 1 spent.
-        property real ring: 0
-        // dip 80 · pop 220 · beat 100 · drop 160 · seat 110 · output 300
-        // dip 80 · pop 220 · beat 100 · drop 210 · seat 110 · output 300 · clear 90
-        readonly property int insertMs: 80 + 220 + 100 + 210 + 110 + 470
+        // sink 260 · surge 460 · slack 90 · ebb 600
+        readonly property int insertMs: 260 + 460 + 90 + 600
+
+        // The water's colours: the shell's ground with the accent let into it, so the sea is
+        // the same sea as the rest of the desktop and recolours with it.
+        readonly property color deep: Qt.tint(Tok.bg, Tok.alpha(Tok.accent, Tok.light ? 0.16 : 0.22))
+        readonly property color shallow: Qt.tint(Tok.bg, Tok.alpha(Tok.accent, Tok.light ? 0.34 : 0.42))
+        // what the tide is made of at its height: more accent near the crest, deep below it
+        readonly property color crest: Qt.tint(Tok.bg, Tok.alpha(Tok.accent, Tok.light ? 0.48 : 0.55))
+        function mix(a, b, t) {
+            return Qt.rgba(a.r + (b.r - a.r) * t, a.g + (b.g - a.g) * t,
+                           a.b + (b.b - a.b) * t, a.a + (b.a - a.a) * t);
+        }
+
+        // One clock for everything that moves on its own: the frames bob on it and the waves
+        // drift on it. Stopped for reduced motion, and whenever nobody can see it.
+        property real tide: 0
+        NumberAnimation on tide {
+            from: 0; to: Math.PI * 2; duration: 6400
+            loops: Animation.Infinite
+            running: root.showing && !Tok.reducedMotion
+        }
+
+        // A periodic wave across `w`, its rest line at y 0: half-wavelength quads, crest and
+        // trough alternating. `close` runs it down to `deep` and back, for a filled body of water.
+        function wavePath(w, len, a, deepTo, close) {
+            var d = "M 0 0", x = 0, up = true;
+            while (x < w) {
+                d += " Q " + (x + len / 4) + " " + (up ? -2 * a : 2 * a) + " " + (x + len / 2) + " 0";
+                x += len / 2; up = !up;
+            }
+            if (close) d += " L " + x + " " + deepTo + " L 0 " + deepTo + " Z";
+            return d;
+        }
+
         property bool entered: false
 
         anchors { top: true; bottom: true; left: true; right: true }
@@ -607,15 +587,30 @@ Item {
                 root.wantMotion = false;
                 vidHop.stop(); stopVideo();
                 // Nothing decodes for a window nobody is looking at.
-                if (!root.showing) { imgA.source = ""; imgB.source = ""; hop.stop(); return }
+                if (!root.showing) { imgA.source = ""; imgB.source = ""; imgA.want = ""; imgB.want = ""; hop.stop(); return }
                 hop.restart();
             }
+            // What the preview should be showing. Each Image remembers what it was asked to
+            // load (`want`), and only a slot holding THIS may take the screen. Flipping on any
+            // Ready let a stale decode land after a newer request; and re-asking a slot for the
+            // path it already holds changes nothing, so no Ready ever came and a fast swipe back
+            // left the preview on the wallpaper before.
+            property string wantUrl: ""
+            function show(img) { preview.useA = (img === imgA) }
             Timer {
                 id: hop; interval: 90; repeat: false
                 onTriggered: {
-                    var src = root.bigStillFor(root.item);
-                    var into = preview.useA ? imgB : imgA;
-                    into.source = Tok.fileUrl(src);
+                    var url = Tok.fileUrl(root.bigStillFor(root.item));
+                    preview.wantUrl = url;
+                    var front = preview.useA ? imgA : imgB, back = preview.useA ? imgB : imgA;
+                    if (front.want === url && front.status !== Image.Error) {
+                        // already up (or on its way up in the visible slot)
+                    } else if (back.want === url && back.status === Image.Ready) {
+                        preview.show(back);
+                    } else {
+                        back.want = url;
+                        back.source = url;
+                    }
                     if (root.item && root.item.vid && !root.committing) vidHop.restart();
                 }
             }
@@ -664,9 +659,10 @@ Item {
                 asynchronous: true; cache: false
                 sourceSize.width: preview.decodeW(root.item)
                 sourceSize.height: preview.decodeH(root.item)
+                property string want: ""
                 opacity: preview.useA ? 1 : 0
                 Behavior on opacity { NumberAnimation { duration: Tok.mSlow; easing.type: Tok.mEase } }
-                onStatusChanged: if (status === Image.Ready) preview.useA = true
+                onStatusChanged: if (status === Image.Ready && want === preview.wantUrl) preview.show(imgA)
             }
             Image {
                 id: imgB
@@ -675,9 +671,10 @@ Item {
                 asynchronous: true; cache: false
                 sourceSize.width: preview.decodeW(root.item)
                 sourceSize.height: preview.decodeH(root.item)
+                property string want: ""
                 opacity: preview.useA ? 0 : 1
                 Behavior on opacity { NumberAnimation { duration: Tok.mSlow; easing.type: Tok.mEase } }
-                onStatusChanged: if (status === Image.Ready) preview.useA = false
+                onStatusChanged: if (status === Image.Ready && want === preview.wantUrl) preview.show(imgB)
             }
 
             // THE BACKEND IS NOT FREE. Constructing MediaPlayer and VideoOutput spins Qt
@@ -749,8 +746,8 @@ Item {
                 }
                 IndText {
                     anchors.horizontalCenter: parent.horizontalCenter
-                    mono: true; sz: Tok.tData; color: Tok.ink3
-                    text: "install ffmpeg to preview moving wallpapers"
+                    sz: Tok.tData; color: Tok.ink3
+                    text: "Install ffmpeg to preview moving wallpapers"
                 }
             }
         }
@@ -768,47 +765,50 @@ Item {
                 GradientStop { position: 1.0;  color: "transparent" }
             }
         }
-        Rectangle {
-            anchors { left: parent.left; right: parent.right; bottom: parent.bottom }
-            height: (win.deckH + 90) * win.ui
-            opacity: chrome.opacity
-            gradient: Gradient {
-                GradientStop { position: 0.0;  color: "transparent" }
-                GradientStop { position: 0.30; color: Tok.alpha(Tok.bg, 0.58) }
-                GradientStop { position: 0.62; color: Tok.alpha(Tok.bg, 0.91) }
-                GradientStop { position: 1.0;  color: Tok.alpha(Tok.bg, 0.985) }
+
+        // ================= the far swell =================
+        // Behind the frames: a paler, longer, slower wave a little above the surface, so the
+        // waterline has depth without a single shadow anywhere.
+        Item {
+            z: 1
+            width: win.lw; height: win.lh
+            transformOrigin: Item.TopLeft; scale: win.ui
+            opacity: win.entered || root.committing ? 1 : 0
+            Behavior on opacity { NumberAnimation { duration: Tok.mSlow; easing.type: Tok.mEase } }
+            // a soft rise of colour above the water, so the frames stand on something
+            Rectangle {
+                x: 0; width: parent.width
+                y: win.waterTop - 120; height: 130
+                gradient: Gradient {
+                    GradientStop { position: 0.0; color: "transparent" }
+                    GradientStop { position: 1.0; color: Tok.alpha(win.deep, 0.55) }
+                }
+            }
+            Shape {
+                readonly property real len: win.lambda * 1.37
+                x: -len * ((win.tide / (Math.PI * 2) * 2) % 1)
+                y: win.waterTop - 12
+                preferredRendererType: Shape.CurveRenderer
+                ShapePath {
+                    strokeWidth: 0; strokeColor: "transparent"
+                    fillColor: Tok.alpha(win.shallow, 0.62)
+                    PathSvg { path: win.wavePath(win.lw + win.lambda * 3, win.lambda * 1.37,
+                                                 win.swell * 0.8, win.lh * 2.2, true) }
+                }
             }
         }
-
-        // The ground, in two pieces that part on the slot line: the LID is everything above
-        // the console, the DECK is the console's own face. Without them the card travelled
-        // across a full-bleed copy of the very image it carries — same picture at two scales,
-        // which reads as a smear rather than as an object moving.
-        //
-        // `y` is set in apply() rather than bound, because the reveal animates it and an
-        // animation writing over a binding silently destroys the binding.
-        Rectangle {
-            id: lid
-            z: 1
-            x: 0; width: win.width; height: win.gapTop
-            color: Tok.bg
-            opacity: root.committing ? 1 : 0
-            visible: opacity > 0
-            Behavior on opacity { NumberAnimation { duration: 120; easing.type: Easing.OutCubic } }
-        }
-
 
         // ================= the chrome =================
         // Laid out in logical pixels and scaled as one block, so every margin and rule keeps
         // its proportion on a 4K panel instead of each one being multiplied by hand. Sits at
-        // z 0, under the deck and the ground, because the commit's machinery has to cover it.
+        // z 2: over the far swell, under the near water and the readout.
         Item {
             id: chrome
-            z: 0
             width: parent.width / win.ui
             height: parent.height / win.ui
             transformOrigin: Item.TopLeft
             scale: win.ui
+            z: 2
             opacity: root.committing ? 0 : (win.entered ? 1 : 0)
             Behavior on opacity { NumberAnimation { duration: Tok.mBase; easing.type: Tok.mEase } }
 
@@ -828,7 +828,7 @@ Item {
                     }
                     IndText {
                         anchors.verticalCenter: parent.verticalCenter
-                        text: "wallpapers"; mono: true; sz: Tok.tPanel
+                        text: "Wallpapers"; sz: Tok.tPanel
                         font.weight: 600; color: Tok.ink
                     }
                     // The folder, or — once there are subfolders in it — the collections
@@ -837,7 +837,7 @@ Item {
                     IndText {
                         anchors.verticalCenter: parent.verticalCenter
                         visible: !root.collections.length
-                        text: root.wpDir; mono: true; sz: Tok.tData; color: Tok.ink3
+                        text: root.wpDir; sz: Tok.tData; color: Tok.ink3
                     }
                     Rectangle {
                         anchors.verticalCenter: parent.verticalCenter
@@ -855,7 +855,7 @@ Item {
                             IndText {
                                 anchors.verticalCenter: parent.verticalCenter
                                 readonly property bool on: root.collection === ""
-                                text: "all"; mono: true; sz: Tok.tData
+                                text: "All"; sz: Tok.tData
                                 font.weight: on ? 700 : 400
                                 color: on ? Tok.accent : Tok.ink3
                                 MouseArea {
@@ -869,7 +869,7 @@ Item {
                                     required property var modelData
                                     anchors.verticalCenter: parent.verticalCenter
                                     readonly property bool on: root.collection === modelData
-                                    text: modelData; mono: true; sz: Tok.tData
+                                    text: Tok.cap(modelData); sz: Tok.tData
                                     font.weight: on ? 700 : 400
                                     color: on ? Tok.accent : Tok.ink3
                                     MouseArea {
@@ -900,7 +900,7 @@ Item {
                                 IndText {
                                     required property var modelData
                                     readonly property bool on: root.filter === modelData
-                                    text: modelData; mono: true; sz: Tok.tData
+                                    text: Tok.cap(modelData); sz: Tok.tData
                                     font.weight: on ? 700 : 400
                                     color: on ? Tok.accent : Tok.ink3
                                     MouseArea {
@@ -930,14 +930,14 @@ Item {
                             id: sRow; anchors.centerIn: parent; spacing: Tok.s2
                             Text {
                                 anchors.verticalCenter: parent.verticalCenter
-                                text: root.sort === "new" ? "schedule" : "sort_by_alpha"
+                                text: root.sort === "new" ? "Schedule" : "sort_by_alpha"
                                 font.family: "Material Symbols Outlined"; font.pixelSize: 14
                                 color: root.sort === "new" ? Tok.accent : Tok.ink3
                             }
                             IndText {
                                 anchors.verticalCenter: parent.verticalCenter
-                                text: root.sort === "new" ? "newest" : "a–z"
-                                mono: true; sz: Tok.tData
+                                text: root.sort === "new" ? "Newest" : "A–Z"
+                                sz: Tok.tData
                                 color: root.sort === "new" ? Tok.ink : Tok.ink3
                             }
                         }
@@ -964,7 +964,7 @@ Item {
                             }
                             IndText {
                                 anchors.verticalCenter: parent.verticalCenter
-                                text: "match colours"; mono: true; sz: Tok.tData
+                                text: "Match colours"; sz: Tok.tData
                                 color: root.matchColors ? Tok.ink : Tok.ink3
                             }
                         }
@@ -978,7 +978,7 @@ Item {
 
             IndText {
                 anchors { top: head.bottom; right: parent.right; rightMargin: Tok.s6; topMargin: Tok.s2 }
-                mono: true; sz: Tok.tLabel; color: Tok.ink2
+                sz: Tok.tLabel; color: Tok.ink2
                 // `m` used to toggle match-colours on its own. It cannot any more: a bare
                 // letter is a search now, and a picker where typing does nothing until you
                 // find the right control is the thing the search exists to remove.
@@ -994,7 +994,7 @@ Item {
                 id: importNote
                 anchors { top: head.bottom; right: parent.right; rightMargin: Tok.s6
                           topMargin: Tok.s2 + 18 }
-                mono: true; sz: Tok.tLabel
+                sz: Tok.tLabel
                 font.weight: 600
                 color: root.importNote.indexOf("nothing") === 0 ? Tok.crit : Tok.accent
                 text: root.importing ? "importing…" : root.importNote
@@ -1003,11 +1003,7 @@ Item {
             }
 
             // ---- the search window ----
-            // Built out of the deck's own parts, at the size of a control rather than a
-            // panel: a RAISED legend plate, a SUNKEN well for the thing you are typing, a
-            // raised counter plate, and hard rules where the materials meet. The first
-            // version was a rounded box with a border, which is a text field from some
-            // other product wearing this one's colours.
+            // A legend plate, a well for the thing you are typing and a counter plate.
             //
             // It exists only while you are searching. A machine does not label a window
             // that has nothing behind it.
@@ -1032,9 +1028,7 @@ Item {
                     anchors.fill: parent
                     radius: Tok.rSmall
                     clip: true
-                    // A recess, not an opening. The slot in the deck is genuinely dark
-                    // because it is a hole; this is a surface you read text off, so it is
-                    // darkened only far enough to separate from an arbitrary photograph —
+                    // Darkened only far enough to separate from an arbitrary photograph —
                     // `sunken` alone sits 4% off `bg` and disappears over a bright one.
                     color: Qt.darker(Tok.sunken, Tok.light ? 1.18 : 1.35)
 
@@ -1046,9 +1040,9 @@ Item {
                         color: Tok.raised
                         IndText {
                             anchors.centerIn: parent
-                            text: "find"; mono: true; sz: Tok.tLabel
-                            font.weight: 700; font.letterSpacing: 1.5
-                            font.capitalization: Font.AllUppercase
+                            text: "Find"; sz: Tok.tLabel
+                            font.weight: 700
+
                             color: Tok.ink3
                         }
                         Rectangle { anchors { right: parent.right; top: parent.top; bottom: parent.bottom }
@@ -1064,7 +1058,7 @@ Item {
                         spacing: 3
                         IndText {
                             anchors.verticalCenter: parent.verticalCenter
-                            text: root.query; mono: true; sz: Tok.tDense
+                            text: root.query; sz: Tok.tDense
                             color: find.hit ? Tok.ink : Tok.ink3
                             elide: Text.ElideLeft
                             width: Math.min(implicitWidth, 186)
@@ -1083,9 +1077,7 @@ Item {
                         }
                     }
 
-                    // 3 — the counter plate, in the deck counter's language: the number
-                    //     large, its unit small beside it. The deck says which of how many;
-                    //     this says how many there are to be which of.
+                    // 3 — the counter plate: the number large, its unit small beside it.
                     Rectangle {
                         id: findCount
                         anchors { right: parent.right; top: parent.top; bottom: parent.bottom }
@@ -1098,16 +1090,15 @@ Item {
                             spacing: 3
                             IndText {
                                 anchors.baseline: findHits.baseline
-                                mono: true; sz: Tok.tBody; font.weight: 700
+                                sz: Tok.tBody; font.weight: 700
                                 color: find.hit ? Tok.accent : Tok.crit
                                 text: find.hit ? (root.shown.length < 10 ? "0" : "") + root.shown.length
                                                : "--"
                             }
                             IndText {
                                 id: findHits
-                                mono: true; sz: Tok.tLabel; color: Tok.ink3
-                                font.letterSpacing: 0.8
-                                font.capitalization: Font.AllUppercase
+                                sz: Tok.tLabel; color: Tok.ink3
+
                                 text: "hit" + (root.shown.length === 1 ? "" : "s")
                             }
                         }
@@ -1115,42 +1106,40 @@ Item {
                 }
             }
 
-            // ---- the projection row ----
+
+            // ---- the frames, afloat ----
             ListView {
                 id: rail
                 anchors { left: parent.left; right: parent.right; bottom: parent.bottom }
-                anchors.bottomMargin: win.deckH + win.holoGap
-                height: win.railH + win.holoDrop
+                anchors.bottomMargin: win.seaH - win.sinkIn - win.reflH
+                height: win.railH + win.reflH
                 orientation: ListView.Horizontal
-                spacing: Tok.s3
+                spacing: Tok.s4
                 model: root.shown
                 cacheBuffer: 1600
 
                 // Dragging and the arrow keys are the same gesture through one variable:
                 // whoever moved last owns contentX. `glide` drives it from the keyboard and is
                 // never running while a finger is down; the drag drives it directly and
-                // publishes what it lands on. Binding contentX to the index instead — which is
-                // what this was — makes the rail unmovable by hand, because the binding wins
-                // back every pixel the drag gains.
-                interactive: true
+                // publishes what it lands on. Binding contentX to the index instead makes the
+                // rail unmovable by hand, because the binding wins back every pixel the drag gains.
+                interactive: !root.committing
                 boundsBehavior: Flickable.StopAtBounds
                 flickDeceleration: 2800
                 maximumFlickVelocity: 4200
 
-                // Centring the first and last panels means scrolling past both ends of the
+                // Centring the first and last frames means scrolling past both ends of the
                 // content, and Flickable pulls contentX back inside its bounds when you do.
                 // These margins ARE those two overhangs, sized exactly.
                 leftMargin:  Math.max(0, rail.width / 2 - rail.frameW(0) / 2)
                 rightMargin: Math.max(0, rail.width / 2 - rail.frameW(root.shown.length - 1) / 2)
 
-                opacity: root.committing ? 0 : 1
-                Behavior on opacity { NumberAnimation { duration: Tok.mFast; easing.type: Tok.mEase } }
                 transform: Translate {
-                    y: win.entered ? 0 : 44
-                    Behavior on y { NumberAnimation { duration: Tok.mBase; easing.type: Tok.mEase } }
+                    y: win.entered ? 0 : 60
+                    Behavior on y { NumberAnimation { duration: Tok.mSlow; easing.type: Easing.OutCubic } }
                 }
 
-                // Panel widths vary, so the centring maths cannot come from ListView — it has
+                // Frame widths vary, so the centring maths cannot come from ListView — it has
                 // to be told where each one starts. Cached rather than summed on demand:
                 // `nearest` runs on every pixel of a drag.
                 property var offs: []
@@ -1195,7 +1184,7 @@ Item {
                 }
                 NumberAnimation {
                     id: glide; target: rail; property: "contentX"
-                    duration: Tok.mBase; easing.type: Tok.mEase
+                    duration: Tok.mSlow; easing.type: Easing.OutCubic
                 }
 
                 // `moving`, not `dragging || flicking`: it also covers the wheel, and still
@@ -1212,42 +1201,36 @@ Item {
                     width: rail.frameW(index)
                     height: rail.height
 
-                    // Distance from the centre of the row, in panels. Continuous rather than a
+                    // Distance from the centre of the row, in frames. Continuous rather than a
                     // focused/not-focused step, so the falloff stays smooth while contentX is
-                    // still animating — or being dragged — instead of snapping when the index
-                    // flips.
+                    // still animating — or being dragged.
                     readonly property real n: Math.abs(
                         (x + width / 2) - (rail.contentX + rail.width / 2)) / win.railH
                     readonly property real k: Math.min(1, frame.n / 3)
                     readonly property bool focused: index === root.cur
-
-                    // Centre large and sharp, the rest receding — out of scale and opacity
-                    // alone. No rotation, no perspective, no shadow: this shell states depth
-                    // with size and ink, never with fake light.
-                    readonly property real sc: 1 - 0.34 * Math.pow(frame.k, 0.60)
+                    readonly property real sc: 1 - 0.36 * Math.pow(frame.k, 0.60)
                     readonly property real op: 1 - 0.55 * Math.pow(frame.k, 0.55)
+
+                    // Afloat: each frame rides the same swell a little out of step with the
+                    // next, so the row moves like things on water and not like a marquee. The
+                    // one you hold is steadier — it is the one you are reading.
+                    readonly property real bob: Math.sin(win.tide + frame.index * 1.3)
+                                              * (frame.focused ? 2 : 4.5)
+                    // The chosen one goes under at the commit; everything else lets go of it.
+                    readonly property real under: frame.focused ? win.sink : 0
+                    opacity: root.committing && !frame.focused ? 1 - win.sink : 1
 
                     Rectangle {
                         id: plate
-                        // The panels share a baseline, so scaling grows them upward and a mixed
-                        // folder packs into a skyline instead of a ragged band.
-                        anchors.bottom: parent.bottom
-                        anchors.bottomMargin: win.holoDrop
                         width: parent.width
                         height: win.railH
+                        y: frame.bob + frame.under * win.railH * 0.85
+                        // Shared baseline, so scaling grows a frame upward out of the water and
+                        // a mixed folder packs into a skyline rather than a ragged band.
                         transformOrigin: Item.Bottom
-                        scale: frame.sc
-                        opacity: frame.op
-                        // No Behavior on scale or opacity: both are already continuous
-                        // functions of contentX, which is itself animated. Easing an eased
-                        // value is what made the row feel like it was lagging the keys.
-
-                        // The held panel goes out instantly, not on the row's fade: the
-                        // cartridge is seeded at exactly this position, so a shared fade leaves
-                        // two copies of the same card dissolving over each other.
-                        visible: !(root.committing && frame.focused)
-
-                        radius: Tok.rSmall
+                        scale: frame.sc * (1 - 0.06 * frame.under)
+                        opacity: frame.op * (1 - 0.6 * frame.under)
+                        radius: Tok.r
                         clip: true
                         color: Tok.sunken
                         border.width: frame.focused ? 2 : 1
@@ -1255,50 +1238,21 @@ Item {
                                     : fm.containsMouse ? Tok.ink3 : Tok.alpha(Tok.rule, 0.9)
                         Behavior on border.color { ColorAnimation { duration: Tok.mFast; easing.type: Tok.mEase } }
 
-                        Image {
+                        // `clip` only clips to the bounding box, so the picture's square corners
+                        // used to stick out past the plate's rounded ones.
+                        ClippingRectangle {
                             anchors.fill: parent
-                            anchors.margins: 1
-                            source: root.stillFor(frame.modelData).length
-                                    ? Tok.fileUrl(root.stillFor(frame.modelData)) : ""
-                            fillMode: Image.PreserveAspectCrop
-                            asynchronous: true; cache: true
-                            sourceSize.height: Math.round(win.railH * 1.4)
-                        }
-
-                        // The projection raster. The held panel is resolved and has none; the
-                        // others are still being projected, which is what the raster says.
-                        Repeater {
-                            model: frame.focused ? 0 : Math.floor(plate.height / 14)
-                            Rectangle {
-                                required property int index
-                                y: index * 14
-                                width: plate.width
-                                height: 1
-                                color: Tok.alpha(Tok.bg, 0.26)
-                            }
-                        }
-
-                        // Registration corners on the held panel. Four brackets say "locked"
-                        // far more clearly over an arbitrary photograph than a border colour
-                        // can — they were 26×3 and invisible until measured against red.
-                        Repeater {
-                            model: (frame.focused && !root.committing) ? 4 : 0
-                            Item {
-                                required property int index
-                                readonly property bool onRight: (index % 2) === 1
-                                readonly property bool onBottom: index >= 2
-                                readonly property real arm: 26
-                                width: arm; height: arm
-                                x: onRight ? plate.width - arm : 0
-                                y: onBottom ? plate.height - arm : 0
-                                Rectangle {
-                                    width: parent.arm; height: 4; color: Tok.accent
-                                    y: parent.onBottom ? parent.arm - 4 : 0
-                                }
-                                Rectangle {
-                                    width: 4; height: parent.arm; color: Tok.accent
-                                    x: parent.onRight ? parent.arm - 4 : 0
-                                }
+                            anchors.margins: plate.border.width
+                            radius: Math.max(0, plate.radius - plate.border.width)
+                            color: "transparent"
+                            Image {
+                                id: still
+                                anchors.fill: parent
+                                source: root.stillFor(frame.modelData).length
+                                        ? Tok.fileUrl(root.stillFor(frame.modelData)) : ""
+                                fillMode: Image.PreserveAspectCrop
+                                asynchronous: true; cache: true
+                                sourceSize.height: Math.round(win.railH * 1.4)
                             }
                         }
 
@@ -1313,13 +1267,13 @@ Item {
                         // has to be visible here — it decides which daemon takes the layer.
                         Rectangle {
                             visible: frame.modelData.vid
-                            anchors { top: parent.top; left: parent.left; margins: Tok.s1 }
-                            width: 18; height: 18; radius: Tok.rSmall
+                            anchors { top: parent.top; left: parent.left; margins: Tok.s2 }
+                            width: 20; height: 20; radius: 10
                             color: Tok.alpha(Tok.bg, 0.72)
                             Text {
                                 anchors.centerIn: parent
                                 text: "play_arrow"; font.family: "Material Symbols Outlined"
-                                font.pixelSize: 13; color: Tok.ink
+                                font.pixelSize: 14; color: Tok.ink
                             }
                         }
 
@@ -1334,8 +1288,48 @@ Item {
                             onClicked: frame.focused ? root.apply() : root.goto(frame.index)
                         }
                     }
+
+                    // The reflection: the frame upside down in the water under it, broken by
+                    // a few drifting lines of sea so it reads as water and not as a mirror.
+                    // The front wave is drawn over it, so it fades as it goes deeper by itself.
+                    Item {
+                        id: refl
+                        readonly property real w: plate.width * plate.scale
+                        readonly property real h: win.railH * plate.scale
+                        x: (parent.width - w) / 2
+                        y: win.railH - frame.bob * 0.5
+                        width: w; height: Math.min(win.reflH, h)
+                        clip: true
+                        opacity: 0.42 * frame.op * (1 - frame.under)
+                        ClippingRectangle {
+                            width: refl.w; height: refl.h
+                            radius: plate.radius * plate.scale
+                            color: "transparent"
+                            Image {
+                                anchors.fill: parent
+                                source: still.source
+                                fillMode: Image.PreserveAspectCrop
+                                asynchronous: true; cache: true
+                                sourceSize.height: Math.round(win.railH * 1.4)
+                                transform: Scale { origin.y: refl.h / 2; yScale: -1 }
+                            }
+                        }
+                        Repeater {
+                            model: 6
+                            Rectangle {
+                                required property int index
+                                readonly property real step: win.reflH / 6
+                                x: Math.sin(win.tide * 2 + index) * 6 - 6
+                                width: refl.w + 12
+                                height: 1.5 + index * 0.5
+                                y: (index * step + (win.tide / (Math.PI * 2)) * step * 3) % win.reflH
+                                color: Tok.alpha(win.deep, 0.75)
+                            }
+                        }
+                    }
                 }
             }
+
 
             // ---- empty ----
             Column {
@@ -1344,7 +1338,7 @@ Item {
                 visible: !root.shown.length
                 IndText {
                     anchors.horizontalCenter: parent.horizontalCenter
-                    mono: true; sz: Tok.tBody; color: Tok.ink
+                    sz: Tok.tBody; color: Tok.ink
                     text: root.papers.length
                           ? (root.query.length ? "nothing here is called “" + root.query + "”"
                                                : "nothing matches the " + root.filter + " filter")
@@ -1352,609 +1346,483 @@ Item {
                 }
                 IndText {
                     anchors.horizontalCenter: parent.horizontalCenter
-                    mono: true; sz: Tok.tData; color: Tok.ink3
+                    sz: Tok.tData; color: Tok.ink3
                     text: root.papers.length
                           ? (root.query.length ? "esc clears the search"
-                                               : "tab cycles the filter")
+                                               : "Tab cycles the filter")
                           : "drop jpg · png · webp · mp4 · webm · gif in there, or set the folder in Settings → Wallpaper"
                 }
             }
         }
 
-        // The print head: it rides the lid's bottom edge, which during the reveal is the
-        // boundary the wallpaper is coming out of, so the emergence has a leading edge you can
-        // follow instead of being an area that grew.
-        Rectangle {
-            id: feedEdge
-            z: 5
-            x: 0; width: win.width
-            height: Math.max(2, Math.round(2 * win.ui))
-            y: lid.y + lid.height
-            color: Tok.accent
-            visible: win.phase === "loaded"
-            opacity: lid.opacity
-        }
-
-        // ---------------- the deck ----------------
-        // A front panel does three things: it contains, it labels, and it indicates. The
-        // version this replaces did the labelling only — text floating on one flat plane,
-        // which is why it read as a bar rather than a machine.
-        //
-        // So it is built the way rack gear is: a RAISED bezel with the opening cut into it,
-        // then a panel divided into functional modules by hard rules — counter, readout, vent,
-        // indicator. Depth is three background steps (raised bezel over surface panel over a
-        // darkened well), never shadow. And there is no nameplate, no serial and no fake
-        // fixings: "a lack of superfluous controls, styling or excessive markings" is the
-        // whole point, and invented hardware markings would be exactly that.
-
-        // the bezel above the opening — drawn over the card, so the cartridge slides behind
-        // the deck's top face and reappears in the slot, the way a front-loader looks
-        Rectangle {
-            id: deckLip
-            z: 4
-            x: 0; width: win.width
-            y: win.height - win.deckH * win.ui
-            height: win.gapTop - y
-            color: Tok.raised
-            transform: Translate { y: win.jolt + win.deckShift }
-            IndRule { anchors { left: parent.left; right: parent.right; top: parent.top } hard: true }
-
-            // Alignment marks either side of the opening. They say where the cartridge goes,
-            // which is the one thing a bezel is for.
-            Repeater {
-                model: 2
-                Rectangle {
-                    required property int index
-                    width: Math.round(14 * win.ui)
-                    height: Math.max(1, Math.round(win.ui))
-                    anchors.bottom: parent.bottom
-                    anchors.bottomMargin: Math.round(5 * win.ui)
-                    x: index === 0 ? win.holoX - 30 * win.ui : win.holoX + win.holoW + 16 * win.ui
-                    color: Tok.ink3
-                }
-            }
-        }
-
-        // the opening — behind the card, so the card is seen IN it, and only as wide as the
-        // thing that goes through it. An opening is dark, and `sunken` cannot say that in the
-        // light theme: it sits 4% off `bg`. The token is still the source, darkened.
-        Rectangle {
-            id: well
-            z: 2
-            width: win.holoW + 10 * win.ui
-            x: (win.width - width) / 2
-            y: win.gapTop; height: win.slotH
-            color: Qt.darker(Tok.sunken, Tok.light ? 2.1 : 1.6)
-            clip: true
-            transform: Translate { y: win.jolt + win.deckShift }
-
-            // THE SHUTTER. Two leaves across the opening, in the plane between the bezel
-            // and the darkness behind — so the slot still reads as an opening when the
-            // picker is idle, but an opening with something across it rather than a hole.
-            //
-            // It is the answer to the one thing the commit never said: the cartridge used
-            // to descend into a static black bar, and the only evidence the machine had
-            // taken it was the jolt. Now the machine OPENS for it and snaps shut behind it,
-            // which is a thing happening TO the deck rather than to the card alone.
-            Repeater {
-                model: 2
-                Rectangle {
-                    required property int index
-                    // NOT `right` — QQuickItem reserves it as a FINAL property and the
-                    // whole file refuses to load.
-                    readonly property bool onRight: index === 1
-                    width: well.width / 2 + 1
-                    height: well.height
-                    x: onRight ? well.width / 2 + win.shutter * width
-                               : -win.shutter * width
-                    color: Tok.sunken
-                    // the leaves' meeting edges, so two leaves read as two
-                    Rectangle {
-                        anchors { top: parent.top; bottom: parent.bottom }
-                        x: parent.onRight ? 0 : parent.width - 1
-                        width: 1; color: Tok.ruleHard
-                    }
-                }
-            }
-        }
-
-        // the bezel closes up either side of the opening
-        Repeater {
-            model: 2
-            Rectangle {
-                required property int index
-                z: 4
-                y: win.gapTop; height: win.slotH
-                x: index === 0 ? 0 : well.x + well.width
-                width: index === 0 ? well.x : win.width - (well.x + well.width)
-                color: Tok.raised
-                transform: Translate { y: win.jolt + win.deckShift }
-            }
-        }
-
-        // everything below the opening: the rest of the bezel, then the panel
-        Rectangle {
-            id: deck
-            z: 4
-            x: 0; y: win.gapBot
-            width: win.width; height: win.height - win.gapBot
-            color: Tok.surface
-            transform: Translate { y: win.jolt + win.deckShift }
-
-            // the bezel's lower lip, and the rule where the face steps down to the panel
-            Rectangle {
-                id: lowerLip
-                anchors { left: parent.left; right: parent.right; top: parent.top }
-                height: (win.bezelH - win.slotInset - win.slotHL) * win.ui
-                color: Tok.raised
-                IndRule { anchors { left: parent.left; right: parent.right; bottom: parent.bottom } hard: true }
-            }
-
-            // ---- the panel: modules, divided by rules ----
-            Row {
-                id: panel
-                anchors { left: parent.left; right: parent.right
-                          top: lowerLip.bottom; bottom: parent.bottom }
-
-                // 1 — the counter. A deck's one display, and the fact that matters most while
-                //     you are choosing: which of how many.
-                Item {
-                    width: Math.round(150 * win.ui); height: panel.height
-                    Row {
-                        anchors.centerIn: parent
-                        spacing: Tok.s2 * win.ui
-                        IndText {
-                            anchors.baseline: ofN.baseline
-                            mono: true; sz: Math.round(Tok.tKpi * win.ui)
-                            font.weight: 700
-                            color: win.loading ? Tok.ink3 : Tok.accent
-                            text: root.shown.length
-                                  ? (root.cur + 1 < 10 ? "0" : "") + (root.cur + 1) : "--"
-                        }
-                        IndText {
-                            id: ofN
-                            mono: true; sz: Math.round(Tok.tDense * win.ui); color: Tok.ink3
-                            text: "/ " + root.shown.length
-                        }
-                    }
-                }
-                Rectangle { width: 1; height: panel.height; color: Tok.ruleHard }
-
-                // 2 — the readout. Name on top, the numbers under it.
-                Item {
-                    width: panel.width - Math.round(150 * win.ui) - Math.round(96 * win.ui)
-                                       - Math.round(150 * win.ui) - 3
-                    height: panel.height
-                    Column {
-                        anchors { left: parent.left; leftMargin: Tok.s6 * win.ui
-                                  verticalCenter: parent.verticalCenter }
-                        spacing: Tok.s2 * win.ui
-                        IndText {
-                            mono: true; sz: Math.round(Tok.tBody * win.ui); color: Tok.ink
-                            text: root.item ? root.item.name : "no wallpaper"
-                            elide: Text.ElideMiddle
-                            width: Math.min(implicitWidth, panel.width * 0.42)
-                        }
-                        Row {
-                            spacing: Tok.s4 * win.ui
-                            IndText {
-                                anchors.verticalCenter: parent.verticalCenter
-                                mono: true; sz: Math.round(Tok.tData * win.ui); color: Tok.ink3
-                                visible: root.item !== null && root.item.w > 0
-                                text: root.item ? root.item.w + "×" + root.item.h : ""
-                            }
-                            IndText {
-                                anchors.verticalCenter: parent.verticalCenter
-                                mono: true; sz: Math.round(Tok.tData * win.ui); color: Tok.ink3
-                                text: root.item ? root.human(root.item.bytes) : ""
-                            }
-                            IndText {
-                                anchors.verticalCenter: parent.verticalCenter
-                                mono: true; sz: Math.round(Tok.tData * win.ui); color: Tok.ink3
-                                visible: root.item !== null && root.item.ms > 0
-                                text: root.item ? root.clock(root.item.ms) : ""
-                            }
-                            // A CONTROL, not a caption. Motion is opt-in, and a line of grey text
-                            // saying "ctrl+p plays" is not an offer anyone reads — the deck is
-                            // covered in text and this is the one piece of it you can press. So it
-                            // is built like the rest of the panel is built: a raised key with a
-                            // hard border, an indicator that lights when it is doing something,
-                            // and the shortcut printed on it the way it is printed on real gear.
-                            Rectangle {
-                                id: playKey
-                                anchors.verticalCenter: parent.verticalCenter
-                                visible: root.item !== null && root.item.vid
-                                width: playRow.implicitWidth + Math.round(16 * win.ui)
-                                height: Math.round(24 * win.ui)
-                                radius: Tok.rSmall
-                                color: root.wantMotion ? Tok.alpha(Tok.accent, 0.20)
-                                     : playMa.containsMouse ? Tok.alpha(Tok.ink3, 0.16)
-                                     : Tok.alpha(Tok.ink3, 0.07)
-                                border.width: 1
-                                border.color: root.wantMotion ? Tok.accent
-                                            : playMa.containsMouse ? Tok.ink3 : Tok.ruleHard
-                                Behavior on color { ColorAnimation { duration: Tok.mFast; easing.type: Tok.mEase } }
-                                Behavior on border.color { ColorAnimation { duration: Tok.mFast; easing.type: Tok.mEase } }
-
-                                Row {
-                                    id: playRow
-                                    anchors.centerIn: parent
-                                    spacing: Math.round(7 * win.ui)
-                                    // The lamp: lit while it is playing, dark while it is not. Same
-                                    // grammar as the deck's own status lamp two modules over.
-                                    Rectangle {
-                                        anchors.verticalCenter: parent.verticalCenter
-                                        width: Math.round(6 * win.ui); height: width; radius: width / 2
-                                        color: root.wantMotion ? Tok.accent : Tok.alpha(Tok.ink3, 0.45)
-                                    }
-                                    IndText {
-                                        anchors.verticalCenter: parent.verticalCenter
-                                        mono: true; sz: Math.round(Tok.tData * win.ui)
-                                        font.letterSpacing: 1.1 * win.ui
-                                        font.capitalization: Font.AllUppercase
-                                        color: root.wantMotion ? Tok.accent : Tok.ink
-                                        text: root.wantMotion ? "stop" : "play"
-                                    }
-                                    IndText {
-                                        anchors.verticalCenter: parent.verticalCenter
-                                        mono: true; sz: Math.round(Tok.tLabel * win.ui)
-                                        color: Tok.ink3
-                                        font.capitalization: Font.AllUppercase
-                                        text: "ctrl+p"
-                                    }
-                                }
-                                MouseArea {
-                                    id: playMa
-                                    anchors.fill: parent
-                                    hoverEnabled: true
-                                    cursorShape: Qt.PointingHandCursor
-                                    onClicked: root.togglePlay()
-                                }
-                            }
-                        }
-                    }
-                }
-                Rectangle { width: 1; height: panel.height; color: Tok.ruleHard }
-
-                // 3 — the vent. Rules only, a full module rather than a detail in a corner.
-                Item {
-                    width: Math.round(96 * win.ui); height: panel.height
-                    Row {
-                        anchors.centerIn: parent
-                        spacing: Math.max(2, Math.round(4 * win.ui))
-                        Repeater {
-                            model: 11
-                            Rectangle {
-                                width: Math.max(1, Math.round(win.ui))
-                                height: Math.round(panel.height * 0.46)
-                                color: Tok.alpha(Tok.ink3, 0.34)
-                            }
-                        }
-                    }
-                }
-                Rectangle { width: 1; height: panel.height; color: Tok.ruleHard }
-
-                // 4 — the indicator. One lamp, and the step it is on.
-                Item {
-                    width: Math.round(150 * win.ui); height: panel.height
-                    Column {
-                        anchors.centerIn: parent
-                        spacing: Tok.s2 * win.ui
-                        // The lamp. It used to go accent the instant you pressed enter and
-                        // stay there for the whole commit, which says "busy" and nothing
-                        // else. It now reads the cartridge: dim while the card is still in
-                        // the air, full at the moment of CONTACT, and a single ring thrown
-                        // off at that instant. A lamp that lights when the thing lands is
-                        // the deck responding; a lamp that lights when you press a key is
-                        // the keyboard responding.
-                        Rectangle {
-                            id: lamp
-                            anchors.horizontalCenter: parent.horizontalCenter
-                            width: Math.round(9 * win.ui); height: width; radius: width / 2
-                            color: (win.phase === "seated" || win.phase === "loaded") ? Tok.accent
-                                 : win.loading ? Tok.alpha(Tok.accent, 0.30)
-                                 : Tok.alpha(Tok.ink3, 0.40)
-                            // 40ms, not mFast: contact is an impact, and anything slow
-                            // enough to watch is not one.
-                            Behavior on color { ColorAnimation { duration: 40 } }
-
-                            Rectangle {
-                                anchors.centerIn: parent
-                                width: parent.width; height: parent.height
-                                radius: width / 2
-                                color: "transparent"
-                                border.width: Math.max(1, Math.round(2 * win.ui))
-                                border.color: Tok.accent
-                                visible: win.ring > 0 && win.ring < 1
-                                scale: 1 + win.ring * 2.4
-                                opacity: 1 - win.ring
-                            }
-                        }
-                        IndText {
-                            anchors.horizontalCenter: parent.horizontalCenter
-                            mono: true; sz: Math.round(Tok.tLabel * win.ui)
-                            font.weight: 600; font.letterSpacing: 1.4 * win.ui
-                            font.capitalization: Font.AllUppercase
-                            color: win.loading ? Tok.accent : Tok.ink3
-                            text: win.loading ? win.phase : "ready"
-                        }
-                    }
-                }
-            }
-        }
-
-        // ================= the carriage =================
-        // Two guide rails down the card's travel, a tick scale along the stretch it actually
-        // moves through, and the gate it rests on. This is the part that was missing: the
-        // upper four fifths of the screen was flat blank, so a 300px card crossing it had
-        // nothing to be measured against and the motion read as small and arbitrary.
-        //
-        // Every mark here has a job — orientation, in the motion-design sense. The rails say
-        // where the card can go, the ticks say how far it has come, the gate says where it
-        // stops. None of it is texture; a shell that states depth with hairlines states a
-        // mechanism with them too.
+        // ================= the near water =================
+        // In front of the frames: the surface they sit in, a foam line along its crest, and
+        // the body of water the readout is printed on. At rest it is see-through at the top,
+        // so the reflections show, and dense at the bottom, so text survives any wallpaper.
+        // At the commit it is also the tide.
         Item {
-            id: carriage
-            z: 2
-            anchors.fill: parent
-            visible: opacity > 0
-            opacity: win.guides ? 1 : 0
-            Behavior on opacity { NumberAnimation { duration: win.guides ? 130 : 90; easing.type: Easing.OutCubic } }
-
-            // the two rails, set just outside the card's own width
-            Repeater {
-                model: 2
-                Rectangle {
-                    required property int index
-                    width: Math.max(1, Math.round(win.ui))
-                    y: win.gateY - 40 * win.ui
-                    height: win.gapTop - y
-                    x: index === 0 ? win.holoX - 16 * win.ui
-                                   : win.holoX + win.holoW + 16 * win.ui
-                    color: Tok.rule
-                }
-            }
-
-            // the scale, on the stretch the card travels — inner ticks on both rails, so the
-            // card runs down a measured channel rather than through space
-            Repeater {
-                model: Math.max(0, Math.floor((win.gapTop - win.gateY) / (26 * win.ui)))
-                Item {
-                    required property int index
-                    readonly property real ty: win.gateY + index * 26 * win.ui
-                    // every fourth tick is long and hard — a scale needs a rhythm to be read
-                    readonly property bool major: (index % 4) === 0
-                    Rectangle {
-                        y: parent.ty; height: Math.max(1, Math.round(win.ui))
-                        x: win.holoX - 16 * win.ui
-                        width: (parent.major ? 11 : 6) * win.ui
-                        color: parent.major ? Tok.ruleHard : Tok.rule
-                    }
-                    Rectangle {
-                        y: parent.ty; height: Math.max(1, Math.round(win.ui))
-                        width: (parent.major ? 11 : 6) * win.ui
-                        x: win.holoX + win.holoW + 16 * win.ui - width
-                        color: parent.major ? Tok.ruleHard : Tok.rule
-                    }
-                }
-            }
-
-        }
-
-        // ================= the card =================
-        // `bay` is everything ABOVE the opening, and it clips. That single fact is the whole
-        // illusion: the card is a fixed-size object whose y travels DOWN, and the clip
-        // boundary IS the slot's mouth, so the last 150ms of that travel is the card going
-        // into the machine rather than shrinking or fading out of existence.
-        Item {
-            id: bay
+            id: sea
             z: 3
-            x: 0; y: 0
-            width: win.width; height: win.gapTop
-            clip: true
-            visible: root.committing
+            width: win.lw; height: win.lh
+            transformOrigin: Item.TopLeft; scale: win.ui
+            opacity: win.entered || root.committing ? 1 : 0
+            Behavior on opacity { NumberAnimation { duration: Tok.mSlow; easing.type: Tok.mEase } }
+            Shape {
+                x: -win.lambda * ((win.tide / (Math.PI * 2) * 3) % 1)
+                y: win.waterTop
+                preferredRendererType: Shape.CurveRenderer
+                ShapePath {
+                    strokeWidth: 0; strokeColor: "transparent"
+                    fillGradient: LinearGradient {
+                        x1: 0; y1: -win.swell * 2; x2: 0; y2: win.seaH + win.surge * win.lh
+                        GradientStop { position: 0.0;  color: win.mix(Tok.alpha(win.deep, 0.50), win.crest, win.surge) }
+                        GradientStop { position: 0.45; color: win.mix(Tok.alpha(win.deep, 0.86), win.shallow, win.surge) }
+                        GradientStop { position: 1.0;  color: win.mix(Tok.alpha(win.deep, 0.97), win.deep, win.surge) }
+                    }
+                    PathSvg { path: win.wavePath(win.lw + win.lambda * 3, win.lambda,
+                                                 win.swell, win.lh * 2.2, true) }
+                }
+                // foam: the crest picked out in a hairline of ink
+                ShapePath {
+                    strokeWidth: 1.5
+                    strokeColor: Tok.alpha(Tok.ink, Tok.light ? 0.30 : 0.22)
+                    fillColor: "transparent"
+                    capStyle: ShapePath.RoundCap
+                    PathSvg { path: win.wavePath(win.lw + win.lambda * 3, win.lambda,
+                                                 win.swell, 0, false) }
+                }
+            }
+        }
 
-            Rectangle {
-                id: cart
-                color: Tok.sunken
-                clip: true
-                radius: Tok.rSmall * win.ui
-                border.width: 2
-                border.color: Tok.accent
+        // ================= sea life =================
+        // Over the water, under the readout: light coming down through it, glints on the crest,
+        // bubbles, a splash where each frame you land on settles, wake off the frames while the
+        // rail moves, and a fish that swims to where you are in the folder. All of it hangs off
+        // the same tide clock as the waves, and all of it except the fish stops for reduced motion.
+        Item {
+            id: life
+            z: 3.5
+            width: win.lw; height: win.lh
+            transformOrigin: Item.TopLeft; scale: win.ui
+            opacity: win.entered || root.committing ? 1 : 0
+            Behavior on opacity { NumberAnimation { duration: Tok.mSlow; easing.type: Tok.mEase } }
 
-                // THE LABEL. The flying card used to be an image with an accent border —
-                // anonymous, and a different object from the cartridges on the shelves in
-                // Settings, which have a plate with a name on it and a keyed corner. Now it
-                // is the same object, so the language is one thing rather than a motif
-                // repeated at two sizes. It is also the only moment you can read what you
-                // are loading without looking somewhere else on screen.
-                //
-                // It arrives during the ANTICIPATION DIP rather than being there from the
-                // start: the rail's panels are projections and this is the one that has
-                // become a physical thing, so the plate coming up as you take hold of it is
-                // that transition, and the seam between panel and card stays invisible.
-                property real plateH: 0
+            readonly property bool alive: root.showing && !Tok.reducedMotion
+            readonly property color foam: Qt.rgba(1, 1, 1, Tok.light ? 0.95 : 0.85)
+            // White spray vanishes on pale light-theme water; there it takes the accent.
+            readonly property color spray: Tok.light ? Tok.alpha(Tok.accent, 0.7) : life.foam
+            // The near wave's height at x — the same curve the sea's Shape draws.
+            function waveY(x) {
+                var off = -win.lambda * ((win.tide / (Math.PI * 2) * 3) % 1);
+                return win.waterTop - win.swell * Math.sin(2 * Math.PI * (x - off) / win.lambda);
+            }
 
-                Image {
-                    id: cartImg
-                    anchors { fill: parent; margins: cart.border.width
-                              bottomMargin: cart.border.width + cart.plateH }
-                    fillMode: Image.PreserveAspectCrop
-                    asynchronous: false; cache: true
-                    sourceSize.width: preview.decodeW(root.item)
-                    sourceSize.height: preview.decodeH(root.item)
+            // How fast the rail is moving, from whoever is moving it (drag, flick or glide).
+            property real vel: 0
+            property real lastX: 0
+            FrameAnimation {
+                running: life.alive && win.entered
+                onTriggered: {
+                    var dx = rail.contentX - life.lastX;
+                    life.lastX = rail.contentX;
+                    var v = frameTime > 0 ? dx / frameTime : 0;
+                    life.vel = Math.abs(v) > 20000 ? life.vel : life.vel * 0.8 + v * 0.2;
+                    if (Math.abs(life.vel) < 4) life.vel = 0;
+                }
+            }
+
+            // ---- the splash ----
+            property real sp: 1                  // 0..1 through the splash, linear time
+            property real splashW: win.railH * 16 / 9
+            property int dir: 1                  // which way the last step went
+            NumberAnimation { id: splashAnim; target: life; property: "sp"; from: 0; to: 1; duration: 720 }
+            function moved(d) {
+                life.dir = d;
+                if (!life.alive) return;
+                life.splashW = rail.frameW(root.cur);
+                splashAnim.restart();
+            }
+
+            // ---- ambient: rays, glints, bubbles ----
+            Item {
+                anchors.fill: parent
+                visible: life.alive
+                opacity: root.committing ? 0 : 1
+                Behavior on opacity { NumberAnimation { duration: Tok.mBase; easing.type: Tok.mEase } }
+
+                // Light shafts, clipped to the water so they start at the surface.
+                Item {
+                    y: win.waterTop; width: parent.width
+                    height: Math.max(0, win.lh - win.waterTop)
+                    clip: true
+                    Repeater {
+                        model: 6
+                        Item {
+                            id: ray
+                            required property int index
+                            readonly property real seed: (index * 0.618034 + 0.2) % 1
+                            x: win.lw * (index + 0.5) / 6 + Math.sin(win.tide + index * 1.7) * 30 - width / 2
+                            y: -12
+                            width: 30 + seed * 60; height: win.seaH * 1.3
+                            transformOrigin: Item.Top
+                            rotation: 16 + Math.sin(win.tide * 0.5 + index) * 5
+                            opacity: 0.25 + 0.75 * Math.pow(0.5 + 0.5 * Math.sin(win.tide * 1.5 + index * 2.3), 2)
+                            // three nested shafts instead of one: the overlap makes a soft core
+                            // and feathered edges, where a single bar read as a pane of glass
+                            Repeater {
+                                model: 3
+                                Rectangle {
+                                    required property int index
+                                    width: ray.width * (1 - index * 0.3); height: ray.height * (1 - index * 0.15)
+                                    x: (ray.width - width) / 2
+                                    radius: width / 2
+                                    gradient: Gradient {
+                                        GradientStop { position: 0.0; color: Qt.rgba(1, 1, 1, Tok.light ? 0.10 : 0.04) }
+                                        GradientStop { position: 1.0; color: "transparent" }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
 
+                // Sun on the crest: little four-point glints that catch and go.
+                Repeater {
+                    model: 14
+                    Item {
+                        required property int index
+                        readonly property real seed: (index * 0.754877 + 0.31) % 1
+                        readonly property real px: win.lw * (index + seed) / 14
+                        readonly property real tw: Math.pow(Math.max(0, Math.sin(win.tide * (2 + seed * 2) + index * 2.1)), 6)
+                        x: px - 6; y: life.waveY(px) - 6
+                        width: 12; height: 12
+                        opacity: tw
+                        scale: 0.4 + tw * 0.8
+                        Rectangle { anchors.centerIn: parent; width: 12; height: 1.5; radius: 1; color: life.foam }
+                        Rectangle { anchors.centerIn: parent; width: 1.5; height: 12; radius: 1; color: life.foam }
+                    }
+                }
+
+                // Bubbles, each on its own clock so they never rise in step.
+                Repeater {
+                    model: 12
+                    Item {
+                        id: bub
+                        required property int index
+                        readonly property real seed: (index * 0.381966 + 0.13) % 1
+                        readonly property real r: 2.5 + seed * 5
+                        property real t: 0
+                        NumberAnimation on t {
+                            from: 0; to: 1; loops: Animation.Infinite
+                            duration: 4200 + bub.seed * 4600
+                            running: life.alive
+                        }
+                        readonly property real p: (bub.t + bub.seed * 1.7) % 1
+                        readonly property real ceil: win.waterTop + 8
+                        x: win.lw * ((bub.index * 0.618034 + 0.05) % 1) + Math.sin(bub.p * Math.PI * 4 + bub.index) * 8 - bub.r
+                        y: win.lh + 10 - bub.p * (win.lh + 10 - bub.ceil) - bub.r
+                        width: bub.r * 2; height: bub.r * 2
+                        opacity: 0.75 * Math.min(1, bub.p * 4) * (bub.p > 0.93 ? (1 - bub.p) / 0.07 : 1)
+                        Rectangle {
+                            anchors.fill: parent; radius: width / 2
+                            color: Qt.rgba(1, 1, 1, 0.07)
+                            border.width: 1; border.color: Qt.rgba(1, 1, 1, Tok.light ? 0.7 : 0.4)
+                        }
+                        Rectangle {
+                            x: parent.width * 0.24; y: parent.height * 0.2
+                            width: Math.max(1.5, parent.width * 0.24); height: width; radius: width / 2
+                            color: Qt.rgba(1, 1, 1, 0.8)
+                        }
+                    }
+                }
+            }
+
+            // ---- wake: foam streaks off the trailing edge of every frame in view ----
+            Repeater {
+                model: life.alive ? root.shown.length : 0
+                Item {
+                    id: wake
+                    required property int index
+                    readonly property real w: rail.frameW(wake.index)
+                    readonly property real cx: (rail.offs[wake.index] || 0) + wake.w / 2 - rail.contentX
+                    readonly property real n: Math.abs(wake.cx - rail.width / 2) / win.railH
+                    readonly property real sc: 1 - 0.36 * Math.pow(Math.min(1, wake.n / 3), 0.60)
+                    readonly property real speed: Math.min(1, Math.abs(life.vel) / 1600)
+                    // contentX growing means the frames are travelling left, so the wake is on the right
+                    readonly property int side: life.vel > 0 ? 1 : -1
+                    visible: wake.speed > 0.03 && wake.cx > -wake.w && wake.cx < win.lw + wake.w && !root.committing
+                    x: wake.cx + wake.side * wake.w * wake.sc / 2
+                    y: life.waveY(wake.x)
+                    Repeater {
+                        model: 3
+                        Rectangle {
+                            required property int index
+                            width: (50 + index * 36) * wake.speed * (1 - index * 0.12)
+                            height: 2.2 - index * 0.5; radius: 1
+                            x: wake.side > 0 ? index * 4 : -width - index * 4
+                            y: -2 + index * 5
+                            opacity: 0.9 - index * 0.25
+                            gradient: Gradient {
+                                orientation: Gradient.Horizontal
+                                GradientStop { position: 0.0; color: wake.side > 0 ? life.spray : "transparent" }
+                                GradientStop { position: 1.0; color: wake.side > 0 ? "transparent" : life.spray }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ---- the splash: rings spreading round the frame you landed on, and spray ----
+            Item {
+                anchors.fill: parent
+                visible: life.sp < 1 && !root.committing
+                Repeater {
+                    model: 2
+                    Shape {
+                        id: ring
+                        required property int index
+                        readonly property real lin: Math.max(0, Math.min(1, (life.sp - index * 0.18) / (1 - index * 0.18)))
+                        readonly property real q: 1 - Math.pow(1 - lin, 3)
+                        readonly property real rx: life.splashW * (0.5 + q * (0.3 + index * 0.18))
+                        readonly property real ry: 5 + q * 12
+                        x: win.lw / 2; y: win.waterTop + 3
+                        opacity: (1 - lin) * (index === 0 ? 0.9 : 0.6)
+                        preferredRendererType: Shape.CurveRenderer
+                        ShapePath {
+                            strokeWidth: 2 - ring.index * 0.6
+                            strokeColor: life.spray
+                            fillColor: "transparent"
+                            PathSvg {
+                                path: "M " + (-ring.rx) + " 0 A " + ring.rx + " " + ring.ry + " 0 1 0 " + ring.rx
+                                    + " 0 A " + ring.rx + " " + ring.ry + " 0 1 0 " + (-ring.rx) + " 0"
+                            }
+                        }
+                    }
+                }
+                Repeater {
+                    model: 12
+                    Rectangle {
+                        required property int index
+                        readonly property real side: index % 2 ? 1 : -1
+                        readonly property real seed: (index * 0.618034 + 0.07) % 1
+                        readonly property real tt: life.sp * 0.72
+                        readonly property real vx: side * (40 + seed * 110) + life.dir * 35
+                        readonly property real vy: 170 + seed * 190
+                        readonly property real x0: win.lw / 2 + side * life.splashW * (0.36 + seed * 0.16)
+                        readonly property real h: vy * tt - 1000 * tt * tt / 2
+                        width: 2.5 + seed * 3.5; height: width; radius: width / 2
+                        x: x0 + vx * tt - width / 2
+                        y: win.waterTop - h - height / 2
+                        visible: h > -2
+                        opacity: 1 - life.sp * 0.6
+                        color: life.spray
+                        border.width: 1; border.color: Tok.alpha(Tok.accent, 0.45)
+                    }
+                }
+            }
+
+            // ---- the fish: where you are in the folder ----
+            Item {
+                id: lane
+                readonly property real y0: win.lh - 104
+                readonly property real x0: Tok.s8 + 24
+                readonly property real x1: win.lw - Tok.s8 - 24
+                readonly property int n: root.shown.length
+                function at(i) { return lane.x0 + (lane.x1 - lane.x0) * i / Math.max(1, lane.n - 1) }
+                width: parent.width; height: parent.height
+                opacity: root.committing || lane.n < 2 ? 0 : 1
+                Behavior on opacity { NumberAnimation { duration: Tok.mBase; easing.type: Tok.mEase } }
+
                 Rectangle {
-                    anchors { left: parent.left; right: parent.right; bottom: parent.bottom
-                              margins: cart.border.width }
-                    height: cart.plateH
-                    color: Tok.raised
-                    clip: true
-                    Rectangle { anchors { left: parent.left; right: parent.right; top: parent.top }
-                                height: Math.max(1, Math.round(win.ui)); color: Tok.ruleHard }
+                    x: lane.x0; width: lane.x1 - lane.x0
+                    y: lane.y0 + 13; height: 1
+                    color: Tok.alpha(Tok.ink, 0.10)
+                }
+                // one pebble per wallpaper while that still reads as a row of them
+                Repeater {
+                    model: lane.n <= 90 ? lane.n : 0
+                    Rectangle {
+                        required property int index
+                        readonly property bool on: index === root.cur
+                        width: on ? 8 : 5; height: width; radius: width / 2
+                        x: lane.at(index) - width / 2
+                        y: lane.y0 + 13 - height / 2
+                        color: on ? Tok.accent : Tok.alpha(Tok.ink, 0.30)
+                        Behavior on width { NumberAnimation { duration: Tok.mFast } }
+                    }
+                }
+
+                Item {
+                    id: fish
+                    readonly property real target: lane.at(root.cur)
+                    readonly property bool swimming: Math.abs(fish.x - fish.target) > 1.5
+                    x: fish.target
+                    y: lane.y0 + Math.sin(win.tide * 2) * 2.5
+                    Behavior on x {
+                        enabled: !Tok.reducedMotion
+                        SpringAnimation { spring: 2.4; damping: 0.3; epsilon: 0.25 }
+                    }
+                    property real flip: life.dir
+                    Behavior on flip { NumberAnimation { duration: 180; easing.type: Easing.InOutQuad } }
+                    transform: Scale { xScale: fish.flip * 1.4; yScale: 1.4 }
+                    // tilt into the swim, nose down when diving forward
+                    rotation: fish.swimming ? Math.max(-12, Math.min(12, (fish.target - fish.x) * 0.15 * fish.flip)) : 0
+                    Behavior on rotation { NumberAnimation { duration: 140 } }
+
+                    Shape {
+                        // the tail, wagging from where it meets the body
+                        preferredRendererType: Shape.CurveRenderer
+                        transform: Rotation {
+                            origin.x: -6; origin.y: 0
+                            angle: Tok.reducedMotion ? 0
+                                 : Math.sin(win.tide * (fish.swimming ? 22 : 7)) * (fish.swimming ? 26 : 12)
+                        }
+                        ShapePath {
+                            strokeWidth: 0; strokeColor: "transparent"
+                            fillColor: Qt.darker(Tok.accent, 1.15)
+                            PathSvg { path: "M -5 0 L -15 -7 Q -12 0 -15 7 Z" }
+                        }
+                    }
+                    Shape {
+                        preferredRendererType: Shape.CurveRenderer
+                        ShapePath {
+                            strokeWidth: 1; strokeColor: Qt.lighter(Tok.accent, 1.35)
+                            fillColor: Tok.accent
+                            PathSvg { path: "M 12 0 Q 7 -8 -6 -4 Q -9 0 -6 4 Q 7 8 12 0 Z" }
+                        }
+                        // dorsal fin
+                        ShapePath {
+                            strokeWidth: 0; strokeColor: "transparent"
+                            fillColor: Qt.darker(Tok.accent, 1.15)
+                            PathSvg { path: "M 2 -5 Q -1 -10 -4 -4 Z" }
+                        }
+                    }
+                    Rectangle { x: 5; y: -2.6; width: 2.6; height: 2.6; radius: 1.3; color: Tok.bg }
+                }
+            }
+        }
+
+        // ================= the readout =================
+        // Printed on the water: which of how many, then the name and its numbers, and the one
+        // control a moving wallpaper needs. Fades with the chrome; the sea itself does not.
+        Item {
+            id: readout
+            z: 4
+            width: win.lw; height: win.lh
+            transformOrigin: Item.TopLeft; scale: win.ui
+            opacity: chrome.opacity
+            Row {
+                anchors { left: parent.left; leftMargin: Tok.s8; right: parent.right; rightMargin: Tok.s8
+                          bottom: parent.bottom; bottomMargin: 30 }
+                spacing: Tok.s6
+                Row {
+                    anchors.bottom: parent.bottom
+                    spacing: Tok.s2
+                    IndText {
+                        anchors.baseline: ofN.baseline
+                        mono: true; sz: Tok.tKpi; font.weight: 700
+                        color: Tok.accent
+                        text: root.shown.length
+                              ? (root.cur + 1 < 10 ? "0" : "") + (root.cur + 1) : "--"
+                    }
+                    IndText {
+                        id: ofN
+                        sz: Tok.tDense; color: Tok.ink3
+                        text: "/ " + root.shown.length
+                    }
+                }
+                Column {
+                    anchors.bottom: parent.bottom
+                    spacing: Tok.s1
+                    IndText {
+                        sz: Tok.tBody; color: Tok.ink; font.weight: 600
+                        text: root.item ? root.item.name : "No wallpaper"
+                        elide: Text.ElideMiddle
+                        width: Math.min(implicitWidth, win.lw * 0.45)
+                    }
                     Row {
-                        anchors { left: parent.left; leftMargin: Tok.s3 * win.ui
-                                  right: parent.right; rightMargin: Tok.s3 * win.ui
-                                  verticalCenter: parent.verticalCenter }
-                        spacing: Tok.s2 * win.ui
+                        spacing: Tok.s4
+                        IndText {
+                            anchors.verticalCenter: parent.verticalCenter
+                            sz: Tok.tData; color: Tok.ink3
+                            visible: root.item !== null && root.item.w > 0
+                            text: root.item ? root.item.w + "×" + root.item.h : ""
+                        }
+                        IndText {
+                            anchors.verticalCenter: parent.verticalCenter
+                            sz: Tok.tData; color: Tok.ink3
+                            text: root.item ? root.human(root.item.bytes) : ""
+                        }
+                        IndText {
+                            anchors.verticalCenter: parent.verticalCenter
+                            sz: Tok.tData; color: Tok.ink3
+                            visible: root.item !== null && root.item.ms > 0
+                            text: root.item ? root.clock(root.item.ms) : ""
+                        }
+                    }
+                }
+                // Motion is opt-in, so a moving wallpaper gets a button that says so.
+                Rectangle {
+                    anchors.bottom: parent.bottom; anchors.bottomMargin: 2
+                    visible: root.item !== null && root.item.vid
+                    width: playRow.implicitWidth + 22; height: 28; radius: 14
+                    color: root.wantMotion ? Tok.alpha(Tok.accent, 0.22)
+                         : playMa.containsMouse ? Tok.alpha(Tok.ink, 0.12) : Tok.alpha(Tok.ink, 0.06)
+                    border.width: 1
+                    border.color: root.wantMotion ? Tok.accent : Tok.alpha(Tok.ink, 0.18)
+                    Behavior on color { ColorAnimation { duration: Tok.mFast } }
+                    Row {
+                        id: playRow
+                        anchors.centerIn: parent
+                        spacing: 6
                         Text {
                             anchors.verticalCenter: parent.verticalCenter
-                            visible: root.item !== null && root.item.vid
-                            text: "play_arrow"; font.family: "Material Symbols Outlined"
-                            font.pixelSize: Math.round(14 * win.ui); color: Tok.ink3
+                            text: root.wantMotion ? "Pause" : "play_arrow"
+                            font.family: "Material Symbols Outlined"; font.pixelSize: 16
+                            color: root.wantMotion ? Tok.accent : Tok.ink
                         }
                         IndText {
                             anchors.verticalCenter: parent.verticalCenter
-                            width: Math.min(implicitWidth, cart.width - Tok.s8 * win.ui)
-                            text: root.item ? root.item.name : ""
-                            mono: true; sz: Math.round(Tok.tData * win.ui); color: Tok.ink
-                            elide: Text.ElideMiddle
+                            sz: Tok.tData; color: root.wantMotion ? Tok.accent : Tok.ink
+                            text: root.wantMotion ? "Stop" : "Play"
+                        }
+                        IndText {
+                            anchors.verticalCenter: parent.verticalCenter
+                            sz: Tok.tLabel; color: Tok.ink3
+                            text: "Ctrl+P"
                         }
                     }
-                }
-
-                // The keyed corner. `Tok.bg` reads as ABSENT material here and nowhere else
-                // on this surface would: the lid covering the screen during the commit is
-                // that exact colour, so the corner is genuinely showing the ground behind.
-                Rectangle {
-                    anchors { right: parent.right; top: parent.top; margins: cart.border.width }
-                    width: Math.round(20 * win.ui); height: Math.round(11 * win.ui)
-                    opacity: cart.plateH > 0 ? 1 : 0
-                    color: Tok.bg
-                    Rectangle { anchors { left: parent.left; top: parent.top; bottom: parent.bottom }
-                                width: Math.max(1, Math.round(win.ui)); color: Tok.ruleHard }
-                    Rectangle { anchors { left: parent.left; right: parent.right; bottom: parent.bottom }
-                                height: Math.max(1, Math.round(win.ui)); color: Tok.ruleHard }
+                    MouseArea {
+                        id: playMa
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: root.togglePlay()
+                    }
                 }
             }
-
-            // THE MOUTH. The clip boundary alone is a hard cut: the card was not swallowed
-            // so much as erased a row of pixels at a time. This is the shadow the deck's
-            // own lip throws onto whatever is entering it, so the last part of the travel
-            // reads as going UNDER something.
-            //
-            // Bound to the card's x and width rather than the bay's, or it would draw a
-            // dark band across the whole screen along the slot line; and faded in by how
-            // much of the card is actually past the mouth, so it is not a smudge sitting
-            // there while the card is still up at the gate.
-            Rectangle {
-                anchors.bottom: parent.bottom
-                x: cart.x; width: cart.width
-                height: Math.round(30 * win.ui)
-                // Lit only while the card actually SPANS the mouth. Ramped over the first
-                // 40px of entry, and back out over the last 40px as the top edge crosses —
-                // measured over the card's full height it was still at full strength once
-                // the card was entirely inside, which drew a dark gradient band across bare
-                // ground with nothing under it to be the shadow of.
-                opacity: {
-                    var ramp = 40 * win.ui;
-                    var inn  = (cart.y + cart.height - win.gapTop) / ramp;   // how much has entered
-                    var left = (win.gapTop - cart.y) / ramp;                 // how much is still out
-                    return Math.max(0, Math.min(1, Math.min(inn, left)));
-                }
-                gradient: Gradient {
-                    GradientStop { position: 0.0; color: "transparent" }
-                    GradientStop { position: 0.55; color: Tok.alpha(Qt.darker(Tok.sunken, 1.9), 0.42) }
-                    GradientStop { position: 1.0; color: Tok.alpha(Qt.darker(Tok.sunken, 1.9), 0.92) }
-                }
+            IndText {
+                anchors { right: parent.right; rightMargin: Tok.s8; bottom: parent.bottom; bottomMargin: 34 }
+                sz: Tok.tData; color: Tok.ink2
+                text: root.matchColors ? "Enter  set it · the shell follows its colours" : "Enter  set it"
             }
         }
 
         SequentialAnimation {
             id: insert
-            // 1 — anticipation. The card dips before it rises. It is the oldest trick in
-            //     animation and the cheapest: 80ms of the wrong direction is what makes the
-            //     pop read as force applied to an object rather than a position changing.
-            //     The ground, the console and the carriage are fading in over this, and the
-            //     rail's other frames are dropping away — see the delegate's `fall`.
-            ParallelAnimation {
-                NumberAnimation {
-                    target: cart; property: "y"; to: cart.y + 9 * win.ui
-                    duration: 80; easing.type: Easing.OutQuad
-                }
-                // …and the label comes up as you take hold of it. The projection on the
-                // rail becomes a physical cartridge in the same 80ms the dip occupies, so
-                // there is no frame where an object with a nameplate appears out of a panel
-                // that never had one.
-                NumberAnimation {
-                    target: cart; property: "plateH"; to: 26 * win.ui
-                    duration: 80; easing.type: Easing.OutCubic
-                }
-            }
-            // 2 — pop, up the guides to the gate. OutBack overshoots a hair and settles: that
-            //     recoil at the top is what makes it read as picked UP rather than slid.
-            NumberAnimation {
-                target: cart; property: "y"; to: win.gateY
-                duration: 220; easing.type: Easing.OutBack
-            }
-            // 3 — held at the gate. Stillness shorter than about 80ms does not register as
-            //     stillness, and without the beat the pop and the drop are one long slide.
-            ScriptAction { script: win.phase = "insert" }
-            PauseAnimation { duration: 100 }
-            // 4 — down the channel. InQuad accelerates into the slot, because a push has no
-            //     follow-through, and the clip takes it at the mouth. The shutter parts
-            //     ahead of it — 130ms against a 210ms fall, so the way is open well before
-            //     the card arrives and the machine is never seen being hit by it.
-            ParallelAnimation {
-                NumberAnimation {
-                    target: cart; property: "y"; to: win.gapTop
-                    duration: 210; easing.type: Easing.InQuad
-                }
-                NumberAnimation {
-                    target: win; property: "shutter"; to: 1
-                    duration: 130; easing.type: Easing.OutCubic
-                }
-            }
-            // 5 — seated. The console takes the impact and settles, the shutter snaps shut
-            //     behind the cartridge, the lamp reads contact, and the carriage marks drop
-            //     out: they were orientation for a move that has now happened.
-            ScriptAction { script: { win.phase = "seated"; win.guides = false } }
-
-            ParallelAnimation {
-                SequentialAnimation {
-                    NumberAnimation { target: win; property: "jolt"; to: 4 * win.ui; duration: 45; easing.type: Easing.OutQuad }
-                    NumberAnimation { target: win; property: "jolt"; to: 0;          duration: 65; easing.type: Easing.OutBack }
-                }
-                // Faster shut than open, and OutBack so it overshoots and settles: a
-                // sprung leaf closing, not a panel sliding.
-                NumberAnimation {
-                    target: win; property: "shutter"; to: 0
-                    duration: 105; easing.type: Easing.OutBack
-                }
-                // One ring, thrown off at the instant of contact and spent. It outlives the
-                // jolt on purpose — the impact is over in 110ms and the eye needs longer
-                // than that to register that anything was signalled.
-                NumberAnimation {
-                    target: win; property: "ring"; to: 1
-                    duration: 420; easing.type: Easing.OutCubic
-                }
-            }
-            // 6 — output. The wallpaper comes OUT of the aperture it just went into: the lid
-            //     is eaten from its bottom edge upward and the console drops away, so the
-            //     picture emerges from the slot rather than being uncovered by two panels
-            //     leaving. In goes the cartridge, out comes the image, through one opening.
-            ScriptAction { script: win.phase = "loaded" }
-            ParallelAnimation {
-                // OutQuint, because a reveal decelerates into place. InOutCubic accelerated
-                // into the middle of the sweep — which is exactly where a 956px boundary
-                // travelling at speed is most visible as a boundary.
-                NumberAnimation { target: lid; property: "height"; to: 0
-                                  duration: 460; easing.type: Easing.OutQuint }
-                // …and it softens as it goes, so the edge stops being a hard line.
-                NumberAnimation { target: lid; property: "opacity"; to: 0
-                                  duration: 460; easing.type: Easing.InCubic }
-                // The deck follows a beat behind rather than moving at the same instant:
-                // follow-through, not two things at once. It travels its own full height so
-                // the bezel, the well and the lip all clear the bottom of the screen.
-                SequentialAnimation {
-                    PauseAnimation { duration: 70 }
-                    NumberAnimation { target: win; property: "deckShift"
-                                      to: win.deckH * win.ui
-                                      duration: 400; easing.type: Easing.OutQuint }
-                }
-                NumberAnimation { target: bay; property: "opacity"; to: 0; duration: 140 }
-            }
+            // 1 — the chosen frame goes under. InCubic: it starts slowly, as something
+            //     settling into water does, and the rest of the row lets go of it meanwhile.
+            NumberAnimation { target: win; property: "sink"; to: 1; duration: 260; easing.type: Easing.InCubic }
+            // 2 — the swell. The surface lifts up the whole screen and the waves grow as it
+            //     comes, so it reads as a wave arriving and not as a curtain being raised.
+            ScriptAction { script: win.phase = "surge" }
+            NumberAnimation { target: win; property: "surge"; to: 1; duration: 460; easing.type: Easing.InOutCubic }
+            // 3 — slack water. Without the beat the rise and the fall are one movement.
+            PauseAnimation { duration: 90 }
+            // 4 — the ebb. The water drains down and out, and leaves the new wallpaper behind.
+            //     OutCubic: it lets go fast and settles, the way a wave runs back down a beach.
+            ScriptAction { script: win.phase = "ebb" }
+            NumberAnimation { target: win; property: "ebb"; to: 1; duration: 600; easing.type: Easing.OutCubic }
         }
 
         // ================= input =================
@@ -2041,7 +1909,7 @@ Item {
         // header keep their own clicks.
         MouseArea {
             anchors { left: parent.left; right: parent.right; top: parent.top; bottom: parent.bottom }
-            anchors.bottomMargin: (win.deckH + win.holoGap) * win.ui
+            anchors.bottomMargin: (win.seaH + win.railH - win.sinkIn) * win.ui
             z: -1
             onClicked: if (!root.committing) root.leave()
         }
@@ -2049,8 +1917,12 @@ Item {
 
     // One place the focus change fans out from: the preview reloads, and the rail closes
     // the gap unless the rail is what moved in the first place.
+    property int prevCur: 0
     onCurChanged: {
+        var d = root.cur >= root.prevCur ? 1 : -1;
+        root.prevCur = root.cur;
         preview.request();
         if (!rail.userMoving) rail.glideTo(root.cur);
+        if (root.showing && win.entered && !root.committing) life.moved(d);
     }
 }

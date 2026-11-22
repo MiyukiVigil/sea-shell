@@ -18,7 +18,7 @@ Row {
             required property var modelData
             readonly property bool on: optRow.current === modelData.v
             implicitWidth: optT.implicitWidth + 16; implicitHeight: 26; radius: 13
-            color: on ? Tok.accent : (optMa.containsMouse ? Tok.accentWash : Tok.sunken)
+            color: on ? Tok.accent : (optMa.containsMouse ? Tok.alpha(Tok.ink, 0.12) : Tok.alpha(Tok.ink, 0.06))
             Text { id: optT; anchors.centerIn: parent; text: modelData.l; color: parent.on ? Tok.accentInk : Tok.ink; font.family: Tok.sans; font.pixelSize: 11 }
             MouseArea { id: optMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
                 onClicked: optRow.item.setOpt(optRow.key, modelData.v) }

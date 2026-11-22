@@ -238,8 +238,8 @@ Item {
     function launchNew(it) { if (it && it.entry) it.entry.execute(); }
 
     // ---------- geometry / overlap ----------
-    readonly property int pad: 6
-    readonly property int slot: dock.iconSize + 10
+    readonly property int pad: 9
+    readonly property int slot: dock.iconSize + 12
     readonly property int thickness: dock.iconSize + dock.pad * 2
     readonly property int headroom: Math.round(dock.iconSize * 0.62)   // zoom growth + label
     readonly property int gap: 8
@@ -396,10 +396,20 @@ Item {
                     id: card
                     width:  dock.vertical ? dock.thickness : dock.cardLen
                     height: dock.vertical ? dock.cardLen : dock.thickness
-                    radius: Tok.rCard
-                    color: Tok.surface
+                    // A shelf, as macOS draws it: rounder than a panel, a hairline round the outside
+                    // and a faint light one inside along the top. Its opacity is the Dock setting —
+                    // which was read into surfaceOpacity and then never used, so the slider did nothing.
+                    radius: Math.min(dock.thickness / 2, Tok.rCard + 8)
+                    color: Tok.alpha(Tok.light ? Tok.raised : Tok.surface, dock.surfaceOpacity)
                     border.width: 1
-                    border.color: Tok.alpha(Tok.ruleHard, 0.55)
+                    border.color: Tok.alpha(Tok.ink, Tok.light ? 0.10 : 0.14)
+                    Rectangle {
+                        anchors.fill: parent; anchors.margins: 1
+                        radius: parent.radius - 1
+                        color: "transparent"
+                        border.width: 1
+                        border.color: Qt.rgba(1, 1, 1, Tok.light ? 0.55 : 0.05)
+                    }
 
                     anchors.horizontalCenter: dock.vertical ? undefined : parent.horizontalCenter
                     anchors.verticalCenter:   dock.vertical ? parent.verticalCenter : undefined
@@ -459,6 +469,22 @@ Item {
                                 height: dock.vertical ? dock.slot : dock.thickness
 
                                 readonly property bool isHover: dock.hoverKey === cellRoot.modelData.key
+                                // the app you are in: its dots take the accent
+                                readonly property bool front: {
+                                    var ws = cellRoot.modelData.wins || [];
+                                    for (var i = 0; i < ws.length; i++) if (ws[i] && ws[i].activated) return true;
+                                    return false;
+                                }
+                                // pinned apps, then a divider, then what is only running — macOS's split
+                                Rectangle {
+                                    visible: cellRoot.index > 0 && !cellRoot.modelData.pinned
+                                             && !!dock.items[cellRoot.index - 1] && dock.items[cellRoot.index - 1].pinned
+                                    color: Tok.alpha(Tok.ink, 0.16)
+                                    width: dock.vertical ? dock.thickness * 0.55 : 1
+                                    height: dock.vertical ? 1 : dock.thickness * 0.55
+                                    x: dock.vertical ? (parent.width - width) / 2 : 0
+                                    y: dock.vertical ? 0 : (parent.height - height) / 2
+                                }
                                 // Distance falloff in SLOT units, not pixels: the row never
                                 // reflows, so index distance is exact and cannot jitter.
                                 // NOT readonly — `Behavior on` cannot attach to a readonly
@@ -502,13 +528,24 @@ Item {
                                     id: iconWrap
                                     width: dock.iconSize; height: dock.iconSize
                                     anchors.centerIn: parent
-                                    scale: cellRoot.mag
-                                    // grow away from the docked edge instead of into it
+                                    // a press dips the icon; it answers before the app does
+                                    scale: cellRoot.mag * (cellMa.pressed ? 0.88 : 1)
+                                    Behavior on scale { NumberAnimation { duration: Tok.mMicro; easing.type: Easing.OutCubic } }
+                                    // Launching an app that is not running bounces it off the shelf
+                                    // until its window turns up (the rebuild that follows ends it).
+                                    property real hop: 0
+                                    SequentialAnimation {
+                                        id: launchHop
+                                        loops: 3
+                                        NumberAnimation { target: iconWrap; property: "hop"; from: 0; to: dock.iconSize * 0.4; duration: 230; easing.type: Easing.OutQuad }
+                                        NumberAnimation { target: iconWrap; property: "hop"; to: 0; duration: 230; easing.type: Easing.InQuad }
+                                    }
+                                    // grow (and hop) away from the docked edge instead of into it
                                     transform: Translate {
-                                        x: dock.edge === "left"  ?  dock.iconSize * (cellRoot.mag - 1) * 0.5
-                                         : dock.edge === "right" ? -dock.iconSize * (cellRoot.mag - 1) * 0.5 : 0
-                                        y: dock.edge === "top"    ?  dock.iconSize * (cellRoot.mag - 1) * 0.5
-                                         : dock.edge === "bottom" ? -dock.iconSize * (cellRoot.mag - 1) * 0.5 : 0
+                                        x: dock.edge === "left"  ?  dock.iconSize * (cellRoot.mag - 1) * 0.5 + iconWrap.hop
+                                         : dock.edge === "right" ? -dock.iconSize * (cellRoot.mag - 1) * 0.5 - iconWrap.hop : 0
+                                        y: dock.edge === "top"    ?  dock.iconSize * (cellRoot.mag - 1) * 0.5 + iconWrap.hop
+                                         : dock.edge === "bottom" ? -dock.iconSize * (cellRoot.mag - 1) * 0.5 - iconWrap.hop : 0
                                         Behavior on x { NumberAnimation { duration: 140; easing.type: Easing.OutCubic } }
                                         Behavior on y { NumberAnimation { duration: 140; easing.type: Easing.OutCubic } }
                                     }
@@ -526,14 +563,13 @@ Item {
                                     Rectangle {
                                         anchors.fill: parent
                                         visible: iconWrap.ip === ""
-                                        radius: Tok.r
-                                        color: Tok.alpha(Tok.accent, 0.20)
-                                        border.width: 1; border.color: Tok.alpha(Tok.accent, 0.45)
+                                        radius: dock.iconSize * 0.24
+                                        color: Tok.accent
                                         Text {
                                             anchors.centerIn: parent
                                             text: ("" + cellRoot.modelData.cls).substring(0, 1).toUpperCase()
-                                            color: Tok.accent
-                                            font.family: Tok.mono
+                                            color: Tok.accentInk
+                                            font.family: Tok.sans
                                             font.pixelSize: Math.round(dock.iconSize * 0.45)
                                             font.weight: 600
                                         }
@@ -541,8 +577,8 @@ Item {
                                 }
 
                                 // ---- running indicator ----
-                                // Up to three ticks, then a single wider bar: past three the
-                                // count stops being readable and only the fact matters.
+                                // A dot per window, up to three: past three the count stops being
+                                // readable and only the fact matters. The app you are in is accent.
                                 Row {
                                     spacing: 3
                                     visible: cellRoot.modelData.count > 0
@@ -552,22 +588,18 @@ Item {
                                     anchors.bottom: dock.edge === "bottom" ? parent.bottom : undefined
                                     anchors.left:   dock.edge === "left"   ? parent.left   : undefined
                                     anchors.right:  dock.edge === "right"  ? parent.right  : undefined
-                                    anchors.margins: 3
-                                    // The model IS the tick count: one tick per window up to
-                                    // three, then a single wide bar. (Rendering three and hiding
-                                    // two of them, as this first did, only looks the same.)
+                                    anchors.margins: 2
                                     Repeater {
-                                        model: cellRoot.modelData.count > 3 ? 1 : cellRoot.modelData.count
+                                        model: Math.min(3, cellRoot.modelData.count)
                                         delegate: Rectangle {
-                                            width: cellRoot.modelData.count > 3 ? 16
-                                                 : cellRoot.modelData.count === 1 ? 7 : 5
-                                            height: 3; radius: 1.5
-                                            color: Tok.accent
+                                            width: 4; height: 4; radius: 2
+                                            color: cellRoot.front ? Tok.accent : Tok.alpha(Tok.ink, 0.55)
                                         }
                                     }
                                 }
 
                                 MouseArea {
+                                    id: cellMa
                                     anchors.fill: parent
                                     hoverEnabled: true
                                     cursorShape: Qt.PointingHandCursor
@@ -575,7 +607,10 @@ Item {
                                     onEntered: { dock.hoverKey = cellRoot.modelData.key; dock.hoverIndex = cellRoot.index }
                                     onExited: if (dock.hoverKey === cellRoot.modelData.key) { dock.hoverKey = ""; dock.hoverIndex = -1 }
                                     onClicked: (m) => {
-                                        if (m.button === Qt.LeftButton) dock.activate(cellRoot.modelData);
+                                        if (m.button === Qt.LeftButton) {
+                                            if (cellRoot.modelData.count === 0 && cellRoot.modelData.entry && !Tok.reducedMotion) launchHop.restart();
+                                            dock.activate(cellRoot.modelData);
+                                        }
                                         else if (m.button === Qt.MiddleButton) dock.launchNew(cellRoot.modelData);
                                         else if (m.button === Qt.RightButton) dock.togglePin(cellRoot.modelData.key);
                                     }
@@ -594,11 +629,13 @@ Item {
                         for (var i = 0; i < dock.items.length; i++) if (dock.items[i].key === dock.hoverKey) return dock.items[i];
                         return null;
                     }
-                    width: tipText.implicitWidth + 14
-                    height: tipText.implicitHeight + 8
-                    radius: Tok.r
-                    color: Tok.raised
-                    border.width: 1; border.color: Tok.alpha(Tok.ruleHard, 0.6)
+                    width: tipCol.implicitWidth + 22
+                    height: tipCol.implicitHeight + 12
+                    radius: 10
+                    // dark in light mode, raised in dark: it must read over any window or wallpaper
+                    color: Tok.light ? Tok.ink : Tok.raised
+                    border.width: Tok.light ? 0 : 1
+                    border.color: Tok.alpha(Tok.ink, 0.12)
 
                     x: dock.vertical
                        ? (dock.edge === "left" ? card.x + card.width + 6 : card.x - width - 6)
@@ -609,9 +646,13 @@ Item {
                             card.y + strip.y + (dock.hoverIndex + 0.5) * dock.slot - height / 2))
                        : (dock.edge === "top" ? card.y + card.height + 6 : card.y - height - 6)
 
+                    Column {
+                        id: tipCol
+                        anchors.centerIn: parent
+                        spacing: 1
                     Text {
                         id: tipText
-                        anchors.centerIn: parent
+                        anchors.horizontalCenter: parent.horizontalCenter
                         // The label also carries the pin state, because nothing else on the dock
                         // does. Right-click has always toggled the pin and always written
                         // dock.json, but for an app that was already running NOTHING on screen
@@ -619,15 +660,23 @@ Item {
                         // as dead. Stating it here both confirms the toggle (the label flips
                         // under the cursor as you click) and teaches the binding to anyone who
                         // never knew it existed.
+                        text: tip.it ? dock.labelFor(tip.it) : ""
+                        color: Tok.light ? Tok.bg : Tok.ink
+                        font.family: Tok.sans
+                        font.pixelSize: 12
+                        font.weight: Font.DemiBold
+                    }
+                    Text {
+                        anchors.horizontalCenter: parent.horizontalCenter
                         text: {
                             var it = tip.it; if (!it) return "";
-                            var n = dock.labelFor(it);
-                            if (it.count > 1) n += "  ·  " + it.count;
-                            return n + (it.pinned ? "  ·  pinned" : "  ·  right-click to pin");
+                            var s = it.count > 1 ? it.count + " windows, " : "";
+                            return s + (it.pinned ? "kept in the Dock (right-click to remove)" : "right-click to keep in the Dock");
                         }
-                        color: Tok.ink
-                        font.family: Tok.mono
-                        font.pixelSize: 11
+                        color: Tok.alpha(Tok.light ? Tok.bg : Tok.ink, 0.7)
+                        font.family: Tok.sans
+                        font.pixelSize: 10
+                    }
                     }
                 }
             }

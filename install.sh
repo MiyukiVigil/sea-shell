@@ -103,13 +103,6 @@ copy_dir() {
   fi
   rm -rf "$dest"; mkdir -p "$dest"
   cp -a "$src"/. "$dest"/
-  # Native browsing core is optional; Python remains the compatible fallback.
-  local core="$SCRIPT_DIR/native/sea-fm-core/target/release/sea-fm-core"
-  if command -v cargo >/dev/null 2>&1; then
-    cargo build --release --locked --manifest-path "$SCRIPT_DIR/native/sea-fm-core/Cargo.toml" \
-      || warn "native file core build failed; using Python fallback"
-  fi
-  if [ -x "$core" ]; then install -m 755 "$core" "$dest/sea-fm-core"; fi
   touch "$dest/.sea-shell"
   chmod +x "$dest"/*.sh 2>/dev/null
   ok "installed ${dest/#$HOME/\~}/"
@@ -120,6 +113,27 @@ link_dir() {
   if [ -d "$dest" ] && ! [ -L "$dest" ]; then mv "$dest" "$dest.bak-$STAMP"; info "backed up ${dest/#$HOME/\~} → .bak-$STAMP"; fi
   ln -sfn "$src" "$dest"
   ok "linked ${dest/#$HOME/\~} → ${src/#$HOME/\~}"
+}
+# Build the Rust programs in native/ and put them in $1. The target dir is given explicitly:
+# a CARGO_TARGET_DIR in the environment (editors set one) would otherwise build them somewhere
+# this never looks, and the install would quietly go without them.
+build_native() {
+  local into="$1" name bin
+  for name in sea-files sea-fm-core sea-panel sea-gamepad sea-appmenu sea-fand; do
+    [ -f "$SCRIPT_DIR/native/$name/Cargo.toml" ] || continue
+    bin="$SCRIPT_DIR/native/$name/target/release/$name"
+    if command -v cargo >/dev/null 2>&1; then
+      info "building $name (first build takes a few minutes)"
+      cargo build --release --locked --quiet --manifest-path "$SCRIPT_DIR/native/$name/Cargo.toml" \
+        --target-dir "$SCRIPT_DIR/native/$name/target" || warn "$name build failed"
+    fi
+    if [ -x "$bin" ]; then
+      install -m 755 "$bin" "$into/$name"
+      ok "installed $name"
+    elif [ "$name" = "sea-files" ]; then
+      warn "sea-files is not built, so Files (Super+E) will not open — install rust (cargo) and re-run"
+    fi
+  done
 }
 # lay the quickshell/ tree down FLAT into $QS_DEST. The repo is organised into subfolders
 # (ui/ · scripts/{wallpaper,theme,lock,…} · assets/) for sanity, but the runtime resolves
@@ -133,15 +147,24 @@ deploy_qs() {
   if [ -d "$dest" ] && [ ! -f "$dest/.sea-shell" ]; then
     mv "$dest" "$dest.bak-$STAMP"; info "backed up ${dest/#$HOME/\~} → .bak-$STAMP"
   fi
-  rm -rf "$dest"; mkdir -p "$dest"
+  # Built beside the live folder and swapped in at the end. A running bar hot-reloads when its
+  # files change, so emptying the folder and refilling it would show it a half-written shell.
+  local build="$dest.new.$$"
+  rm -rf "$build"; mkdir -p "$build"
   while IFS= read -r f; do
     name="$(basename "$f")"
     case "$seen" in *" $name "*) warn "duplicate basename '$name' (${f#$src/}) — skipped"; continue ;; esac
     seen="$seen$name "
-    if [ "$mode" = "link" ]; then ln -sfn "$f" "$dest/$name"
-    else install -m 644 "$f" "$dest/$name"; fi
+    if [ "$mode" = "link" ]; then ln -sfn "$f" "$build/$name"
+    else install -m 644 "$f" "$build/$name"; fi
   done < <(find "$src" -type f ! -name '.sea-shell' | sort)
-  touch "$dest/.sea-shell"
+  build_native "$build"
+  touch "$build/.sea-shell"
+  if [ -d "$dest" ]; then
+    rm -rf "$dest.old.$$"; mv "$dest" "$dest.old.$$"; mv "$build" "$dest"; rm -rf "$dest.old.$$"
+  else
+    mv "$build" "$dest"
+  fi
   # Stamp the release alongside the code. Without this a backup archive made months later has
   # no idea which version produced it, which is exactly when you need to know.
   printf '%s\n' "$SEA_VERSION" > "$dest/VERSION"
@@ -149,8 +172,11 @@ deploy_qs() {
   # allows the repo to be moved or deleted afterwards, so the deployed copy has no other way
   # of knowing where its source is.
   printf '%s\n' "$SCRIPT_DIR" > "$dest/REPO_PATH"
+  # Which commit is deployed, so the updater can tell "pulled but never installed" from "current".
+  git -C "$SCRIPT_DIR" rev-parse HEAD > "$dest/INSTALLED_COMMIT" 2>/dev/null || rm -f "$dest/INSTALLED_COMMIT"
   chmod +x "$dest"/*.sh "$dest"/*.py 2>/dev/null
   python3 "$dest/sea-register-files.py" || warn "could not register Files with the desktop"
+  python3 "$dest/sea-appimage.py" register >/dev/null || warn "could not register the AppImage installer"
   ok "installed ${dest/#$HOME/\~}/ (${mode}, flattened)"
 }
 
@@ -161,14 +187,17 @@ check_deps() {
   done
   # used by the bar / launcher / keybinds — everything still works without them,
   # just with that feature missing
-  for d in grim slurp wl-copy cliphist fd playerctl brightnessctl hyprlock hypridle hyprsunset wf-recorder jq kdeconnect-cli zenity; do
+  for d in grim slurp wl-copy cliphist fd playerctl brightnessctl hyprlock hypridle hyprsunset wf-recorder jq kdeconnect-cli zenity qrencode; do
     command -v "$d" >/dev/null 2>&1 || optional+=("$d")
   done
-  # static wallpapers want swww (or its awww fork); animated ones want mpvpaper
+  # static wallpapers want swww (or its awww fork); animated ones are played by the bar
+  # through QtMultimedia, and its ffmpeg backend is a separate package
   command -v swww >/dev/null 2>&1 || command -v awww >/dev/null 2>&1 || optional+=("swww")
-  command -v mpvpaper >/dev/null 2>&1 || optional+=("mpvpaper")
+  [ -d /usr/lib/qt6/qml/QtMultimedia ] || optional+=("qt6-multimedia")
+  ls /usr/lib/qt6/plugins/multimedia/libffmpegmediaplugin.so >/dev/null 2>&1 || optional+=("qt6-multimedia-ffmpeg")
   # the file manager is a python app, not a binary — check the module, not PATH
   python3 -c "import PySide6" >/dev/null 2>&1 || optional+=("pyside6")
+  command -v gnome-keyring-daemon >/dev/null 2>&1 || optional+=("gnome-keyring")
   [ -x /usr/lib/hyprpolkitagent/hyprpolkitagent ] || command -v hyprpolkitagent >/dev/null 2>&1 || optional+=("hyprpolkitagent")
   [ ${#missing[@]} -gt 0 ] && warn "REQUIRED but not on PATH: ${missing[*]}"
   [ ${#optional[@]} -gt 0 ] && warn "optional, some features off without them: ${optional[*]}"
@@ -190,15 +219,19 @@ REPO_PKGS=(
   xdg-desktop-portal-gtk adw-gtk-theme                # GTK/Qt/browser light-dark follows the shell
   brightnessctl playerctl cliphist wl-clipboard       # brightness · media · clipboard
   grim slurp cava                                     # screenshots · audio visualiser
+  hyprpicker qrencode                                 # colour picker · Wi-Fi & file share QR codes
   wf-recorder                                         # screen recording (SUPER+R)
   libnotify python fd ffmpeg imagemagick curl jq kdeconnect # notifications + helpers used by scripts
+  qt6-multimedia qt6-multimedia-ffmpeg                # video wallpapers, drawn by the bar
   zenity                                              # file picker behind KDE Connect "send file"
   ttf-nerd-fonts-symbols                              # brand/distro logo glyphs on the System page
   inter-font ttf-jetbrains-mono                       # the interface font and the numbers/code font (fontconfig/60-sea-fonts.conf)
   python-hidapi                                       # Moondrop DAC EQ panel (USB-HID control)
+  python-evdev                                        # big picture — reads controllers, home button
   python-pykakasi pypinyin                            # lyrics pronunciation — kana/kanji→romaji, hanzi→pinyin (both offline)
   at-spi2-core python-gobject                         # global menu — the focused window's menu bar, read over accessibility
-  pyside6                                             # file manager (SUPER+E) — sea-fm.py is a PySide6/QML app
+  gtk4                                                # Files (Super+E), built from native/sea-files at install (rust added below if no cargo)
+  pyside6                                             # optional — legacy FM in legacy/quickshell-fm only
   translate-shell                                     # lyrics translation (Google's unofficial endpoint; optional, degrades quietly)
 )
 # AUR packages — need an AUR helper (paru/yay); bootstrapped below if absent.
@@ -207,7 +240,6 @@ AUR_PKGS=(
   matugen                             # wallpaper→accent theming ("match colours")
   ttf-material-symbols-variable       # the bar's icon font (stable pkg; the -git one won't build)
   swww                                # static / image wallpapers
-  mpvpaper                            # animated (video) wallpapers
   python-syncedlyrics                 # second-chance lyrics lookup (NetEase · Musixmatch) when lrclib misses
 )
 
@@ -236,6 +268,9 @@ enable_services() {
   sudo systemctl enable --now NetworkManager.service     2>/dev/null || true
   sudo systemctl enable --now bluetooth.service          2>/dev/null || true
   sudo systemctl enable --now power-profiles-daemon.service 2>/dev/null || true
+  # The shell is the polkit agent, and only one can hold the session. This service would win the
+  # race at login and the shell's own prompt would never appear.
+  systemctl --user disable --now hyprpolkitagent.service 2>/dev/null
   systemctl --user enable --now pipewire.service pipewire-pulse.service wireplumber.service 2>/dev/null || true
   # start light/dark from a known state so GTK/Qt/browsers have a color-scheme to follow
   command -v gsettings >/dev/null 2>&1 && gsettings set org.gnome.desktop.interface color-scheme 'prefer-dark' 2>/dev/null || true
@@ -246,6 +281,8 @@ install_deps() {
   require_arch
   title "installing packages"
   info "official repos (pacman)…"
+  # rust only when there is no cargo: rustup provides one too and conflicts with the rust package
+  command -v cargo >/dev/null 2>&1 || REPO_PKGS+=(rust)
   sudo pacman -S --needed $NOCONFIRM "${REPO_PKGS[@]}" || warn "some repo packages didn't install — check the names/network above"
   local helper; helper="$(aur_helper)" || { bootstrap_paru && helper=paru || helper=""; }
   if [ -n "$helper" ]; then
@@ -320,6 +357,38 @@ wire_gamemode() {
   ok "wired game mode to gamemode (${ini/#$HOME/\~})"
 }
 
+# Prism Launcher starts Minecraft through Feral gamemode only with "Enable Feral GameMode" on,
+# and that is what fires the hooks above. Prism rewrites its settings, so it must be closed.
+wire_prism_gamemode() {
+  command -v gamemoded >/dev/null 2>&1 || return 0
+  case "$(python3 "$SCRIPT_DIR/quickshell/scripts/system/sea-gaming.py" prism-gamemode 2>/dev/null)" in
+    on) ok "Prism Launcher starts Minecraft with game mode" ;;
+    running) info "Prism Launcher is open: close it and rerun, or turn on Settings → Minecraft → Tweaks → Enable Feral GameMode" ;;
+  esac
+}
+
+# The "sea-shell Gaming" login session: big picture mode and nothing else (hypr/gaming.lua). The
+# session list is system-wide, so this is the one step that asks for sudo; skipped quietly when the
+# entry is already current, and never fatal.
+wire_gaming_session() {
+  local entry="/usr/share/wayland-sessions/sea-shell-gaming.desktop" launcher="/usr/local/bin/sea-gaming-session"
+  [ -d /usr/share/wayland-sessions ] || return 0
+  if cmp -s "$SCRIPT_DIR/hypr/sea-shell-gaming.desktop" "$entry" && cmp -s "$SCRIPT_DIR/hypr/sea-gaming-session" "$launcher"; then
+    ok "gaming session already on the login screen"; return 0
+  fi
+  local cmd="sudo install -Dm 755 $SCRIPT_DIR/hypr/sea-gaming-session $launcher && sudo install -m 644 $SCRIPT_DIR/hypr/sea-shell-gaming.desktop $entry"
+  if [ ! -t 0 ] && ! sudo -n true 2>/dev/null; then
+    info "gaming session: run  $cmd"
+    return 0
+  fi
+  if sudo install -Dm 755 "$SCRIPT_DIR/hypr/sea-gaming-session" "$launcher" \
+     && sudo install -m 644 "$SCRIPT_DIR/hypr/sea-shell-gaming.desktop" "$entry"; then
+    ok "added \"sea-shell Gaming\" to the login screen"
+  else
+    warn "could not add the gaming session — it needs: $cmd"
+  fi
+}
+
 do_install() {
   [ "${NO_DEPS:-0}" = "1" ] || install_deps      # packages first (Arch-gated); --no-deps skips
   title "installing sea-shell v$SEA_VERSION from ${SCRIPT_DIR/#$HOME/\~}"
@@ -339,6 +408,7 @@ do_install() {
     # ---- developer mode: live-edit the repo, configs follow instantly ----
     deploy_qs link
     wire_hypr_lua "$SCRIPT_DIR/hypr"
+    ln -sfn "$SCRIPT_DIR/hypr/gaming.lua" "$HYPR_DEST/gaming.lua"; ok "linked ${HYPR_DEST/#$HOME/\~}/gaming.lua → repo"
     add_block "$CFG/kitty/kitty.conf" "include $SCRIPT_DIR/kitty/sea-cyan.conf"
     mkdir -p "$CFG"
     # Link the TEMPLATE, never ~/.config/starship.toml itself: the theme pipeline generates the
@@ -357,6 +427,7 @@ do_install() {
     mkdir -p "$HYPR_DEST"
     copy_file "$SCRIPT_DIR/hypr/sea.lua" "$HYPR_DEST/sea.lua"
     copy_file "$SCRIPT_DIR/hypr/keybinds.lua" "$HYPR_DEST/keybinds.lua"
+    copy_file "$SCRIPT_DIR/hypr/gaming.lua" "$HYPR_DEST/gaming.lua"
     wire_hypr_lua "$HYPR_DEST"
     # 2) kitty theme
     copy_file "$SCRIPT_DIR/kitty/sea-cyan.conf" "$KITTY_THEME"
@@ -409,6 +480,8 @@ do_install() {
   [ -f "$SCRIPT_DIR/sea-wall.png" ] && copy_file "$SCRIPT_DIR/sea-wall.png" "$DATA_DIR/sea-wall.png"
   if [ "${WALLPAPER:-0}" = "1" ]; then set_wallpaper; fi
   wire_gamemode
+  wire_prism_gamemode
+  wire_gaming_session
 
   # 4) apply live: reload hyprland + (re)start the bar from the installed config
   if command -v hyprctl >/dev/null 2>&1 && [ -n "${HYPRLAND_INSTANCE_SIGNATURE:-}" ]; then
@@ -420,14 +493,14 @@ do_install() {
     # said "bar restarted" while leaving the old process running the previous code. Hence both
     # the correct dispatch form AND an actual check that a new pid appeared.
     _sup="sh \$HOME/.config/quickshell/sea-shell/sea-bar-supervisor.sh --restart"
-    _oldbar=$(pgrep -xf "qs -c sea-shell" 2>/dev/null | head -1)
+    _oldbar=$(pgrep -f '(^|/)(seashell|qs|quickshell)( -[^ ]+)* -c sea-shell( |$)' 2>/dev/null | head -1)
     if ! hyprctl dispatch "hl.dsp.exec_cmd('$_sup')" 2>&1 | grep -q '^ok'; then
       # pre-0.55 .conf parser, where the Lua form is the one that does not exist
       hyprctl dispatch exec "$_sup" >/dev/null 2>&1
     fi
     _i=0; _newbar=""
     while [ "$_i" -lt 30 ]; do
-      _newbar=$(pgrep -xf "qs -c sea-shell" 2>/dev/null | head -1)
+      _newbar=$(pgrep -f '(^|/)(seashell|qs|quickshell)( -[^ ]+)* -c sea-shell( |$)' 2>/dev/null | head -1)
       [ -n "$_newbar" ] && [ "$_newbar" != "$_oldbar" ] && break
       _i=$((_i + 1)); sleep 0.2
     done
@@ -569,13 +642,16 @@ do_uninstall() {
   # stop the supervisor first, or it just respawns the bar we are removing
   [ -f "${XDG_RUNTIME_DIR:-/tmp}/sea-shell-supervisor.pid" ] && \
     kill "$(cat "${XDG_RUNTIME_DIR:-/tmp}/sea-shell-supervisor.pid")" 2>/dev/null
-  pkill -xf "qs -c sea-shell" 2>/dev/null
+  pkill -f '(^|/)(seashell|qs|quickshell)( -[^ ]+)* -c sea-shell( |$)' 2>/dev/null
   remove_block "$CFG/hypr/hyprland.lua"     # Lua entry (5.0+)
   remove_block "$CFG/hypr/hyprland.conf"    # legacy hyprlang entry (pre-5.0)
   remove_block "$CFG/kitty/kitty.conf"
   # installed copies (only removed when tagged as ours) and --dev symlinks
   if [ -L "$QS_DEST" ] || [ -f "$QS_DEST/.sea-shell" ]; then rm -rf "$QS_DEST"; ok "removed ${QS_DEST/#$HOME/\~}"; fi
   [ -d "$HYPR_DEST" ] && { rm -rf "$HYPR_DEST"; ok "removed ${HYPR_DEST/#$HOME/\~}"; }
+  [ -f /usr/share/wayland-sessions/sea-shell-gaming.desktop ] && \
+    { sudo rm -f /usr/share/wayland-sessions/sea-shell-gaming.desktop /usr/local/bin/sea-gaming-session \
+      && ok "removed the gaming session from the login screen"; }
   [ -f "$KITTY_THEME" ] && { rm -f "$KITTY_THEME"; ok "removed ${KITTY_THEME/#$HOME/\~}"; }
   # per-file installs: only remove if ours (or a --dev symlink), then restore the newest backup
   local f bak
@@ -614,6 +690,7 @@ end)' '-- >>> sea-shell polkit fallback >>>' '-- <<< sea-shell polkit fallback <
     warn "hyprpolkitagent is missing; install it to restore password prompts"
   fi
   python3 "$SCRIPT_DIR/quickshell/scripts/system/sea-restore-defaults.py"
+  python3 "$SCRIPT_DIR/quickshell/scripts/system/sea-appimage.py" unregister || warn "could not remove the AppImage installer"
   info "runtime data kept at ${DATA_DIR/#$HOME/\~} (appearance, launcher history) — delete it manually if unwanted"
   title "done — run 'hyprctl reload' to apply"
 }

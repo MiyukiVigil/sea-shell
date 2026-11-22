@@ -31,12 +31,12 @@ Column {
             spacing: 8
             Text {
                 visible: h.value !== ""; anchors.verticalCenter: parent.verticalCenter
-                text: h.value; color: Tok.ink2; font.family: Tok.mono; font.pixelSize: 12; font.features: { "tnum": 1 }
+                text: h.value; color: Tok.ink2; font.family: Tok.sans; font.pixelSize: 12; font.features: { "tnum": 1 }
             }
             Rectangle {
                 visible: h.actionIcon !== ""; anchors.verticalCenter: parent.verticalCenter
-                width: 26; height: 26; radius: Tok.r
-                color: am.containsMouse ? Tok.accentWash : "transparent"
+                width: 26; height: 26; radius: 13
+                color: am.containsMouse ? Tok.alpha(Tok.ink, 0.09) : "transparent"
                 Text {
                     id: ai; anchors.centerIn: parent; text: h.actionIcon
                     font.family: "Material Symbols Outlined"; font.pixelSize: 16; color: am.containsMouse ? Tok.ink : Tok.ink2
@@ -60,6 +60,6 @@ Column {
         font.family: Tok.sans; font.pixelSize: 12
     }
     Item { width: 1; height: 6 }
-    Rectangle { width: parent.width; height: 1; color: Tok.rule }
+    Rectangle { width: parent.width; height: 1; color: Tok.alpha(Tok.ink, 0.08) }
     Item { width: 1; height: 2 }
 }

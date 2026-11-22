@@ -26,6 +26,14 @@ Singleton {
     // ---------------- raw config ----------------
     property string accentRaw: "#63c7dd"
     property bool   light: false
+    readonly property bool _hasInterVariable: Qt.fontFamilies().indexOf("Inter Variable") >= 0
+    function resolveFont(name) {
+        var f = ("" + (name || "")).trim();
+        // Prefer Inter Variable (~860 KB) over Inter.ttc (~13 MB), which Qt/FreeType mmaps
+        // separately per weight/face (~50-60 MB RSS).
+        if (f === "Inter" && tok._hasInterVariable) return "Inter Variable";
+        return f;
+    }
     property string sans: "Adwaita Sans"
     property string mono: "JetBrains Mono"
     // raw "roundness" from appearance.json — drives the whole radius scale below
@@ -95,7 +103,7 @@ Singleton {
             if (j.monitors) tok.cfgMonitors = j.monitors;
             // A display face (the old `font` key) is fine for prose but destroys data
             // legibility, so it is accepted as the SANS role only — mono is ours.
-            if (j.font !== undefined && (""+j.font).length) tok.sans = j.font;
+            if (j.font !== undefined && (""+j.font).length) tok.sans = tok.resolveFont(j.font);
             tok.reducedMotion = !!j.reducedMotion;
             if (j.radius !== undefined) tok.radiusCfg = Math.max(0, j.radius);
         } catch(e) {}
@@ -179,7 +187,9 @@ Singleton {
     readonly property int s12: 48
 
     // ---------------- type scale (pick from it, never interpolate) ----------------
-    readonly property int tLabel: 11     // mono, uppercase, tracked — column heads
+    // Sentence case for words that come from data or a list of values, which stay lowercase in code.
+    function cap(s) { s = "" + s; return s.length ? s.charAt(0).toUpperCase() + s.slice(1) : s }
+    readonly property int tLabel: 11     // small labels and column heads
     readonly property int tData:  12     // mono dense data, chips
     readonly property int tDense: 13     // secondary text
     readonly property int tBody:  15
@@ -213,6 +223,22 @@ Singleton {
     readonly property var mMove:  [0.2,  0.0,  0.0, 1.0,  1, 1]
 
     function alpha(c, a) { return Qt.rgba(c.r, c.g, c.b, a) }
+
+    // ---------------- glass: the bar, its menus, notifications ----------------
+    // macOS's materials, not a see-through panel. What is behind is blurred by Hyprland
+    // first (layer_rule blur, xray: the WALLPAPER, never the app under the menu, so a dark
+    // window cannot darken the bar), then tinted with the surface colour at glassAlpha, which
+    // never goes below the floor that keeps text readable on any picture. A hairline outside
+    // and a sheen along the top edge give it the lit edge glass has. Set from appearance.json
+    // "glass": solid | frosted | clear (shell.qml). Large panels (Settings, the dashboard)
+    // stay solid, as System Settings' content does.
+    property string glassMode: "frosted"
+    readonly property real glassAlpha: glassMode === "solid" ? 1.0 : glassMode === "clear" ? 0.66 : 0.78
+    readonly property bool glassy: glassAlpha < 0.995
+    readonly property color glassTint: tok.light ? raised : surface
+    readonly property color glassFill: alpha(glassTint, glassAlpha)
+    readonly property color glassEdge: tok.light ? Qt.rgba(0, 0, 0, 0.11) : Qt.rgba(0, 0, 0, 0.42)
+    readonly property color glassSheen: tok.light ? Qt.rgba(1, 1, 1, 0.55) : Qt.rgba(1, 1, 1, 0.075)
 
     // per-monitor UI scale — matches the rule shell.qml and Dashboard.qml both hand-rolled
     function uiFor(scr) {

@@ -15,6 +15,7 @@ import Quickshell.Bluetooth
 import QtQuick
 import QtQuick.Layouts
 import QtQuick.Effects
+import "WifiEnterprise.js" as WifiEnterprise
 
 Scope {
     id: root
@@ -40,6 +41,37 @@ Scope {
         onLoaded: { try { root.userProfile=JSON.parse(text()) } catch(e){} }
         onFileChanged: reload()
     }
+    property var recentPages: []
+    property var favPages: []
+    readonly property string favPagesPath: Quickshell.env("HOME") + "/.config/sea-shell/settings-favs.json"
+    Process {
+        id: favLoadProc
+        running: true
+        command: ["sh", "-c", "cat \"" + root.favPagesPath + "\" 2>/dev/null || echo '[]'"]
+        stdout: StdioCollector { id: favLoadOut; onStreamFinished: {
+            try {
+                var a = JSON.parse(favLoadOut.text.trim());
+                root.favPages = Array.isArray(a) ? a.filter(function(t) { return root.tabMeta[t] }) : [];
+            } catch (e) { root.favPages = [] }
+        } } }
+    function saveFavPages() {
+        var b64 = Qt.btoa(JSON.stringify(root.favPages));
+        Quickshell.execDetached(["sh", "-c",
+            "mkdir -p \"$HOME/.config/sea-shell\" && echo '" + b64 + "' | base64 -d > \"" + root.favPagesPath + "\""]);
+    }
+    function isFav(tab) { return root.favPages.indexOf(Number(tab)) >= 0; }
+    function toggleFav(tab) {
+        var t = Number(tab);
+        if (!root.tabMeta[t]) return;
+        var f = root.favPages.slice();
+        var i = f.indexOf(t);
+        if (i >= 0) f.splice(i, 1); else f.push(t);
+        root.favPages = f;
+        saveFavPages();
+    }
+    // The two profile editors, on pages that may not be built yet, keep each other current.
+    property var lockEditor: null
+    property var userEditor: null
     property int tab: 8                             // land on the System / About dashboard
 
     // ---- resident lifecycle: the panel is hidden until shown, so it costs ~nothing closed ----
@@ -83,58 +115,89 @@ Scope {
         var t = -1, p = sec.parent;
         while (p) { if (p.tabIdx !== undefined) { t = p.tabIdx; break } p = p.parent }
         if (t < 0) return;
+        sec.sameAsPage = sec.title.toLowerCase() === ("" + root.tabLabel(t)).toLowerCase();
         root.sectionIndex.push({ "tab": t, "title": sec.title, "icon": sec.icon, "item": sec });
         secSettle.restart();
     }
 
     // idx -> what the sidebar calls that page, so a search hit can say where it lives.
-    readonly property var tabMeta: ({
-        0:  { l: "Audio",          i: "volume_up" },
-        1:  { l: "Display",        i: "brightness_6" },
-        2:  { l: "Network",        i: "wifi" },
-        3:  { l: "Weather",        i: "cloud" },
-        4:  { l: "Appearance",     i: "palette" },
-        5:  { l: "Actions",        i: "bolt" },
-        6:  { l: "Power",          i: "power_settings_new" },
-        7:  { l: "Keybinds",       i: "keyboard" },
-        8:  { l: "System",         i: "monitor_heart" },
-        9:  { l: "Bluetooth",      i: "bluetooth" },
-        10: { l: "Idle & lock",    i: "bedtime" },
-        11: { l: "Calendar",       i: "calendar_month" },
-        12: { l: "Bar Widgets",    i: "widgets" },
-        13: { l: "Theme Profiles", i: "auto_awesome" },
-        14: { l: "KDE Connect",    i: "phonelink" },
-        15: { l: "Input",          i: "mouse" },
-        16: { l: "Dock",           i: "dock_to_bottom" },
-        17: { l: "Window rules",   i: "picture_in_picture" },
-        18: { l: "Screen time",    i: "hourglass_top" },
-        19: { l: "Disks",          i: "hard_drive" },
-        20: { l: "Bar",            i: "view_agenda" },
-        21: { l: "Desktop",        i: "wallpaper" },
-        22: { l: "Default Apps",   i: "apps" },
-        23: { l: "Your profile", i: "account_circle" }
-    })
-    readonly property var pageDescriptions: ({"0": "Output, input and individual application volume.", "1": "Arrange monitors and choose resolution, refresh rate and scaling.", "2": "Manage wired, wireless and VPN connections.", "3": "Choose your location, units and weather information.", "4": "Preview your desktop look before applying colors, fonts and icons.", "5": "Configure desktop actions and shortcuts to common tools.", "6": "Choose power profiles and session actions.", "7": "Find and edit your keyboard shortcuts.", "8": "Inspect your system and available maintenance actions.", "9": "Pair devices and manage Bluetooth connections.", "10": "Your lock screen, the login screen, and when the screen dims, locks and sleeps.", "11": "Manage calendars, events and reminders.", "12": "Choose the information shown in your bar.", "13": "Save a desktop look or switch between theme profiles.", "14": "Connect your phone and manage sharing features.", "15": "Configure keyboard, pointer and touchpad behavior.", "16": "Customize dock placement, sizing and behavior.", "17": "Set behavior for matching application windows.", "18": "Review application activity and screen-time preferences.", "19": "Inspect storage devices and available space.", "20": "Set bar placement, appearance and visibility.", "21": "Manage wallpaper and desktop layout.", "23": "Your picture and display name, as Settings, the power menu and the lock screen show them.", "22": "Choose which applications open folders, links and files."})
-    function pageEffectNote(t) {
-        if (t === 1) return "Monitor changes use Apply. Keep a working display connected while testing.";
-        if (t === 4 || t === 13) return "Appearance saves automatically; app icons may need an app restart.";
-        if (t === 17) return "Some window rules take effect when the application opens a new window.";
-        if (t === 22) return "Defaults affect future opens. An already-running file manager may keep handling reveal requests until it closes.";
-        return "";
+    // quiet hours: the bar reads this same file and does the silencing (shell.qml quietCfg)
+    property var quietCfg: ({ enabled: false, from: "22:00", to: "07:00", share: true })
+    FileView { path: Quickshell.env("HOME") + "/.config/sea-shell/quiet.json"; watchChanges: true; printErrors: false
+        onLoaded: { try { var j = JSON.parse(text());
+            root.quietCfg = { enabled: !!j.enabled, from: j.from || "22:00", to: j.to || "07:00", share: j.share !== false } } catch (e) {} }
+        onFileChanged: reload() }
+    property bool dndOn: false
+    FileView { path: Quickshell.env("HOME") + "/.config/sea-shell/dnd"; watchChanges: true; printErrors: false
+        onLoaded: root.dndOn = text().trim() === "1"
+        onFileChanged: reload() }
+    property var mutedList: []
+    FileView { path: Quickshell.env("HOME") + "/.config/sea-shell/notif-mutes.json"; watchChanges: true; printErrors: false
+        onLoaded: { try { var a = JSON.parse(text()); root.mutedList = Array.isArray(a) ? a : [] } catch (e) {} }
+        onFileChanged: reload() }
+    property string focusActive: ""
+    FileView { path: Quickshell.env("HOME") + "/.config/sea-shell/focus-active"; watchChanges: true; printErrors: false
+        onLoaded: root.focusActive = text().trim()
+        onFileChanged: reload() }
+    function setQuiet(k, v) {
+        // half-typed times read as "2_:__" through the mask; leave the last good one alone
+        if ((k === "from" || k === "to") && !/^([01][0-9]|2[0-3]):[0-5][0-9]$/.test(v)) return;
+        var c = Object.assign({}, root.quietCfg); c[k] = v; root.quietCfg = c;
+        Quickshell.execDetached(["sh", "-c", "printf %s \"$1\" > \"$HOME/.config/sea-shell/quiet.json\"", "sh", JSON.stringify(c)]);
     }
-    function tabLabel(t) { var m = root.tabMeta[t]; return m ? m.l : "" }
-    function tabIcon(t)  { var m = root.tabMeta[t]; return m ? m.i : "tune" }
-    // the icon tile's hue turn for each page, matching its sidebar group
-    readonly property var tabHues: ({ 2: 0, 9: 0, 14: 0, 0: -0.09, 18: -0.09, 8: 0.5, 4: 0.09, 13: 0.09, 20: 0.09, 12: 0.09,
-        21: 0.18, 16: 0.18, 17: 0.18, 1: -0.18, 6: -0.18, 10: -0.18, 11: 0.3, 3: 0.3, 22: 0.3, 5: 0.3, 7: -0.3, 15: -0.3, 19: -0.3, 23: 0 })
-    function tabHue(t) { var h = root.tabHues[t]; return h === undefined ? 0 : h }
+    readonly property var tabMeta: ({
+        0:  { l: "Sound",                i: "volume_up",             c: "#FF2D55" },
+        1:  { l: "Displays",             i: "monitor",               c: "#007AFF" },
+        2:  { l: "Network",              i: "wifi",                  c: "#007AFF" },
+        3:  { l: "Weather",              i: "cloud",                 c: "#32ADE6", parent: 22 },
+        4:  { l: "Appearance",           i: "palette",               c: "#AF52DE" },
+        5:  { l: "Quick Actions",        i: "bolt",                  c: "#FF9500", parent: 8 },
+        6:  { l: "Battery & Power",      i: "battery_charging_full", c: "#34C759" },
+        7:  { l: "Keyboard",             i: "keyboard",              c: "#636366" },
+        8:  { l: "General",              i: "settings",              c: "#8E8E93" },
+        9:  { l: "Bluetooth",            i: "bluetooth",             c: "#007AFF" },
+        10: { l: "Lock Screen",          i: "lock",                  c: "#5E5CE6" },
+        11: { l: "Calendar",             i: "calendar_month",        c: "#FF3B30", parent: 22 },
+        12: { l: "Bar Widgets",          i: "widgets",               c: "#32ADE6", parent: 20 },
+        13: { l: "Theme Profiles",       i: "auto_awesome",          c: "#AF52DE", parent: 4 },
+        14: { l: "Phone Link",           i: "phonelink",             c: "#30B0C7" },
+        15: { l: "Mouse & Trackpad",     i: "mouse",                 c: "#636366" },
+        16: { l: "Desktop & Dock",       i: "dock_to_bottom",        c: "#0A84FF" },
+        17: { l: "Window Rules",         i: "picture_in_picture",    c: "#5856D6", parent: 16 },
+        18: { l: "Screen Time",          i: "hourglass_top",         c: "#5856D6" },
+        19: { l: "Storage",              i: "hard_drive",            c: "#8E8E93", parent: 8 },
+        20: { l: "Menu Bar",             i: "view_agenda",           c: "#32ADE6" },
+        21: { l: "Wallpaper",            i: "wallpaper",             c: "#30B0C7" },
+        22: { l: "Apps & Calendar",      i: "apps",                  c: "#007AFF" },
+        23: { l: "Your Profile",         i: "account_circle",        c: "#007AFF" },
+        24: { l: "Notifications",        i: "notifications",         c: "#FF3B30" },
+        25: { l: "Gaming",               i: "sports_esports",        c: "#FF5E3A" },
+        26: { l: "Accessibility",        i: "accessibility_new",     c: "#007AFF" },
+        27: { l: "Privacy & Security",   i: "shield",                c: "#FF9500" },
+        28: { l: "About",                i: "info",                  c: "#8E8E93", parent: 8 },
+        29: { l: "Software Update",      i: "system_update_alt",     c: "#8E8E93", parent: 8 },
+        30: { l: "Login Items & Startup",i: "rocket_launch",         c: "#8E8E93", parent: 8 },
+        31: { l: "Date & Time",          i: "schedule",              c: "#8E8E93", parent: 8 },
+        32: { l: "Language & Region",    i: "language",              c: "#8E8E93", parent: 8 },
+        33: { l: "Backup & Restore",     i: "archive",               c: "#34C759", parent: 8 },
+        34: { l: "Health Check",         i: "stethoscope",           c: "#30B0C7", parent: 8 },
+        35: { l: "Window Effects",       i: "view_quilt",            c: "#0A84FF", parent: 16 }
+    })
+    function tabLabel(t)  { var m = root.tabMeta[t]; return m ? m.l : "" }
+    function tabIcon(t)   { var m = root.tabMeta[t]; return m ? m.i : "tune" }
+    function tabColor(t)  { var m = root.tabMeta[t]; return (m && m.c) ? m.c : Tok.accent }
+    function tabParent(t) { var m = root.tabMeta[t]; return (m && m.parent !== undefined) ? m.parent : -1 }
+    readonly property int activeSidebarTab: root.tabParent(root.tab) >= 0 ? root.tabParent(root.tab) : root.tab
 
-    // ---- the macOS look: colours derived from the palette, never fixed ----
-    // A group panel and a hovered row are the ink laid thinly over the window, so they go a
-    // shade darker in light mode and a shade lighter in dark, as System Settings' do.
-    readonly property color groupFill: Qt.rgba(Tok.ink.r, Tok.ink.g, Tok.ink.b, Tok.light ? 0.04 : 0.05)
-    readonly property color groupRule: Qt.rgba(Tok.ink.r, Tok.ink.g, Tok.ink.b, 0.075)
-    readonly property color rowHover:  Qt.rgba(Tok.ink.r, Tok.ink.g, Tok.ink.b, 0.07)
+    // ---- macOS System Settings surface tokens (derived from sea-shell's live palette) ----
+    readonly property color windowCanvas: Tok.light ? Qt.hsla(Tok._h, 0.06 * Tok._sm, 0.955, 1) : Tok.bg
+    readonly property color sidebarFill:  Tok.light ? Qt.hsla(Tok._h, 0.08 * Tok._sm, 0.922, 1) : Tok.sunken
+    readonly property color cardFill:     Tok.light ? "#ffffff" : Qt.rgba(Tok.ink.r, Tok.ink.g, Tok.ink.b, 0.055)
+    readonly property color cardBorder:   Qt.rgba(Tok.ink.r, Tok.ink.g, Tok.ink.b, Tok.light ? 0.085 : 0.095)
+    readonly property color hairline:     Qt.rgba(Tok.ink.r, Tok.ink.g, Tok.ink.b, Tok.light ? 0.075 : 0.085)
+    readonly property color groupFill:    root.cardFill
+    readonly property color groupRule:    root.cardBorder
+    readonly property color rowHover:     Qt.rgba(Tok.ink.r, Tok.ink.g, Tok.ink.b, Tok.light ? 0.045 : 0.065)
     function tileColor(turn) {
         var h = ((Tok._h + turn) % 1 + 1) % 1;
         return Qt.hsla(h, Tok._achromatic ? 0 : 0.46, Tok.light ? 0.55 : 0.5, 1);
@@ -145,7 +208,18 @@ Scope {
     property var navFwd: []
     property int navLast: tab
     property bool navMoving: false
+    readonly property bool canNavBack: root.navBack.length > 0 || root.tabParent(root.tab) >= 0
     function navGo(dir) {
+        if (dir < 0 && !root.navBack.length) {
+            var p = root.tabParent(root.tab);
+            if (p >= 0) {
+                root.navMoving = true;
+                root.navFwd = root.navFwd.concat([root.tab]);
+                root.tab = p;
+                root.navMoving = false;
+            }
+            return;
+        }
         var from = dir < 0 ? root.navBack : root.navFwd;
         if (!from.length) return;
         var to = from[from.length - 1];
@@ -155,6 +229,132 @@ Scope {
         root.tab = to;
         root.navMoving = false;
     }
+
+    // ---- real system backends via sea-sys-settings.py ----
+    readonly property string sysScript: Qt.resolvedUrl("sea-sys-settings.py").toString().replace("file://", "")
+    property string sysMsg: ""
+    property var dtInfo: ({ timezone: "", ntp: true, ntpSynced: false, localRtc: false })
+    property var dtTimezones: []
+    property var localeInfo: ({ lang: "en_US.UTF-8", lcTime: "", lcMeasurement: "", keymap: "", locales: [] })
+    property var startupApps: []
+    property var startupServices: []
+    property var netExtra: ({ hostname: "", wired: [], activeConnection: "", dnsPreset: "auto", dnsServers: [] })
+    property var privInfo: ({ ufwInstalled: false, ufwEnabled: false, clipCount: 0, clipWatching: false, micApps: [], camPresent: false, camInUse: false })
+    property bool privBusy: false
+    property var compCfg: ({
+        gaps_in: 5, gaps_out: 12, border_size: 2, rounding: 10,
+        blur_enabled: true, blur_size: 9, blur_passes: 4, shadow_enabled: true,
+        inactive_opacity: 0.96, animations_enabled: true, follow_mouse: 1,
+        kb_layout: "us", kb_options: "", repeat_rate: 25, repeat_delay: 600,
+        numlock_by_default: true, cursor_size: 24, zoom_factor: 1.0
+    })
+
+    Process {
+        id: dtGetProc
+        command: ["python3", root.sysScript, "datetime-status"]
+        stdout: StdioCollector { id: dtGetOut; onStreamFinished: {
+            try { var j = JSON.parse(dtGetOut.text); if (j.ok) root.dtInfo = j } catch (e) {}
+        } }
+    }
+    Process {
+        id: dtTzProc
+        stdout: StdioCollector { id: dtTzOut; onStreamFinished: {
+            try { var j = JSON.parse(dtTzOut.text); if (j.ok) root.dtTimezones = j.timezones || [] } catch (e) {}
+        } }
+    }
+    Process {
+        id: localeGetProc
+        command: ["python3", root.sysScript, "locale-status"]
+        stdout: StdioCollector { id: locGetOut; onStreamFinished: {
+            try { var j = JSON.parse(locGetOut.text); if (j.ok) root.localeInfo = j } catch (e) {}
+        } }
+    }
+    Process {
+        id: startupGetProc
+        command: ["python3", root.sysScript, "startup-list"]
+        stdout: StdioCollector { id: stGetOut; onStreamFinished: {
+            try {
+                var j = JSON.parse(stGetOut.text);
+                if (j.ok) { root.startupApps = j.apps || []; root.startupServices = j.services || [] }
+            } catch (e) {}
+        } }
+    }
+    Process {
+        id: netExtraProc
+        command: ["python3", root.sysScript, "network-extra"]
+        stdout: StdioCollector { id: netExOut; onStreamFinished: {
+            try { var j = JSON.parse(netExOut.text); if (j.ok) root.netExtra = j } catch (e) {}
+        } }
+    }
+    Process {
+        id: privGetProc
+        command: ["python3", root.sysScript, "privacy-status"]
+        stdout: StdioCollector { id: privOut; onStreamFinished: {
+            try { var j = JSON.parse(privOut.text); if (j.ok) root.privInfo = j } catch (e) {}
+        } }
+    }
+    Process {
+        id: compGetProc
+        command: ["python3", root.sysScript, "compositor-get"]
+        stdout: StdioCollector { id: compOut; onStreamFinished: {
+            try { var j = JSON.parse(compOut.text); if (j.ok && j.config) root.compCfg = j.config } catch (e) {}
+        } }
+    }
+    Process {
+        id: sysActionProc
+        property string afterRefresh: ""
+        stdout: StdioCollector { id: sysActOut; onStreamFinished: {
+            root.privBusy = false;
+            try {
+                var j = JSON.parse(sysActOut.text);
+                if (!j.ok && j.error) root.sysMsg = j.error;
+                else if (j.ok) root.sysMsg = "";
+                if (j.ok && j.config) root.compCfg = j.config;
+            } catch (e) {}
+            if (sysActionProc.afterRefresh === "datetime") root.refreshDateTime();
+            else if (sysActionProc.afterRefresh === "locale") root.refreshLocale();
+            else if (sysActionProc.afterRefresh === "startup") root.refreshStartup();
+            else if (sysActionProc.afterRefresh === "net") { root.refreshNetExtra(); root.rescanWifi(); }
+            else if (sysActionProc.afterRefresh === "privacy") root.refreshPrivacy();
+            else if (sysActionProc.afterRefresh === "host") { root.refreshSystemInfo(); root.refreshNetExtra(); }
+        } }
+    }
+    function runSysAction(args, refreshKey) {
+        sysActionProc.afterRefresh = refreshKey || "";
+        sysActionProc.command = ["python3", root.sysScript].concat(args);
+        sysActionProc.running = false;
+        sysActionProc.running = true;
+    }
+    function refreshDateTime() { dtGetProc.running = false; dtGetProc.running = true }
+    function searchTimezones(q) {
+        dtTzProc.command = ["python3", root.sysScript, "datetime-timezones", q || ""];
+        dtTzProc.running = false; dtTzProc.running = true;
+    }
+    function setDateTimeNtp(on) { root.sysMsg = "Updating NTP…"; root.runSysAction(["datetime-set-ntp", on ? "true" : "false"], "datetime") }
+    function setTimeZone(tz) { root.sysMsg = "Setting timezone…"; root.runSysAction(["datetime-set-tz", tz], "datetime") }
+    function refreshLocale() { localeGetProc.running = false; localeGetProc.running = true }
+    function setSystemLocale(lang) { root.sysMsg = "Updating locale…"; root.runSysAction(["locale-set", lang], "locale") }
+    function setHostname(name) { if (!name) return; root.sysMsg = "Updating hostname…"; root.runSysAction(["hostname-set", name], "host") }
+    function refreshStartup() { startupGetProc.running = false; startupGetProc.running = true }
+    function startupToggleApp(id, on) { root.runSysAction(["startup-toggle-app", id, on ? "true" : "false"], "startup") }
+    function startupAddApp(id) { root.runSysAction(["startup-add-app", id], "startup") }
+    function startupRemoveApp(id) { root.runSysAction(["startup-remove-app", id], "startup") }
+    function startupServiceAction(unit, act) { root.runSysAction(["startup-service", unit, act], "startup") }
+    function refreshNetExtra() { netExtraProc.running = false; netExtraProc.running = true }
+    function setNetworkDns(con, preset) { root.sysMsg = "Applying DNS…"; root.runSysAction(["network-set-dns", con, preset], "net") }
+    function refreshPrivacy() { privGetProc.running = false; privGetProc.running = true }
+    function setFirewall(enable) { root.privBusy = true; root.sysMsg = "Requesting authorization…"; root.runSysAction(["privacy-firewall", enable ? "enable" : "disable"], "privacy") }
+    function clearClipboardHistory() { root.runSysAction(["privacy-clear-clipboard"], "privacy") }
+    function refreshCompositor() { compGetProc.running = false; compGetProc.running = true }
+    function setCompositor(patch) {
+        var merged = Object.assign({}, root.compCfg, patch);
+        root.compCfg = merged;
+        var b64 = Qt.btoa(JSON.stringify(patch));
+        root.runSysAction(["compositor-set", b64], "");
+    }
+    function refreshSystemInfo() { sysProc.running = false; sysProc.running = true; diskProc.running = false; diskProc.running = true }
+    function refreshBackups() { bkListProc.running = false; bkListProc.running = true }
+    function runHealthCheck() { docProc.running = false; docProc.running = true }
 
     // ---- default applications -------------------------------------------------
     // WHICH PROGRAM OPENS WHAT is a system-wide setting, not a shell one: it lives
@@ -202,20 +402,19 @@ Scope {
     // global menu the same way "global" does, and a page name alone lists that page.
     readonly property var navHits: {
         var q = root.navQuery.toLowerCase().trim();
-        var _ = root.sectionTick;               // recompute when the registry settles
-        if (!root.sectionsReady || q.length === 0) return [];
+        if (q.length === 0) return [];
         var terms = q.split(/\s+/), out = [];
-        for (var i = 0; i < root.sectionIndex.length; i++) {
-            var e = root.sectionIndex[i];
-            var hay = (e.title + " " + root.tabLabel(e.tab)).toLowerCase();
+        for (var i = 0; i < searchIndex.sections.length; i++) {
+            var e = searchIndex.sections[i];
+            var par = root.tabParent(e.tab);
+            var hay = (e.title + " " + root.tabLabel(e.tab) + (par >= 0 ? " " + root.tabLabel(par) : "")).toLowerCase();
             var ok = true;
             for (var t = 0; t < terms.length; t++)
                 if (hay.indexOf(terms[t]) < 0) { ok = false; break }
             if (!ok) continue;
-            // an exact hit in the section's own name sorts above one that only matched
-            // because of the page it sits on
             out.push({ "e": e, "rank": e.title.toLowerCase().indexOf(terms[0]) === 0 ? 0
-                              : (e.title.toLowerCase().indexOf(terms[0]) >= 0 ? 1 : 2) });
+                              : (e.title.toLowerCase().indexOf(terms[0]) >= 0 ? 1
+                              : (root.tabLabel(e.tab).toLowerCase().indexOf(terms[0]) >= 0 ? 2 : 3)) });
             if (out.length > 60) break;
         }
         out.sort(function (a, b) { return a.rank - b.rank });
@@ -267,8 +466,14 @@ Scope {
     function jumpTo(entry) {
         if (!entry) return;
         if (root.tab !== entry.tab) root.showTab(entry.tab);
+        // A search hit only names its section. The page exists now, so the section does too.
+        var target = entry.item;
+        for (var i = 0; !target && i < root.sectionIndex.length; i++) {
+            var known = root.sectionIndex[i];
+            if (known.tab === entry.tab && known.title === entry.title) target = known.item;
+        }
         if (entry.tab === 4) {
-            var ancestor = entry.item;
+            var ancestor = target;
             while (ancestor) {
                 if (typeof ancestor.appearanceSubTab !== "undefined") {
                     root.apSubTab = ancestor.appearanceSubTab;
@@ -277,7 +482,7 @@ Scope {
                 ancestor = ancestor.parent;
             }
         }
-        root.pendingJump = entry.item;
+        root.pendingJump = target;
         jumpTimer.restart();
     }
     // A search is done once it has taken you somewhere: the field empties and lets go of the
@@ -302,13 +507,26 @@ Scope {
         // out and would scroll to the wrong offset on a page that grows as it settles.
         onTriggered: { root.doJump(); n++; if (n > 5) { stop(); root.pendingJump = null } } }
 
-    function showTab(t) {
-        // Select the active output each time; the warm surface otherwise stays on its first output.
-        var focused = Hyprland.focusedMonitor;
-        var screens = Quickshell.screens;
-        for (var i = 0; focused && i < screens.length; i++) {
-            if (screens[i].name === focused.name) { panel.screen = screens[i]; break; }
+    // A warm window whose output went away (lid shut, monitor unplugged) is closed by the
+    // compositor and hidden by Quickshell for good; moving it to another screen alone leaves it
+    // hidden. So open() takes the active output (where the cursor is) and, whenever the window is
+    // not alive there, rebuilds it: hide, move, show again.
+    property bool screensMoved: false
+    Connections { target: Quickshell; function onScreensChanged() { root.screensMoved = true } }
+    function placeOn(w) {
+        var f = Hyprland.focusedMonitor, s = Quickshell.screens, t = null;
+        for (var i = 0; f && i < s.length; i++) if (s[i].name === f.name) t = s[i];
+        if (!t && s.length) t = s[0];
+        if (t && (t !== w.screen || root.screensMoved || !w.backingWindowVisible || !w.visible)) {
+            w.visible = false;
+            w.screen = t;
+            w.visible = Qt.binding(() => !root.authenticationPending);
         }
+        root.screensMoved = false;
+    }
+    function showTab(t) {
+        // on the active output each time; the warm surface otherwise stays on its first one
+        root.placeOn(panel);
 
         // Not fresh until the read below lands. Everything this panel mirrors is stale between
         // here and there, and one of those mirrors drives the WHOLE SHELL's palette.
@@ -320,23 +538,31 @@ Scope {
     }
     Timer { id: tabRefresh; interval: 80; onTriggered: root.refreshTab(root.tab) }
     function refreshTab(t) {
-        if (t === 0) root.audioRefresh()              // audio: sink formats + streams
-        if (t === 1) { root.reloadMonitors(); root.reloadDisplayProfiles() }   // display: monitors + saved layout profiles
-        if (t === 2) root.rescanWifi()                // network: re-probe the air, don't show the last poll
-        if (t === 14) root.reloadKde()                // kdeconnect: refresh devices
-        if (t === 7) kbProc.running = true            // keybinds: refresh binds
-        if (t === 17) { wrRead.running = true; wrClsProc.running = true }   // window rules + live class list
-        if (t === 15) gsRead.running = true           // input: reload gestures from disk
-        if (t === 18) { usageReadProc.running = true; ulimReadProc.running = true }   // screen time
-        if (t === 8) { sysProc.running = true; bkListProc.running = true; otaProc.running = true }   // system: stats + backups + update check
-        if (t === 19) diskProc.running = true         // disks
-        if (t === 10) { idleChk.running = true; lockSettingsGet.running = true; lockProfileEditor.reload() }   // idle & lock
-        if (t === 23) userProfileEditor.reload()
-        if (t === 6) { ppGet.running = true; lockSettingsGet.running = true; battProc.running = true }   // power: profile, lid settings, battery wear
-        if (t === 11) { reloadEventsProc.running = true; calCfgLoad.running = true }  // calendar
+        root.sysMsg = "";
+        if (t === 0) root.audioRefresh()
+        if (t === 1) { root.reloadMonitors(); root.reloadDisplayProfiles(); panelGet.running = true }
+        if (t === 2) { root.rescanWifi(); root.refreshNetExtra() }
+        if (t === 14) root.reloadKde()
+        if (t === 7) { kbProc.running = true; root.refreshCompositor() }
+        if (t === 17) { wrRead.running = true; wrClsProc.running = true }
+        if (t === 15) gsRead.running = true
+        if (t === 18) { usageReadProc.running = true; ulimReadProc.running = true }
+        if (t === 8) { sysProc.running = true; bkListProc.running = true; diskProc.running = true; root.refreshDateTime(); root.refreshLocale(); root.refreshStartup() }
+        if (t === 19) { diskProc.running = true; diskScan.open() }
+        if (t === 10) { idleChk.running = true; lockSettingsGet.running = true; if (root.lockEditor) root.lockEditor.reload() }
+        if (t === 23 && root.userEditor) root.userEditor.reload()
+        if (t === 6) { ppGet.running = true; lockSettingsGet.running = true; battProc.running = true }
+        if (t === 11) { reloadEventsProc.running = true; calCfgLoad.running = true }
+        if (t === 26 || t === 35) root.refreshCompositor()
+        if (t === 27) root.refreshPrivacy()
+        if (t === 28) { sysProc.running = true; root.refreshNetExtra() }
+        if (t === 30) root.refreshStartup()
+        if (t === 31) root.refreshDateTime()
+        if (t === 32) root.refreshLocale()
+        if (t === 33) root.refreshBackups()
     }
     function run(cmd) { Quickshell.execDetached(["sh", "-c", cmd]) }
-    property string appearanceSaveState: "Appearance saves automatically"
+    property string appearanceSaveState: "Changes save automatically"
     property bool appearanceSaveFailed: false
     property string pendingAppearancePayload: ""
     property var appearancePostSaveAction: null
@@ -468,27 +694,18 @@ Scope {
         return out.slice(0, 7);
     }
     onTabChanged: {
+        if (tab !== 8 && root.tabMeta[tab])
+            root.recentPages = [tab].concat(root.recentPages.filter(function(t) { return t !== root.tab })).slice(0, 5);
         if (!root.navMoving && root.navLast !== tab) { root.navBack = root.navBack.concat([root.navLast]).slice(-30); root.navFwd = [] }
         root.navLast = tab;
+        if (root.pendingJump === null) contentFlick.contentY = 0;
         if (root.shown) pageArrival.restart();
         tabRefresh.restart();
-        // The applications list is filled when that page is first looked at, not
-        // at startup: it walks every applications directory on the machine and
-        // nothing needs that until asked. There can only be ONE handler for a
-        // signal in QML -- a second `onTabChanged` elsewhere in this file is a
-        // "Property value set multiple times" error and the panel does not load
-        // at all -- so it goes here rather than beside the state it belongs to.
         if (tab === 22 && root.defRoles.length === 0) root.defRefresh();
     }
 
-    // SUPER+S and other external triggers toggle the resident panel through this handler
-    IpcHandler {
-        target: "settings"
-        function toggle(): void { root.togglePanel() }
-        function open(): void { root.openPanel() }
-        function openTab(requestedTab: int): void { root.openTab(requestedTab) }
-        function close(): void { root.closePanel() }
-    }
+    // SUPER+S is handled by shell.qml (target "settings") so this file can be unloaded
+    // while it is closed. A second handler for the same target would replace that one.
 
     // ---------- native QML file browser ----------
     // The browser used to start at a literal "/home/miyukivigil", which is one specific
@@ -1020,15 +1237,25 @@ Scope {
         }
     }
     function nodeName(n) { return n ? (n.description || n.nickname || n.name || "device") : "" }
+    // "Alder Lake PCH-P High Definition Audio Controller HDMI / DisplayPort 3 Output (Stereo)" says
+    // what the part is called and buries what it is. The port first, the chip only as a footnote.
+    function deviceName(raw) {
+        var s = ("" + raw).replace(/\s*\((Stereo|Mono)\)$/, "").replace(/\s+(Analog|Digital) Stereo(\s*\(HDMI\))?$/, function (m, a, h) { return h ? " HDMI" : "" });
+        var m = s.match(/^(.*?)\s*High Definition Audio Controller\s*(.*)$/);
+        if (!m) return { name: s, chip: "" };
+        return { name: (m[2] || "Audio").replace(/\s+Output$/, ""), chip: m[1] };
+    }
     // Flat rows for the device tables. Pipewire nodes are live objects with derived names and
     // per-node format lookups, so — as with Bluetooth — the object rides along in `_node` and
     // the table only ever renders plain values.
     readonly property var sinkRows: root.sinks.map(function (n) {
-        return { name: root.nodeName(n), format: root.audioFmtBadge(n.name),
+        var d = root.deviceName(root.nodeName(n));
+        return { name: d.name, chip: d.chip, format: root.audioFmtBadge(n.name),
                  rate: root.audioMaxRate(n.name), _node: n };
     })
     readonly property var sourceRows: root.sources.map(function (n) {
-        return { name: root.nodeName(n), _node: n };
+        var d = root.deviceName(root.nodeName(n));
+        return { name: d.name, chip: d.chip, _node: n };
     })
     readonly property int sinkSel: {
         if (!root.curSink) return -1;
@@ -1094,7 +1321,7 @@ Scope {
 
     // ---------- weather location + unit ----------
     property string wxLoc: "Kuching"
-    property string wxUnit: "m"   // m = °C metric · u = °F "freedom units"
+    property string wxUnit: "m"   // m = °C metric · u = °F "Freedom units"
     Process { running: true; command: ["sh", "-c", "cat ~/.config/sea-shell/location 2>/dev/null || echo Kuching"]
         stdout: StdioCollector { id: locOut; onStreamFinished: { var v = locOut.text.trim(); if (v) root.wxLoc = v } } }
     Process { running: true; command: ["sh", "-c", "cat ~/.config/sea-shell/wxunit 2>/dev/null || echo m"]
@@ -1121,17 +1348,21 @@ Scope {
     // ---------- displays (hyprctl monitors) ----------
     property var monitors: []
     property int monSel: 0            // which monitor is being edited
+    property var offMonitors: []      // connected but switched off: [{name, desc, laptop}]
     property string selRes: ""        // "1920x1080"
     property string selHz: ""         // "165.00"
     property int selTransform: 0      // 0 landscape · 1 portrait · 2 landscape-flipped · 3 portrait-flipped
     readonly property var curMon: (root.monitors.length > root.monSel) ? root.monitors[root.monSel] : null
     Process {
         id: monProc; running: true
-        command: ["sh", "-c", "hyprctl -j monitors"]
+        // "all": a switched-off display (the laptop screen with an external one plugged in) is
+        // still listed below the table, so it doesn't just vanish from Settings
+        command: ["sh", "-c", "hyprctl -j monitors all"]
         stdout: StdioCollector { id: monOut; onStreamFinished: {
             try {
-                var arr = JSON.parse(monOut.text); var out = [];
+                var arr = JSON.parse(monOut.text); var out = [], off = [];
                 for (var i=0;i<arr.length;i++) { var m=arr[i];
+                    if (m.disabled) { off.push({ name: m.name, desc: (m.description || m.name), laptop: /^(eDP|LVDS|DSI)/.test(m.name) }); continue }
                     var modes=[]; var seenR={};
                     for (var j=0;j<(m.availableModes||[]).length;j++){ var raw=m.availableModes[j];
                         var mm=raw.match(/^(\d+)x(\d+)@([\d.]+)Hz$/); if(!mm) continue;
@@ -1142,6 +1373,7 @@ Scope {
                 }
                 if (root.monSel >= out.length) root.monSel = 0;
                 root.monitors = out;
+                root.offMonitors = off;
                 if (out.length && root.selRes==="") { var c=out[root.monSel];
                     root.selRes=c.curRes; root.selHz=(c.modes[0]?c.modes[0].hz:""); root.selTransform=c.transform;
                     // prefer a mode whose hz matches current
@@ -1247,10 +1479,26 @@ Scope {
         dispProfRefresh.restart();
     }
 
+    // ---------- laptop screen (sea-panel.sh → Rust binary or sea-panel.py) ----------
+    readonly property string _panelScript: Qt.resolvedUrl("sea-panel.sh").toString().replace("file://", "")
+    property bool panelLaptop: false           // this machine has a built-in panel at all
+    property bool panelExternalOnly: false
+    property bool panelLidOff: true
+    Process { id: panelGet; command: ["sh", root._panelScript, "--get"]
+        stdout: StdioCollector { id: panelOut
+            onStreamFinished: { try { var j = JSON.parse(panelOut.text.trim() || "{}");
+                root.panelLaptop = !!j.laptop; root.panelExternalOnly = !!j.external_only; root.panelLidOff = !!j.lid_off } catch (e) {} } } }
+    function setPanel(key, on) {
+        Quickshell.execDetached(["sh", root._panelScript, "--set", key, on ? "1" : "0"]);
+        monRefresh.start();
+    }
+
     // ---------- appearance (shared with the bar via ~/.config/sea-shell/appearance.json) ----------
     property real apRadius: 14
     property real apOpacity: 0.80
+    property string apGlass: "frosted"      // Tok glass: solid | frosted | clear
     property bool apReducedMotion: false
+    property bool apDisplaySetups: true     // sea-setups.py: one arrangement per set of displays
     property bool apBarOpaque: true
     property int  apHeight: 42
     property real apScale: 0                 // UI scale: 0 = auto (per-monitor), >0 = manual multiplier
@@ -1348,6 +1596,9 @@ Scope {
 
     property bool apAutoHide: false          // auto-hide the bar (reveal on hover)
     property bool apHideFullscreen: false     // hide the bar while a window is fullscreen
+    property bool apHideGaming: false        // hide the bar during game mode / active game window
+    property bool apSuspendShellGaming: false // stop seashell + wallpaper/clipboard daemons during game mode
+    property bool apAutoPowerBattery: false   // auto power-saver + 60Hz on battery, restore on AC
     property bool apNight: false             // night light on/off (manual)
     property int  apNightTemp: 4000          // night-light colour temperature (K)
     property bool apNightAuto: false         // night light follows dark mode
@@ -1355,13 +1606,13 @@ Scope {
     // MUST match shell.qml's defaultWidgetOrder — it is the same bar. This copy had drifted:
     // wgUpdates and wgNet appeared twice (so the reorder list showed two identical rows, and
     // dragging either wrote a duplicate into the saved order) and one widget was missing.
-    readonly property var defaultWidgetOrder: ["wgMpris","wgTray","wgQuick","wgUpdates","wgNet","wgWeather","wgClipboard","wgNotif","wgWifi","wgBluetooth","wgKdeconnect","wgCaffeine","wgNight","wgSystem","wgMic","wgVolume","wgBattery","wgRec","wgClock","wgPower"]
+    readonly property var defaultWidgetOrder: ["wgMpris","wgTray","wgQuick","wgAi","wgGithub","wgTotem","wgUpdates","wgNet","wgWeather","wgClipboard","wgNotif","wgWifi","wgBluetooth","wgKdeconnect","wgCaffeine","wgNight","wgSystem","wgMic","wgVolume","wgBattery","wgRec","wgClock","wgPower"]
     property var apWidgetOrder: root.defaultWidgetOrder
     // left cluster order (mirrors shell.qml cfgLeftOrder)
     readonly property var defaultLeftOrder: ["lgLogo","lgWork","lgScratch","lgTitle"]
     property var apLeftOrder: root.defaultLeftOrder
     readonly property var lgMeta: ({
-        lgLogo:  { i: "sailing",  l: "Logo",         d: "The sea-shell mark — click opens the launcher" },
+        lgLogo:  { i: "water",  l: "Logo",         d: "The sea-shell mark — click opens the launcher" },
         lgWork:  { i: "apps",     l: "Workspaces",   d: "Hyprland workspace indicators" },
         lgScratch: { i: "inventory_2", l: "Scratchpad", d: "How many windows are stashed — hidden while it holds none" },
         lgTitle: { i: "title",    l: "Window Title", d: "Class of the focused window" }
@@ -1379,6 +1630,9 @@ Scope {
         wgMpris:     { i: "play_circle",           l: "Media Player",      d: "Track info + controls — always sits in the bar centre", prop: "wgMpris" },
         wgTray:      { i: "grid_view",             l: "System Tray",       d: "Collapsible background app status-notifier icons",      prop: "wgTray" },
         wgQuick:     { i: "tune",                  l: "Control Center",    d: "Quick toggles (dark · caffeine · DND · Wi-Fi · BT) + power profile", prop: "wgQuick" },
+        wgAi:        { i: "auto_awesome",          l: "AI usage",          d: "Allowance left · Claude, GPT, Cursor/Grok, Gemini", prop: "wgAi" },
+        wgGithub:    { i: "commit",                l: "GitHub",            d: "Commits today, streak, and watched-repo CI", prop: "wgGithub" },
+        wgTotem:     { i: "password",              l: "Totem",             d: "2FA codes from your phone (Totem)",          prop: "wgTotem" },
         wgWeather:   { i: "cloud",                 l: "Weather",           d: "Current temperature and conditions",                    prop: "wgWeather" },
         wgClipboard: { i: "content_paste",         l: "Clipboard Manager", d: "Opens the clipboard-history search",                    prop: "wgClipboard" },
         wgNotif:     { i: "notifications",         l: "Notification Bell", d: "Unread-count badge + notification centre",              prop: "wgNotif" },
@@ -1629,43 +1883,22 @@ Scope {
     }
     property int usageSel: -1
 
-    // ---------- OTA updates ----------
-    // sea-update.sh does the git work and refuses anything unsafe; this only shows the result
-    // and offers the button when the state is actually installable.
-    property string otaState: ""            // uptodate·available·ahead·diverged·dirty·norepo·offline
-    property string otaLocal: ""
-    property string otaRemote: ""
-    property int    otaBehind: 0
-    property string otaDetail: ""
-    property bool   otaBusy: false
-    Process {
-        id: otaProc
-        command: ["sh","-c","~/.config/quickshell/sea-shell/sea-update.sh check"]
-        onRunningChanged: root.otaBusy = otaProc.running || otaApply.running
-        stdout: StdioCollector { id: otaOut; onStreamFinished: {
-            var p = otaOut.text.trim().split("|");
-            if (p.length < 5) { root.otaState = "offline"; root.otaDetail = "check failed"; return }
-            root.otaState = p[0]; root.otaLocal = p[1]; root.otaRemote = p[2];
-            root.otaBehind = parseInt(p[3]) || 0; root.otaDetail = p[4];
-        } } }
-    Process {
-        id: otaApply
-        command: ["sh","-c","~/.config/quickshell/sea-shell/sea-update.sh apply"]
-        onRunningChanged: {
-            root.otaBusy = otaProc.running || otaApply.running;
-            if (!otaApply.running) otaProc.running = true;   // re-check once it finishes
-        }
-        stdout: StdioCollector { id: otaApplyOut; onStreamFinished: {
-            var p = otaApplyOut.text.trim().split("|");
-            if (p.length >= 5) { root.otaState = p[0]; root.otaDetail = p[4]; }
-        } } }
-    // Only a clean fast-forward is offered. Every other state is a situation a human should look
-    // at, not something a button should paper over.
-    readonly property bool otaCanApply: root.otaState === "available" && !root.otaBusy
-    readonly property color otaColor: root.otaState === "available" ? theme.frost
-                                    : root.otaState === "uptodate"  ? theme.good
-                                    : root.otaState === "offline" || root.otaState === "norepo" ? theme.faint
-                                    : theme.warn
+    Attention { id: attention }
+    SettingsIndex { id: searchIndex }
+    // A page costs nothing until it is first opened, then stays: most sessions touch two or three
+    // of the 26, and building them all up front was most of what Settings kept in memory. Search
+    // can't see unbuilt pages, so it reads SettingsIndex instead. Building them on the first search
+    // was tried and cost more memory than the old single file.
+    component PageLoader: Loader {
+        id: pageLoader
+        property int page: -1
+        readonly property bool wanted: root.tab === page
+        Layout.fillWidth: true
+        visible: wanted
+        active: false
+        onWantedChanged: if (wanted) active = true
+        Component.onCompleted: if (wanted) active = true
+    }
 
     // ---------- health check ----------
     property var  docRows: []
@@ -1756,9 +1989,9 @@ Scope {
         id: gmCfg
         path: Quickshell.env("HOME") + "/.config/sea-shell/appmenu.json"
         watchChanges: true
-        function apply() {
+        function apply(refresh) {
             try {
-                reload();
+                if (refresh !== false) reload();
                 var t = text();
                 if (!t || !t.trim()) return;
                 var j = JSON.parse(t);
@@ -1768,7 +2001,7 @@ Scope {
             } catch (e) {}
         }
         onFileChanged: apply()
-        onLoaded: apply()
+        onLoaded: apply(false)
         Component.onCompleted: apply()
     }
     function gmSave() {
@@ -1916,12 +2149,21 @@ Scope {
         return "";
     }
     property string diskMsg: ""
+    DiskScan { id: diskScan; active: root.shown && root.tab === 19; onCleaned: diskProc.running = true }
+    // Every place this partition is mounted, root first. A btrfs partition is mounted once per
+    // subvolume, and lsblk's single MOUNTPOINT is just whichever came up first (here /var/tmp),
+    // which hid "/" from everything that looks for it.
+    function diskMounts(n) {
+        var all = (n.mountpoints || []).filter(function (m) { return !!m && m !== "[SWAP]" });
+        if (all.length === 0 && n.mountpoint) all = [n.mountpoint];
+        return all.sort(function (a, b) { return a.length - b.length || (a < b ? -1 : 1) });
+    }
     Process {
         id: diskProc
         // FSUSED/FSAVAIL/FSUSE% are only populated for MOUNTED filesystems — an unmounted
         // partition genuinely has no knowable usage without mounting it, so the UI shows a
         // dash there rather than implying 0%.
-        command: ["sh","-c","lsblk -J -o NAME,SIZE,FSTYPE,MOUNTPOINT,RM,TYPE,LABEL,PATH,TRAN,MODEL,VENDOR,FSSIZE,FSUSED,FSAVAIL,FSUSE% 2>/dev/null"]
+        command: ["sh","-c","lsblk -J -o NAME,SIZE,FSTYPE,MOUNTPOINT,MOUNTPOINTS,RM,TYPE,LABEL,PATH,TRAN,MODEL,VENDOR,FSSIZE,FSUSED,FSAVAIL,FSUSE% 2>/dev/null"]
         stdout: StdioCollector { id: diskOut; onStreamFinished: {
             var out = [], ej = [];
             try {
@@ -1941,9 +2183,10 @@ Scope {
                         for (var k = 0; k < ns.length; k++) {
                             var n = ns[k];
                             if (n.type === "part" && n.fstype && n.fstype !== "swap") {
-                                var mnt = n.mountpoint || "";
+                                var mnts = root.diskMounts(n);
+                                var mnt = mnts.length ? mnts[0] : "";
                                 var pth = n.path || ("/dev/" + n.name);
-                                var sys = (mnt === "/" || mnt === "/boot" || mnt.indexOf("/boot/") === 0);
+                                var sys = mnts.some(function (m) { return m === "/" || m === "/boot" || m.indexOf("/boot/") === 0 });
                                 if (mnt) mountedPaths.push(pth);
                                 var pctRaw = n["fsuse%"] ? parseInt(("" + n["fsuse%"]).replace("%","")) : -1;
                                 dParts.push({
@@ -1952,6 +2195,7 @@ Scope {
                                     size: n.size || "",
                                     fs: n.fstype,
                                     mount: mnt,
+                                    mounts: mnts.join(", "),
                                     used: n.fsused || "",
                                     avail: n.fsavail || "",
                                     pct: isNaN(pctRaw) ? -1 : pctRaw,
@@ -2017,7 +2261,7 @@ Scope {
     }
     function diskToggle(row) {
         if (!row || row._system) {
-            root.diskMsg = row && row._system ? "system partitions stay mounted" : "";
+            root.diskMsg = row && row._system ? "System partitions stay mounted" : "";
             return;
         }
         var d = row._path.replace(/'/g, "");
@@ -2107,7 +2351,7 @@ Scope {
     // Rotating into a video respawns a decoder every interval; some folders are mostly
     // clips and some people would rather the timer left those alone.
     property bool   apWpRotateStills: false
-    // A paused mpvpaper still holds its decoder, its surface and its VRAM. Freeing it is
+    // A paused player still holds its decoder and its frames. Freeing it is
     // the default because the thing covering the wallpaper is usually the thing that
     // wanted that memory.
     property bool   apWpCoverStill: true
@@ -2121,11 +2365,9 @@ Scope {
     // unconditionally — so "a different picture on the lock screen" was not expressible.
     property bool   apWpLockOwn: false
     property string apWpLock: ""
-    // 0 = leave mpvpaper alone. Capping a 60fps clip to 30 halves the full-screen blits
-    // the compositor does for it, which on a machine whose iGPU composites while the dGPU
-    // renders is the cost that actually shows up.
+    // The frame rate the bar re-encodes moving wallpapers to; 0 (unset) means 30.
     property int    apWpVidFps: 0
-    readonly property var wpVidFpsOptions: [0, 60, 30, 24]
+    readonly property var wpVidFpsOptions: [30, 60, 24]
     // WHAT DECIDES LIGHT/DARK.  "manual" = whatever you last set, "clock" = the
     // darkStart..darkEnd window, "wallpaper" = the picture's own luminance. One source, chosen —
     // rather than two booleans that can both be on and disagree every minute.
@@ -2135,7 +2377,7 @@ Scope {
     property string apDarkEnd: "07:00"      // dark ends (light begins)
     property var apCustomFonts: []      // fonts the user typed, persisted as chips
     property string apAppMode: "auto"       // system app dark/light: "auto" (follows shell), "dark", "light"
-    property int apSubTab: 5
+    property int apSubTab: 0
     property int idlSubTab: 0
     // ---------- bar widgets toggles ----------
     property bool wgMpris: true
@@ -2153,8 +2395,62 @@ Scope {
     property bool wgVolume: true
     property bool wgBattery: true
     property bool wgClock: true
+    property bool apClock24: true
+    property bool apClockSeconds: false
     property bool wgPower: true
     property bool wgQuick: true
+    property bool wgAi: true
+    property bool wgGithub: true
+    property bool wgTotem: true
+    property var apAiOn: ({ "claude": true, "codex": true, "cursor": true, "cursor-alt": true, "gemini": true })
+    property string apAiDefault: ""
+    property int apAiDigits: 2
+    // What resting the pointer in each screen corner does. "" is nothing.
+    property var apHotCorners: ({ "tl": "", "tr": "", "bl": "", "br": "" })
+    function hotCornerSet(corner, action) {
+        var o = {};
+        for (var k in root.apHotCorners) o[k] = root.apHotCorners[k];
+        o[corner] = action;
+        root.apHotCorners = o;
+        root.saveAppearance();
+    }
+    readonly property var aiPlanIds: ["claude", "codex", "cursor", "cursor-alt", "gemini"]
+    function aiPlanKnown(id) { return id === "" || root.aiPlanIds.indexOf(id) >= 0; }
+    // A second Cursor profile, signed in from its own user-data dir.
+    property bool apHasCursorAlt: false
+    Process {
+        running: true
+        command: ["sh", "-c", "test -d \"$HOME/.cursor-alt/data\" -o -s \"$HOME/.config/sea-shell/cursor-profiles\" && echo yes"]
+        stdout: StdioCollector { onStreamFinished: root.apHasCursorAlt = text.trim() === "yes" }
+    }
+    function aiDigitsSet(n) {
+        if (n !== 0 && n !== 1 && n !== 2) return;
+        root.apAiDigits = n;
+        root.saveAppearance();
+    }
+    function aiOnGet(id) {
+        var o = root.apAiOn || ({});
+        return o[id] !== false;
+    }
+    function aiOnToggle(id) {
+        var ids = root.aiPlanIds;
+        var o = {};
+        for (var k = 0; k < ids.length; k++) o[ids[k]] = root.aiOnGet(ids[k]);
+        var leaving = o[id] !== false;
+        if (leaving) {
+            var n = 0;
+            for (var i = 0; i < ids.length; i++) if (ids[i] !== id && o[ids[i]]) n++;
+            if (n === 0) return;
+        }
+        o[id] = !o[id];
+        root.apAiOn = o;
+        if (!o[id] && root.apAiDefault === id) root.apAiDefault = "";
+        root.saveAppearance();
+    }
+    function aiDefaultSet(id) {
+        root.apAiDefault = (root.apAiDefault === id) ? "" : id;
+        root.saveAppearance();
+    }
     property bool wgNight: false
     property bool wgMic: false
     // Which readings the System Monitor pill shows. sea-sysmon.sh has always sampled all of them;
@@ -2205,6 +2501,8 @@ Scope {
     Process { id: apReadProc; running: true; command: ["sh","-c","cat \"$HOME/.config/sea-shell/appearance.json\" 2>/dev/null"]
         stdout: StdioCollector { id: apOut; onStreamFinished: { try { var j=JSON.parse(apOut.text);
             root.apReducedMotion=!!j.reducedMotion;
+            root.apDisplaySetups = j.displaySetups !== false;
+            root.apGlass = (j.glass === "solid" || j.glass === "clear") ? j.glass : "frosted";
             if(j.barOpaque!==undefined) root.apBarOpaque=!!j.barOpaque;
             if(j.radius!==undefined) root.apRadius=j.radius; if(j.opacity!==undefined) root.apOpacity=j.opacity;
             if(j.height!==undefined) root.apHeight=j.height; if(j.scale!==undefined) root.apScale=j.scale; if(j.accent!==undefined) root.apAccent=j.accent;
@@ -2270,10 +2568,19 @@ Scope {
             if(j.wgVolume!==undefined) root.wgVolume=!!j.wgVolume;
             if(j.wgBattery!==undefined) root.wgBattery=!!j.wgBattery;
             if(j.wgClock!==undefined) root.wgClock=!!j.wgClock;
+            if(j.clock24!==undefined) root.apClock24=!!j.clock24;
+            if(j.clockSeconds!==undefined) root.apClockSeconds=!!j.clockSeconds;
             if(j.wgPower!==undefined) root.wgPower=!!j.wgPower;
             if(j.wgQuick!==undefined) root.wgQuick=!!j.wgQuick;
+            if(j.wgAi!==undefined) root.wgAi=!!j.wgAi;
+            if(j.wgGithub!==undefined) root.wgGithub=!!j.wgGithub;
+            if(j.wgTotem!==undefined) root.wgTotem=!!j.wgTotem;
+            if(j.aiOn && typeof j.aiOn==="object") root.apAiOn=j.aiOn;
+            if(typeof j.aiDefault==="string" && root.aiPlanKnown(j.aiDefault)) root.apAiDefault=j.aiDefault;
+            if(j.aiDigits===0||j.aiDigits===1||j.aiDigits===2) root.apAiDigits=j.aiDigits;
             if(j.wgNight!==undefined) root.wgNight=!!j.wgNight;
             if(j.wgMic!==undefined) root.wgMic=!!j.wgMic;
+            if(j.hotCorners && typeof j.hotCorners==="object") root.apHotCorners=j.hotCorners;
             if(j.sysShow!==undefined && Array.isArray(j.sysShow) && j.sysShow.length) root.apSysShow=j.sysShow;
             if(j.barShape==="bar"||j.barShape==="pills") root.apBarShape=j.barShape;
             if(j.wsStyle==="grow"||j.wsStyle==="pill"||j.wsStyle==="circle") root.apWsStyle=j.wsStyle;
@@ -2285,6 +2592,9 @@ Scope {
             if(j.welcomed!==undefined) root.apWelcomed=!!j.welcomed;
             if(j.autoHide!==undefined) root.apAutoHide=!!j.autoHide;
             if(j.hideFullscreen!==undefined) root.apHideFullscreen=!!j.hideFullscreen;
+            if(j.hideGaming!==undefined) root.apHideGaming=!!j.hideGaming;
+            if(j.suspendShellGaming!==undefined) root.apSuspendShellGaming=!!j.suspendShellGaming;
+            if(j.autoPowerBattery!==undefined) root.apAutoPowerBattery=!!j.autoPowerBattery;
             if(j.night!==undefined) root.apNight=!!j.night;
             if(j.nightTemp!==undefined) root.apNightTemp=j.nightTemp;
             if(j.nightAuto!==undefined) root.apNightAuto=!!j.nightAuto;
@@ -2354,11 +2664,20 @@ Scope {
             wgClock: root.wgClock,
             wgPower: root.wgPower,
             wgQuick: root.wgQuick,
+            wgAi: root.wgAi,
+            wgGithub: root.wgGithub,
+            wgTotem: root.wgTotem,
+            aiOn: root.apAiOn,
+            aiDefault: root.apAiDefault,
+            aiDigits: root.apAiDigits,
             wgNight: root.wgNight,
             wgMic: root.wgMic,
             sysShow: root.apSysShow,
             autoHide: root.apAutoHide,
             hideFullscreen: root.apHideFullscreen,
+            hideGaming: root.apHideGaming,
+            suspendShellGaming: root.apSuspendShellGaming,
+            autoPowerBattery: root.apAutoPowerBattery,
             night: root.apNight,
             nightTemp: root.apNightTemp,
             nightAuto: root.apNightAuto,
@@ -2414,10 +2733,19 @@ Scope {
         if (p.wgClock !== undefined) root.wgClock = p.wgClock;
         if (p.wgPower !== undefined) root.wgPower = p.wgPower;
         if (p.wgQuick !== undefined) root.wgQuick = p.wgQuick;
+        if (p.wgAi !== undefined) root.wgAi = p.wgAi;
+        if (p.wgGithub !== undefined) root.wgGithub = p.wgGithub;
+        if (p.wgTotem !== undefined) root.wgTotem = p.wgTotem;
+        if (p.aiOn && typeof p.aiOn === "object") root.apAiOn = p.aiOn;
+        if (typeof p.aiDefault === "string" && root.aiPlanKnown(p.aiDefault)) root.apAiDefault = p.aiDefault;
+        if (p.aiDigits === 0 || p.aiDigits === 1 || p.aiDigits === 2) root.apAiDigits = p.aiDigits;
         if (p.wgNight !== undefined) root.wgNight = p.wgNight;
         if (p.wgMic !== undefined) root.wgMic = p.wgMic;
         if (p.autoHide !== undefined) root.apAutoHide = p.autoHide;
         if (p.hideFullscreen !== undefined) root.apHideFullscreen = p.hideFullscreen;
+        if (p.hideGaming !== undefined) root.apHideGaming = p.hideGaming;
+        if (p.suspendShellGaming !== undefined) root.apSuspendShellGaming = p.suspendShellGaming;
+        if (p.autoPowerBattery !== undefined) root.apAutoPowerBattery = p.autoPowerBattery;
         if (p.night !== undefined) root.apNight = p.night;
         if (p.nightTemp !== undefined) root.apNightTemp = p.nightTemp;
         if (p.nightAuto !== undefined) root.apNightAuto = p.nightAuto;
@@ -2441,7 +2769,7 @@ Scope {
     // restores it — wgNet and wgUpdates were toggleable in the panel but absent from this list, so
     // switching between saved layouts left those two wherever they happened to be. wgRec is the
     // only correct omission: the recorder pill shows itself while recording and has no toggle.
-    readonly property var barToggleKeys: ["wgMpris","wgTray","wgWeather","wgClipboard","wgNotif","wgWifi","wgBluetooth","wgKdeconnect","wgCaffeine","wgNight","wgSystem","wgVolume","wgBattery","wgClock","wgPower","wgQuick","wgNet","wgUpdates","wgMic"]
+    readonly property var barToggleKeys: ["wgMpris","wgTray","wgWeather","wgClipboard","wgNotif","wgWifi","wgBluetooth","wgKdeconnect","wgCaffeine","wgNight","wgSystem","wgVolume","wgBattery","wgClock","wgPower","wgQuick","wgNet","wgUpdates","wgMic","wgAi","wgGithub","wgTotem"]
     property var barLayouts: []
     Process { id: barLayoutsReadProc; running: true; command: ["sh","-c","cat \"$HOME/.config/sea-shell/bar-layouts.json\" 2>/dev/null || echo '[]'"]
         stdout: StdioCollector { id: blOut; onStreamFinished: { try { root.barLayouts = JSON.parse(blOut.text) } catch(e){ root.barLayouts = [] } } } }
@@ -2480,6 +2808,8 @@ Scope {
             radius:          Math.round(root.apRadius),
             opacity:         Number(root.apOpacity.toFixed(2)),
             reducedMotion:   root.apReducedMotion,
+            displaySetups:   root.apDisplaySetups,
+            glass:           root.apGlass,
             barOpaque:       true,
             height:          Math.round(root.apHeight),
             scale:           Number(root.apScale.toFixed(2)),
@@ -2523,10 +2853,19 @@ Scope {
             wgVolume:        root.wgVolume,
             wgBattery:       root.wgBattery,
             wgClock:         root.wgClock,
+            clock24:         root.apClock24,
+            clockSeconds:    root.apClockSeconds,
             wgPower:         root.wgPower,
             wgQuick:         root.wgQuick,
+            wgAi:            root.wgAi,
+            wgGithub:        root.wgGithub,
+            wgTotem:         root.wgTotem,
+            aiOn:            root.apAiOn,
+            aiDefault:       root.apAiDefault,
+            aiDigits:        root.apAiDigits,
             wgNight:         root.wgNight,
             wgMic:           root.wgMic,
+            hotCorners:      root.apHotCorners,
             barShape:        root.apBarShape,
             wsStyle:         root.apWsStyle,
             wsLabel:         root.apWsLabel,
@@ -2537,6 +2876,9 @@ Scope {
             welcomed:        root.apWelcomed,
             autoHide:        root.apAutoHide,
             hideFullscreen:  root.apHideFullscreen,
+            hideGaming:      root.apHideGaming,
+            suspendShellGaming: root.apSuspendShellGaming,
+            autoPowerBattery: root.apAutoPowerBattery,
             night:           root.apNight,
             nightTemp:       Math.round(root.apNightTemp),
             nightAuto:       root.apNightAuto,
@@ -2722,7 +3064,8 @@ Scope {
                     var p = lines[i].split(":");
                     var sid = p.slice(3).join(":").replace(/\\:/g, ":");   // terse mode escapes ':' in SSIDs
                     if (!sid) continue;
-                    var e = { active: p[0] === "yes", signal: parseInt(p[1]) || 0, secure: (p[2] || "").length > 0, ssid: sid };
+                    var e = { active: p[0] === "yes", signal: parseInt(p[1]) || 0, secure: (p[2] || "").length > 0,
+                              enterprise: WifiEnterprise.isEnterprise(p[2]), ssid: sid };
                     if (!(sid in best)) { best[sid] = e; order.push(sid) }
                     else if (e.signal > best[sid].signal) { e.active = e.active || best[sid].active; best[sid] = e }
                     else if (e.active) best[sid].active = true;
@@ -2819,11 +3162,15 @@ Scope {
         wifiJoin.command = ["sh","-c","nmcli dev wifi connect '" + e + "' 2>&1"];
         wifiJoin.running = true;
     }
-    function wifiJoinPw(ssid, pw) {
+    // identity is only passed for 802.1X networks; they need a full EAP profile, not a PSK join
+    function wifiJoinPw(ssid, pw, identity) {
         if (!pw.length) return;
+        if (identity !== undefined && !identity.length) return;
         var e = ssid.replace(/'/g, ""), p = pw.replace(/'/g, "'\\''");
         root.wifiMsg = "connecting…"; root.wifiPwFor = ""; root.wifiRetry = ""; root.wifiAsked = ssid;
-        wifiJoin.command = ["sh","-c","nmcli dev wifi connect '" + e + "' password '" + p + "' 2>&1"];
+        wifiJoin.command = identity !== undefined
+            ? WifiEnterprise.joinCmd(ssid, identity, pw)
+            : ["sh","-c","nmcli dev wifi connect '" + e + "' password '" + p + "' 2>&1"];
         wifiJoin.running = true;
     }
     function wifiDisconnect(ssid) {
@@ -2843,7 +3190,7 @@ Scope {
             }
             root.wifiRetry = "";
             root.wifiMsg = ok ? "connected ✓"
-                         : t.indexOf("Secrets were required") >= 0 || t.indexOf("password") >= 0 ? "wrong password — try again"
+                         : t.indexOf("Secrets were required") >= 0 || t.indexOf("password") >= 0 ? "Wrong password. Try again."
                          : t.split("\n")[0].slice(0, 64);
             wifiRefresh.start();
         } } }
@@ -2956,236 +3303,15 @@ Scope {
         root.vpnMsg = "importing OpenVPN…"; vpnRefreshTimer.start();
     }
 
-    // ============ reusable components ============
-    component Sym: Text {
-        property int sz: 18
-        font.family: "Material Symbols Outlined"; font.pixelSize: sz
-        color: theme.frost; verticalAlignment: Text.AlignVCenter
-    }
 
-    // A section is a macOS-style group: a bold title, and everything after it on the page, up
-    // to the next section, sits on one rounded panel. The panel is drawn from here, behind the
-    // section's siblings, so the twenty-odd pages did not have to be rewritten into containers:
-    // their rows already keep a 14px inset on both sides, which is exactly the panel's padding.
-    component Section: ColumnLayout {
-        id: sec
-        property string title: ""
-        property string icon: ""
-        readonly property bool isSection: true
-        // Every section on every page puts itself on the map as it is built. That map is
-        // what the search field searches and what the jump chips above each page aim at —
-        // one registry, so a section added later is findable without being listed anywhere
-        // by hand.
-        Component.onCompleted: { root.regSection(sec); Qt.callLater(sec.insetRows) }
-        Layout.fillWidth: true; Layout.leftMargin: 14; Layout.topMargin: 14
-        spacing: 7
-        // Everything on this section's panel keeps the panel's 14px padding. Most rows were
-        // written with it; the ones that were not sat flush against the panel's edge, a box
-        // jammed inside a box. Rather than finding each by hand, the section gives the inset
-        // to any row of its own that has none — now, and whenever a Repeater adds more.
-        function insetRows() {
-            var host = sec.parent;
-            if (!host) return;
-            var kids = host.children, mine = false;
-            for (var i = 0; i < kids.length; i++) {
-                var k = kids[i];
-                if (k === sec) { mine = true; continue }
-                if (!mine) continue;
-                if (k.isSection === true) break;
-                if (!k.Layout) continue;
-                if (k.Layout.leftMargin === 0) k.Layout.leftMargin = 14;
-                if (k.Layout.rightMargin === 0) k.Layout.rightMargin = 14;
-            }
-        }
-        Connections { target: sec.parent; function onChildrenChanged() { Qt.callLater(sec.insetRows) } }
-        RowLayout {
-            spacing: 7
-            Sym { text: icon; sz: 14; color: Tok.ink3 }
-            Text { text: title; color: Tok.ink; font.pixelSize: 13; font.family: Tok.sans
-                font.weight: 700 }
-        }
-        // Zero-height, so the layout ignores it; the panel hangs off it and reaches down to
-        // just above the next visible section among the same siblings, or the page's end.
-        Item {
-            Layout.fillWidth: true; Layout.preferredHeight: 0
-            Rectangle {
-                readonly property Item host: sec.parent
-                readonly property real gap: host && host.spacing !== undefined ? host.spacing : 12
-                readonly property real reach: {
-                    if (!host) return 0;
-                    var kids = host.children, mine = false;
-                    for (var i = 0; i < kids.length; i++) {
-                        var k = kids[i];
-                        if (k === sec) { mine = true; continue }
-                        if (mine && k.visible && k.isSection === true) return k.y - gap;
-                    }
-                    return host.height + 12;
-                }
-                x: -sec.x; y: 0; z: -1
-                width: host ? host.width : 0
-                height: reach - (sec.y + sec.height)
-                visible: height > 18
-                radius: Tok.r + 2
-                color: root.groupFill; border.width: 1; border.color: root.groupRule
-            }
-        }
-    }
 
-    // custom slider (0..1)
-    component Slider: Item {
-        id: sl
-        property real value: 0
-        property color fill: theme.iris
-        signal moved(real v)
-        implicitHeight: 22
-        Layout.fillWidth: true
-        function clamp(v) { return Math.max(0, Math.min(1, v)) }
-        Rectangle {
-            id: track
-            anchors.verticalCenter: parent.verticalCenter
-            width: parent.width; height: 6; radius: Tok.r
-            color: theme.a(theme.line, 0.8)
-            Rectangle { width: track.width * sl.clamp(sl.value); height: parent.height; radius: Tok.r; color: sl.fill }
-        }
-        Rectangle {
-            width: 15; height: 15; radius: Tok.r
-            border.width: 2; border.color: sl.fill; color: theme.frost
-            anchors.verticalCenter: parent.verticalCenter
-            x: (sl.width - width) * sl.clamp(sl.value)
-        }
-        MouseArea {
-            anchors.fill: parent; cursorShape: Qt.PointingHandCursor
-            onPressed: (e) => { var v = sl.clamp(e.x / sl.width); sl.value = v; sl.moved(v) }
-            onPositionChanged: (e) => { if (pressed) { var v = sl.clamp(e.x / sl.width); sl.value = v; sl.moved(v) } }
-        }
-    }
 
-    // ---- consistent form controls: spacing is baked in so every tab aligns by construction ----
-    // on/off switch — bind `on`, handle `toggled`
-    component Toggle: Rectangle {
-        id: tg
-        property bool on: false
-        signal toggled()
-        implicitWidth: 44; implicitHeight: 24; radius: Tok.r
-        color: on ? Tok.accent : Tok.sunken
-        border.width: 1; border.color: on ? Tok.accent : Tok.ruleHard
-        Behavior on color { ColorAnimation { duration: Tok.mFast } }
-        // knob must contrast with whatever it sits ON: accent-ink over the lit track, tertiary
-        // ink over the dark one. (It was a single fixed colour, which the palette change broke.)
-        Rectangle { width: 18; height: 18; radius: Tok.r; y: 3; x: tg.on ? tg.width - width - 3 : 3
-            color: tg.on ? Tok.accentInk : Tok.ink3
-            Behavior on x { NumberAnimation { duration: Tok.mFast; easing.type: Easing.OutCubic } } }
-        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: tg.toggled() }
-    }
 
-    // full-width setting row with a built-in switch: icon · title · description · toggle.
-    // The whole row is clickable. Border lights up while `on`.
-    component ToggleCard: Rectangle {
-        id: tc
-        property string icon: ""
-        property string title: ""
-        property string desc: ""
-        property bool on: false
-        signal toggled()
-        Layout.fillWidth: true
-        implicitHeight: Math.max(60, tcRow.implicitHeight + 24)
-        // Flat: it sits on its section's panel, as a row of a macOS group does.
-        radius: Tok.r
-        color: tcMa.containsMouse ? root.rowHover : "transparent"
-        Behavior on color { ColorAnimation { duration: Tok.mFast } }
-        RowLayout {
-            id: tcRow
-            anchors.fill: parent; anchors.leftMargin: 14; anchors.rightMargin: 14; spacing: 12
-            Sym { visible: tc.icon !== ""; text: tc.icon; sz: 19; color: tc.on ? theme.frost : theme.sub; Layout.alignment: Qt.AlignVCenter }
-            ColumnLayout { spacing: 2; Layout.fillWidth: true; Layout.alignment: Qt.AlignVCenter
-                Text { visible: tc.title !== ""; text: tc.title; color: theme.text; font.pixelSize: 13; font.family: Tok.mono; Layout.fillWidth: true; elide: Text.ElideRight }
-                Text { visible: tc.desc !== ""; text: tc.desc; color: theme.faint; font.pixelSize: 10; font.family: Tok.mono; Layout.fillWidth: true; wrapMode: Text.WordWrap } }
-            Toggle { on: tc.on; onToggled: tc.toggled(); Layout.alignment: Qt.AlignVCenter }
-        }
-        MouseArea { id: tcMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: tc.toggled() }
-    }
 
-    // icon · fixed-width label · slider · fixed-width readout — columns line up across every slider
-    component SliderRow: RowLayout {
-        id: sr
-        implicitHeight: 42
-        property string icon: ""
-        property string label: ""
-        property real value: 0
-        property string readout: ""
-        property color tint: theme.iris
-        signal moved(real v)
-        Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; spacing: 12
-        Sym { text: sr.icon; sz: 18; color: theme.sub; Layout.alignment: Qt.AlignVCenter }
-        Text { text: sr.label; color: theme.sub; font.pixelSize: 13; font.family: Tok.sans; Layout.minimumWidth: 100 }
-        Slider { fill: sr.tint; value: sr.value; onMoved: (v) => sr.moved(v) }
-        Text { text: sr.readout; color: theme.sub; font.pixelSize: 12; font.family: Tok.mono; Layout.minimumWidth: 48; horizontalAlignment: Text.AlignRight }
-    }
 
-    // selectable pill for choice groups (resolution, scheme, profile, …)
-    component Chip: Rectangle {
-        id: ch
-        scale: chMa.pressed ? 0.96 : 1
-        Behavior on scale { NumberAnimation { duration: Tok.mMicro; easing.type: Easing.OutCubic } }
-        property string label: ""
-        property string icon: ""
-        // Some chips ARE their symbol — the workspace numbering picker shows ⚀⚁⚂ rather than
-        // the word "dice" — and the UI font does not necessarily have them.
-        property string labelFont: Tok.mono
-        property bool on: false
-        signal picked()
-        implicitWidth: chRow.implicitWidth + 24; implicitHeight: 32; radius: Tok.r
-        color: on ? theme.iris : (chMa.containsMouse ? theme.a(theme.iris, 0.16) : theme.a(theme.line, 0.4))
-        border.width: 1; border.color: on ? theme.iris : theme.a(theme.iris, 0.16)
-        Behavior on color { ColorAnimation { duration: Tok.mFast } }
-        Row { id: chRow; anchors.centerIn: parent; spacing: 6
-            Sym { visible: ch.icon !== ""; anchors.verticalCenter: parent.verticalCenter; text: ch.icon; sz: 15; color: ch.on ? Tok.accentInk : Tok.ink2 }
-            Text { anchors.verticalCenter: parent.verticalCenter; text: ch.label; color: ch.on ? Tok.accentInk : Tok.ink; font.pixelSize: 12; font.family: ch.labelFont; font.bold: ch.on } }
-        MouseArea { id: chMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: ch.picked() }
-    }
 
-    // accent action button (Apply, Save, …)
-    component AccentBtn: Rectangle {
-        id: ab
-        scale: abMa.pressed ? 0.98 : 1
-        Behavior on scale { NumberAnimation { duration: Tok.mMicro; easing.type: Easing.OutCubic } }
-        property string label: ""
-        property string icon: ""
-        property bool enabled: true
-        signal clicked()
-        Layout.fillWidth: true; implicitHeight: 40; radius: Tok.r
-        opacity: ab.enabled ? 1 : 0.45
-        color: abMa.containsMouse && ab.enabled ? theme.iris : theme.a(theme.iris, 0.22)
-        border.width: 1; border.color: theme.iris
-        Behavior on color { ColorAnimation { duration: Tok.mFast } }
-        RowLayout { anchors.centerIn: parent; spacing: 8
-            Sym { visible: ab.icon !== ""; text: ab.icon; sz: 17; color: abMa.containsMouse && ab.enabled ? Tok.accentInk : Tok.ink2 }
-            Text { text: ab.label; color: abMa.containsMouse && ab.enabled ? Tok.accentInk : Tok.ink; font.pixelSize: 13; font.family: Tok.mono; font.bold: true } }
-        MouseArea { id: abMa; anchors.fill: parent; hoverEnabled: true; enabled: ab.enabled; cursorShape: Qt.PointingHandCursor; onClicked: ab.clicked() }
-    }
 
-    component Row2: RowLayout {
-        property string icon: ""
-        property string label: ""
-        property string cmd: ""
-        property bool quitAfter: false
-        property color tint: theme.frost
-        Layout.fillWidth: true
-        Rectangle {
-            Layout.fillWidth: true; implicitHeight: 42; radius: Tok.r
-            color: rma.containsMouse ? root.rowHover : "transparent"
-            Behavior on color { ColorAnimation { duration: Tok.mFast } }
-            RowLayout {
-                anchors.fill: parent; anchors.leftMargin: 13; anchors.rightMargin: 13; spacing: 10
-                Sym { text: parent.parent.parent.icon; sz: 19; color: parent.parent.parent.tint }
-                Text { text: parent.parent.parent.label; color: theme.text; font.pixelSize: 13; font.family: Tok.mono; elide: Text.ElideRight; Layout.fillWidth: true }
-            }
-            MouseArea {
-                id: rma; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
-                onClicked: { root.run(parent.parent.cmd); if (parent.parent.quitAfter) root.closePanel() }
-            }
-        }
-    }
+
 
     // ---------- the wallpaper shelf ----------
     // The picker's index, read here too, so the day/night pair can be chosen by LOOKING at
@@ -3264,214 +3390,7 @@ Scope {
         return n;
     }
 
-    // ---- a wallpaper as a CARTRIDGE ----
-    // The picker commits by dropping a cartridge into a deck. Choosing which wallpaper is
-    // loaded automatically at dusk is the same act, decided in advance — so it is the same
-    // object: a labelled plate with a picture on it and a key notch down one side, sitting
-    // in a slot that is either occupied or plainly empty.
-    //
-    // The notch is not decoration. It is the one marking on here that says which way up
-    // this goes, which is the only thing a physical cartridge's shape ever told you.
-    component CartTile: Rectangle {
-        id: ct
-        property string slot: ""            // DAY / NIGHT — the tracked legend
-        property string path: ""
-        property bool armed: false          // waiting for a pick off the shelf
-        signal picked()
-        signal cleared()
 
-        readonly property var entry: root.wpNamed(ct.path)
-        readonly property bool filled: ct.path.length > 0
-
-        implicitWidth: 208; implicitHeight: 132
-        radius: Tok.rSmall
-        clip: true
-        color: Tok.sunken
-        border.width: ct.armed ? 2 : 1
-        border.color: ct.armed ? Tok.accent : (ctMa.containsMouse ? Tok.ink3 : Tok.ruleHard)
-        Behavior on border.color { ColorAnimation { duration: Tok.mFast } }
-
-        Image {
-            anchors { fill: parent; margins: ct.border.width; bottomMargin: 26 + ct.border.width }
-            visible: ct.filled
-            source: ct.entry ? Tok.fileUrl(root.wpStill(ct.entry)) : ""
-            fillMode: Image.PreserveAspectCrop
-            asynchronous: true; cache: true
-            sourceSize.height: 240
-        }
-
-        // empty slot — an opening with nothing in it, said the way the deck says it
-        Column {
-            anchors.centerIn: parent
-            anchors.verticalCenterOffset: -13
-            spacing: 4
-            visible: !ct.filled
-            Sym { anchors.horizontalCenter: parent.horizontalCenter
-                  text: "add_photo_alternate"; sz: 22; color: Tok.ink3 }
-            Text { anchors.horizontalCenter: parent.horizontalCenter
-                   text: ct.armed ? "pick one below" : "empty"
-                   color: ct.armed ? Tok.accent : Tok.ink3
-                   font.pixelSize: Tok.tLabel; font.family: Tok.mono
-                   font.letterSpacing: 1.2; font.capitalization: Font.AllUppercase }
-        }
-
-        // the label plate
-        Rectangle {
-            id: ctPlate
-            anchors { left: parent.left; right: parent.right; bottom: parent.bottom }
-            height: 26
-            color: Tok.raised
-            Rectangle { anchors { left: parent.left; right: parent.right; top: parent.top }
-                        height: 1; color: Tok.ruleHard }
-            Row {
-                anchors { left: parent.left; leftMargin: 8; right: ctClear.left; rightMargin: 6
-                          verticalCenter: parent.verticalCenter }
-                spacing: 8
-                Text {
-                    anchors.verticalCenter: parent.verticalCenter
-                    text: ct.slot; color: Tok.accent
-                    font.pixelSize: Tok.tLabel; font.family: Tok.mono; font.weight: 700
-                    font.letterSpacing: 1.3; font.capitalization: Font.AllUppercase
-                }
-                Rectangle { anchors.verticalCenter: parent.verticalCenter
-                            width: 1; height: 12; color: Tok.ruleHard }
-                Text {
-                    anchors.verticalCenter: parent.verticalCenter
-                    width: Math.max(0, parent.width - 96)
-                    text: ct.filled ? (ct.entry ? ct.entry.name : ct.path.slice(ct.path.lastIndexOf("/") + 1))
-                                    : "—"
-                    color: Tok.ink2; font.pixelSize: Tok.tData; font.family: Tok.mono
-                    elide: Text.ElideMiddle
-                }
-            }
-            Sym {
-                id: ctClear
-                anchors { right: parent.right; rightMargin: 7; verticalCenter: parent.verticalCenter }
-                visible: ct.filled
-                text: "backspace"; sz: 14
-                color: ctClearMa.containsMouse ? Tok.crit : Tok.ink3
-                MouseArea { id: ctClearMa; anchors.fill: parent; anchors.margins: -5
-                            hoverEnabled: true; cursorShape: Qt.PointingHandCursor
-                            onClicked: ct.cleared() }
-            }
-        }
-
-        // The key notch, in the ground's own colour so it reads as absent material rather
-        // than as a painted mark. TOP corner, which is where a cartridge is actually keyed —
-        // and, on the profile cartridge that shares this detail, the only edge where a
-        // notch does not take a bite out of the accent band that identifies it.
-        Rectangle {
-            anchors { right: parent.right; top: parent.top }
-            width: 18; height: 10
-            color: Tok.bg
-            Rectangle { anchors { left: parent.left; top: parent.top; bottom: parent.bottom }
-                        width: 1; color: Tok.ruleHard }
-            Rectangle { anchors { left: parent.left; right: parent.right; bottom: parent.bottom }
-                        height: 1; color: Tok.ruleHard }
-        }
-
-        // registration corners while armed — the same four brackets the picker puts on the
-        // panel it has hold of, meaning the same thing: this one is the target.
-        Repeater {
-            model: ct.armed ? 4 : 0
-            Item {
-                required property int index
-                readonly property bool onRight: (index % 2) === 1
-                readonly property bool onBottom: index >= 2
-                // 4px, matching the picker's brackets. At 3 they were technically drawn and
-                // practically invisible — the same measuring mistake the picker's own
-                // corners needed correcting for.
-                readonly property real arm: 16
-                width: arm; height: arm
-                x: onRight ? ct.width - arm : 0
-                y: onBottom ? ct.height - 26 - arm : 0
-                Rectangle { width: parent.arm; height: 4; color: Tok.accent
-                            y: parent.onBottom ? parent.arm - 4 : 0 }
-                Rectangle { width: 4; height: parent.arm; color: Tok.accent
-                            x: parent.onRight ? parent.arm - 4 : 0 }
-            }
-        }
-
-        MouseArea { id: ctMa; anchors.fill: parent; anchors.bottomMargin: 26
-                    hoverEnabled: true; cursorShape: Qt.PointingHandCursor
-                    onClicked: ct.picked() }
-    }
-
-    // ---- the shelf a cartridge is picked off ----
-    // Only while a slot is armed. A row of every wallpaper you own, permanently on display
-    // under slots that are already full, would be the largest thing on this page and would
-    // answer nothing. Two groups need one (the day/night pair, and the lock screen), which
-    // is why it is a component rather than a block of markup written twice.
-    component WallShelf: Rectangle {
-        id: sh
-        property bool open: false
-        property string chosen: ""
-        signal picked(string path)
-
-        Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14
-        // Via a plain property: QML has no Behavior on an ATTACHED property, so animating
-        // Layout.preferredHeight directly is not a slower open, it is an error.
-        property real shelfH: sh.open ? 104 : 0
-        Behavior on shelfH { NumberAnimation { duration: Tok.mBase; easing.type: Tok.mEase } }
-        Layout.preferredHeight: shelfH
-        visible: shelfH > 1
-        clip: true
-        radius: Tok.r
-        color: Tok.sunken
-        border.width: 1; border.color: Tok.ruleHard
-
-        Text {
-            anchors.centerIn: parent
-            visible: !root.wpIndex.length
-            text: root.wpIndexBusy ? "scanning…" : "no wallpapers in that folder"
-            color: theme.faint; font.pixelSize: 11; font.family: Tok.mono
-        }
-
-        ListView {
-            id: shelfList
-            anchors.fill: parent; anchors.margins: 10
-            orientation: ListView.Horizontal
-            spacing: 8
-            clip: true
-            model: root.wpIndex
-            delegate: Rectangle {
-                id: shelfItem
-                required property var modelData
-                readonly property bool isChosen: sh.chosen === modelData.path
-                width: 132; height: shelfList.height
-                radius: Tok.rSmall
-                clip: true
-                color: Tok.bg
-                border.width: shelfItem.isChosen ? 2 : 1
-                border.color: shelfItem.isChosen ? Tok.accent
-                            : (shelfMa.containsMouse ? Tok.ink3 : Tok.ruleHard)
-                Behavior on border.color { ColorAnimation { duration: Tok.mFast } }
-                Image {
-                    anchors.fill: parent; anchors.margins: shelfItem.border.width
-                    source: root.wpStill(shelfItem.modelData).length
-                            ? Tok.fileUrl(root.wpStill(shelfItem.modelData)) : ""
-                    fillMode: Image.PreserveAspectCrop
-                    asynchronous: true; cache: true
-                    sourceSize.height: 160
-                }
-                // motion marker, exactly as the picker draws it — a moving wallpaper is a
-                // different kind of thing and that has to be visible wherever one is offered
-                Rectangle {
-                    visible: shelfItem.modelData.vid
-                    anchors { top: parent.top; left: parent.left; margins: 4 }
-                    width: 16; height: 16; radius: Tok.rSmall
-                    color: Tok.alpha(Tok.bg, 0.72)
-                    Sym { anchors.centerIn: parent; text: "play_arrow"; sz: 12; color: Tok.ink }
-                }
-                MouseArea {
-                    id: shelfMa
-                    anchors.fill: parent; hoverEnabled: true
-                    cursorShape: Qt.PointingHandCursor
-                    onClicked: sh.picked(shelfItem.modelData.path)
-                }
-            }
-        }
-    }
 
     // ---- a theme profile as a CARTRIDGE ----
     // Same object as the wallpaper pair above, for the same reason: a saved preset is a
@@ -3514,213 +3433,10 @@ Scope {
             && root.profLight(p) === root.apLight;
     }
 
-    component ProfileCart: Rectangle {
-        id: pc
-        property var profile: null
-        property bool loaded: false
-        signal load()
-        signal eject()
 
-        implicitWidth: 176; implicitHeight: 116
-        radius: Tok.rSmall
-        clip: true
-        color: Tok.sunken
-        border.width: pc.loaded ? 2 : 1
-        border.color: pc.loaded ? Tok.accent : (pcMa.containsMouse ? Tok.ink3 : Tok.ruleHard)
-        Behavior on border.color { ColorAnimation { duration: Tok.mFast } }
-        // The dip on press: 3px of the machine taking the object. Anticipation is the whole
-        // reason the picker's insert reads as force rather than as a position change, and it
-        // costs one Behavior here.
-        transform: Translate { y: pcMa.pressed ? 3 : 0
-                               Behavior on y { NumberAnimation { duration: 90; easing.type: Easing.OutQuad } } }
 
-        // The face. Three neutral steps and the accent, with hairlines between them —
-        // without those a low-saturation preset (the shipped "BW" is four shades of
-        // near-white) draws four bands you cannot tell apart, and the cartridge looks blank
-        // rather than pale. The rules are the profile's OWN rule colour, so the separation
-        // is drawn in the palette being previewed rather than in the one you are sitting in.
-        Item {
-            id: pcFace
-            anchors { fill: parent; margins: pc.border.width; bottomMargin: 26 + pc.border.width }
 
-            Column {
-                anchors.fill: parent
-                Repeater {
-                    model: 3
-                    Rectangle {
-                        required property int index
-                        width: pcFace.width
-                        height: (pcFace.height - 14) / 3
-                        color: root.profStep(pc.profile, index)
-                        Rectangle {
-                            anchors { left: parent.left; right: parent.right; bottom: parent.bottom }
-                            height: 1
-                            color: root.profLight(pc.profile)
-                                   ? Qt.hsla(root.profHue(pc.profile), 0.10, 0.845, 1)
-                                   : Qt.hsla(root.profHue(pc.profile), 0.12, 0.190, 1)
-                        }
-                    }
-                }
-                // The accent gets a band rather than a dot: it is the single fact that
-                // distinguishes one preset from another, and a 30px circle floating in the
-                // corner was decoration standing in for it.
-                Rectangle {
-                    width: pcFace.width; height: 14
-                    color: root.profAccent(pc.profile)
-                }
-            }
 
-            // light or dark, said once, in the palette's own ink
-            Sym {
-                anchors { left: parent.left; top: parent.top; margins: 7 }
-                text: root.profLight(pc.profile) ? "light_mode" : "dark_mode"
-                sz: 15
-                color: root.profLight(pc.profile) ? Qt.hsla(root.profHue(pc.profile), 0.16, 0.09, 1)
-                                                  : Qt.hsla(root.profHue(pc.profile), 0.08, 0.912, 1)
-            }
-
-            // The spec, printed on the label the way a spec is printed on hardware — in the
-            // preset's own secondary ink, over its own raised step. This is what the row
-            // this replaces spent a whole line of prose on.
-            Text {
-                anchors { left: parent.left; right: parent.right; leftMargin: 7; rightMargin: 7
-                          bottom: parent.bottom; bottomMargin: 19 }
-                text: (pc.profile ? pc.profile.font : "") + "  ·  r" + (pc.profile ? Math.round(pc.profile.radius) : 0)
-                color: root.profLight(pc.profile) ? Qt.hsla(root.profHue(pc.profile), 0.12, 0.310, 1)
-                                                  : Qt.hsla(root.profHue(pc.profile), 0.08, 0.680, 1)
-                font.pixelSize: Tok.tLabel; font.family: Tok.mono
-                font.letterSpacing: 0.6
-                elide: Text.ElideRight
-            }
-        }
-
-        Rectangle {
-            id: pcPlate
-            anchors { left: parent.left; right: parent.right; bottom: parent.bottom }
-            height: 26
-            color: Tok.raised
-            Rectangle { anchors { left: parent.left; right: parent.right; top: parent.top }
-                        height: 1; color: Tok.ruleHard }
-            Row {
-                anchors { left: parent.left; leftMargin: 8; right: pcEject.left; rightMargin: 6
-                          verticalCenter: parent.verticalCenter }
-                spacing: 7
-                // The status lamp, exactly as the deck runs it: lit for the one that is in.
-                Rectangle {
-                    anchors.verticalCenter: parent.verticalCenter
-                    width: 7; height: 7; radius: 3.5
-                    color: pc.loaded ? Tok.accent : Tok.alpha(Tok.ink3, 0.40)
-                    Behavior on color { ColorAnimation { duration: Tok.mFast } }
-                }
-                Text {
-                    anchors.verticalCenter: parent.verticalCenter
-                    width: Math.max(0, parent.width - 26)
-                    text: pc.profile ? pc.profile.name : ""
-                    color: Tok.ink; font.pixelSize: Tok.tData; font.family: Tok.mono
-                    font.weight: pc.loaded ? 700 : 400
-                    elide: Text.ElideRight
-                }
-            }
-            Sym {
-                id: pcEject
-                anchors { right: parent.right; rightMargin: 7; verticalCenter: parent.verticalCenter }
-                text: "eject"; sz: 15
-                color: pcEjectMa.containsMouse ? Tok.crit : Tok.ink3
-                MouseArea { id: pcEjectMa; anchors.fill: parent; anchors.margins: -5
-                            hoverEnabled: true; cursorShape: Qt.PointingHandCursor
-                            onClicked: pc.eject() }
-            }
-        }
-
-        // the key notch — the one marking that says which way up this goes
-        Rectangle {
-            anchors { right: parent.right; top: parent.top }
-            width: 18; height: 10
-            color: Tok.bg
-            Rectangle { anchors { left: parent.left; top: parent.top; bottom: parent.bottom }
-                        width: 1; color: Tok.ruleHard }
-            Rectangle { anchors { left: parent.left; right: parent.right; bottom: parent.bottom }
-                        height: 1; color: Tok.ruleHard }
-        }
-
-        MouseArea { id: pcMa; anchors.fill: parent; anchors.bottomMargin: 26
-                    hoverEnabled: true; cursorShape: Qt.PointingHandCursor
-                    onClicked: pc.load() }
-    }
-
-    // a single tab button in the sidebar
-    // A sidebar row as macOS draws it: a small coloured tile with a white glyph, then the name,
-    // and a filled accent row for the page you are on. The tiles are not Apple's rainbow: each
-    // group turns the accent's hue by its own step, so they stay one family with the palette.
-    component TabBtn: Rectangle {
-        id: tb
-        property string icon: ""
-        property string label: ""
-        property int idx: 0
-        property real hue: 0
-        readonly property bool sel: root.tab === idx
-        Layout.fillWidth: true; implicitHeight: 32; radius: Tok.r
-        color: sel ? Tok.accent : (tbm.containsMouse ? root.rowHover : "transparent")
-        Behavior on color { ColorAnimation { duration: Tok.mFast } }
-        RowLayout {
-            anchors.fill: parent; anchors.leftMargin: 6; anchors.rightMargin: 10; spacing: 10
-            Rectangle {
-                implicitWidth: 22; implicitHeight: 22; radius: Math.min(7, Tok.r)
-                color: root.tileColor(tb.hue)
-                border.width: tb.sel ? 1 : 0; border.color: Qt.rgba(1, 1, 1, 0.55)
-                Sym { anchors.centerIn: parent; text: tb.icon; sz: 15; color: "white" }
-            }
-            Text { text: tb.label; color: tb.sel ? Tok.accentInk : Tok.ink; font.pixelSize: 13
-                font.family: Tok.sans; font.weight: tb.sel ? 600 : 400
-                elide: Text.ElideRight; Layout.fillWidth: true }
-        }
-        // preventStealing: the sidebar is a Flickable, and a tap that moved a pixel was taken as the
-        // start of a drag, so the click never arrived and a tab needed two or three tries
-        MouseArea { id: tbm; anchors.fill: parent; hoverEnabled: true; preventStealing: true; cursorShape: Qt.PointingHandCursor; onClicked: root.tab = tb.idx }
-    }
-
-    // macOS separates the sidebar's groups with space, not headings.
-    component GroupGap: Item { Layout.fillWidth: true; implicitHeight: 9 }
-
-    // one key/value tile for the About/System dashboard
-    component InfoTile: Rectangle {
-        property string icon: ""
-        property url logo: ""
-        property string iconFont: "Material Symbols Outlined"   // set "Symbols Nerd Font" for brand/distro glyphs
-        property string label: ""
-        property string value: "…"
-        Layout.fillWidth: true; implicitHeight: 46; radius: Tok.r
-        color: Qt.rgba(Tok.ink.r, Tok.ink.g, Tok.ink.b, 0.035)
-        RowLayout {
-            anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 12; spacing: 11
-            ThemedLogo { visible: logo.toString().length > 0; artwork: logo; Layout.preferredWidth: 30; Layout.preferredHeight: 24 }
-
-            Sym { visible: !logo.toString().length; text: icon; sz: 19; color: theme.iris; font.family: iconFont }
-            ColumnLayout {
-                spacing: 1; Layout.fillWidth: true
-                Text { text: label; color: theme.faint; font.pixelSize: 9; font.family: Tok.mono; font.bold: true; font.letterSpacing: 1 }
-                Text { text: value; color: theme.text; font.pixelSize: 12; font.family: Tok.mono; elide: Text.ElideRight; Layout.fillWidth: true }
-            }
-        }
-    }
-
-    // a labelled progress meter (RAM / disk)
-    component Meter: RowLayout {
-        property string label: ""
-        property string value: "…"
-        property real pct: 0
-        property color fill: theme.iris
-        Layout.fillWidth: true; spacing: 11
-        Text { text: label; color: theme.faint; font.pixelSize: 11; font.family: Tok.mono; Layout.preferredWidth: 58 }
-        Rectangle {
-            Layout.fillWidth: true; implicitHeight: 9; radius: Tok.r; color: theme.a(theme.line, 0.8)
-            Rectangle { height: parent.height; radius: Tok.r
-                width: parent.width * Math.max(0, Math.min(1, parent.parent.pct / 100))
-                color: parent.parent.pct > 88 ? theme.bad : parent.parent.fill
-                Behavior on width { NumberAnimation { duration: 260; easing.type: Easing.OutCubic } } }
-        }
-        Text { text: value; color: theme.sub; font.pixelSize: 11; font.family: Tok.mono; Layout.preferredWidth: 96; horizontalAlignment: Text.AlignRight }
-    }
 
     SurfaceMotion { id: settingsMotion; opened: root.shown && (root.apLoaded || Tok.loaded); reduced: Tok.reducedMotion; enterDuration: 160; exitDuration: 100 }
     NumberAnimation { id: pageArrival; target: pane; property: "arrival"; from: 0; to: 1
@@ -3745,6 +3461,9 @@ Scope {
         Region { id: noInput }
         Region { id: allInput; item: panel.contentItem }
         color: "transparent"
+        // Keep the native surface on one layer. Changing layers on every toggle
+        // requires a remap and discards the warm surface, delaying the first frame.
+        // Closed panels already shrink to one transparent pixel with an empty mask.
         WlrLayershell.layer: WlrLayer.Overlay
         WlrLayershell.keyboardFocus: root.shown ? WlrKeyboardFocus.Exclusive : WlrKeyboardFocus.None
         exclusionMode: ExclusionMode.Ignore
@@ -3764,103 +3483,114 @@ Scope {
         Binding { target: panel.contentItem; property: "scale"; value: panel.ui }
 
         Rectangle {
+            id: winCard
             anchors.centerIn: parent
-            // USE THE SCREEN. This was capped at 960x780, which on a 1080p display left
-            // nearly half the width unused while the pages inside scrolled — the same
-            // complaint every review of Ventura's fixed-width System Settings makes: the
-            // sidebar and the content compete for a window that has been told not to grow.
-            // Still clamped to fit, and still capped so it never becomes a full-screen wall
-            // of controls on a 4K panel.
-            //
-            // Sized from the SCREEN, not the window: closed, the window is one pixel, and a card
-            // sized from it collapsed to nothing, so every open laid all 24 pages out again from
-            // scratch while you watched them assemble. The screen does not change while closed.
-            width: Math.min((panel.screen ? panel.screen.width : parent.width) / panel.ui - 60, 1240)
-            height: Math.min((panel.screen ? panel.screen.height : parent.height) / panel.ui - 60, 880)
-            radius: Tok.rCard
-            // fade in once the saved palette is read — no default sea-cyan flash first
+            width: Math.min((panel.screen ? panel.screen.width : parent.width) / panel.ui - 60, 1140)
+            height: Math.min((panel.screen ? panel.screen.height : parent.height) / panel.ui - 60, 840)
+            radius: Math.max(12, Math.min(18, Tok.rCard))
             opacity: settingsMotion.progress
             scale: 0.975 + 0.025 * settingsMotion.progress
-            transform: Translate { y: 18 * (1 - settingsMotion.progress) }
-            // Drawn as one picture while it fades. Without a layer Qt fades every item on its
-            // own, so mid-fade each background turns see-through and the parts stacked behind
-            // it show: the panel looked like it was assembling and coming apart. Only during
-            // the fade, so the open panel keeps drawing straight to the window.
+            transform: Translate { y: 16 * (1 - settingsMotion.progress) }
             layer.enabled: settingsMotion.progress > 0 && settingsMotion.progress < 1
             layer.smooth: true
-            color: Tok.surface
-            border.width: 1; border.color: Tok.ruleHard
+            color: root.windowCanvas
+            border.width: 1
+            border.color: Tok.ruleHard
+            clip: true
+
             MouseArea { anchors.fill: parent }
-            // Closing takes clicks away with a cover, not `enabled: false`: disabling the card
-            // flipped every switch, chip and slider to its greyed look the instant it closed.
             MouseArea { anchors.fill: parent; z: 1000; visible: !root.shown; hoverEnabled: true; acceptedButtons: Qt.AllButtons }
 
-            // ---------------- sidebar (anchored, fixed width) ----------------
-            // The tab list SCROLLS. It used to be one fixed-height ColumnLayout anchored top and
-            // bottom, which silently overflowed the card the moment the tabs stopped fitting —
-            // adding a single tab pushed "Actions" out past the panel's rounded edge. Trimming
-            // row heights would only postpone that, so the list is a Flickable: it scrolls when
-            // it must, sits still when it need not, and survives the next tab being added.
-            // ---------------- sidebar ----------------
-            // macOS layout: its own full-height pane, search at the top, then you, then the
-            // pages in groups separated by space. The tab list SCROLLS: a fixed column silently
-            // overflowed the card the day one more tab was added.
+            // Global shortcuts inside Settings (Ctrl+F search, Alt+Left/Right back/forward)
+            Shortcut { enabled: root.shown; sequence: "Ctrl+F"; onActivated: navIn.forceActiveFocus() }
+            Shortcut { enabled: root.shown && root.canNavBack; sequence: "Alt+Left"; onActivated: root.navGo(-1) }
+            Shortcut { enabled: root.shown && root.navFwd.length > 0; sequence: "Alt+Right"; onActivated: root.navGo(1) }
+
+            // ---------------- macOS Sequoia Sidebar ----------------
             Rectangle {
                 id: sidebarPane
-                anchors { left: parent.left; top: parent.top; bottom: parent.bottom }
-                anchors.margins: 1
-                width: sidebar.width + 24; radius: parent.radius - 1
-                color: Tok.bg
-                // square off the corners on the content side
+                anchors { left: parent.left; top: parent.top; bottom: parent.bottom; margins: 1 }
+                width: 248
+                radius: parent.radius - 1
+                color: root.sidebarFill
+                // square off inner edge
                 Rectangle { anchors { right: parent.right; top: parent.top; bottom: parent.bottom } width: parent.radius; color: parent.color }
-                Rectangle { anchors { right: parent.right; top: parent.top; bottom: parent.bottom } width: 1; color: root.groupRule }
+                Rectangle { anchors { right: parent.right; top: parent.top; bottom: parent.bottom } width: 1; color: root.hairline }
             }
+
             Item {
                 id: sidebar
-                anchors { left: parent.left; top: parent.top; bottom: parent.bottom; leftMargin: 12; topMargin: 16; bottomMargin: 12 }
+                anchors { left: parent.left; top: parent.top; bottom: parent.bottom; leftMargin: 12; topMargin: 14; bottomMargin: 12 }
                 width: 224
 
                 ColumnLayout {
                     id: sbHead
                     anchors { left: parent.left; right: parent.right; top: parent.top }
-                    spacing: 8
-                    // ---- search ----
-                    // The one control that makes twenty-two pages navigable: type a few
-                    // letters and Enter goes to the first hit. Deliberately NOT focused when
-                    // the panel opens — the panel's Escape-to-close lives on a sibling item,
-                    // and a text field holding focus would swallow that key. Escape inside
-                    // the field empties it rather than closing, so it can never trap you.
+                    spacing: 10
+
+                    // Authentic macOS window close dot + subtle title
+                    RowLayout {
+                        Layout.fillWidth: true
+                        Layout.leftMargin: 4
+                        spacing: 7
+                        Rectangle {
+                            id: macCloseDot
+                            implicitWidth: 12; implicitHeight: 12; radius: 6
+                            color: "#FF5F56"
+                            border.width: 0.5; border.color: Qt.rgba(0, 0, 0, 0.22)
+                            Sym {
+                                anchors.centerIn: parent; text: "close"; sz: 9
+                                color: "#4D0000"; visible: macCloseMa.containsMouse
+                            }
+                            MouseArea {
+                                id: macCloseMa; anchors.fill: parent; anchors.margins: -3
+                                hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                onClicked: root.closePanel()
+                            }
+                        }
+                        Rectangle {
+                            implicitWidth: 12; implicitHeight: 12; radius: 6
+                            color: Tok.light ? Qt.rgba(0, 0, 0, 0.12) : Qt.rgba(1, 1, 1, 0.12)
+                        }
+                        Rectangle {
+                            implicitWidth: 12; implicitHeight: 12; radius: 6
+                            color: Tok.light ? Qt.rgba(0, 0, 0, 0.12) : Qt.rgba(1, 1, 1, 0.12)
+                        }
+                        Item { Layout.fillWidth: true }
+                    }
+
+                    // Recessed macOS Search Field
                     Rectangle {
-                        Layout.fillWidth: true; Layout.topMargin: 2; Layout.bottomMargin: 2
-                        implicitHeight: 30; radius: Tok.r
-                        color: theme.a(theme.line, 0.45)
-                        border.width: 1
-                        border.color: navIn.activeFocus ? theme.iris : theme.a(theme.iris, 0.16)
-                        Behavior on border.color { ColorAnimation { duration: Tok.mFast } }
-                        Sym { id: navMag
+                        Layout.fillWidth: true
+                        implicitHeight: 30; radius: 8
+                        color: Tok.light ? Qt.rgba(0, 0, 0, 0.055) : Qt.rgba(1, 1, 1, 0.07)
+                        border.width: navIn.activeFocus ? 1.5 : 1
+                        border.color: navIn.activeFocus ? Tok.accent : (Tok.light ? Qt.rgba(0, 0, 0, 0.07) : Qt.rgba(1, 1, 1, 0.08))
+                        Behavior on border.color { ColorAnimation { duration: Tok.mMicro } }
+
+                        Sym {
+                            id: navMag
                             anchors { left: parent.left; leftMargin: 9; verticalCenter: parent.verticalCenter }
-                            text: "search"; sz: 14
-                            color: navIn.activeFocus ? theme.iris : theme.faint }
+                            text: "search"; sz: 15
+                            color: navIn.activeFocus ? Tok.accent : Tok.ink3
+                        }
                         TextInput {
                             id: navIn
-                            anchors { left: navMag.right; leftMargin: 7; right: navClr.left; rightMargin: 4
-                                      verticalCenter: parent.verticalCenter }
-                            color: theme.text; font.pixelSize: 12; font.family: Tok.mono
-                            clip: true
+                            anchors { left: navMag.right; leftMargin: 6; right: navClr.left; rightMargin: 4; verticalCenter: parent.verticalCenter }
+                            color: Tok.ink; font.pixelSize: 12; font.family: Tok.sans; clip: true
                             onTextChanged: root.navQuery = text
                             Keys.onPressed: (e) => {
                                 if (e.key === Qt.Key_Escape) {
                                     if (navIn.text.length) { navIn.text = ""; e.accepted = true }
-                                } else if ((e.key === Qt.Key_Return || e.key === Qt.Key_Enter)
-                                           && root.navHits.length > 0) {
+                                } else if ((e.key === Qt.Key_Return || e.key === Qt.Key_Enter) && root.navHits.length > 0) {
                                     root.jumpFromSearch(root.navHits[0]); e.accepted = true;
                                 }
                             }
                             Text {
                                 anchors.verticalCenter: parent.verticalCenter
-                                visible: !navIn.text.length && !navIn.activeFocus
-                                text: "search settings"
-                                color: theme.faint; font.pixelSize: 12; font.family: Tok.mono
+                                visible: !navIn.text.length
+                                text: "Search"
+                                color: Tok.ink3; font.pixelSize: 12; font.family: Tok.sans
                             }
                         }
                         Item {
@@ -3868,43 +3598,44 @@ Scope {
                             anchors { right: parent.right; rightMargin: 6; verticalCenter: parent.verticalCenter }
                             width: 18; height: 18
                             visible: navIn.text.length > 0
-                            Sym { anchors.centerIn: parent; text: "close"; sz: 13
-                                  color: navClrMa.containsMouse ? theme.text : theme.faint }
-                            MouseArea { id: navClrMa; anchors.fill: parent; hoverEnabled: true
-                                cursorShape: Qt.PointingHandCursor
-                                onClicked: { navIn.text = ""; navIn.forceActiveFocus() } }
+                            Sym { anchors.centerIn: parent; text: "cancel"; sz: 14; color: navClrMa.containsMouse ? Tok.ink : Tok.ink3 }
+                            MouseArea {
+                                id: navClrMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                onClicked: { navIn.text = ""; navIn.forceActiveFocus() }
+                            }
                         }
                     }
 
-                    // ---- you, as the Apple Account row is: picture, name, what it opens ----
+                    // macOS Apple Account-style User Profile row
                     Rectangle {
-                        Layout.fillWidth: true; Layout.topMargin: 2
-                        implicitHeight: meCard.implicitHeight; radius: Tok.r
+                        Layout.fillWidth: true
+                        implicitHeight: meCard.implicitHeight; radius: 8
                         color: root.tab === 23 ? Tok.accentWash : (meMa.containsMouse ? root.rowHover : "transparent")
-                        border.width: root.tab === 23 ? 1 : 0; border.color: theme.a(theme.iris, 0.35)
-                        Behavior on color { ColorAnimation { duration: Tok.mFast } }
-                        ProfileCard { id: meCard; width: parent.width; compact: true; flat: true
-                            profile: root.userProfile; subtitle: "your profile" }
-                        MouseArea { id: meMa; anchors.fill: parent; hoverEnabled: true; preventStealing: true; cursorShape: Qt.PointingHandCursor; onClicked: root.tab = 23 }
+                        border.width: root.tab === 23 ? 1 : 0; border.color: Tok.alpha(Tok.accent, 0.35)
+                        Behavior on color { ColorAnimation { duration: Tok.mMicro } }
+                        ProfileCard {
+                            id: meCard; width: parent.width; compact: true; flat: true
+                            profile: root.userProfile
+                            subtitle: root.sysInfo.host ? ("Local Account · " + root.sysInfo.host) : "Your Profile"
+                        }
+                        MouseArea {
+                            id: meMa; anchors.fill: parent; hoverEnabled: true; preventStealing: true
+                            cursorShape: Qt.PointingHandCursor; onClicked: root.showTab(23)
+                        }
                     }
                 }
 
                 Flickable {
                     id: sbFlick
                     anchors { left: parent.left; right: parent.right; top: sbHead.bottom; bottom: sbFoot.top }
-                    anchors.topMargin: 3; anchors.bottomMargin: 6
+                    anchors.topMargin: 8; anchors.bottomMargin: 8
                     clip: true
                     contentWidth: width
-                    contentHeight: root.navQuery.length ? sbHits.implicitHeight
-                                                        : sbList.implicitHeight
-                    // only grabs the wheel when there is somewhere to go
+                    contentHeight: root.navQuery.length ? sbHits.implicitHeight : sbList.implicitHeight
                     interactive: contentHeight > height
                     boundsBehavior: Flickable.StopAtBounds
 
-                    // ---- search results, in place of the page list ----
-                    // Replacing the list rather than sitting beside it: while you are asking
-                    // for something by name the page list is not what you are looking at, and
-                    // a 202px column has no room to show both.
+                    // Search results list
                     ColumnLayout {
                         id: sbHits
                         visible: root.navQuery.length > 0
@@ -3912,4720 +3643,274 @@ Scope {
                         spacing: 2
                         Text {
                             visible: root.navHits.length === 0
-                            Layout.fillWidth: true; Layout.topMargin: 8; Layout.leftMargin: 4
-                            text: "nothing matches\n\u201c" + root.navQuery + "\u201d"
-                            color: theme.faint; font.pixelSize: 11; font.family: Tok.mono
-                            wrapMode: Text.WordWrap
+                            Layout.fillWidth: true; Layout.topMargin: 12; Layout.leftMargin: 6
+                            text: "No results for \u201c" + root.navQuery + "\u201d"
+                            color: Tok.ink3; font.pixelSize: 12; font.family: Tok.sans; wrapMode: Text.WordWrap
                         }
                         Repeater {
                             model: root.navHits
                             delegate: Rectangle {
+                                id: hitRow
                                 required property var modelData
-                                Layout.fillWidth: true
-                                implicitHeight: 38
-                                radius: Tok.r
-                                color: hitMa.containsMouse ? theme.a(theme.iris, 0.16) : "transparent"
-                                Behavior on color { ColorAnimation { duration: Tok.mFast } }
-                                Sym {
-                                    id: hitIco
-                                    anchors { left: parent.left; leftMargin: 9; verticalCenter: parent.verticalCenter }
-                                    text: modelData.icon && modelData.icon.length
-                                          ? modelData.icon : root.tabIcon(modelData.tab)
-                                    sz: 15
-                                    color: hitMa.containsMouse ? theme.frost : theme.faint
+                                Layout.fillWidth: true; implicitHeight: 40; radius: 7
+                                color: hitMa.containsMouse ? root.rowHover : "transparent"
+                                Behavior on color { ColorAnimation { duration: Tok.mMicro } }
+                                RowLayout {
+                                    anchors { fill: parent; leftMargin: 8; rightMargin: 8 }
+                                    spacing: 9
+                                    MacIconBadge {
+                                        icon: hitRow.modelData.icon && hitRow.modelData.icon.length
+                                              ? hitRow.modelData.icon : root.tabIcon(hitRow.modelData.tab)
+                                        badgeColor: root.tabColor(hitRow.modelData.tab)
+                                        size: 21; iconSize: 13
+                                    }
+                                    Column {
+                                        Layout.fillWidth: true; spacing: 0
+                                        Text {
+                                            width: parent.width; elide: Text.ElideRight
+                                            text: hitRow.modelData.title
+                                            color: Tok.ink; font.pixelSize: 12; font.family: Tok.sans; font.weight: 500
+                                        }
+                                        Text {
+                                            width: parent.width; elide: Text.ElideRight
+                                            readonly property int par: root.tabParent(hitRow.modelData.tab)
+                                            text: par >= 0 ? (root.tabLabel(par) + " › " + root.tabLabel(hitRow.modelData.tab))
+                                                           : root.tabLabel(hitRow.modelData.tab)
+                                            color: Tok.ink3; font.pixelSize: 11; font.family: Tok.sans
+                                        }
+                                    }
                                 }
-                                Column {
-                                    anchors { left: hitIco.right; leftMargin: 9; right: parent.right
-                                              rightMargin: 6; verticalCenter: parent.verticalCenter }
-                                    spacing: 0
-                                    Text { width: parent.width; elide: Text.ElideRight
-                                        text: modelData.title
-                                        color: theme.text; font.pixelSize: 12; font.family: Tok.mono }
-                                    Text { width: parent.width; elide: Text.ElideRight
-                                        text: root.tabLabel(modelData.tab)
-                                        color: theme.faint; font.pixelSize: 10; font.family: Tok.mono }
-                                }
-                                MouseArea { id: hitMa; anchors.fill: parent; hoverEnabled: true
+                                MouseArea {
+                                    id: hitMa; anchors.fill: parent; hoverEnabled: true
                                     cursorShape: Qt.PointingHandCursor
-                                    onClicked: root.jumpFromSearch(modelData) }
+                                    onClicked: root.jumpFromSearch(hitRow.modelData)
+                                }
                             }
                         }
                     }
 
+                    // Streamlined macOS Sequoia Sidebar Categories (20 top-level panes)
                     ColumnLayout {
                         id: sbList
                         visible: root.navQuery.length === 0
                         width: sbFlick.width
-                        spacing: 3
+                        spacing: 2
 
-                        // System Settings' order: connections, sound and attention, how it
-                        // looks, the desktop, the screen and power, everyday apps, then input.
-                        TabBtn { icon: "wifi";                 label: "Network";      idx: 2;  hue: 0 }
-                        TabBtn { icon: "bluetooth";            label: "Bluetooth";    idx: 9;  hue: 0 }
-                        TabBtn { icon: "phonelink";            label: "KDE Connect";  idx: 14; hue: 0 }
+                        // Connectivity
+                        TabBtn { icon: "wifi";                  label: "Network";            idx: 2 }
+                        TabBtn { icon: "bluetooth";             label: "Bluetooth";          idx: 9 }
+                        TabBtn { icon: "phonelink";             label: "Phone Link";         idx: 14 }
                         GroupGap {}
-                        TabBtn { icon: "volume_up";            label: "Audio";        idx: 0;  hue: -0.09 }
-                        TabBtn { icon: "hourglass_top";        label: "Screen time";  idx: 18; hue: -0.09 }
+
+                        // Sound & Attention
+                        TabBtn { icon: "notifications";         label: "Notifications";      idx: 24 }
+                        TabBtn { icon: "volume_up";             label: "Sound";              idx: 0 }
+                        TabBtn { icon: "hourglass_top";         label: "Screen Time";        idx: 18 }
                         GroupGap {}
-                        TabBtn { icon: "monitor_heart";        label: "System";       idx: 8;  hue: 0.5 }
-                        TabBtn { icon: "palette";              label: "Appearance";   idx: 4;  hue: 0.09 }
-                        TabBtn { icon: "auto_awesome";         label: "Theme Profiles"; idx: 13; hue: 0.09 }
-                        TabBtn { icon: "view_agenda";          label: "Bar";          idx: 20; hue: 0.09 }
-                        TabBtn { icon: "widgets";              label: "Bar Widgets";  idx: 12; hue: 0.09 }
+
+                        // Core System & Look (macOS Sequoia order)
+                        TabBtn { icon: "settings";              label: "General";            idx: 8; badge: attention.urgentCount }
+                        TabBtn { icon: "accessibility_new";     label: "Accessibility";      idx: 26 }
+                        TabBtn { icon: "palette";               label: "Appearance";         idx: 4 }
+                        TabBtn { icon: "view_agenda";           label: "Menu Bar";           idx: 20 }
+                        TabBtn { icon: "dock_to_bottom";        label: "Desktop & Dock";     idx: 16 }
+                        TabBtn { icon: "monitor";               label: "Displays";           idx: 1 }
+                        TabBtn { icon: "wallpaper";             label: "Wallpaper";          idx: 21 }
                         GroupGap {}
-                        TabBtn { icon: "wallpaper";            label: "Desktop";      idx: 21; hue: 0.18 }
-                        TabBtn { icon: "dock_to_bottom";       label: "Dock";         idx: 16; hue: 0.18 }
-                        TabBtn { icon: "picture_in_picture";   label: "Window rules"; idx: 17; hue: 0.18 }
+
+                        // Security, Lock & Power
+                        TabBtn { icon: "lock";                  label: "Lock Screen";        idx: 10 }
+                        TabBtn { icon: "shield";                label: "Privacy & Security"; idx: 27 }
+                        TabBtn { icon: "battery_charging_full"; label: "Battery & Power";    idx: 6 }
                         GroupGap {}
-                        TabBtn { icon: "brightness_6";         label: "Display";      idx: 1;  hue: -0.18 }
-                        TabBtn { icon: "power_settings_new";   label: "Power";        idx: 6;  hue: -0.18 }
-                        TabBtn { icon: "bedtime";              label: "Idle & lock";  idx: 10; hue: -0.18 }
-                        GroupGap {}
-                        TabBtn { icon: "calendar_month";       label: "Calendar";     idx: 11; hue: 0.3 }
-                        TabBtn { icon: "cloud";                label: "Weather";      idx: 3;  hue: 0.3 }
-                        TabBtn { icon: "apps";                 label: "Default Apps"; idx: 22; hue: 0.3 }
-                        TabBtn { icon: "bolt";                 label: "Actions";      idx: 5;  hue: 0.3 }
-                        GroupGap {}
-                        TabBtn { icon: "keyboard";             label: "Keybinds";     idx: 7;  hue: -0.3 }
-                        TabBtn { icon: "mouse";                label: "Input";        idx: 15; hue: -0.3 }
-                        TabBtn { icon: "hard_drive";           label: "Disks";        idx: 19; hue: -0.3 }
+
+                        // Gaming, Hardware & Apps
+                        TabBtn { icon: "sports_esports";        label: "Gaming";             idx: 25 }
+                        TabBtn { icon: "keyboard";              label: "Keyboard";           idx: 7 }
+                        TabBtn { icon: "mouse";                 label: "Mouse & Trackpad";   idx: 15 }
+                        TabBtn { icon: "apps";                  label: "Apps & Calendar";    idx: 22 }
                     }
                 }
 
-                // hand-drawn scroll indicator — this shell does not import QtQuick.Controls
-                // (its ScrollBar needs a QQuickStyle set before any QML loads), so a Rectangle
-                // does the job with no new dependency.
+                // Subtle macOS overlay scrollbar for sidebar
                 Rectangle {
                     visible: sbFlick.contentHeight > sbFlick.height
                     width: 3; radius: 1.5
-                    color: theme.a(theme.iris, 0.45)
-                    anchors.right: sbFlick.right
-                    y: sbFlick.y + (sbFlick.contentHeight > 0
-                        ? (sbFlick.contentY / sbFlick.contentHeight) * sbFlick.height : 0)
-                    height: sbFlick.contentHeight > 0
-                        ? Math.max(24, sbFlick.height * (sbFlick.height / sbFlick.contentHeight)) : 0
+                    color: Qt.rgba(Tok.ink.r, Tok.ink.g, Tok.ink.b, sbFlick.moving ? 0.38 : 0.16)
+                    anchors.right: sbFlick.right; anchors.rightMargin: -4
+                    y: sbFlick.y + (sbFlick.contentHeight > 0 ? (sbFlick.contentY / sbFlick.contentHeight) * sbFlick.height : 0)
+                    height: sbFlick.contentHeight > 0 ? Math.max(24, sbFlick.height * (sbFlick.height / sbFlick.contentHeight)) : 0
                 }
 
-                // pinned to the bottom of the sidebar, outside the scrolling area
+                // Minimal version footer
                 RowLayout {
                     id: sbFoot
                     anchors { left: parent.left; right: parent.right; bottom: parent.bottom; leftMargin: 6; rightMargin: 6 }
-                    spacing: 8
-                    SeaLogo { size: 20; card: theme.panel; accent: theme.iris; highlight: theme.frost; rim: theme.iris }
-                    Text { text: "sea-shell"; color: theme.sub; font.pixelSize: 11; font.family: Tok.mono; font.bold: true }
-                    Text { text: "v" + root.seaVersion; color: theme.faint; font.pixelSize: 10; font.family: Tok.mono }
+                    spacing: 7
+                    SeaLogo { size: 17; card: Tok.surface; accent: Tok.accent; highlight: Tok.ink; rim: Tok.accent }
+                    Text { text: "sea-shell"; color: Tok.ink2; font.pixelSize: 11; font.family: Tok.sans; font.weight: 600 }
+                    Text { text: "v" + root.seaVersion; color: Tok.ink3; font.pixelSize: 11; font.family: Tok.mono }
                     Item { Layout.fillWidth: true }
-                    Text { text: "esc"; color: theme.faint; font.pixelSize: 10; font.family: Tok.mono }
+                    Text { text: "Esc"; color: Tok.ink3; font.pixelSize: 10; font.family: Tok.mono }
                 }
             }
 
-
-            // ---------------- content pane (anchored between sidebar and edge) ----------------
-            // ---------------- page header: where you are, and what is on this page ----------------
-            //
-            // The pages used to open straight into their first section, so the only thing
-            // telling you which one you were looking at was the highlight in the sidebar —
-            // and on a long page, scrolled down, not even that was in view.
-            //
-            // The chips are the fix for "it is so far down": every section of this page, in
-            // one row, ALWAYS ON SCREEN because this sits outside the scroll area. The Bar
-            // page has ten sections and the global menu is the ninth; reaching it was nine
-            // sections of scrolling and is now one click.
-            // ---------------- toolbar: back, forward, where you are ----------------
-            RowLayout {
+            // ---------------- macOS Content Toolbar (Back / Forward / Breadcrumb Title) ----------------
+            Item {
                 id: toolbar
-                anchors { left: sidebarPane.right; leftMargin: 18; right: parent.right; rightMargin: 16; top: parent.top; topMargin: 14 }
-                spacing: 4
-                Repeater {
-                    model: [{ g: "chevron_left", d: -1 }, { g: "chevron_right", d: 1 }]
-                    delegate: Rectangle {
-                        required property var modelData
-                        readonly property bool can: modelData.d < 0 ? root.navBack.length > 0 : root.navFwd.length > 0
-                        implicitWidth: 28; implicitHeight: 26; radius: Tok.r
-                        color: navMa.containsMouse && can ? root.rowHover : "transparent"
-                        Sym { anchors.centerIn: parent; text: modelData.g; sz: 22; color: can ? Tok.ink2 : Qt.rgba(Tok.ink3.r, Tok.ink3.g, Tok.ink3.b, 0.45) }
-                        MouseArea { id: navMa; anchors.fill: parent; hoverEnabled: true; enabled: can
-                            cursorShape: Qt.PointingHandCursor; onClicked: root.navGo(modelData.d) }
-                    }
-                }
-                Text { Layout.leftMargin: 8; text: root.tabLabel(root.tab)
-                    color: theme.text; font.pixelSize: 15; font.family: Tok.sans; font.bold: true }
-                Item { Layout.fillWidth: true }
-                Text { text: root.appearanceSaveState
-                    color: root.appearanceSaveFailed ? theme.bad : theme.faint
-                    font.pixelSize: 10; font.family: Tok.sans
-                    elide: Text.ElideRight; Layout.maximumWidth: 260 }
-                Rectangle {
-                    implicitWidth: 26; implicitHeight: 26; radius: 13
-                    color: closeMa.containsMouse ? root.rowHover : "transparent"
-                    Sym { anchors.centerIn: parent; text: "close"; sz: 17; color: closeMa.containsMouse ? Tok.ink : Tok.ink3 }
-                    MouseArea { id: closeMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.closePanel() }
-                }
-            }
-            Rectangle {
-                anchors { left: sidebarPane.right; right: parent.right; top: toolbar.bottom; topMargin: 12 }
-                height: 1; color: root.groupRule
-            }
+                anchors { left: sidebarPane.right; right: parent.right; top: parent.top }
+                height: 48
 
-            // ---------------- hero: what this page is, and what is on it ----------------
-            //
-            // The chips are the fix for "it is so far down": every section of this page, in
-            // one row, ALWAYS ON SCREEN because this sits outside the scroll area. The Bar
-            // page has ten sections and the global menu is the ninth; reaching it was nine
-            // sections of scrolling and is now one click.
-            ColumnLayout {
-                id: pageHead
-                readonly property real columnWidth: Math.min(parent.width - sidebarPane.width - 56, 860)
-                x: sidebarPane.width + (parent.width - sidebarPane.width - columnWidth) / 2
-                width: columnWidth
-                anchors { top: toolbar.bottom; topMargin: 26 }
-                spacing: 10
-                Rectangle {
-                    Layout.fillWidth: true
-                    implicitHeight: heroRow.implicitHeight + 28
-                    radius: Tok.r + 2; color: root.groupFill; border.width: 1; border.color: root.groupRule
-                    RowLayout {
-                        id: heroRow
-                        anchors { left: parent.left; right: parent.right; verticalCenter: parent.verticalCenter; leftMargin: 16; rightMargin: 16 }
-                        spacing: 14
-                        Rectangle { implicitWidth: 52; implicitHeight: 52; radius: Math.min(14, Tok.r + 4)
-                            Layout.alignment: Qt.AlignTop
-                            color: root.tileColor(root.tabHue(root.tab))
-                            Sym { anchors.centerIn: parent; text: root.tabIcon(root.tab); sz: 30; color: "white" } }
-                        ColumnLayout {
-                            Layout.fillWidth: true; spacing: 4
-                            Text { text: root.tabLabel(root.tab)
-                                color: theme.text; font.pixelSize: 19; font.family: Tok.sans; font.bold: true }
-                            Text { Layout.fillWidth: true; wrapMode: Text.WordWrap
-                                text: root.pageDescriptions[root.tab] || ""; color: theme.sub; font.pixelSize: 12; font.family: Tok.sans }
-                            Text { Layout.fillWidth: true; wrapMode: Text.WordWrap; Layout.topMargin: 2
-                                text: root.pageEffectNote(root.tab); color: theme.faint; font.pixelSize: 10; font.family: Tok.sans }
-                        }
-                    }
-                }
-                Flow {
-                    Layout.fillWidth: true
-                    spacing: 6
-                    // Two or three sections are already all on screen; chips would be noise.
-                    visible: root.pageSections.length > 3
+                RowLayout {
+                    anchors { fill: parent; leftMargin: 16; rightMargin: 16 }
+                    spacing: 4
+
                     Repeater {
-                        model: root.pageSections
+                        model: [{ g: "chevron_left", d: -1 }, { g: "chevron_right", d: 1 }]
                         delegate: Rectangle {
                             required property var modelData
-                            height: 24; radius: 12
-                            width: chipT.implicitWidth + 22
-                            color: chipMa.containsMouse ? Tok.accentWash : root.groupFill
-                            border.width: 1; border.color: chipMa.containsMouse ? theme.a(theme.iris, 0.35) : root.groupRule
-                            Behavior on color { ColorAnimation { duration: Tok.mFast } }
-                            Text {
-                                id: chipT; anchors.centerIn: parent
-                                text: modelData.title
-                                color: chipMa.containsMouse ? theme.text : theme.sub
-                                font.pixelSize: 11; font.family: Tok.sans
+                            readonly property bool can: modelData.d < 0 ? root.canNavBack : root.navFwd.length > 0
+                            implicitWidth: 28; implicitHeight: 28; radius: 7
+                            color: navMa.containsMouse && can ? root.rowHover : "transparent"
+                            Sym {
+                                anchors.centerIn: parent; text: modelData.g; sz: 22
+                                color: can ? Tok.ink : Qt.rgba(Tok.ink3.r, Tok.ink3.g, Tok.ink3.b, 0.35)
                             }
                             MouseArea {
-                                id: chipMa; anchors.fill: parent; hoverEnabled: true
-                                cursorShape: Qt.PointingHandCursor
-                                onClicked: root.jumpTo(modelData)
+                                id: navMa; anchors.fill: parent; hoverEnabled: true; enabled: can
+                                cursorShape: can ? Qt.PointingHandCursor : Qt.ArrowCursor
+                                onClicked: root.navGo(modelData.d)
                             }
                         }
                     }
+
+                    // Breadcrumb parent link when inside a drill-down sub-pane
+                    Rectangle {
+                        readonly property int par: root.tabParent(root.tab)
+                        visible: par >= 0
+                        Layout.leftMargin: 6
+                        implicitWidth: parTxt.implicitWidth + 12; implicitHeight: 26; radius: 6
+                        color: parMa.containsMouse ? root.rowHover : "transparent"
+                        Text {
+                            id: parTxt; anchors.centerIn: parent
+                            text: parent.par >= 0 ? root.tabLabel(parent.par) : ""
+                            color: Tok.ink2; font.pixelSize: 14; font.family: Tok.sans; font.weight: 500
+                        }
+                        MouseArea {
+                            id: parMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                            onClicked: if (parent.par >= 0) root.showTab(parent.par)
+                        }
+                    }
+                    Sym {
+                        visible: root.tabParent(root.tab) >= 0
+                        text: "chevron_right"; sz: 16; color: Tok.ink3
+                    }
+
+                    Text {
+                        Layout.leftMargin: root.tabParent(root.tab) >= 0 ? 2 : 8
+                        text: root.tabLabel(root.tab)
+                        color: Tok.ink; font.pixelSize: 15; font.family: Tok.sans; font.weight: 700
+                    }
+
+                    Item { Layout.fillWidth: true }
+
+                    Text {
+                        text: root.appearanceSaveState
+                        color: root.appearanceSaveFailed ? Tok.crit : Tok.ink3
+                        font.pixelSize: 11; font.family: Tok.sans
+                        elide: Text.ElideRight; Layout.maximumWidth: 220
+                    }
+
+                    Rectangle {
+                        implicitWidth: 26; implicitHeight: 26; radius: 13
+                        color: closeMa.containsMouse ? root.rowHover : "transparent"
+                        Sym { anchors.centerIn: parent; text: "close"; sz: 16; color: closeMa.containsMouse ? Tok.ink : Tok.ink3 }
+                        MouseArea {
+                            id: closeMa; anchors.fill: parent; hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor; onClicked: root.closePanel()
+                        }
+                    }
+                }
+
+                Rectangle {
+                    anchors { left: parent.left; right: parent.right; bottom: parent.bottom }
+                    height: 1; color: root.hairline
                 }
             }
 
-            // The content column had no scrollbar of any kind — the only clue that a page
-            // continued below the fold was the text being cut off. Same hand-drawn approach
-            // as the sidebar's, for the same reason (no QtQuick.Controls in this shell).
+            // Subtle overlay scrollbar for main content
             Rectangle {
                 visible: contentFlick.contentHeight > contentFlick.height
-                width: 3; radius: 1.5
-                color: theme.a(theme.iris, 0.4)
-                anchors.right: contentFlick.right
-                anchors.rightMargin: -8
-                y: contentFlick.y + (contentFlick.contentY / contentFlick.contentHeight) * contentFlick.height
-                height: Math.max(24, (contentFlick.height / contentFlick.contentHeight) * contentFlick.height)
-                opacity: contentFlick.moving ? 0.85 : 0.35
-                Behavior on opacity { NumberAnimation { duration: Tok.mBase } }
+                width: 4; radius: 2
+                color: Qt.rgba(Tok.ink.r, Tok.ink.g, Tok.ink.b, contentFlick.moving ? 0.36 : 0.14)
+                anchors { right: parent.right; rightMargin: 6 }
+                y: contentFlick.y + (contentFlick.contentHeight > 0 ? (contentFlick.contentY / contentFlick.contentHeight) * contentFlick.height : 0)
+                height: contentFlick.contentHeight > 0 ? Math.max(28, (contentFlick.height / contentFlick.contentHeight) * contentFlick.height) : 0
+                Behavior on color { ColorAnimation { duration: Tok.mFast } }
             }
 
+            // ---------------- Full-Height Scrollable macOS Content Column ----------------
             Flickable {
                 id: contentFlick
-                anchors { left: sidebarPane.right; leftMargin: 1; right: parent.right; rightMargin: 14; top: pageHead.bottom; topMargin: 4; bottom: parent.bottom; bottomMargin: 14 }
+                anchors { left: sidebarPane.right; right: parent.right; top: toolbar.bottom; bottom: parent.bottom }
                 contentWidth: width
-                // The last section's panel hangs 12px past the page's end (Section.reach), so a
-                // scroll that stopped at implicitHeight clipped its bottom edge and corners off:
-                // every page ended on a box with no floor. The extra is that overhang plus air.
-                contentHeight: pane.implicitHeight + 36
+                contentHeight: pane.implicitHeight + 68
                 clip: true
                 boundsBehavior: Flickable.StopAtBounds
 
                 ColumnLayout {
                     id: pane
                     property real arrival: 1
-                    opacity: 0.65 + 0.35 * arrival
-                    transform: Translate { y: 8 * (1 - pane.arrival) }
-                    // the same centred column as the hero above it
-                    width: pageHead.width
-                    x: pageHead.x - contentFlick.x
+                    readonly property real colW: Math.min(contentFlick.width - 56, 740)
+                    width: colW
+                    x: Math.max(24, (contentFlick.width - colW) / 2)
+                    y: 20
+                    opacity: 0.72 + 0.28 * arrival
+                    transform: Translate { y: 6 * (1 - pane.arrival) }
                     spacing: 16
 
-                        // ================= AUDIO =================
-                        ColumnLayout {
-                            property int tabIdx: 0
-                            visible: root.tab === 0; Layout.fillWidth: true; spacing: 12
-                            Section { title: "output"; icon: "volume_up" }
-                            RowLayout { Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; spacing: 12
-                                Sym { text: (root.curSink && root.curSink.audio && root.curSink.audio.muted) ? "volume_off" : "volume_up"; sz: 18
-                                    color: (root.curSink && root.curSink.audio && root.curSink.audio.muted) ? theme.faint : theme.sub; Layout.alignment: Qt.AlignVCenter
-                                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { if (root.curSink && root.curSink.audio) root.curSink.audio.muted = !root.curSink.audio.muted } } }
-                                Text { text: "volume"; color: theme.sub; font.pixelSize: 12; font.family: Tok.mono; Layout.minimumWidth: 76 }
-                                Slider { value: (root.curSink && root.curSink.audio) ? root.curSink.audio.volume : 0
-                                    onMoved: (v) => { if (root.curSink && root.curSink.audio) { root.curSink.audio.muted = false; root.curSink.audio.volume = v } } }
-                                Text { text: (root.curSink && root.curSink.audio) ? Math.round(root.curSink.audio.volume * 100) + "%" : "—"
-                                    color: theme.sub; font.pixelSize: 12; font.family: Tok.mono; Layout.minimumWidth: 48; horizontalAlignment: Text.AlignRight } }
-                            RowLayout { visible: root.curSource && root.curSource.audio; Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; spacing: 12
-                                Sym { text: (root.curSource && root.curSource.audio && root.curSource.audio.muted) ? "mic_off" : "mic"; sz: 18
-                                    color: (root.curSource && root.curSource.audio && root.curSource.audio.muted) ? theme.faint : theme.sub; Layout.alignment: Qt.AlignVCenter
-                                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { if (root.curSource && root.curSource.audio) root.curSource.audio.muted = !root.curSource.audio.muted } } }
-                                Text { text: "microphone"; color: theme.sub; font.pixelSize: 12; font.family: Tok.mono; Layout.minimumWidth: 76 }
-                                Slider { fill: theme.good; value: (root.curSource && root.curSource.audio) ? root.curSource.audio.volume : 0
-                                    onMoved: (v) => { if (root.curSource && root.curSource.audio) { root.curSource.audio.muted = false; root.curSource.audio.volume = v } } }
-                                Text { text: (root.curSource && root.curSource.audio) ? Math.round(root.curSource.audio.volume * 100) + "%" : "—"
-                                    color: theme.sub; font.pixelSize: 12; font.family: Tok.mono; Layout.minimumWidth: 48; horizontalAlignment: Text.AlignRight } }
-                            Text { text: "output device"; color: theme.faint; font.pixelSize: 10; font.family: Tok.mono; Layout.leftMargin: 14; Layout.topMargin: 2 }
-                            IndTable {
-                                Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14
-                                rowHeight: 32
-                                rows: root.sinkRows
-                                selectable: true
-                                selectedIndex: root.sinkSel
-                                emptyText: "no output devices"
-                                columns: [
-                                    { label: "Device", key: "name",   flex: true },
-                                    { label: "Format", key: "format", w: 96,  chip: true, num: true },
-                                    { label: "Max",    key: "rate",   w: 84,  num: true }
-                                ]
-                                onActivated: (i, row) => { if (row._node) Pipewire.preferredDefaultAudioSink = row._node }
-                            }
-                            // ---- bluetooth codec (per connected BT output offering a choice) ----
-                            Text { visible: root.audioBtSinks.length > 0; text: "bluetooth codec"; color: theme.faint; font.pixelSize: 10; font.family: Tok.mono; Layout.leftMargin: 14; Layout.topMargin: 2 }
-                            ColumnLayout { visible: root.audioBtSinks.length > 0; Layout.fillWidth: true; spacing: 8
-                                Repeater { model: root.audioBtSinks
-                                    delegate: ColumnLayout { id: btRow; required property var modelData; Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; spacing: 5
-                                        Text { text: btRow.modelData.label; color: theme.sub; font.pixelSize: 11; font.family: Tok.mono; elide: Text.ElideRight; Layout.fillWidth: true }
-                                        Flow { Layout.fillWidth: true; Layout.leftMargin: 4; spacing: 6
-                                            Repeater { model: btRow.modelData.bt_codecs
-                                                delegate: Rectangle { required property var modelData
-                                                    readonly property bool on: modelData.active
-                                                    implicitHeight: 26; implicitWidth: bcT.implicitWidth + 20; radius: Tok.r
-                                                    color: on ? theme.a(theme.iris, 0.25) : (bcMa.containsMouse ? theme.a(theme.line, 0.55) : theme.a(theme.line, 0.32))
-                                                    border.width: 1; border.color: on ? theme.a(theme.iris, 0.55) : theme.a(theme.iris, 0.14)
-                                                    Text { id: bcT; anchors.centerIn: parent; text: modelData.codec; color: on ? theme.iris : theme.sub; font.pixelSize: 10; font.family: Tok.mono; font.bold: on }
-                                                    MouseArea { id: bcMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.audioSetCodec(btRow.modelData.name, modelData.profile) } } } } } } }
-                            Text { text: "input device"; color: theme.faint; font.pixelSize: 10; font.family: Tok.mono; Layout.leftMargin: 14; Layout.topMargin: 2 }
-                            IndTable {
-                                Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14
-                                rowHeight: 32
-                                rows: root.sourceRows
-                                selectable: true
-                                selectedIndex: root.sourceSel
-                                emptyText: "no input devices"
-                                columns: [ { label: "Device", key: "name", flex: true } ]
-                                onActivated: (i, row) => { if (row._node) Pipewire.preferredDefaultAudioSource = row._node }
-                            }
-                            Section { title: "per-app volume"; icon: "graphic_eq" }
-                            Text { visible: root.streams.length === 0; text: "nothing is playing"; color: theme.faint; font.pixelSize: 11; font.family: Tok.mono; Layout.leftMargin: 14 }
-                            ColumnLayout { Layout.fillWidth: true; spacing: 8
-                                Repeater { model: root.streams
-                                    delegate: RowLayout { required property var modelData; Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; spacing: 12
-                                        Sym { text: "music_note"; sz: 16; color: theme.sub; Layout.alignment: Qt.AlignVCenter }
-                                        Text { text: root.streamName(modelData); color: theme.sub; font.pixelSize: 11; font.family: Tok.mono; elide: Text.ElideRight; Layout.preferredWidth: 120 }
-                                        Slider { fill: theme.iris; value: modelData.audio ? modelData.audio.volume : 0; onMoved: (v) => { if (modelData.audio) modelData.audio.volume = v } }
-                                        Text { text: modelData.audio ? Math.round(modelData.audio.volume * 100) + "%" : "—"; color: theme.sub; font.pixelSize: 11; font.family: Tok.mono; Layout.minimumWidth: 48; horizontalAlignment: Text.AlignRight } } } }
-
-                            Section { title: "per-app output"; icon: "alt_route" }
-                            Text { visible: root.audioStreams.length === 0; text: "nothing is playing"; color: theme.faint; font.pixelSize: 11; font.family: Tok.mono; Layout.leftMargin: 14 }
-                            ColumnLayout { Layout.fillWidth: true; spacing: 12
-                                Repeater { model: root.audioStreams
-                                    delegate: ColumnLayout { id: appRow; required property var modelData; Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; spacing: 5
-                                        RowLayout { Layout.fillWidth: true; spacing: 8
-                                            Sym { text: "graphic_eq"; sz: 15; color: theme.sub; Layout.alignment: Qt.AlignVCenter }
-                                            Text { text: appRow.modelData.app + (appRow.modelData.title ? " — " + appRow.modelData.title : ""); color: theme.sub; font.pixelSize: 11; font.family: Tok.mono; elide: Text.ElideRight; Layout.fillWidth: true } }
-                                        Flow { Layout.fillWidth: true; Layout.leftMargin: 23; spacing: 6
-                                            Repeater { model: root.sinks
-                                                delegate: Rectangle { required property var modelData
-                                                    readonly property bool here: appRow.modelData.sink_id === modelData.id
-                                                    implicitHeight: 24; implicitWidth: routeChipText.implicitWidth + 18; radius: Tok.r
-                                                    color: here ? theme.a(theme.iris, 0.25) : (routeChipMouse.containsMouse ? theme.a(theme.line, 0.55) : theme.a(theme.line, 0.32))
-                                                    border.width: 1; border.color: here ? theme.a(theme.iris, 0.55) : theme.a(theme.iris, 0.14)
-                                                    Text { id: routeChipText; anchors.centerIn: parent; text: modelData.nickname || root.nodeName(modelData); color: here ? theme.iris : theme.sub; font.pixelSize: 10; font.family: Tok.mono; font.bold: here }
-                                                    MouseArea { id: routeChipMouse; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.audioRoute(appRow.modelData.id, modelData.name) } } } } } } }
-                        }
-
-                        // ================= DISPLAY =================
-                        ColumnLayout {
-                            property int tabIdx: 1
-                            visible: root.tab === 1; Layout.fillWidth: true; spacing: 12
-
-                            // ---- brightness ----
-                            Section { title: "brightness"; icon: "brightness_6" }
-                            SliderRow { icon: "brightness_low"; label: "level"; tint: theme.frost
-                                value: root.brightness >= 0 ? root.brightness / 100 : 0
-                                readout: root.brightness >= 0 ? root.brightness + "%" : "n/a"
-                                onMoved: (v) => root.setBrightness(v * 100) }
-                            Text { visible: root.brightness < 0; text: "brightnessctl found no backlight (desktop monitor?)"
-                                color: theme.faint; font.pixelSize: 11; font.family: Tok.mono; Layout.leftMargin: 14 }
-
-                            // ---- monitor mode ----
-                            Section { title: "monitor"; icon: "monitor" }
-                            // Every output at once, and the row IS the selector — picking one
-                            // scopes the resolution / refresh / scale controls below to it.
-                            IndTable {
-                                Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14
-                                rowHeight: 32
-                                rows: root.monRows
-                                selectable: true
-                                selectedIndex: root.monSel
-                                emptyText: "reading monitors…"
-                                columns: [
-                                    { label: "Output",  key: "name",  w: 110, mono: true },
-                                    { label: "Display", key: "desc",  flex: true },
-                                    { label: "Mode",    key: "mode",  w: 150, num: true },
-                                    { label: "Scale",   key: "scale", w: 60,  num: true },
-                                    { label: "Rotate",  key: "rot",   w: 62,  num: true }
-                                ]
-                                onActivated: (i) => { root.monSel = i; root.selRes = ""; root.reloadMonitors() }
-                            }
-
-                            // ---- adaptive sync ----
-                            // misc:vrr is GLOBAL in hyprland, not per-monitor, so it sits under
-                            // the monitor table rather than inside the per-output controls.
-                            RowLayout {
-                                Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14
-                                Layout.topMargin: 4; spacing: 8
-                                Text { text: "adaptive sync"; color: theme.sub; font.pixelSize: 12; font.family: Tok.mono; Layout.minimumWidth: 100 }
-                                Repeater {
-                                    model: root.vrrModes
-                                    delegate: Chip {
-                                        required property var modelData
-                                        label: modelData.l; on: root.apVrr === modelData.v
-                                        onPicked: { root.apVrr = modelData.v; root.saveAppearance(); root.applyVrr() }
-                                    }
-                                }
-                                Item { Layout.fillWidth: true }
-                            }
-                            Text {
-                                Layout.fillWidth: true; Layout.leftMargin: 14; wrapMode: Text.WordWrap
-                                text: root.curMon && root.curMon.vrrCapable === false
-                                      ? "this panel reports no VRR support — the setting will have no effect"
-                                      : "variable refresh (FreeSync / G-Sync). “fullscreen” limits it to fullscreen windows, which avoids flicker on panels that misbehave at low refresh"
-                                color: theme.faint; font.pixelSize: 10; font.family: Tok.mono
-                            }
-
-                            Text { text: "resolution"; color: theme.faint; font.pixelSize: 10; font.family: Tok.mono; Layout.leftMargin: 14; Layout.topMargin: 2 }
-                            Flow { Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; spacing: 7
-                                Repeater { model: root.uniqueRes(root.curMon)
-                                    delegate: Chip { required property var modelData; label: modelData; on: root.selRes === modelData
-                                        onPicked: { root.selRes = modelData; var hs = root.hzFor(root.curMon, modelData); if (hs.length) root.selHz = hs[0] } } } }
-
-                            Text { text: "refresh rate"; color: theme.faint; font.pixelSize: 10; font.family: Tok.mono; Layout.leftMargin: 14; Layout.topMargin: 2 }
-                            Flow { Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; spacing: 7
-                                Repeater { model: root.hzFor(root.curMon, root.selRes)
-                                    delegate: Chip { required property var modelData; label: Math.round(parseFloat(modelData)) + " Hz"; on: root.selHz === modelData
-                                        onPicked: root.selHz = modelData } } }
-
-                            Text { text: "orientation"; color: theme.faint; font.pixelSize: 10; font.family: Tok.mono; Layout.leftMargin: 14; Layout.topMargin: 2 }
-                            Flow { Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; spacing: 7
-                                Repeater { model: [{t:0,i:"stay_current_landscape",l:"landscape"},{t:1,i:"stay_current_portrait",l:"portrait"}]
-                                    delegate: Chip { required property var modelData; label: modelData.l; icon: modelData.i; on: root.selTransform === modelData.t
-                                        onPicked: root.selTransform = modelData.t } } }
-
-                            AccentBtn { visible: root.curMon !== null; Layout.leftMargin: 14; Layout.rightMargin: 14; Layout.topMargin: 4
-                                icon: "check"; label: "Apply " + root.selRes + "@" + Math.round(parseFloat(root.selHz || "0")) + "Hz"
-                                onClicked: root.applyDisplay() }
-
-                            // ---- layout profiles (save/restore whole monitor arrangements) ----
-                            Section { title: "layout profiles"; icon: "dashboard" }
-                            Text { text: "save the current monitor arrangement — resolution, position, scale — and restore it in one tap when you dock or unplug."
-                                color: theme.faint; font.pixelSize: 10; font.family: Tok.mono; Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; wrapMode: Text.WordWrap }
-
-                            Repeater { model: root.displayProfiles
-                                delegate: Rectangle {
-                                    required property var modelData
-                                    Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14
-                                    implicitHeight: 48; radius: Tok.r
-                                    color: dpMa.containsMouse ? theme.a(theme.line, 0.55) : theme.a(theme.line, 0.4)
-                                    border.width: 1; border.color: modelData.matches ? theme.a(theme.iris, 0.5) : theme.a(theme.iris, 0.14)
-                                    RowLayout {
-                                        anchors.fill: parent; anchors.leftMargin: 14; anchors.rightMargin: 10; spacing: 12
-                                        Sym { text: modelData.matches ? "check_circle" : "dashboard"; sz: 19
-                                            color: modelData.matches ? theme.good : theme.sub; Layout.alignment: Qt.AlignVCenter }
-                                        ColumnLayout { spacing: 1; Layout.fillWidth: true; Layout.alignment: Qt.AlignVCenter
-                                            Text { text: modelData.name; color: theme.text; font.pixelSize: 13; font.family: Tok.mono; elide: Text.ElideRight; Layout.fillWidth: true }
-                                            Text { text: modelData.summary + (modelData.created ? "  ·  " + modelData.created : ""); color: theme.faint; font.pixelSize: 10; font.family: Tok.mono; elide: Text.ElideRight; Layout.fillWidth: true } }
-                                        // apply
-                                        Rectangle { Layout.alignment: Qt.AlignVCenter; implicitWidth: 66; implicitHeight: 30; radius: Tok.r
-                                            color: dpApplyMa.containsMouse ? theme.iris : theme.a(theme.iris, 0.22); border.width: 1; border.color: theme.iris
-                                            Row { anchors.centerIn: parent; spacing: 5
-                                                Sym { anchors.verticalCenter: parent.verticalCenter; text: "play_arrow"; sz: 14; color: dpApplyMa.containsMouse ? theme.bg : theme.frost }
-                                                Text { anchors.verticalCenter: parent.verticalCenter; text: "apply"; color: dpApplyMa.containsMouse ? theme.bg : theme.frost; font.pixelSize: 11; font.family: Tok.mono } }
-                                            MouseArea { id: dpApplyMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.applyDisplayProfile(modelData.name) } }
-                                        // delete
-                                        Rectangle { Layout.alignment: Qt.AlignVCenter; implicitWidth: 30; implicitHeight: 30; radius: Tok.r
-                                            color: dpDelMa.containsMouse ? theme.a(theme.bad, 0.25) : "transparent"; border.width: 1; border.color: theme.a(theme.bad, dpDelMa.containsMouse ? 0.5 : 0.2)
-                                            Sym { anchors.centerIn: parent; text: "delete"; sz: 15; color: dpDelMa.containsMouse ? theme.bad : theme.faint }
-                                            MouseArea { id: dpDelMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.deleteDisplayProfile(modelData.name) } }
-                                    }
-                                    MouseArea { id: dpMa; anchors.fill: parent; hoverEnabled: true; acceptedButtons: Qt.NoButton }
-                                } }
-                            Text { visible: root.displayProfiles.length === 0; text: "no saved layouts yet"; color: theme.faint; font.pixelSize: 11; font.family: Tok.mono; Layout.leftMargin: 14 }
-
-                            // save-current row
-                            RowLayout { Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; Layout.topMargin: 2; spacing: 8
-                                Rectangle { Layout.fillWidth: true; implicitHeight: 38; radius: Tok.r
-                                    color: theme.a(theme.line, 0.5); border.width: 1; border.color: profIn.activeFocus ? theme.iris : theme.a(theme.iris, 0.2)
-                                    TextInput { id: profIn; anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 12; verticalAlignment: TextInput.AlignVCenter
-                                        color: theme.text; font.pixelSize: 12; font.family: Tok.mono; clip: true; selectByMouse: true
-                                        text: root.profName; onTextChanged: root.profName = text
-                                        onAccepted: { root.saveDisplayProfile(text); text = "" }
-                                        Text { anchors.verticalCenter: parent.verticalCenter; visible: profIn.text === ""; text: "name this layout…"; color: theme.faint; font.pixelSize: 12; font.family: Tok.mono } } }
-                                Rectangle { Layout.alignment: Qt.AlignVCenter; implicitWidth: 78; implicitHeight: 38; radius: Tok.r
-                                    opacity: root.profName.trim() !== "" ? 1 : 0.45
-                                    color: profSaveMa.containsMouse && root.profName.trim() !== "" ? theme.iris : theme.a(theme.iris, 0.22); border.width: 1; border.color: theme.iris
-                                    Row { anchors.centerIn: parent; spacing: 5
-                                        Sym { anchors.verticalCenter: parent.verticalCenter; text: "bookmark_add"; sz: 15; color: profSaveMa.containsMouse && root.profName.trim() !== "" ? theme.bg : theme.frost }
-                                        Text { anchors.verticalCenter: parent.verticalCenter; text: "save"; color: profSaveMa.containsMouse && root.profName.trim() !== "" ? theme.bg : theme.frost; font.pixelSize: 11; font.family: Tok.mono } }
-                                    MouseArea { id: profSaveMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
-                                        onClicked: { root.saveDisplayProfile(root.profName); profIn.text = "" } } } }
-
-                            // ---- per-monitor rules ----
-                            Section { visible: root.curMon !== null; title: "this monitor" + (root.monitors.length > 1 && root.curMon ? " · " + root.curMon.name : ""); icon: "tv_options_edit_channels" }
-                            ToggleCard { visible: root.curMon !== null
-                                icon: (root.curMon && root.monBarAp(root.curMon.name)) ? "web_asset" : "web_asset_off"
-                                title: "show bar"; desc: "display the sea-shell bar on this output"
-                                on: root.curMon ? root.monBarAp(root.curMon.name) : true
-                                onToggled: if (root.curMon) root.setMon(root.curMon.name, "bar", !root.monBarAp(root.curMon.name)) }
-                            ToggleCard { id: ovrScaleCard; visible: root.curMon !== null
-                                icon: "zoom_out_map"; title: "override scale"
-                                desc: ovrScaleCard.on ? ("this monitor: " + root.monScaleAp(root.curMon.name).toFixed(2) + "×") : "use the global / auto scale"
-                                on: root.curMon ? (root.monScaleAp(root.curMon.name) > 0) : false
-                                onToggled: if (root.curMon) root.setMon(root.curMon.name, "scale", root.monScaleAp(root.curMon.name) > 0 ? 0 : Math.max(1.0, root.autoScaleEstimate())) }
-                            SliderRow { visible: root.curMon !== null && root.monScaleAp(root.curMon.name) > 0
-                                icon: "aspect_ratio"; label: "scale"
-                                value: root.curMon ? (root.monScaleAp(root.curMon.name) - 0.75) / 1.75 : 0
-                                readout: (root.curMon ? root.monScaleAp(root.curMon.name).toFixed(2) : "1.00") + "×"
-                                onMoved: (v) => { if (root.curMon) root.setMon(root.curMon.name, "scale", Math.round((0.75 + v * 1.75) * 20) / 20) } }
-
-                            // ---- global display scale ----
-                            Section { title: "display scale"; icon: "aspect_ratio" }
-                            ToggleCard { icon: "aspect_ratio"; title: "auto scale (match display)"
-                                desc: "sizes the whole shell per monitor — a 4K TV scales up, 1080p stays 1×"
-                                on: root.apScale === 0
-                                onToggled: { root.apScale = (root.apScale === 0) ? Math.max(1.0, root.autoScaleEstimate()) : 0; root.saveAppearance() } }
-                            SliderRow { visible: root.apScale > 0; icon: "zoom_out_map"; label: "UI scale"
-                                value: (root.apScale - 0.75) / 1.75; readout: root.apScale.toFixed(2) + "×"
-                                onMoved: (v) => { root.apScale = Math.round((0.75 + v * 1.75) * 20) / 20; root.saveAppearance() } }
-                            Text { visible: root.apScale > 0; text: "bump this up when projecting to a TV and everything looks too small"
-                                color: theme.faint; font.pixelSize: 10; font.family: Tok.mono; Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; wrapMode: Text.WordWrap }
-
-                            // ---- night light ----
-                            Section { title: "night light"; icon: "nightlight" }
-                            ToggleCard { icon: "routine"; title: "follow dark mode"
-                                desc: "warm the screen automatically whenever the shell is in dark mode"
-                                on: root.apNightAuto
-                                onToggled: { root.apNightAuto = !root.apNightAuto; root.saveAppearance() } }
-                            ToggleCard { visible: !root.apNightAuto; icon: "nightlight"; title: "night light"
-                                desc: "warm the screen now (also toggleable from the Control Center)"
-                                on: root.apNight
-                                onToggled: { root.apNight = !root.apNight; root.saveAppearance() } }
-                            SliderRow { icon: "thermostat"; label: "warmth"; tint: theme.warn
-                                value: (6000 - root.apNightTemp) / 3500; readout: root.apNightTemp + "K"
-                                onMoved: (v) => { root.apNightTemp = Math.round((6000 - v * 3500) / 100) * 100; root.saveAppearance() } }
-                            Text { text: "lower = warmer/oranger. Needs the hyprsunset package (bundled with the installer)."
-                                color: theme.faint; font.pixelSize: 10; font.family: Tok.mono; Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; wrapMode: Text.WordWrap }
-                        }
-
-                        // ================= NETWORK =================
-                        ColumnLayout {
-                            property int tabIdx: 2
-                            visible: root.tab === 2; Layout.fillWidth: true; spacing: 12
-                            Section { title: "wi-fi networks"; icon: "wifi" }
-                            RowLayout {
-                                Layout.fillWidth: true; spacing: 8
-                                Text { text: "wi-fi networks"; color: Tok.ink; font.pixelSize: 13; font.family: Tok.sans }
-                                Item { Layout.fillWidth: true }
-                                // radio on/off toggle
-                                Rectangle { implicitWidth: 46; implicitHeight: 22; radius: Tok.r
-                                    color: root.wifiRadio ? theme.a(theme.iris, 0.35) : theme.a(theme.line, 0.7)
-                                    border.width: 1; border.color: root.wifiRadio ? theme.iris : theme.a(theme.line, 0.9)
-                                    Rectangle { width: 16; height: 16; radius: Tok.r; y: 3
-                                        x: root.wifiRadio ? parent.width - 19 : 3
-                                        color: root.wifiRadio ? theme.frost : theme.faint
-                                        Behavior on x { NumberAnimation { duration: 120 } } }
-                                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.setWifiRadio(!root.wifiRadio) } }
-                                Sym { text: "refresh"; sz: 17; color: theme.sub
-                                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.rescanWifi() } }
-                            }
-                            // active connection details
-                            Rectangle {
-                                visible: !!root.netInfo.ip
-                                Layout.fillWidth: true; implicitHeight: netCol.implicitHeight + 16; radius: Tok.r
-                                color: theme.a(theme.iris, 0.08); border.width: 1; border.color: theme.a(theme.iris, 0.25)
-                                ColumnLayout {
-                                    id: netCol; anchors.fill: parent; anchors.margins: 10; spacing: 3
-                                    Repeater {
-                                        model: [
-                                            { k: "ip",      v: root.netInfo.ip || "" },
-                                            { k: "gateway", v: root.netInfo.gw || "" },
-                                            { k: "dns",     v: (root.netInfo.dns || []).join("  ·  ") },
-                                            { k: "iface",   v: root.netInfo.iface || "" }
-                                        ]
-                                        delegate: RowLayout {
-                                            required property var modelData
-                                            visible: modelData.v !== ""
-                                            Layout.fillWidth: true; spacing: 8
-                                            Text { text: modelData.k; color: theme.faint; font.pixelSize: 10; font.family: Tok.mono; Layout.preferredWidth: 56 }
-                                            Text { text: modelData.v; color: theme.sub; font.pixelSize: 11; font.family: Tok.mono; elide: Text.ElideRight; Layout.fillWidth: true }
-                                        }
-                                    }
-                                }
-                            }
-                            ColumnLayout {
-                                Layout.fillWidth: true; spacing: 6
-                                Repeater {
-                                    model: root.wifiList
-                                    delegate: Rectangle {
-                                        id: wrow
-                                        required property var modelData
-                                        readonly property bool asking: root.wifiPwFor === modelData.ssid
-                                        readonly property bool joining: root.wifiConnectingTo === modelData.ssid
-                                        onAskingChanged: if (asking) pwIn.forceActiveFocus()
-                                        Layout.fillWidth: true; implicitHeight: asking ? 80 : 40; radius: Tok.r
-                                        Behavior on implicitHeight { NumberAnimation { duration: 110; easing.type: Easing.OutCubic } }
-                                        color: modelData.active || joining ? Tok.accentWash : (wma.containsMouse || asking ? root.rowHover : "transparent")
-                                        border.width: asking || joining || modelData.active ? 1 : 0; border.color: theme.a(theme.iris, 0.45)
-                                        clip: true
-                                        ColumnLayout {
-                                            anchors { fill: parent; leftMargin: 12; rightMargin: 12; topMargin: 4; bottomMargin: 6 }
-                                            spacing: 2
-                                            Item {
-                                                Layout.fillWidth: true; implicitHeight: 30
-                                                // base click zone UNDER the icon buttons
-                                                MouseArea { id: wma; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
-                                                    onClicked: {
-                                                        if (wrow.joining) return;
-                                                        if (modelData.active) { root.wifiDisconnect(modelData.ssid); return }
-                                                        if (wrow.asking) { root.wifiPwFor = ""; return }
-                                                        root.wifiConnect(modelData.ssid, modelData.secure)
-                                                    } }
-                                                RowLayout {
-                                                    anchors.fill: parent; spacing: 9
-                                                    readonly property bool saved: root.savedCons.indexOf(modelData.ssid) >= 0
-                                                    Sym {
-                                                        text: wrow.joining ? ["wifi_1_bar", "wifi_2_bar", "wifi"][root.wifiPhase]
-                                                            : modelData.signal > 66 ? "signal_wifi_4_bar" : modelData.signal > 33 ? "network_wifi_3_bar" : "network_wifi_1_bar"
-                                                        sz: 17; color: modelData.active || wrow.joining ? theme.iris : theme.frost
-                                                    }
-                                                    Text { text: modelData.ssid; color: theme.text; font.pixelSize: 12; font.family: Tok.mono; elide: Text.ElideRight; Layout.fillWidth: true }
-                                                    Text { text: wrow.joining ? "connecting…" : modelData.signal + "%"
-                                                        color: wrow.joining ? theme.iris : theme.faint; font.pixelSize: 10; font.family: Tok.mono }
-                                                    // forget (saved networks) — its own hitbox, sits above the row's click zone
-                                                    Sym { visible: wma.containsMouse && parent.saved; text: "delete"; sz: 15; color: fgm.containsMouse ? theme.bad : theme.faint
-                                                        MouseArea { id: fgm; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
-                                                            onClicked: root.wifiForget(modelData.ssid) } }
-                                                    Sym { visible: modelData.active && wma.containsMouse; text: "link_off"; sz: 15; color: theme.bad }
-                                                    Sym { text: "lock"; sz: 13; color: theme.faint; visible: modelData.secure && !wma.containsMouse }
-                                                    Sym { text: "check"; sz: 15; color: theme.good; visible: modelData.active && !wma.containsMouse }
-                                                }
-                                            }
-                                            // inline password row (secured networks)
-                                            RowLayout {
-                                                visible: wrow.asking; Layout.fillWidth: true; spacing: 8
-                                                Rectangle {
-                                                    Layout.fillWidth: true; implicitHeight: 28; radius: Tok.r
-                                                    color: theme.bg; border.width: 1; border.color: theme.a(theme.iris, 0.4)
-                                                    TextInput { id: pwIn
-                                                        anchors { fill: parent; leftMargin: 9; rightMargin: 9 }
-                                                        verticalAlignment: TextInput.AlignVCenter
-                                                        color: theme.text; font.pixelSize: 12; font.family: Tok.mono
-                                                        echoMode: TextInput.Password; clip: true
-                                                        Text { text: "password…"; visible: pwIn.text===""; color: theme.faint
-                                                            font.pixelSize: 11; font.family: Tok.mono; anchors.verticalCenter: parent.verticalCenter }
-                                                        Keys.onReturnPressed: { root.wifiJoinPw(wrow.modelData.ssid, pwIn.text); pwIn.text = "" }
-                                                        Keys.onEscapePressed: (e)=> { root.wifiPwFor = ""; pwIn.text = ""; e.accepted = true }
-                                                    }
-                                                }
-                                                Rectangle { implicitWidth: 64; implicitHeight: 28; radius: Tok.r
-                                                    color: jbm.containsMouse ? theme.iris : theme.a(theme.iris, 0.25)
-                                                    border.width: 1; border.color: theme.iris
-                                                    Text { anchors.centerIn: parent; text: "join"; font.pixelSize: 11; font.family: Tok.mono; font.bold: true
-                                                        color: jbm.containsMouse ? theme.bg : theme.frost }
-                                                    MouseArea { id: jbm; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
-                                                        onClicked: { root.wifiJoinPw(wrow.modelData.ssid, pwIn.text); pwIn.text = "" } } }
-                                            }
-                                        }
-                                    }
-                                }
-                                Text { visible: root.wifiList.length === 0; text: root.wifiRadio ? "scanning…" : "wi-fi is off"; color: theme.faint; font.pixelSize: 11; font.family: Tok.mono }
-                                // join a hidden network
-                                Rectangle {
-                                    Layout.fillWidth: true; implicitHeight: root.hidOpen ? 78 : 34; radius: Tok.r; clip: true
-                                    Behavior on implicitHeight { NumberAnimation { duration: 110; easing.type: Easing.OutCubic } }
-                                    color: root.hidOpen ? root.rowHover : "transparent"; border.width: root.hidOpen ? 1 : 0; border.color: theme.a(theme.iris, 0.45)
-                                    ColumnLayout {
-                                        anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 12; anchors.topMargin: 4; anchors.bottomMargin: 6; spacing: 4
-                                        Item {
-                                            Layout.fillWidth: true; implicitHeight: 26
-                                            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
-                                                onClicked: { root.hidOpen = !root.hidOpen; if (root.hidOpen) hidSsid.forceActiveFocus() } }
-                                            RowLayout { anchors.fill: parent; spacing: 9
-                                                Sym { text: "visibility_off"; sz: 16; color: theme.frost }
-                                                Text { text: "join a hidden network…"; color: theme.sub; font.pixelSize: 12; font.family: Tok.mono; Layout.fillWidth: true }
-                                                Sym { text: root.hidOpen ? "expand_less" : "expand_more"; sz: 16; color: theme.faint } }
-                                        }
-                                        RowLayout {
-                                            visible: root.hidOpen; Layout.fillWidth: true; spacing: 8
-                                            Rectangle { Layout.fillWidth: true; implicitHeight: 28; radius: Tok.r
-                                                color: theme.bg; border.width: 1; border.color: theme.a(theme.iris, 0.4)
-                                                TextInput { id: hidSsid; anchors { fill: parent; leftMargin: 9; rightMargin: 9 }
-                                                    verticalAlignment: TextInput.AlignVCenter; color: theme.text; font.pixelSize: 12; font.family: Tok.mono; clip: true
-                                                    Text { text: "ssid"; visible: hidSsid.text===""; color: theme.faint; font.pixelSize: 11; font.family: Tok.mono; anchors.verticalCenter: parent.verticalCenter } } }
-                                            Rectangle { Layout.fillWidth: true; implicitHeight: 28; radius: Tok.r
-                                                color: theme.bg; border.width: 1; border.color: theme.a(theme.iris, 0.4)
-                                                TextInput { id: hidPw; anchors { fill: parent; leftMargin: 9; rightMargin: 9 }
-                                                    verticalAlignment: TextInput.AlignVCenter; color: theme.text; font.pixelSize: 12; font.family: Tok.mono; echoMode: TextInput.Password; clip: true
-                                                    Text { text: "password (blank if open)"; visible: hidPw.text===""; color: theme.faint; font.pixelSize: 11; font.family: Tok.mono; anchors.verticalCenter: parent.verticalCenter }
-                                                    Keys.onReturnPressed: { root.wifiJoinHidden(hidSsid.text, hidPw.text); hidSsid.text=""; hidPw.text="" } } }
-                                            Rectangle { implicitWidth: 56; implicitHeight: 28; radius: Tok.r
-                                                color: hjm.containsMouse ? theme.iris : theme.a(theme.iris, 0.25); border.width: 1; border.color: theme.iris
-                                                Text { anchors.centerIn: parent; text: "join"; font.pixelSize: 11; font.family: Tok.mono; font.bold: true
-                                                    color: hjm.containsMouse ? theme.bg : theme.frost }
-                                                MouseArea { id: hjm; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
-                                                    onClicked: { root.wifiJoinHidden(hidSsid.text, hidPw.text); hidSsid.text=""; hidPw.text="" } } }
-                                        }
-                                    }
-                                }
-                                Text { visible: root.wifiMsg !== ""; Layout.fillWidth: true; wrapMode: Text.Wrap; text: root.wifiMsg
-                                    color: root.wifiMsg.indexOf("✓") >= 0 ? theme.good : root.wifiMsg.indexOf("wrong") >= 0 ? theme.bad : theme.sub
-                                    font.pixelSize: 11; font.family: Tok.mono }
-                                Text { Layout.fillWidth: true; wrapMode: Text.Wrap; text: "click to connect / disconnect · the trash icon forgets a saved network · secured ones ask inline"
-                                    color: theme.faint; font.pixelSize: 10; font.family: Tok.mono; Layout.topMargin: 4 }
-                            }
-                        }
-
-                        // ================= VPN =================
-                        ColumnLayout {
-                            property int tabIdx: 2
-                            visible: root.tab === 2; Layout.fillWidth: true; spacing: 10
-
-                            // WARP header row
-                            Section { title: "cloudflare warp"; icon: "security" }
-                            RowLayout {
-                                Layout.fillWidth: true; spacing: 8
-                                Text { text: "Cloudflare WARP"; color: Tok.ink; font.pixelSize: 13; font.family: Tok.sans }
-                                Item { Layout.fillWidth: true }
-                                Rectangle { implicitWidth: 46; implicitHeight: 22; radius: Tok.r
-                                    color: root.warpConnected ? theme.a(theme.good, 0.4) : theme.a(theme.line, 0.7)
-                                    border.width: 1; border.color: root.warpConnected ? theme.good : theme.a(theme.line, 0.9)
-                                    Behavior on color { ColorAnimation { duration: Tok.mFast } }
-                                    Rectangle { width: 16; height: 16; radius: Tok.r; y: 3
-                                        x: root.warpConnected ? parent.width - 19 : 3
-                                        color: root.warpConnected ? theme.frost : theme.faint
-                                        Behavior on x { NumberAnimation { duration: 130 } } }
-                                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.warpToggle() } }
-                            }
-
-                            // WARP status + mode chips
-                            RowLayout {
-                                Layout.fillWidth: true; spacing: 6
-                                Text { text: root.warpStatus; color: root.warpConnected ? theme.good : theme.faint
-                                    font.pixelSize: 11; font.family: Tok.mono }
-                                Item { Layout.fillWidth: true }
-                                Repeater { model: ["warp","doh","warp+doh","tunnel_only"]
-                                    delegate: Rectangle {
-                                        required property var modelData
-                                        readonly property bool cur: root.warpMode === modelData
-                                        implicitHeight: 20; radius: Tok.r; implicitWidth: wmt.implicitWidth + 14
-                                        color: cur ? theme.a(theme.good, 0.25) : (wma2.containsMouse ? theme.a(theme.line,0.5) : theme.a(theme.line,0.3))
-                                        border.width: cur ? 1 : 0; border.color: theme.a(theme.good, 0.45)
-                                        Text { id: wmt; anchors.centerIn: parent; text: modelData
-                                            color: cur ? theme.good : theme.faint; font.pixelSize: 9; font.family: Tok.mono; font.bold: cur }
-                                        MouseArea { id: wma2; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
-                                            onClicked: root.warpSetMode(modelData) } } }
-                            }
-
-                            // VPN connections divider
-                            Section { title: "vpn connections"; icon: "vpn_key" }
-
-                            // saved VPN list
-                            ColumnLayout {
-                                Layout.fillWidth: true; spacing: 6
-                                Text { visible: root.vpnList.length === 0; text: "no VPN profiles saved — import one below"
-                                    color: theme.faint; font.pixelSize: 11; font.family: Tok.mono }
-                                Repeater {
-                                    model: root.vpnList
-                                    delegate: Rectangle {
-                                        required property var modelData
-                                        readonly property bool connecting: modelData.state === "activating" || root.vpnActionName === modelData.name
-                                        readonly property bool failed: root.vpnFailedName === modelData.name
-                                        Layout.fillWidth: true; implicitHeight: 50; radius: Tok.r
-                                        color: modelData.active ? theme.a(theme.iris, 0.18) : (connecting ? theme.a(theme.frost, 0.08) : theme.a(theme.line, 0.35))
-                                        border.width: 1; border.color: failed ? theme.bad : (modelData.active ? theme.a(theme.iris, 0.5) : (connecting ? theme.a(theme.frost, 0.3) : theme.a(theme.iris, 0.12)))
-                                        RowLayout {
-                                            anchors.fill: parent; anchors.leftMargin: 14; anchors.rightMargin: 12; spacing: 10
-                                            Sym { text: modelData.type==="wireguard" ? "cable" : "vpn_key"; sz: 17
-                                                color: modelData.active ? theme.iris : (connecting ? theme.frost : (failed ? theme.bad : theme.faint)) }
-                                            ColumnLayout { spacing: 2; Layout.fillWidth: true
-                                                Text { text: modelData.name; color: modelData.active ? theme.text : (connecting ? theme.frost : (failed ? theme.bad : theme.sub))
-                                                    font.pixelSize: 13; font.family: Tok.mono; font.bold: modelData.active || connecting; elide: Text.ElideRight }
-                                                Text {
-                                                    text: connecting ? "connecting…" : (failed ? "connection failed — please try again" : (modelData.active ? "connected" : modelData.type))
-                                                    color: connecting ? theme.frost : (failed ? theme.bad : (modelData.active ? theme.good : theme.faint))
-                                                    font.pixelSize: 10; font.family: Tok.mono } }
-                                            Rectangle {
-                                                implicitWidth: 104; implicitHeight: 30; radius: Tok.r
-                                                color: connecting ? theme.a(theme.line, 0.5) : (vtm.containsMouse ? (modelData.active ? theme.a(theme.bad,0.3) : theme.iris) : (modelData.active ? theme.a(theme.bad,0.15) : theme.a(theme.iris,0.2)))
-                                                border.width: 1; border.color: connecting ? theme.a(theme.line, 0.7) : (modelData.active ? theme.bad : theme.iris)
-                                                Behavior on color { ColorAnimation { duration: Tok.mFast } }
-                                                Text { anchors.centerIn: parent
-                                                    text: connecting ? "connecting…" : (modelData.active ? "disconnect" : "connect")
-                                                    color: connecting ? theme.faint : (vtm.containsMouse ? (modelData.active ? theme.bad : theme.bg) : (modelData.active ? theme.bad : theme.frost))
-                                                    font.pixelSize: 11; font.family: Tok.mono; font.bold: true }
-                                                MouseArea { id: vtm; anchors.fill: parent; hoverEnabled: true; cursorShape: connecting ? Qt.ArrowCursor : Qt.PointingHandCursor
-                                                    onClicked: if (!connecting) root.vpnToggle(modelData.name) } }
-                                            Rectangle {
-                                                implicitWidth: 32; implicitHeight: 30; radius: Tok.r
-                                                color: vdm.containsMouse ? theme.a(theme.bad, 0.25) : "transparent"
-                                                Sym { anchors.centerIn: parent; text: "delete"; sz: 16
-                                                    color: vdm.containsMouse ? theme.bad : theme.faint }
-                                                MouseArea { id: vdm; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
-                                                    onClicked: root.vpnDelete(modelData.name) } }
-                                        }
-                                    }
-                                }
-                            }
-
-                            // add VPN expandable panel
-                            Rectangle {
-                                Layout.fillWidth: true
-                                implicitHeight: root.vpnAddOpen ? vpnAddInner.implicitHeight + 20 : 42
-                                radius: Tok.r; clip: true
-                                Behavior on implicitHeight { NumberAnimation { duration: 150; easing.type: Easing.OutCubic } }
-                                color: root.vpnAddOpen ? root.rowHover : "transparent"
-                                border.width: root.vpnAddOpen ? 1 : 0; border.color: theme.a(theme.iris, 0.45)
-
-                                ColumnLayout {
-                                    id: vpnAddInner
-                                    anchors { fill: parent; leftMargin: 14; rightMargin: 14; topMargin: 8; bottomMargin: 8 }
-                                    spacing: 10
-
-                                    // toggle header
-                                    MouseArea { Layout.fillWidth: true; implicitHeight: 26; cursorShape: Qt.PointingHandCursor
-                                        onClicked: root.vpnAddOpen = !root.vpnAddOpen
-                                        RowLayout { anchors.fill: parent; spacing: 8
-                                            Sym { text: "add_circle"; sz: 17; color: theme.frost }
-                                            Text { text: "import VPN profile"; color: theme.sub; font.pixelSize: 12; font.family: Tok.mono; Layout.fillWidth: true }
-                                            Sym { text: root.vpnAddOpen ? "expand_less" : "expand_more"; sz: 17; color: theme.faint } } }
-
-                                    // type chips
-                                    RowLayout {
-                                        visible: root.vpnAddOpen; Layout.fillWidth: true; spacing: 8
-                                        Repeater { model: [{l:"WireGuard (.conf)",v:0},{l:"OpenVPN (.ovpn)",v:1}]
-                                            delegate: Rectangle {
-                                                required property var modelData
-                                                readonly property bool sel: root.vpnAddMode === modelData.v
-                                                Layout.fillWidth: true; implicitHeight: 32; radius: Tok.r
-                                                color: sel ? theme.a(theme.iris,0.25) : (atm2.containsMouse ? theme.a(theme.line,0.5) : theme.a(theme.line,0.35))
-                                                border.width: 1; border.color: sel ? theme.iris : theme.a(theme.iris,0.15)
-                                                Text { anchors.centerIn: parent; text: modelData.l; color: sel ? theme.text : theme.sub
-                                                    font.pixelSize: 11; font.family: Tok.mono; font.bold: sel }
-                                                MouseArea { id: atm2; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
-                                                    onClicked: root.vpnAddMode = modelData.v } } }
-                                    }
-
-                                    // file path + import button
-                                    RowLayout {
-                                        visible: root.vpnAddOpen; Layout.fillWidth: true; spacing: 8
-                                        Rectangle {
-                                            Layout.fillWidth: true; implicitHeight: 34; radius: Tok.r
-                                            color: theme.bg; border.width: 1
-                                            border.color: vpnPathIn.activeFocus ? theme.iris : theme.a(theme.iris, 0.25)
-                                            TextInput {
-                                                id: vpnPathIn
-                                                anchors { fill: parent; leftMargin: 10; rightMargin: 10 }
-                                                verticalAlignment: TextInput.AlignVCenter
-                                                color: theme.text; font.pixelSize: 12; font.family: Tok.mono; clip: true
-                                                Text { anchors.verticalCenter: parent.verticalCenter; visible: vpnPathIn.text === ""
-                                                    text: root.vpnAddMode === 0 ? "~/path/to/tunnel.conf" : "~/path/to/config.ovpn"
-                                                    color: theme.faint; font.pixelSize: 12; font.family: Tok.mono }
-                                                Keys.onReturnPressed: {
-                                                    if (root.vpnAddMode === 0) root.vpnAddWireguard(vpnPathIn.text);
-                                                    else root.vpnAddOpenVPN(vpnPathIn.text);
-                                                    vpnPathIn.text = ""; root.vpnAddOpen = false; } } }
-                                        Rectangle {
-                                            implicitWidth: 36; implicitHeight: 34; radius: Tok.r
-                                            color: vpnBrowseMa.containsMouse ? theme.a(theme.iris, 0.25) : theme.a(theme.line, 0.4)
-                                            border.width: 1; border.color: theme.a(theme.iris, 0.25)
-                                            Sym { anchors.centerIn: parent; text: "folder_open"; sz: 16; color: theme.frost }
-                                            MouseArea {
-                                                id: vpnBrowseMa
-                                                anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
-                                                onClicked: {
-                                                    var filter = root.vpnAddMode === 0 ? "WireGuard (*.conf) | *.conf" : "OpenVPN (*.ovpn) | *.ovpn";
-                                                    root.pickFile(root.vpnAddMode === 0 ? "Select WireGuard Configuration" : "Select OpenVPN Configuration", filter, function(path) {
-                                                        vpnPathIn.text = path;
-                                                    }); } } }
-                                        Rectangle {
-                                            implicitWidth: 80; implicitHeight: 34; radius: Tok.r
-                                            color: viam.containsMouse ? theme.iris : theme.a(theme.iris, 0.2)
-                                            border.width: 1; border.color: theme.iris
-                                            RowLayout { anchors.centerIn: parent; spacing: 5
-                                                Sym { text: "upload_file"; sz: 14; color: viam.containsMouse ? theme.bg : theme.frost }
-                                                Text { text: "import"; color: viam.containsMouse ? theme.bg : theme.text; font.pixelSize: 11; font.family: Tok.mono; font.bold: true } }
-                                            MouseArea { id: viam; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
-                                                onClicked: {
-                                                    if (root.vpnAddMode === 0) root.vpnAddWireguard(vpnPathIn.text);
-                                                    else root.vpnAddOpenVPN(vpnPathIn.text);
-                                                    vpnPathIn.text = ""; root.vpnAddOpen = false; } } }
-                                    }
-
-                                    // hint
-                                    Text { visible: root.vpnAddOpen; Layout.fillWidth: true; wrapMode: Text.Wrap
-                                        text: root.vpnAddMode === 0
-                                            ? "paste the path to a WireGuard .conf file — the profile name is taken from the filename. get a .conf from your VPN provider or export from your router."
-                                            : "paste the path to an OpenVPN .ovpn file — username/password will be prompted on first connect if required."
-                                        color: theme.faint; font.pixelSize: 10; font.family: Tok.mono }
-                                }
-                            }
-
-                            // status message
-                            Text { visible: root.vpnMsg !== ""; text: root.vpnMsg
-                                color: root.vpnMsg.indexOf("fail") >= 0 || root.vpnMsg.indexOf("fail") >= 0 ? theme.bad : theme.sub
-                                font.pixelSize: 11; font.family: Tok.mono; Layout.fillWidth: true; wrapMode: Text.Wrap }
-                        }
-
-                        // ================= WEATHER =================
-                        ColumnLayout {
-                            property int tabIdx: 3
-                            visible: root.tab === 3; Layout.fillWidth: true; spacing: 14
-                            Section { title: "location"; icon: "location_on" }
-                            RowLayout {
-                                Layout.fillWidth: true; spacing: 10
-                                Rectangle {
-                                    Layout.fillWidth: true; implicitHeight: 38; radius: Tok.r
-                                    color: theme.a(theme.line, 0.4); border.width: 1
-                                    border.color: locIn.activeFocus ? theme.iris : theme.a(theme.iris, 0.16)
-                                    TextInput {
-                                        id: locIn
-                                        anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 12
-                                        verticalAlignment: TextInput.AlignVCenter
-                                        color: theme.text; font.pixelSize: 13; font.family: Tok.mono
-                                        clip: true; selectByMouse: true; selectionColor: theme.a(theme.iris, 0.4)
-                                        Component.onCompleted: text = root.wxLoc
-                                        onAccepted: root.saveLoc(text)
-                                        Text { anchors.verticalCenter: parent.verticalCenter; visible: locIn.text === ""; text: "city, e.g. Kuching"; color: theme.faint; font.pixelSize: 13; font.family: Tok.mono }
-                                    }
-                                }
-                                Rectangle {
-                                    implicitWidth: 96; implicitHeight: 38; radius: Tok.r
-                                    color: svm.containsMouse ? theme.iris : theme.a(theme.iris, 0.2)
-                                    border.width: 1; border.color: theme.iris
-                                    RowLayout {
-                                        anchors.centerIn: parent; spacing: 6
-                                        Sym { text: "save"; sz: 16; color: svm.containsMouse ? theme.bg : theme.frost }
-                                        Text { text: "Save"; color: svm.containsMouse ? theme.bg : theme.text; font.pixelSize: 13; font.family: Tok.mono }
-                                    }
-                                    MouseArea { id: svm; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.saveLoc(locIn.text) }
-                                }
-                            }
-                            Section { title: "units"; icon: "thermostat" }
-                            RowLayout {
-                                Layout.fillWidth: true; spacing: 10
-                                Repeater {
-                                    model: [{u:"m",l:"°C  metric"},{u:"u",l:"°F  freedom"}]
-                                    delegate: Rectangle {
-                                        required property var modelData
-                                        readonly property bool sel: root.wxUnit === modelData.u
-                                        Layout.fillWidth: true; implicitHeight: 40; radius: Tok.r
-                                        color: sel ? theme.iris : (um.containsMouse ? theme.a(theme.iris,0.16) : theme.a(theme.line,0.4))
-                                        border.width: 1; border.color: sel ? theme.iris : theme.a(theme.iris,0.16)
-                                        Text { anchors.centerIn: parent; text: modelData.l; color: sel ? theme.bg : theme.text; font.pixelSize: 13; font.family: Tok.mono; font.bold: sel }
-                                        MouseArea { id: um; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.saveUnit(modelData.u) }
-                                    }
-                                }
-                            }
-                        }
-
-                        // ================= APPEARANCE =================
-                        ColumnLayout {
-                            property int tabIdx: 4
-                            visible: root.tab === 4; Layout.fillWidth: true; spacing: 14
-
-                            // segmented horizontal navigation bar for Appearance sub-menus
-                            RowLayout {
-                                Layout.fillWidth: true; spacing: 6; Layout.bottomMargin: 8
-                                Repeater {
-                                    model: [
-                                        { i: "visibility", l: "preview", k: 5 },
-                                        { i: "contrast", l: "theme", k: 0 },
-                                        { i: "palette", l: "colors", k: 1 },
-                                        { i: "tune", l: "targets", k: 2 },
-                                        { i: "font_download", l: "fonts", k: 3 },
-                                        { i: "wallpaper", l: "wallpaper", k: 4 }
-                                    ]
-                                    delegate: Rectangle {
-                                        required property var modelData; required property int index
-                                        readonly property bool sel: root.apSubTab === modelData.k
-                                        Layout.fillWidth: true; implicitHeight: 34; radius: Tok.r
-                                        color: sel ? theme.iris : (subMa.containsMouse ? theme.a(theme.iris, 0.16) : theme.a(theme.line, 0.4))
-                                        border.width: 1; border.color: sel ? theme.iris : theme.a(theme.iris, 0.14)
-                                        RowLayout {
-                                            anchors.centerIn: parent; spacing: 6
-                                            Sym { text: modelData.i; sz: 14; color: sel ? theme.bg : theme.frost }
-                                            Text { text: modelData.l; color: sel ? theme.bg : theme.text; font.pixelSize: 11; font.family: root.apFont; font.bold: sel }
-                                        }
-                                        MouseArea { id: subMa; anchors.fill: parent; hoverEnabled: true; preventStealing: true; cursorShape: Qt.PointingHandCursor; onClicked: root.apSubTab = modelData.k }
-                                    }
-                                }
-                            }
-
-                            AppearancePreview {
-                                Layout.fillWidth: true
-                                visible: root.apSubTab === 5
-                                property int appearanceSubTab: 5
-                                baseLight: root.apLight; baseAccent: root.apAccent; baseFont: root.apFont
-                                baseSolid: root.apBarOpaque; baseIconTheme: root.apIconTheme
-                                iconCatalog: root.iconPreviewCatalog; fonts: root.fontPresets; barFill: root.apBarFill
-                                onApplied: (light, accent, fontName, solid, iconTheme) => {
-                                    var accentChanged = root.apAccent.toString() !== accent.toString();
-                                    root.apModeSource = "manual";
-                                    root.apLight = light; root.apFont = fontName; root.apBarOpaque = solid;
-                                    root.apAccent = accent; root.apIconTheme = iconTheme;
-                                    if (accentChanged) root.apMatugen = false;
-                                    root.applyIconTheme(iconTheme);
-                                    root.applyAppMode();
-                                    if (accentChanged) root.afterAppearanceSave(function() { Quickshell.execDetached(["sh", root.matugenScript]); });
-                                }
-                            }
-
-                            // SUB-TAB 0: Bar Theme
-                            ColumnLayout {
-                                property int appearanceSubTab: 0
-                                visible: root.apSubTab === 0; Layout.fillWidth: true; spacing: 12
-                                Section { title: "theme"; icon: "contrast" }
-                                Flow { Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; spacing: 7
-                                    Repeater { model: [{k:false,l:"dark",i:"dark_mode"},{k:true,l:"light",i:"light_mode"}]
-                                        delegate: Chip { required property var modelData; label: modelData.l; icon: modelData.i; on: root.apLight===modelData.k
-                                            onPicked: { root.apLight=modelData.k; root.saveAppearance() } } } }
-                                // WHAT DECIDES IT.  This was a boolean — "auto dark by time", on or off —
-                                // which had no room for a third answer, and two booleans that can both be on
-                                // is how a schedule and a wallpaper end up overwriting each other once a
-                                // minute. One source, chosen.
-                                Text { text: "what decides light or dark"; color: theme.faint; font.pixelSize: 10
-                                       font.family: Tok.mono; Layout.leftMargin: 14; Layout.topMargin: 6 }
-                                Flow { Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; spacing: 7
-                                    Repeater {
-                                        model: [{k:"manual",   l:"you",       i:"touch_app"},
-                                                {k:"clock",    l:"the clock", i:"schedule"},
-                                                {k:"wallpaper",l:"the wallpaper", i:"wallpaper"}]
-                                        delegate: Chip { required property var modelData; label: modelData.l; icon: modelData.i
-                                            on: root.apModeSource === modelData.k
-                                            onPicked: {
-                                                root.apModeSource = modelData.k;
-                                                root.apAutoDark = (modelData.k === "clock");
-                                                root.saveAppearance();
-                                                if (modelData.k === "wallpaper") root.applyModeFromWallpaper();
-                                            } } } }
-                                Text {
-                                    Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14
-                                    wrapMode: Text.WordWrap; color: theme.faint; font.pixelSize: 10; font.family: Tok.mono
-                                    text: root.apModeSource === "clock"
-                                          ? "dark inside the window below · overrides the manual pick and the SUPER+⇧+D key"
-                                          : root.apModeSource === "wallpaper"
-                                          ? "each wallpaper's own brightness picks the mode. a picture that is neither clearly dark nor clearly light leaves it alone, so most switches change nothing — pressing SUPER+⇧+D hands control back to you"
-                                          : "whatever you last set, by the chip above or SUPER+⇧+D. nothing changes it behind your back"
-                                }
-                                RowLayout { visible: root.apModeSource === "clock"; Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; spacing: 10
-                                    Sym { text: "schedule"; sz: 18; color: theme.sub }
-                                    Text { text: "dark from"; color: theme.sub; font.pixelSize: 12; font.family: Tok.mono }
-                                    Rectangle { implicitWidth: 68; implicitHeight: 32; radius: Tok.r; color: theme.a(theme.line,0.5); border.width: 1; border.color: dstart.activeFocus?theme.iris:theme.a(theme.iris,0.2)
-                                        TextInput { id: dstart; anchors.fill: parent; horizontalAlignment: TextInput.AlignHCenter; verticalAlignment: TextInput.AlignVCenter
-                                            color: theme.text; font.pixelSize: 13; font.family: Tok.mono; inputMask: "99:99;_"; text: root.apDarkStart
-                                            onEditingFinished: { root.apDarkStart = text; root.saveAppearance() } } }
-                                    Text { text: "to"; color: theme.sub; font.pixelSize: 12; font.family: Tok.mono }
-                                    Rectangle { implicitWidth: 68; implicitHeight: 32; radius: Tok.r; color: theme.a(theme.line,0.5); border.width: 1; border.color: dend.activeFocus?theme.iris:theme.a(theme.iris,0.2)
-                                        TextInput { id: dend; anchors.fill: parent; horizontalAlignment: TextInput.AlignHCenter; verticalAlignment: TextInput.AlignVCenter
-                                            color: theme.text; font.pixelSize: 13; font.family: Tok.mono; inputMask: "99:99;_"; text: root.apDarkEnd
-                                            onEditingFinished: { root.apDarkEnd = text; root.saveAppearance() } } }
-                                    Item { Layout.fillWidth: true } }
-
-                                Section { title: "app preference"; icon: "apps" }
-                                Text { text: "controls GTK / Qt app themes independently from the shell"; color: theme.faint; font.pixelSize: 10; font.family: Tok.mono; Layout.leftMargin: 14 }
-                                Flow { Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; spacing: 7
-                                    Repeater { model: [{k:"auto",l:"auto",i:"sync"},{k:"dark",l:"dark",i:"dark_mode"},{k:"light",l:"light",i:"light_mode"}]
-                                        delegate: Chip { required property var modelData; label: modelData.l; icon: modelData.i; on: root.apAppMode===modelData.k
-                                            onPicked: { root.apAppMode=modelData.k; root.saveAppearance(); root.applyAppMode() } } } }
-                                Text { visible: root.apAppMode!=="auto"; text: "apps will stay " + root.apAppMode + " regardless of shell theme"; color: theme.iris; font.pixelSize: 10; font.family: Tok.mono; Layout.leftMargin: 14 }
-
-
-                                Section { title: "application icons"; icon: "folder" }
-                                Text { Layout.fillWidth: true; Layout.leftMargin: 14; wrapMode: Text.WordWrap
-                                    text: "Choose one icon family for Files and desktop applications. Light and dark variants follow your theme."
-                                    color: theme.sub; font.pixelSize: 11; font.family: Tok.sans }
-                                Flow { Layout.fillWidth: true; Layout.leftMargin: 14; spacing: 8
-                                    Repeater { model: root.installedIconThemes
-                                        delegate: Chip { required property var modelData
-                                            label: modelData; icon: "folder"; on: root.apIconTheme === modelData
-                                            onPicked: root.applyIconTheme(modelData) }
-                                    }
-                                }
-                                ToggleCard { icon: "palette"; title: "folders follow wallpaper colour"
-                                    desc: "Papirus folders use the nearest accent colour; requires the folder helper."
-                                    on: root.apFolderColorFollow
-                                    onToggled: { root.apFolderColorFollow = !root.apFolderColorFollow; root.saveAppearance();
-                                        root.afterAppearanceSave(function() { Quickshell.execDetached(["python3", Qt.resolvedUrl("sea-folder-color.py").toString().replace("file://", "")]); }) }
-                                }
-                                Chip { Layout.leftMargin: 14; label: "reset folder colour"; icon: "restart_alt"
-                                    onPicked: { root.apFolderColorFollow = false; root.saveAppearance();
-                                        root.afterAppearanceSave(function() { Quickshell.execDetached(["python3", Qt.resolvedUrl("sea-folder-color.py").toString().replace("file://", ""), "--reset"]); }) }
-                                }
-                                Text { Layout.leftMargin: 14; text: root.iconApplyState || "Some running applications need reopening to refresh their icons."
-                                    color: root.iconApplyFailed ? theme.bad : theme.faint; font.pixelSize: 10; font.family: Tok.sans }
-
-                                // A picture of your choosing stuck on the corner of the power menu and the
-                                // media dropdown (a GIF moves while the panel is open). None by default.
-                                Section { title: "stickers"; icon: "add_reaction" }
-                                Repeater {
-                                    model: [{ k: "power", l: "power menu" }, { k: "media", l: "media" }]
-                                    delegate: RowLayout {
-                                        required property var modelData
-                                        readonly property string path: modelData.k === "power" ? root.apStickerPower : root.apStickerMedia
-                                        function setPath(f) {
-                                            if (modelData.k === "power") root.apStickerPower = f; else root.apStickerMedia = f;
-                                            root.saveAppearance();
-                                        }
-                                        Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; spacing: 10
-                                        Text { text: modelData.l; color: theme.sub; font.pixelSize: 12; font.family: Tok.mono; Layout.minimumWidth: 90 }
-                                        Rectangle {
-                                            Layout.fillWidth: true; implicitHeight: 34; radius: Tok.r
-                                            color: theme.a(theme.line, 0.4)
-                                            border.width: 1; border.color: theme.a(theme.iris, 0.16)
-                                            Text {
-                                                anchors { fill: parent; leftMargin: 12; rightMargin: 12 }
-                                                verticalAlignment: Text.AlignVCenter
-                                                text: parent.parent.path.length ? parent.parent.path : "none"
-                                                color: parent.parent.path.length ? theme.text : theme.faint
-                                                font.pixelSize: 11; font.family: Tok.mono; elide: Text.ElideLeft
-                                            }
-                                        }
-                                        Chip { label: "choose…"; icon: "folder_open"
-                                            onPicked: root.pickFile(modelData.l + " sticker", "*.gif *.png *.webp *.jpg *.jpeg", function (f) { parent.setPath(f) }) }
-                                        Chip { visible: parent.path.length > 0; label: "remove"; icon: "close"; onPicked: parent.setPath("") }
-                                    }
-                                }
-                            }
-
-                            // SUB-TAB 1: Colors
-                            ColumnLayout {
-                                property int appearanceSubTab: 1
-                                visible: root.apSubTab === 1; Layout.fillWidth: true; spacing: 12
-                                Section { title: "accent colour"; icon: "palette" }
-                                Flow { Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; spacing: 10
-                                    Repeater { model: root.accents
-                                        delegate: Rectangle { required property var modelData; readonly property bool sel: root.apAccent.toLowerCase()===modelData.toLowerCase()
-                                            width: 40; height: 40; radius: Tok.r; color: modelData
-                                            border.width: sel?3:1; border.color: sel?theme.text:theme.a(theme.text,0.2)
-                                            Sym { anchors.centerIn: parent; visible: parent.sel; text: "check"; sz: 20; color: "#0d1420" }
-                                            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.pickAccent(modelData) } } } }
-                                ToggleCard { icon: "colorize"; title: "auto colours from wallpaper"
-                                    desc: "recolours the shell + kitty on every wallpaper · off = sea cyan"
-                                    on: root.apMatugen; onToggled: root.toggleMatugen() }
-                                ColumnLayout { Layout.fillWidth: true; spacing: 8; visible: root.apMatugen
-                                    RowLayout { Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; spacing: 8
-                                        Sym { text: "tune"; sz: 15; color: theme.faint }
-                                        Text { text: "colour scheme"; color: theme.sub; font.pixelSize: 12; font.family: Tok.mono }
-                                        Item { Layout.fillWidth: true }
-                                        Text { text: root.apScheme.replace("scheme-",""); color: theme.frost; font.pixelSize: 11; font.family: Tok.mono } }
-                                    Flow { Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; spacing: 7
-                                        Repeater { model: root.schemes
-                                            delegate: Chip { required property var modelData; label: (""+modelData).replace("scheme-",""); on: root.apScheme===modelData
-                                                onPicked: root.setScheme(modelData) } } } }
-                                RowLayout { Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; spacing: 8
-                                    AccentBtn { icon: root.matugenBusy?"sync":"auto_awesome"; label: root.matugenBusy ? "matching…" : "pick a palette from wallpaper"; onClicked: root.matchWallpaper() }
-                                    AccentBtn { Layout.fillWidth: false; implicitWidth: 104; icon: "colorize"; label: "picker"; onClicked: { root.pickingTarget = "accent"; colorPickerProc.running = true } } }
-                                Flow { Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; spacing: 9; visible: root.matugenPalette.length>0
-                                    Repeater { model: root.matugenPalette
-                                        delegate: Rectangle { required property var modelData; readonly property bool sel: root.apAccent.toLowerCase()===modelData.toLowerCase()
-                                            width: 36; height: 36; radius: Tok.r; color: modelData
-                                            border.width: sel?3:1; border.color: sel?theme.text:theme.a(theme.text,0.2)
-                                            Sym { anchors.centerIn: parent; visible: parent.sel; text: "check"; sz: 18; color: "#0d1420" }
-                                            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.pickPaletteAccent(modelData) } } } }
-                            }
-
-                            // SUB-TAB 2: Custom Targets Overrides
-                            ColumnLayout {
-                                property int appearanceSubTab: 2
-                                visible: root.apSubTab === 2; Layout.fillWidth: true; spacing: 14
-                                // ---------- per-target colour overrides ----------
-                                ColumnLayout { Layout.fillWidth: true; spacing: 8
-                                    Section { title: "colour targets"; icon: "tune" }
-                                    Text { text: "Choose which apps follow the accent or use custom colours."; color: theme.faint; font.pixelSize: 10; font.family: root.apFont }
-                                    // Hyprland borders
-                                    Rectangle { Layout.fillWidth: true; implicitHeight: hyprCol.implicitHeight + 20; radius: Tok.r
-                                        color: theme.a(theme.line,0.4); border.width: 1; border.color: root.ovrHyprland?theme.a(theme.iris,0.5):theme.a(theme.iris,0.16)
-                                        ColumnLayout { id: hyprCol; anchors.fill: parent; anchors.margins: 10; spacing: 8
-                                            RowLayout { Layout.fillWidth: true; spacing: 10
-                                                Sym { text: "border_style"; sz: 18; color: root.ovrHyprland?theme.frost:theme.faint }
-                                                ColumnLayout { spacing: 1; Layout.fillWidth: true
-                                                    Text { text: "hyprland borders"; color: theme.text; font.pixelSize: 13; font.family: root.apFont }
-                                                    Text { text: "window active/inactive border colours"; color: theme.faint; font.pixelSize: 10; font.family: root.apFont } }
-                                                Rectangle { implicitWidth: 46; implicitHeight: 22; radius: Tok.r
-                                                    color: root.ovrHyprland?theme.iris:theme.a(theme.line,0.85); border.width: 1; border.color: root.ovrHyprland?theme.iris:theme.a(theme.iris,0.3)
-                                                    Rectangle { width: 16; height: 16; radius: Tok.r; y: 3; x: root.ovrHyprland?27:3; color: theme.frost; Behavior on x { NumberAnimation { duration: 120 } } }
-                                                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { root.ovrHyprland=!root.ovrHyprland; root.toggleOverride("hyprland") } } } }
-                                            // custom border colours (only visible when auto-match is OFF)
-                                            ColumnLayout { Layout.fillWidth: true; spacing: 6; visible: !root.ovrHyprland
-                                                RowLayout { Layout.fillWidth: true; spacing: 8
-                                                    Text { text: "active"; color: theme.sub; font.pixelSize: 11; font.family: root.apFont; Layout.minimumWidth: 46 }
-                                                    Rectangle { implicitWidth: 16; implicitHeight: 16; radius: Tok.r; color: root.ovrHyprActive || root.apAccent; border.width: 1; border.color: theme.a(theme.text,0.2) }
-                                                    Rectangle { Layout.fillWidth: true; implicitHeight: 28; radius: Tok.r; color: theme.a(theme.line,0.5); border.width: 1; border.color: haIn.activeFocus?theme.iris:theme.a(theme.iris,0.2)
-                                                        TextInput { id: haIn; anchors.fill: parent; anchors.leftMargin: 8; anchors.rightMargin: 8; verticalAlignment: TextInput.AlignVCenter
-                                                            color: theme.text; font.pixelSize: 11; font.family: Tok.mono; clip: true; selectByMouse: true; text: root.ovrHyprActive
-                                                            onEditingFinished: { root.ovrHyprActive=text.trim(); root.toggleOverride("hyprland") }
-                                                            Text { anchors.verticalCenter: parent.verticalCenter; visible: !haIn.text; text: "auto"; color: theme.faint; font.pixelSize: 11; font.family: Tok.mono } } }
-                                                    Rectangle { implicitWidth: 28; implicitHeight: 28; radius: Tok.r
-                                                        color: haEdm.containsMouse ? theme.a(theme.iris, 0.2) : theme.a(theme.line, 0.4)
-                                                        border.width: 1; border.color: theme.a(theme.iris, 0.16)
-                                                        Sym { anchors.centerIn: parent; text: "colorize"; sz: 14; color: theme.frost }
-                                                        MouseArea { id: haEdm; anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { root.pickingTarget = "hyprActive"; colorPickerProc.running = true } } } }
-                                                Flow { Layout.fillWidth: true; spacing: 4; Layout.leftMargin: 54
-                                                    Repeater { model: root.accents.concat(root.matugenPalette)
-                                                        delegate: Rectangle { required property var modelData; width: 16; height: 16; radius: Tok.r; color: modelData; border.width: 1; border.color: theme.a(theme.text, 0.2)
-                                                            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { root.ovrHyprActive = modelData; root.toggleOverride("hyprland") } } } } }
-                                                RowLayout { Layout.fillWidth: true; spacing: 8
-                                                    Text { text: "inactive"; color: theme.sub; font.pixelSize: 11; font.family: root.apFont; Layout.minimumWidth: 46 }
-                                                    Rectangle { implicitWidth: 16; implicitHeight: 16; radius: Tok.r; color: root.ovrHyprInactive || theme.a(root.apAccent,0.4); border.width: 1; border.color: theme.a(theme.text,0.2) }
-                                                    Rectangle { Layout.fillWidth: true; implicitHeight: 28; radius: Tok.r; color: theme.a(theme.line,0.5); border.width: 1; border.color: hiIn.activeFocus?theme.iris:theme.a(theme.iris,0.2)
-                                                        TextInput { id: hiIn; anchors.fill: parent; anchors.leftMargin: 8; anchors.rightMargin: 8; verticalAlignment: TextInput.AlignVCenter
-                                                            color: theme.text; font.pixelSize: 11; font.family: Tok.mono; clip: true; selectByMouse: true; text: root.ovrHyprInactive
-                                                            onEditingFinished: { root.ovrHyprInactive=text.trim(); root.toggleOverride("hyprland") }
-                                                            Text { anchors.verticalCenter: parent.verticalCenter; visible: !hiIn.text; text: "auto"; color: theme.faint; font.pixelSize: 11; font.family: Tok.mono } } }
-                                                    Rectangle { implicitWidth: 28; implicitHeight: 28; radius: Tok.r
-                                                        color: hiEdm.containsMouse ? theme.a(theme.iris, 0.2) : theme.a(theme.line, 0.4)
-                                                        border.width: 1; border.color: theme.a(theme.iris, 0.16)
-                                                        Sym { anchors.centerIn: parent; text: "colorize"; sz: 14; color: theme.frost }
-                                                        MouseArea { id: hiEdm; anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { root.pickingTarget = "hyprInactive"; colorPickerProc.running = true } } } }
-                                                Flow { Layout.fillWidth: true; spacing: 4; Layout.leftMargin: 54
-                                                    Repeater { model: root.accents.concat(root.matugenPalette)
-                                                        delegate: Rectangle { required property var modelData; width: 16; height: 16; radius: Tok.r; color: modelData; border.width: 1; border.color: theme.a(theme.text, 0.2)
-                                                            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { root.ovrHyprInactive = modelData; root.toggleOverride("hyprland") } } } } } } } }
-                                    // Hyprland window glow (decoration:shadow) — a separate target
-                                    // from the borders on purpose: a matched border with a fixed
-                                    // glow is a real preference, and they used to be welded together
-                                    // only because the glow simply never followed the wallpaper.
-                                    Rectangle { Layout.fillWidth: true; implicitHeight: glowCol.implicitHeight + 20; radius: Tok.r
-                                        color: theme.a(theme.line,0.4); border.width: 1; border.color: root.ovrHyprGlow?theme.a(theme.iris,0.5):theme.a(theme.iris,0.16)
-                                        ColumnLayout { id: glowCol; anchors.fill: parent; anchors.margins: 10; spacing: 8
-                                            RowLayout { Layout.fillWidth: true; spacing: 10
-                                                Sym { text: "blur_on"; sz: 18; color: root.ovrHyprGlow?theme.frost:theme.faint }
-                                                ColumnLayout { spacing: 1; Layout.fillWidth: true
-                                                    Text { text: "hyprland window glow"; color: theme.text; font.pixelSize: 13; font.family: root.apFont }
-                                                    Text { text: "the coloured shadow around the focused window"; color: theme.faint; font.pixelSize: 10; font.family: root.apFont } }
-                                                Rectangle { implicitWidth: 46; implicitHeight: 22; radius: Tok.r
-                                                    color: root.ovrHyprGlow?theme.iris:theme.a(theme.line,0.85); border.width: 1; border.color: root.ovrHyprGlow?theme.iris:theme.a(theme.iris,0.3)
-                                                    Rectangle { width: 16; height: 16; radius: Tok.r; y: 3; x: root.ovrHyprGlow?27:3; color: theme.frost; Behavior on x { NumberAnimation { duration: 120 } } }
-                                                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { root.ovrHyprGlow=!root.ovrHyprGlow; root.toggleOverride("hyprGlow") } } } }
-                                            ColumnLayout { Layout.fillWidth: true; spacing: 6; visible: !root.ovrHyprGlow
-                                                RowLayout { Layout.fillWidth: true; spacing: 8
-                                                    Text { text: "glow"; color: theme.sub; font.pixelSize: 11; font.family: root.apFont; Layout.minimumWidth: 46 }
-                                                    Rectangle { implicitWidth: 16; implicitHeight: 16; radius: Tok.r; color: root.ovrHyprGlowColor || root.apAccent; border.width: 1; border.color: theme.a(theme.text,0.2) }
-                                                    Rectangle { Layout.fillWidth: true; implicitHeight: 28; radius: Tok.r; color: theme.a(theme.line,0.5); border.width: 1; border.color: hgIn.activeFocus?theme.iris:theme.a(theme.iris,0.2)
-                                                        TextInput { id: hgIn; anchors.fill: parent; anchors.leftMargin: 8; anchors.rightMargin: 8; verticalAlignment: TextInput.AlignVCenter
-                                                            color: theme.text; font.pixelSize: 11; font.family: Tok.mono; clip: true; selectByMouse: true; text: root.ovrHyprGlowColor
-                                                            onEditingFinished: { root.ovrHyprGlowColor=text.trim(); root.toggleOverride("hyprGlow") }
-                                                            Text { anchors.verticalCenter: parent.verticalCenter; visible: !hgIn.text; text: "auto"; color: theme.faint; font.pixelSize: 11; font.family: Tok.mono } } } }
-                                                Flow { Layout.fillWidth: true; spacing: 4; Layout.leftMargin: 54
-                                                    Repeater { model: root.accents.concat(root.matugenPalette)
-                                                        delegate: Rectangle { required property var modelData; width: 16; height: 16; radius: Tok.r; color: modelData; border.width: 1; border.color: theme.a(theme.text, 0.2)
-                                                            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { root.ovrHyprGlowColor = modelData; root.toggleOverride("hyprGlow") } } } } } } } }
-                                    // Kitty terminal
-                                    Rectangle { Layout.fillWidth: true; implicitHeight: kittyCol.implicitHeight + 20; radius: Tok.r
-                                        color: theme.a(theme.line,0.4); border.width: 1; border.color: root.ovrKitty?theme.a(theme.iris,0.5):theme.a(theme.iris,0.16)
-                                        ColumnLayout { id: kittyCol; anchors.fill: parent; anchors.margins: 10; spacing: 8
-                                            RowLayout { Layout.fillWidth: true; spacing: 10
-                                                Sym { text: "terminal"; sz: 18; color: root.ovrKitty?theme.frost:theme.faint }
-                                                ColumnLayout { spacing: 1; Layout.fillWidth: true
-                                                    Text { text: "kitty terminal"; color: theme.text; font.pixelSize: 13; font.family: root.apFont }
-                                                    Text { text: "terminal colour palette and background"; color: theme.faint; font.pixelSize: 10; font.family: root.apFont } }
-                                                Rectangle { implicitWidth: 46; implicitHeight: 22; radius: Tok.r
-                                                    color: root.ovrKitty?theme.iris:theme.a(theme.line,0.85); border.width: 1; border.color: root.ovrKitty?theme.iris:theme.a(theme.iris,0.3)
-                                                    Rectangle { width: 16; height: 16; radius: Tok.r; y: 3; x: root.ovrKitty?27:3; color: theme.frost; Behavior on x { NumberAnimation { duration: 120 } } }
-                                                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { root.ovrKitty=!root.ovrKitty; root.toggleOverride("kitty") } } } }
-                                            // custom kitty colors
-                                            ColumnLayout { Layout.fillWidth: true; spacing: 6; visible: !root.ovrKitty
-                                                RowLayout { Layout.fillWidth: true; spacing: 8
-                                                    Text { text: "accent"; color: theme.sub; font.pixelSize: 11; font.family: root.apFont; Layout.minimumWidth: 46 }
-                                                    Rectangle { implicitWidth: 16; implicitHeight: 16; radius: Tok.r; color: root.ovrKittyAccent || root.apAccent; border.width: 1; border.color: theme.a(theme.text,0.2) }
-                                                    Rectangle { Layout.fillWidth: true; implicitHeight: 28; radius: Tok.r; color: theme.a(theme.line,0.5); border.width: 1; border.color: kaIn.activeFocus?theme.iris:theme.a(theme.iris,0.2)
-                                                        TextInput { id: kaIn; anchors.fill: parent; anchors.leftMargin: 8; anchors.rightMargin: 8; verticalAlignment: TextInput.AlignVCenter
-                                                            color: theme.text; font.pixelSize: 11; font.family: Tok.mono; clip: true; selectByMouse: true; text: root.ovrKittyAccent
-                                                            onEditingFinished: { root.ovrKittyAccent=text.trim(); root.toggleOverride("kitty") }
-                                                            Text { anchors.verticalCenter: parent.verticalCenter; visible: !kaIn.text; text: "auto"; color: theme.faint; font.pixelSize: 11; font.family: Tok.mono } } }
-                                                    Rectangle { implicitWidth: 28; implicitHeight: 28; radius: Tok.r
-                                                        color: kaEdm.containsMouse ? theme.a(theme.iris, 0.2) : theme.a(theme.line, 0.4)
-                                                        border.width: 1; border.color: theme.a(theme.iris, 0.16)
-                                                        Sym { anchors.centerIn: parent; text: "colorize"; sz: 14; color: theme.frost }
-                                                        MouseArea { id: kaEdm; anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { root.pickingTarget = "kittyAccent"; colorPickerProc.running = true } } } }
-                                                Flow { Layout.fillWidth: true; spacing: 4; Layout.leftMargin: 54
-                                                    Repeater { model: root.accents.concat(root.matugenPalette)
-                                                        delegate: Rectangle { required property var modelData; width: 16; height: 16; radius: Tok.r; color: modelData; border.width: 1; border.color: theme.a(theme.text, 0.2)
-                                                            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { root.ovrKittyAccent = modelData; root.toggleOverride("kitty") } } } } }
-                                                RowLayout { Layout.fillWidth: true; spacing: 8
-                                                    Text { text: "bg"; color: theme.sub; font.pixelSize: 11; font.family: root.apFont; Layout.minimumWidth: 46 }
-                                                    Rectangle { implicitWidth: 16; implicitHeight: 16; radius: Tok.r; color: root.ovrKittyBg || "#171729"; border.width: 1; border.color: theme.a(theme.text,0.2) }
-                                                    Rectangle { Layout.fillWidth: true; implicitHeight: 28; radius: Tok.r; color: theme.a(theme.line,0.5); border.width: 1; border.color: kbIn.activeFocus?theme.iris:theme.a(theme.iris,0.2)
-                                                        TextInput { id: kbIn; anchors.fill: parent; anchors.leftMargin: 8; anchors.rightMargin: 8; verticalAlignment: TextInput.AlignVCenter
-                                                            color: theme.text; font.pixelSize: 11; font.family: Tok.mono; clip: true; selectByMouse: true; text: root.ovrKittyBg
-                                                            onEditingFinished: { root.ovrKittyBg=text.trim(); root.toggleOverride("kitty") }
-                                                            Text { anchors.verticalCenter: parent.verticalCenter; visible: !kbIn.text; text: "auto"; color: theme.faint; font.pixelSize: 11; font.family: Tok.mono } } }
-                                                    Rectangle { implicitWidth: 28; implicitHeight: 28; radius: Tok.r
-                                                        color: kbEdm.containsMouse ? theme.a(theme.iris, 0.2) : theme.a(theme.line, 0.4)
-                                                        border.width: 1; border.color: theme.a(theme.iris, 0.16)
-                                                        Sym { anchors.centerIn: parent; text: "colorize"; sz: 14; color: theme.frost }
-                                                        MouseArea { id: kbEdm; anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { root.pickingTarget = "kittyBg"; colorPickerProc.running = true } } } }
-                                                Flow { Layout.fillWidth: true; spacing: 4; Layout.leftMargin: 54
-                                                    Repeater { model: ["#0f141d","#171729","#1a1b26","#1e1e2e","#282828","#000000"].concat(root.matugenPalette)
-                                                        delegate: Rectangle { required property var modelData; width: 16; height: 16; radius: Tok.r; color: modelData; border.width: 1; border.color: theme.a(theme.text, 0.2)
-                                                            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { root.ovrKittyBg = modelData; root.toggleOverride("kitty") } } } } } } } }
-                                    // Fastfetch
-                                    Rectangle { Layout.fillWidth: true; implicitHeight: ffCol.implicitHeight + 20; radius: Tok.r
-                                        color: theme.a(theme.line,0.4); border.width: 1; border.color: root.ovrFastfetch?theme.a(theme.iris,0.5):theme.a(theme.iris,0.16)
-                                        ColumnLayout { id: ffCol; anchors.fill: parent; anchors.margins: 10; spacing: 8
-                                            RowLayout { Layout.fillWidth: true; spacing: 10
-                                                Sym { text: "info"; sz: 18; color: root.ovrFastfetch?theme.frost:theme.faint }
-                                                ColumnLayout { spacing: 1; Layout.fillWidth: true
-                                                    Text { text: "fastfetch"; color: theme.text; font.pixelSize: 13; font.family: root.apFont }
-                                                    Text { text: "system info key + logo accent colour"; color: theme.faint; font.pixelSize: 10; font.family: root.apFont } }
-                                                Rectangle { implicitWidth: 46; implicitHeight: 22; radius: Tok.r
-                                                    color: root.ovrFastfetch?theme.iris:theme.a(theme.line,0.85); border.width: 1; border.color: root.ovrFastfetch?theme.iris:theme.a(theme.iris,0.3)
-                                                    Rectangle { width: 16; height: 16; radius: Tok.r; y: 3; x: root.ovrFastfetch?27:3; color: theme.frost; Behavior on x { NumberAnimation { duration: 120 } } }
-                                                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { root.ovrFastfetch=!root.ovrFastfetch; root.toggleOverride("fastfetch") } } } }
-                                            // custom fastfetch accent
-                                            ColumnLayout { Layout.fillWidth: true; spacing: 6; visible: !root.ovrFastfetch
-                                                RowLayout { Layout.fillWidth: true; spacing: 8
-                                                    Text { text: "accent"; color: theme.sub; font.pixelSize: 11; font.family: root.apFont; Layout.minimumWidth: 46 }
-                                                    Rectangle { implicitWidth: 16; implicitHeight: 16; radius: Tok.r; color: root.ovrFastfetchAccent || root.apAccent; border.width: 1; border.color: theme.a(theme.text,0.2) }
-                                                    Rectangle { Layout.fillWidth: true; implicitHeight: 28; radius: Tok.r; color: theme.a(theme.line,0.5); border.width: 1; border.color: ffaIn.activeFocus?theme.iris:theme.a(theme.iris,0.2)
-                                                        TextInput { id: ffaIn; anchors.fill: parent; anchors.leftMargin: 8; anchors.rightMargin: 8; verticalAlignment: TextInput.AlignVCenter
-                                                            color: theme.text; font.pixelSize: 11; font.family: Tok.mono; clip: true; selectByMouse: true; text: root.ovrFastfetchAccent
-                                                            onEditingFinished: { root.ovrFastfetchAccent=text.trim(); root.toggleOverride("fastfetch") }
-                                                            Text { anchors.verticalCenter: parent.verticalCenter; visible: !ffaIn.text; text: "auto"; color: theme.faint; font.pixelSize: 11; font.family: Tok.mono } } }
-                                                    Rectangle { implicitWidth: 28; implicitHeight: 28; radius: Tok.r
-                                                        color: ffEdm.containsMouse ? theme.a(theme.iris, 0.2) : theme.a(theme.line, 0.4)
-                                                        border.width: 1; border.color: theme.a(theme.iris, 0.16)
-                                                        Sym { anchors.centerIn: parent; text: "colorize"; sz: 14; color: theme.frost }
-                                                        MouseArea { id: ffEdm; anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { root.pickingTarget = "fastfetch"; colorPickerProc.running = true } } } }
-                                                Flow { Layout.fillWidth: true; spacing: 4; Layout.leftMargin: 54
-                                                    Repeater { model: root.accents.concat(root.matugenPalette)
-                                                        delegate: Rectangle { required property var modelData; width: 16; height: 16; radius: Tok.r; color: modelData; border.width: 1; border.color: theme.a(theme.text, 0.2)
-                                                            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { root.ovrFastfetchAccent = modelData; root.toggleOverride("fastfetch") } } } } } } } }
-                                    // Starship prompt
-                                    Rectangle { Layout.fillWidth: true; implicitHeight: ssCol.implicitHeight + 20; radius: Tok.r
-                                        color: theme.a(theme.line,0.4); border.width: 1; border.color: root.ovrStarship?theme.a(theme.iris,0.5):theme.a(theme.iris,0.16)
-                                        ColumnLayout { id: ssCol; anchors.fill: parent; anchors.margins: 10; spacing: 8
-                                            RowLayout { Layout.fillWidth: true; spacing: 10
-                                                Sym { text: "star"; sz: 18; color: root.ovrStarship?theme.frost:theme.faint }
-                                                ColumnLayout { spacing: 1; Layout.fillWidth: true
-                                                    Text { text: "starship prompt"; color: theme.text; font.pixelSize: 13; font.family: root.apFont }
-                                                    Text { text: "terminal prompt accent colours"; color: theme.faint; font.pixelSize: 10; font.family: root.apFont } }
-                                                Rectangle { implicitWidth: 46; implicitHeight: 22; radius: Tok.r
-                                                    color: root.ovrStarship?theme.iris:theme.a(theme.line,0.85); border.width: 1; border.color: root.ovrStarship?theme.iris:theme.a(theme.iris,0.3)
-                                                    Rectangle { width: 16; height: 16; radius: Tok.r; y: 3; x: root.ovrStarship?27:3; color: theme.frost; Behavior on x { NumberAnimation { duration: 120 } } }
-                                                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { root.ovrStarship=!root.ovrStarship; root.toggleOverride("starship") } } } }
-                                            // custom starship accent
-                                            ColumnLayout { Layout.fillWidth: true; spacing: 6; visible: !root.ovrStarship
-                                                RowLayout { Layout.fillWidth: true; spacing: 8
-                                                    Text { text: "accent"; color: theme.sub; font.pixelSize: 11; font.family: root.apFont; Layout.minimumWidth: 46 }
-                                                    Rectangle { implicitWidth: 16; implicitHeight: 16; radius: Tok.r; color: root.ovrStarshipAccent || root.apAccent; border.width: 1; border.color: theme.a(theme.text,0.2) }
-                                                    Rectangle { Layout.fillWidth: true; implicitHeight: 28; radius: Tok.r; color: theme.a(theme.line,0.5); border.width: 1; border.color: ssaIn.activeFocus?theme.iris:theme.a(theme.iris,0.2)
-                                                        TextInput { id: ssaIn; anchors.fill: parent; anchors.leftMargin: 8; anchors.rightMargin: 8; verticalAlignment: TextInput.AlignVCenter
-                                                            color: theme.text; font.pixelSize: 11; font.family: Tok.mono; clip: true; selectByMouse: true; text: root.ovrStarshipAccent
-                                                            onEditingFinished: { root.ovrStarshipAccent=text.trim(); root.toggleOverride("starship") }
-                                                            Text { anchors.verticalCenter: parent.verticalCenter; visible: !ssaIn.text; text: "auto"; color: theme.faint; font.pixelSize: 11; font.family: Tok.mono } } }
-                                                    Rectangle { implicitWidth: 28; implicitHeight: 28; radius: Tok.r
-                                                        color: ssEdm.containsMouse ? theme.a(theme.iris, 0.2) : theme.a(theme.line, 0.4)
-                                                        border.width: 1; border.color: theme.a(theme.iris, 0.16)
-                                                        Sym { anchors.centerIn: parent; text: "colorize"; sz: 14; color: theme.frost }
-                                                        MouseArea { id: ssEdm; anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { root.pickingTarget = "starship"; colorPickerProc.running = true } } } }
-                                                Flow { Layout.fillWidth: true; spacing: 4; Layout.leftMargin: 54
-                                                    Repeater { model: root.accents.concat(root.matugenPalette)
-                                                        delegate: Rectangle { required property var modelData; width: 16; height: 16; radius: Tok.r; color: modelData; border.width: 1; border.color: theme.a(theme.text, 0.2)
-                                                            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { root.ovrStarshipAccent = modelData; root.toggleOverride("starship") } } } } } } } }
-                                }
-                            }
-
-                            // SUB-TAB 3: Fonts
-                            ColumnLayout {
-                                property int appearanceSubTab: 3
-                                visible: root.apSubTab === 3; Layout.fillWidth: true; spacing: 12
-                                Section { title: "font"; icon: "font_download" }
-                                Flow { Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; spacing: 7
-                                    Repeater { model: root.fontPresets
-                                        delegate: Rectangle { required property var modelData; readonly property bool sel: root.apFont===modelData
-                                            implicitWidth: ft.implicitWidth+22; implicitHeight: 32; radius: Tok.r
-                                            color: sel?theme.iris:(fmm.containsMouse?theme.a(theme.iris,0.16):theme.a(theme.line,0.4)); border.width: 1; border.color: sel?theme.iris:theme.a(theme.iris,0.16)
-                                            Text { id: ft; anchors.centerIn: parent; text: modelData; color: sel?theme.bg:theme.text; font.pixelSize: 12; font.family: modelData; font.bold: sel }
-                                            MouseArea { id: fmm; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: { root.apFont=modelData; root.saveAppearance() } } } } }
-                                FontPicker {
-                                    Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14
-                                    text: root.apFont
-                                    onPicked: function(family) { root.addCustomFont(family) }
-                                }
-                                Text { text: "changes apply to the bar live"; color: theme.faint; font.pixelSize: 10; font.family: Tok.mono; Layout.leftMargin: 14 }
-                            }
-
-                            // SUB-TAB 4: Wallpaper — folder · transition · rotation · pair · motion
-                            ColumnLayout {
-                                id: wpTab
-                                property int appearanceSubTab: 4
-                                visible: root.apSubTab === 4; Layout.fillWidth: true; spacing: 12
-                                // "" | day | night — which cartridge slot the shelf is filling.
-                                property string armed: ""
-                                // Both: onVisibleChanged covers arriving at the tab, and
-                                // Component.onCompleted covers the panel opening with this
-                                // tab already selected — where visibility never changes and
-                                // the shelf would sit empty saying "0 wallpapers".
-                                onVisibleChanged: if (visible && !root.wpIndex.length) root.rescanWallpapers()
-                                Component.onCompleted: if (visible && !root.wpIndex.length) root.rescanWallpapers()
-                                // …and whenever the PANEL opens. The two above only fire when
-                                // this tab's visibility changes, so a panel left sitting on
-                                // this tab with an empty index — which is what an earlier
-                                // failed scan leaves behind — had no way to try again short of
-                                // the re-scan button.
-                                Connections {
-                                    target: root
-                                    function onShownChanged() {
-                                        if (root.shown && wpTab.visible && !root.wpIndex.length)
-                                            root.rescanWallpapers();
-                                    }
-                                }
-
-                                Section { title: "wallpaper folder"; icon: "folder_open" }
-                                Text {
-                                    text: "the picker, the SUPER+N keybinds and auto-rotate all read this one folder"
-                                    color: theme.faint; font.pixelSize: 10; font.family: Tok.mono
-                                    Layout.leftMargin: 14
-                                }
-                                Rectangle {
-                                    Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14
-                                    implicitHeight: 38; radius: Tok.r
-                                    color: theme.a(theme.line, 0.4)
-                                    border.width: 1
-                                    border.color: wpDirIn.activeFocus ? theme.iris : theme.a(theme.iris, 0.16)
-                                    RowLayout {
-                                        anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 10
-                                        spacing: 8
-                                        Sym { text: "folder"; sz: 17; color: theme.sub }
-                                        TextInput {
-                                            id: wpDirIn
-                                            Layout.fillWidth: true
-                                            verticalAlignment: TextInput.AlignVCenter
-                                            color: theme.text; font.pixelSize: 13; font.family: Tok.mono
-                                            clip: true; selectByMouse: true
-                                            selectionColor: theme.a(theme.iris, 0.4)
-                                            Component.onCompleted: text = root.apWpDir
-                                            // Committed on ↵, not on every keystroke: saving per character
-                                            // would re-scan the folder once per letter of the path you are
-                                            // still halfway through typing.
-                                            onAccepted: {
-                                                root.apWpDir = text.trim().length ? text.trim() : "~/Pictures/wallpapers";
-                                                wpDirIn.text = root.apWpDir;
-                                                root.saveAppearance();
-                                                root.rescanWallpapers();
-                                            }
-                                        }
-                                        Text {
-                                            visible: wpDirIn.text.trim() !== root.apWpDir
-                                            text: "↵ to save"; color: theme.iris
-                                            font.pixelSize: 10; font.family: Tok.mono
-                                        }
-                                        Rectangle {
-                                            implicitWidth: 28; implicitHeight: 26; radius: Tok.rSmall
-                                            color: wpBrowseMa.containsMouse ? theme.a(theme.iris, 0.22) : "transparent"
-                                            border.width: 1; border.color: theme.a(theme.iris, 0.25)
-                                            Sym { anchors.centerIn: parent; text: "folder_open"; sz: 15
-                                                  color: wpBrowseMa.containsMouse ? theme.iris : theme.sub }
-                                            MouseArea {
-                                                id: wpBrowseMa
-                                                anchors.fill: parent; hoverEnabled: true
-                                                cursorShape: Qt.PointingHandCursor
-                                                onClicked: root.pickFolder("wallpaper folder",
-                                                                           root.expandHome(root.apWpDir),
-                                                                           function (dir) {
-                                                    root.apWpDir = root.shortenHome(dir);
-                                                    wpDirIn.text = root.apWpDir;
-                                                    root.saveAppearance();
-                                                    root.rescanWallpapers();
-                                                })
-                                            }
-                                        }
-                                    }
-                                }
-                                ToggleCard {
-                                    icon: "account_tree"
-                                    title: "include subfolders"
-                                    desc: "each subfolder becomes a collection you can filter the picker by"
-                                    on: root.apWpRecursive
-                                    onToggled: { root.apWpRecursive = !root.apWpRecursive
-                                                 root.saveAppearance(); root.rescanWallpapers() }
-                                }
-                                RowLayout {
-                                    Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14
-                                    spacing: 10
-                                    Text {
-                                        Layout.fillWidth: true
-                                        color: theme.sub; font.pixelSize: 11; font.family: Tok.mono
-                                        text: root.wpIndexBusy ? "scanning…"
-                                              : !root.wpScanned ? "not scanned yet — press re-scan"
-                                              : root.wpIndex.length + " wallpaper" + (root.wpIndex.length === 1 ? "" : "s")
-                                                + (root.wpCollCount ? "  ·  " + root.wpCollCount + " collection"
-                                                                       + (root.wpCollCount === 1 ? "" : "s") : "")
-                                    }
-                                    Chip {
-                                        label: root.wpIndexBusy ? "scanning" : "re-scan"
-                                        icon: "refresh"
-                                        onPicked: root.rescanWallpapers()
-                                    }
-                                }
-
-                                Section { title: "switch transition"; icon: "animation" }
-                                Text {
-                                    text: "used by the picker, SUPER+N / SUPER+SHIFT+N, and auto-rotate"
-                                    color: theme.faint; font.pixelSize: 10; font.family: Tok.mono
-                                    Layout.leftMargin: 14
-                                }
-                                Flow {
-                                    Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; spacing: 6
-                                    Repeater {
-                                        model: root.wpTransitions
-                                        delegate: Chip {
-                                            required property var modelData
-                                            label: modelData
-                                            on: root.apWpTransition === modelData
-                                            onPicked: { root.apWpTransition = modelData; root.saveAppearance() }
-                                        }
-                                    }
-                                }
-                                SliderRow {
-                                    icon: "speed"; label: "duration"
-                                    value: Math.min(1, root.apWpTransitionDur / 5)
-                                    readout: root.apWpTransitionDur.toFixed(1) + "s"
-                                    onMoved: (v) => { root.apWpTransitionDur = Math.max(0.1, v * 5); root.saveAppearance() }
-                                }
-                                SliderRow {
-                                    icon: "60fps"; label: "fps"
-                                    value: Math.min(1, (root.apWpTransitionFps - 15) / 105)
-                                    readout: Math.round(root.apWpTransitionFps) + ""
-                                    onMoved: (v) => { root.apWpTransitionFps = Math.round(15 + v * 105); root.saveAppearance() }
-                                }
-                                Row2 {
-                                    icon: "skip_next"; label: "preview it — switch to the next wallpaper"
-                                    cmd: "sh '" + root.wpCycleScript + "' next"
-                                }
-
-                                Section { title: "auto-rotate"; icon: "schedule" }
-                                ToggleCard {
-                                    icon: "autorenew"
-                                    title: "rotate wallpaper automatically"
-                                    desc: root.apWpDayNight
-                                          ? "held — the day/night pair below outranks the timer"
-                                          : (root.apMatugen
-                                             ? "on — heads up: “match colours” is enabled, so every rotation re-themes the shell"
-                                             : "cycles the wallpaper folder on a timer")
-                                    on: root.apWpRotate && !root.apWpDayNight
-                                    onToggled: {
-                                        root.apWpRotate = !root.apWpRotate;
-                                        root.saveAppearance();
-                                        // the daemon re-reads config each tick, but restart so a
-                                        // changed interval takes effect now instead of after the
-                                        // current sleep — and so enabling it works even if the
-                                        // daemon was never started this session.
-                                        run("sh '" + root.wpRotateScript + "' --restart >/dev/null 2>&1 &");
-                                    }
-                                }
-                                SliderRow {
-                                    icon: "timer"; label: "every"
-                                    value: Math.min(1, (root.apWpRotateMins - 1) / 239)
-                                    readout: root.apWpRotateMins >= 60
-                                             ? (root.apWpRotateMins / 60).toFixed(1) + "h"
-                                             : Math.round(root.apWpRotateMins) + "m"
-                                    onMoved: (v) => { root.apWpRotateMins = Math.max(1, Math.round(1 + v * 239)); root.saveAppearance() }
-                                }
-                                RowLayout {
-                                    Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; spacing: 8
-                                    Text { text: "order"; color: theme.sub; font.pixelSize: 12; font.family: Tok.mono; Layout.minimumWidth: 76 }
-                                    Repeater {
-                                        model: root.wpRotateModes
-                                        delegate: Chip {
-                                            required property var modelData
-                                            label: modelData
-                                            on: root.apWpRotateMode === modelData
-                                            onPicked: {
-                                                root.apWpRotateMode = modelData; root.saveAppearance();
-                                                run("sh '" + root.wpRotateScript + "' --restart >/dev/null 2>&1 &");
-                                            }
-                                        }
-                                    }
-                                    Item { Layout.fillWidth: true }
-                                }
-                                ToggleCard {
-                                    icon: "image"
-                                    title: "stills only"
-                                    desc: "skip moving wallpapers — rotating into one restarts a video decoder every interval"
-                                    on: root.apWpRotateStills
-                                    onToggled: { root.apWpRotateStills = !root.apWpRotateStills; root.saveAppearance() }
-                                }
-
-                                // ---------------- the pair ----------------
-                                Section { title: "day & night"; icon: "routine" }
-                                ToggleCard {
-                                    icon: "bedtime"
-                                    title: "pin a day and a night wallpaper"
-                                    desc: "swaps at " + root.apDarkStart + " and " + root.apDarkEnd
-                                          + " — the same times as auto dark mode, in Theme"
-                                    on: root.apWpDayNight
-                                    onToggled: {
-                                        root.apWpDayNight = !root.apWpDayNight;
-                                        root.saveAppearance();
-                                        run("sh '" + root.wpRotateScript + "' --restart >/dev/null 2>&1 &");
-                                    }
-                                }
-                                RowLayout {
-                                    Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14
-                                    spacing: 12
-                                    opacity: root.apWpDayNight ? 1 : 0.4
-                                    Behavior on opacity { NumberAnimation { duration: Tok.mFast } }
-                                    CartTile {
-                                        slot: "day"; path: root.apWpDay
-                                        armed: wpTab.armed === "day"
-                                        onPicked: wpTab.armed = (wpTab.armed === "day") ? "" : "day"
-                                        onCleared: { root.apWpDay = ""; root.saveAppearance() }
-                                    }
-                                    CartTile {
-                                        slot: "night"; path: root.apWpNight
-                                        armed: wpTab.armed === "night"
-                                        onPicked: wpTab.armed = (wpTab.armed === "night") ? "" : "night"
-                                        onCleared: { root.apWpNight = ""; root.saveAppearance() }
-                                    }
-                                    Item { Layout.fillWidth: true }
-                                }
-
-                                WallShelf {
-                                    open: wpTab.armed === "day" || wpTab.armed === "night"
-                                    chosen: wpTab.armed === "day" ? root.apWpDay
-                                          : wpTab.armed === "night" ? root.apWpNight : ""
-                                    onPicked: (path) => {
-                                        if (wpTab.armed === "day")        root.apWpDay = path;
-                                        else if (wpTab.armed === "night") root.apWpNight = path;
-                                        root.saveAppearance();
-                                        wpTab.armed = "";
-                                        run("sh '" + root.wpRotateScript + "' --restart >/dev/null 2>&1 &");
-                                    }
-                                }
-
-                                // ---------------- the lock screen ----------------
-                                Section { title: "lock screen"; icon: "lock" }
-                                ToggleCard {
-                                    icon: "photo_library"
-                                    title: "lock screen keeps its own picture"
-                                    desc: "off — hyprlock follows the desktop, re-synced on every switch"
-                                    on: root.apWpLockOwn
-                                    onToggled: {
-                                        root.apWpLockOwn = !root.apWpLockOwn;
-                                        root.saveAppearance();
-                                        // Re-run the sync so the change is on the lock screen now
-                                        // rather than at the next wallpaper switch — which, if you
-                                        // never switch, is never.
-                                        run("sh '" + root.lockwallScript + "' >/dev/null 2>&1 &");
-                                    }
-                                }
-                                RowLayout {
-                                    Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14
-                                    spacing: 12
-                                    opacity: root.apWpLockOwn ? 1 : 0.4
-                                    Behavior on opacity { NumberAnimation { duration: Tok.mFast } }
-                                    CartTile {
-                                        slot: "lock"; path: root.apWpLock
-                                        armed: wpTab.armed === "lock"
-                                        onPicked: wpTab.armed = (wpTab.armed === "lock") ? "" : "lock"
-                                        onCleared: {
-                                            root.apWpLock = ""; root.saveAppearance();
-                                            run("sh '" + root.lockwallScript + "' >/dev/null 2>&1 &");
-                                        }
-                                    }
-                                    Item { Layout.fillWidth: true }
-                                }
-                                WallShelf {
-                                    open: wpTab.armed === "lock"
-                                    chosen: root.apWpLock
-                                    onPicked: (path) => {
-                                        root.apWpLock = path;
-                                        root.saveAppearance();
-                                        wpTab.armed = "";
-                                        run("sh '" + root.lockwallScript + "' >/dev/null 2>&1 &");
-                                    }
-                                }
-
-                                // ---------------- moving wallpapers ----------------
-                                Section { title: "moving wallpapers"; icon: "movie" }
-                                Text {
-                                    text: "mp4 · webm · gif play through mpvpaper, which holds a decoder for as long as it runs"
-                                    color: theme.faint; font.pixelSize: 10; font.family: Tok.mono
-                                    Layout.leftMargin: 14; Layout.rightMargin: 14
-                                    Layout.fillWidth: true; wrapMode: Text.WordWrap
-                                }
-                                ToggleCard {
-                                    icon: "memory"
-                                    title: "free it while it's covered"
-                                    desc: "a fullscreen window swaps the video for its own still frame — pausing keeps the VRAM, this hands it back"
-                                    on: root.apWpCoverStill
-                                    onToggled: { root.apWpCoverStill = !root.apWpCoverStill; root.saveAppearance() }
-                                }
-                                ToggleCard {
-                                    icon: "battery_saver"
-                                    title: "still frame on battery"
-                                    desc: "hold the poster frame until it's plugged back in"
-                                    on: root.apWpBatteryStill
-                                    onToggled: { root.apWpBatteryStill = !root.apWpBatteryStill; root.saveAppearance() }
-                                }
-                                RowLayout {
-                                    Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; spacing: 8
-                                    Text { text: "frame cap"; color: theme.sub; font.pixelSize: 12
-                                           font.family: Tok.mono; Layout.minimumWidth: 76 }
-                                    Repeater {
-                                        model: root.wpVidFpsOptions
-                                        delegate: Chip {
-                                            required property var modelData
-                                            label: modelData === 0 ? "as filmed" : modelData + " fps"
-                                            on: root.apWpVidFps === modelData
-                                            onPicked: {
-                                                root.apWpVidFps = modelData; root.saveAppearance();
-                                                // mpvpaper reads its options once, at start
-                                                run("sh '" + root.wpApplyScript + "' >/dev/null 2>&1 &");
-                                            }
-                                        }
-                                    }
-                                    Item { Layout.fillWidth: true }
-                                }
-                                Text {
-                                    text: "capping halves the full-screen blits the compositor does for a clip · it does not reduce decoding"
-                                    color: theme.faint; font.pixelSize: 10; font.family: Tok.mono
-                                    Layout.leftMargin: 14; Layout.rightMargin: 14
-                                    Layout.fillWidth: true; wrapMode: Text.WordWrap
-                                }
-                            }
-                        }
-
-                        // ================= DESKTOP =================
-                        // Which program opens what. See the note by defScript above:
-                        // this page asks and shows, sea-defaults.py writes.
-                        ColumnLayout {
-                            property int tabIdx: 22
-                            visible: root.tab === 22; Layout.fillWidth: true; spacing: 12
-
-                            Section { title: "what opens what"; icon: "apps" }
-                            Text {
-                                Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14
-                                wrapMode: Text.Wrap
-                                color: Tok.ink3; font.pixelSize: Tok.tDense; font.family: Tok.mono
-                                text: "These are the machine's associations, not the shell's — set one here "
-                                    + "and every application that asks the system will follow it. The only "
-                                    + "exception is the terminal, which no standard covers; that one is "
-                                    + "sea-shell's own and is used by its command actions."
-                            }
-
-                            Text {
-                                visible: root.defError.length > 0
-                                Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14
-                                wrapMode: Text.Wrap
-                                color: theme.love !== undefined ? theme.love : "#e06c75"
-                                font.pixelSize: Tok.tDense; font.family: Tok.mono
-                                text: "⚠  " + root.defError
-                            }
-
-                            Text {
-                                visible: root.defRoles.length === 0
-                                Layout.leftMargin: 14; Layout.topMargin: 6
-                                color: Tok.ink3; font.pixelSize: Tok.tDense; font.family: Tok.mono
-                                text: "reading the applications on this machine…"
-                            }
-
-                            Repeater {
-                                model: root.defRoles
-                                delegate: ColumnLayout {
-                                    id: roleBlock
-                                    required property var modelData
-                                    readonly property bool expanded: root.defOpen === modelData.role
-                                    readonly property var choices: root.defCands[modelData.role] || []
-                                    Layout.fillWidth: true
-                                    Layout.leftMargin: 14; Layout.rightMargin: 14
-                                    spacing: 6
-
-                                    Rectangle {
-                                        Layout.fillWidth: true
-                                        implicitHeight: 46
-                                        radius: Tok.r
-                                        color: roleBlock.expanded ? theme.a(theme.iris, 0.10)
-                                             : (roleMa.containsMouse ? Tok.hover : "transparent")
-                                        border.width: roleBlock.expanded ? 1 : 0
-                                        border.color: theme.a(theme.iris, 0.35)
-
-                                        RowLayout {
-                                            anchors.fill: parent
-                                            anchors.leftMargin: 12; anchors.rightMargin: 12
-                                            spacing: 10
-
-                                            Sym { text: roleBlock.modelData.icon; sz: 17; color: theme.frost }
-
-                                            // preferredWidth 0 with fillWidth means "take the
-                                            // slack, but do not ASK for anything". Without it a
-                                            // row's implicit width included the note's full
-                                            // text, so the rows that have a note came out wider
-                                            // than the rows that do not and the columns to the
-                                            // right of them started in a different place on
-                                            // every line. Eliding alone does not fix that: elide
-                                            // changes what is drawn once a width is decided, not
-                                            // the width the item asks for.
-                                            ColumnLayout {
-                                                spacing: 0
-                                                Layout.fillWidth: true
-                                                Layout.preferredWidth: 0
-                                                Text {
-                                                    Layout.fillWidth: true
-                                                    Layout.preferredWidth: 0
-                                                    elide: Text.ElideRight
-                                                    text: roleBlock.modelData.label
-                                                    color: Tok.ink; font.pixelSize: 13; font.family: Tok.mono
-                                                    font.bold: true
-                                                }
-                                                Text {
-                                                    visible: roleBlock.modelData.note.length > 0
-                                                    text: roleBlock.modelData.note
-                                                    color: Tok.ink3; font.pixelSize: 10; font.family: Tok.mono
-                                                    elide: Text.ElideRight
-                                                    Layout.fillWidth: true
-                                                    Layout.preferredWidth: 0
-                                                }
-                                            }
-
-                                            // Not a standard association: say so rather than
-                                            // letting it look like the others and quietly not be.
-                                            Rectangle {
-                                                visible: !roleBlock.modelData.standard
-                                                implicitHeight: 15; implicitWidth: shellOnlyT.width + 12
-                                                radius: Tok.r
-                                                color: theme.a(theme.iris, 0.12)
-                                                border.width: 1; border.color: theme.a(theme.iris, 0.28)
-                                                Text {
-                                                    id: shellOnlyT; anchors.centerIn: parent
-                                                    text: "sea-shell only"
-                                                    color: theme.frost; font.pixelSize: 9; font.family: Tok.mono
-                                                }
-                                            }
-
-                                            // A COLUMN, NOT TWO LOOSE ITEMS. Laid out
-                                            // inline, the icon and the name took whatever x
-                                            // the widths around them left over, so no two
-                                            // rows agreed on where either began — a fixed
-                                            // cell gives the eye one edge to run down. The
-                                            // icon keeps its 18px whether or not there is an
-                                            // icon to draw, so the names line up under each
-                                            // other even where the theme has nothing to give.
-                                            RowLayout {
-                                                Layout.preferredWidth: 240
-                                                Layout.maximumWidth: 240
-                                                spacing: 8
-                                                // The slack sits BEFORE the value, not after,
-                                                // so the name ends flush against the chevron on
-                                                // every row. Left-aligning it inside a fixed
-                                                // cell lined the icons up but left every short
-                                                // name hanging in the middle of the row with a
-                                                // gap after it; a value column reads as a column
-                                                // because its edge is the one nearest the
-                                                // control it belongs to.
-                                                Item { Layout.fillWidth: true }
-                                                IconImage {
-                                                    Layout.preferredWidth: 18
-                                                    Layout.preferredHeight: 18
-                                                    visible: roleBlock.modelData.currentIcon.length > 0
-                                                             && status === Image.Ready
-                                                    source: roleBlock.modelData.currentIcon.length > 0
-                                                            ? Quickshell.iconPath(roleBlock.modelData.currentIcon, true) : ""
-                                                }
-                                                Text {
-                                                    Layout.maximumWidth: 214
-                                                    elide: Text.ElideRight
-                                                    horizontalAlignment: Text.AlignRight
-                                                    text: root.defBusy === roleBlock.modelData.role ? "setting…"
-                                                        : (roleBlock.modelData.currentName.length > 0
-                                                           ? roleBlock.modelData.currentName : "not set")
-                                                    color: roleBlock.modelData.currentName.length > 0 ? Tok.ink2 : Tok.ink3
-                                                    font.pixelSize: 12; font.family: Tok.mono
-                                                }
-                                            }
-                                            Sym {
-                                                text: roleBlock.expanded ? "expand_less" : "expand_more"
-                                                sz: 16; color: Tok.ink3
-                                            }
-                                        }
-
-                                        MouseArea {
-                                            id: roleMa
-                                            anchors.fill: parent
-                                            hoverEnabled: true
-                                            cursorShape: Qt.PointingHandCursor
-                                            onClicked: root.defOpen = roleBlock.expanded ? "" : roleBlock.modelData.role
-                                        }
-                                    }
-
-                                    // The applications that say they can do this job.
-                                    Flow {
-                                        visible: roleBlock.expanded
-                                        Layout.fillWidth: true
-                                        Layout.leftMargin: 8; Layout.bottomMargin: 4
-                                        spacing: 6
-
-                                        Repeater {
-                                            model: roleBlock.expanded ? roleBlock.choices : []
-                                            delegate: Rectangle {
-                                                id: appChip
-                                                required property var modelData
-                                                readonly property bool chosen: modelData.id === roleBlock.modelData.current
-                                                implicitHeight: 30
-                                                implicitWidth: chipRow.implicitWidth + 20
-                                                radius: Tok.r
-                                                color: appChip.chosen ? theme.a(theme.iris, 0.18)
-                                                     : (chipMa2.containsMouse ? Tok.hover : Tok.sunken)
-                                                border.width: 1
-                                                border.color: appChip.chosen ? theme.iris : Tok.rule
-
-                                                RowLayout {
-                                                    id: chipRow
-                                                    anchors.centerIn: parent
-                                                    spacing: 7
-                                                    IconImage {
-                                                        visible: appChip.modelData.icon.length > 0 && status === Image.Ready
-                                                        implicitSize: 16
-                                                        source: appChip.modelData.icon.length > 0
-                                                                ? Quickshell.iconPath(appChip.modelData.icon, true) : ""
-                                                    }
-                                                    Text {
-                                                        text: appChip.modelData.name
-                                                        color: appChip.chosen ? theme.frost : Tok.ink2
-                                                        font.pixelSize: 12; font.family: Tok.mono
-                                                        font.bold: appChip.chosen
-                                                    }
-                                                    Sym {
-                                                        visible: appChip.chosen
-                                                        text: "check"; sz: 13; color: theme.frost
-                                                    }
-                                                }
-
-                                                MouseArea {
-                                                    id: chipMa2
-                                                    anchors.fill: parent
-                                                    hoverEnabled: true
-                                                    cursorShape: Qt.PointingHandCursor
-                                                    onClicked: root.defSet(roleBlock.modelData.role, appChip.modelData.id)
-                                                }
-                                            }
-                                        }
-
-                                        Text {
-                                            visible: roleBlock.expanded && roleBlock.choices.length === 0
-                                            text: "nothing installed says it can do this"
-                                            color: Tok.ink3; font.pixelSize: Tok.tDense; font.family: Tok.mono
-                                        }
-                                    }
-                                }
-                            }
-
-                            RowLayout {
-                                Layout.fillWidth: true; Layout.leftMargin: 14; Layout.topMargin: 6
-                                spacing: 10
-                                Chip { label: "rescan"; icon: "refresh"; onPicked: root.defRefresh() }
-                                Item { Layout.fillWidth: true }
-                            }
-                        }
-
-                        // The space between the bar and the dock. Everything here is a
-                        // request to sea-desktop.py; see the note by dtScript above.
-                        ColumnLayout {
-                            property int tabIdx: 21
-                            visible: root.tab === 21; Layout.fillWidth: true; spacing: 12
-
-                            Section { title: "arranging"; icon: "drag_pan" }
-                            Text {
-                                text: "Drag widgets to arrange them; hold Shift to pin them over busy wallpaper areas."
-                                color: theme.faint; font.pixelSize: 10; font.family: Tok.mono
-                                wrapMode: Text.WordWrap
-                                Layout.leftMargin: 14; Layout.rightMargin: 14; Layout.fillWidth: true
-                            }
-                            RowLayout {
-                                Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; spacing: 10
-                                Chip {
-                                    label: root.dtEditing ? "arranging" : "arrange"
-                                    icon: "drag_pan"
-                                    on: root.dtEditing
-                                    onPicked: {
-                                        root.dtEditing = !root.dtEditing;
-                                        root.dtIpc(root.dtEditing ? "start" : "done");
-                                    }
-                                }
-                                Chip {
-                                    label: "follow wallpaper: " + root.dtAuto
-                                    icon: "auto_awesome_motion"
-                                    on: root.dtAuto !== "off"
-                                    onPicked: {
-                                        var o = ["rescue", "arrange", "off"];
-                                        var i = o.indexOf(root.dtAuto);
-                                        root.dtRun(["--auto", o[(i + 1) % o.length]]);
-                                    }
-                                }
-                                Item { Layout.fillWidth: true }
-                            }
-
-                            Section { title: "on the desktop"; icon: "widgets" }
-                            Text {
-                                visible: root.dtItems.length === 0
-                                text: "nothing yet"
-                                color: theme.faint; font.pixelSize: 10; font.family: Tok.mono
-                                Layout.leftMargin: 14
-                            }
-                            Repeater {
-                                model: root.dtItems
-                                delegate: RowLayout {
-                                    required property var modelData
-                                    Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14
-                                    spacing: 10
-                                    Text {
-                                        text: ({ "clock": "schedule", "weather": "cloud",
-                                                 "media": "music_note", "system": "monitor_heart",
-                                                 "launch": "apps" })[modelData.kind] || "widgets"
-                                        font.family: "Material Symbols Rounded"; font.pixelSize: 16
-                                        color: theme.sub
-                                    }
-                                    Text {
-                                        text: modelData.kind === "launch"
-                                              ? (modelData.label || "shortcut") : modelData.kind
-                                        color: theme.text; font.pixelSize: 12; font.family: root.apFont
-                                    }
-                                    Text {
-                                        text: modelData.id || ""
-                                        color: theme.faint; font.pixelSize: 9; font.family: Tok.mono
-                                    }
-                                    Item { Layout.fillWidth: true }
-                                    // Cycling chips rather than a row of radio groups per
-                                    // widget: five widgets times four axes is twenty
-                                    // controls, and a settings page you have to scroll past
-                                    // is how a customisable thing stops being customised.
-                                    // card / glass / clear: the Material/macOS tile, solid, half
-                                    // see-through, or none; classic: the original read-out
-                                    Chip {
-                                        visible: modelData.kind !== "launch"
-                                        label: modelData.look || "card"
-                                        icon: (modelData.look || "card") === "card" ? "crop_square" : "texture"
-                                        onPicked: {
-                                            var o = ["card", "glass", "clear", "classic"];
-                                            var i = o.indexOf(modelData.look || "card");
-                                            root.dtRun(["--set", "" + modelData.id, "--look", o[(i + 1) % o.length]]);
-                                        }
-                                    }
-                                    Chip {
-                                        visible: modelData.kind === "clock"
-                                        label: modelData.face || "dial"
-                                        icon: "schedule"
-                                        onPicked: {
-                                            var o = ["dial", "cookie", "digital", "stacked"];
-                                            var i = o.indexOf(modelData.face || "dial");
-                                            root.dtRun(["--set", "" + modelData.id,
-                                                        "--face", o[(i + 1) % o.length]]);
-                                        }
-                                    }
-                                    Chip {
-                                        visible: modelData.kind !== "launch"
-                                        label: modelData.ground || "rule"
-                                        icon: "layers"
-                                        onPicked: {
-                                            var o = ["rule", "panel", "bare"];
-                                            var i = o.indexOf(modelData.ground || "rule");
-                                            root.dtRun(["--set", "" + modelData.id,
-                                                        "--ground", o[(i + 1) % o.length]]);
-                                        }
-                                    }
-                                    Chip {
-                                        visible: modelData.kind !== "launch"
-                                        label: modelData.tone || "accent"
-                                        icon: "palette"
-                                        onPicked: {
-                                            var o = ["accent", "frost", "green", "amber", "red", "plain"];
-                                            var i = o.indexOf(modelData.tone || "accent");
-                                            root.dtRun(["--set", "" + modelData.id,
-                                                        "--tone", o[(i + 1) % o.length]]);
-                                        }
-                                    }
-                                    Chip {
-                                        visible: modelData.kind !== "launch"
-                                        label: modelData.align || "left"
-                                        icon: "format_align_left"
-                                        onPicked: {
-                                            var o = ["left", "centre", "right"];
-                                            var i = o.indexOf(modelData.align || "left");
-                                            root.dtRun(["--set", "" + modelData.id,
-                                                        "--align", o[(i + 1) % o.length]]);
-                                        }
-                                    }
-                                    Chip {
-                                        label: modelData.size || "medium"
-                                        icon: "photo_size_select_small"
-                                        onPicked: {
-                                            var o = ["small", "medium", "large"];
-                                            var i = o.indexOf(modelData.size || "medium");
-                                            root.dtRun(["--set", "" + modelData.id,
-                                                        "--size", o[(i + 1) % o.length]]);
-                                        }
-                                    }
-                                    Chip {
-                                        label: modelData.pinned ? "pinned" : "free"
-                                        icon: modelData.pinned ? "push_pin" : "open_in_full"
-                                        on: !!modelData.pinned
-                                        onPicked: root.dtRun([modelData.pinned ? "--unpin" : "--pin",
-                                                              "" + modelData.id])
-                                    }
-                                    Chip {
-                                        label: "remove"; icon: "close"
-                                        onPicked: root.dtRun(["--remove", "" + modelData.id])
-                                    }
-                                }
-                            }
-
-                            Section { title: "add"; icon: "add_circle" }
-                            RowLayout {
-                                Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; spacing: 10
-                                Repeater {
-                                    model: [{ k: "clock",   l: "clock",   i: "schedule" },
-                                            { k: "weather", l: "weather", i: "cloud" },
-                                            { k: "media",   l: "playing", i: "music_note" },
-                                            { k: "system",  l: "system",  i: "monitor_heart" }]
-                                    delegate: Chip {
-                                        required property var modelData
-                                        label: modelData.l; icon: modelData.i
-                                        onPicked: root.dtRun(["--add-" + modelData.k])
-                                    }
-                                }
-                                Item { Layout.fillWidth: true }
-                            }
-                            Rectangle {
-                                Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14
-                                height: 30; radius: Tok.r
-                                color: theme.a(theme.line, 0.45)
-                                border.width: 1; border.color: theme.a(theme.line, 0.9)
-                                TextInput {
-                                    id: dtIn
-                                    anchors.fill: parent; anchors.leftMargin: 10; anchors.rightMargin: 10
-                                    verticalAlignment: TextInput.AlignVCenter
-                                    color: theme.text; font.pixelSize: 12; font.family: root.apFont
-                                    selectByMouse: true
-                                    onTextChanged: root.dtQuery = text
-                                }
-                                Text {
-                                    anchors.verticalCenter: parent.verticalCenter
-                                    anchors.left: parent.left; anchors.leftMargin: 10
-                                    visible: dtIn.text.length === 0
-                                    text: "search installed applications"
-                                    color: theme.faint; font.pixelSize: 11; font.family: Tok.mono
-                                }
-                            }
-                            Repeater {
-                                model: root.dtApps
-                                delegate: RowLayout {
-                                    required property var modelData
-                                    Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14
-                                    spacing: 10
-                                    IconImage {
-                                        implicitSize: 18
-                                        source: Quickshell.iconPath(modelData.icon, true)
-                                    }
-                                    Text {
-                                        text: modelData.name || ""
-                                        color: theme.text; font.pixelSize: 12; font.family: root.apFont
-                                    }
-                                    Item { Layout.fillWidth: true }
-                                    Chip {
-                                        label: "add"; icon: "add"
-                                        onPicked: root.dtRun(["--add-entry", "" + modelData.id,
-                                                              "--label", "" + modelData.name,
-                                                              "--icon", "" + (modelData.icon || modelData.id)])
-                                    }
-                                }
-                            }
-                        }
-
-                        // ================= BAR =================
-                        // Its own tab, because it was sharing "Appearance → bar theme" with the
-                        // shell-wide dark/light switch and the GTK/Qt app preference — neither of
-                        // which is about the bar. What is here IS the bar: its shape, how it draws
-                        // workspaces, and the mark at its left end.
-                        ColumnLayout {
-                            property int tabIdx: 20
-                            visible: root.tab === 20; Layout.fillWidth: true; spacing: 12
-
-                            Section { title: "shape"; icon: "view_agenda" }
-                            Text {
-                                text: "one strip, or the three clusters as separate floating pills"
-                                color: theme.faint; font.pixelSize: 10; font.family: Tok.mono
-                                Layout.leftMargin: 14
-                            }
-                            RowLayout {
-                                Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; spacing: 10
-                                Repeater {
-                                    model: [{ k: "bar", l: "one bar", i: "rectangle" },
-                                            { k: "pills", l: "pills", i: "view_week" }]
-                                    delegate: Chip {
-                                        required property var modelData
-                                        label: modelData.l; icon: modelData.i
-                                        on: root.apBarShape === modelData.k
-                                        onPicked: { root.apBarShape = modelData.k; root.saveAppearance() }
-                                    }
-                                }
-                                Item { Layout.fillWidth: true }
-                            }
-
-                            Section { title: "workspaces"; icon: "grid_view" }
-                            RowLayout {
-                                Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; spacing: 10
-                                Repeater {
-                                    model: [{ k: "grow",   l: "grow",    i: "unfold_more" },
-                                            { k: "pill",   l: "pills",   i: "more_horiz" },
-                                            { k: "circle", l: "circles", i: "circle" }]
-                                    delegate: Chip {
-                                        required property var modelData
-                                        label: modelData.l; icon: modelData.i
-                                        on: root.apWsStyle === modelData.k
-                                        onPicked: { root.apWsStyle = modelData.k; root.saveAppearance() }
-                                    }
-                                }
-                                Item { Layout.fillWidth: true }
-                            }
-                            Text {
-                                text: root.apWsStyle === "grow"
-                                      ? "a chip each · the one you are on stretches along the bar"
-                                      : root.apWsStyle === "circle"
-                                      ? "true circles that stretch into a pill on the one you are on \u00b7 round at any roundness setting, unlike grow"
-                                      : "every workspace the same chip · the one you are on is filled, and nothing moves"
-                                color: theme.faint; font.pixelSize: 10; font.family: Tok.mono
-                                Layout.leftMargin: 14; Layout.rightMargin: 14
-                                Layout.fillWidth: true; wrapMode: Text.WordWrap
-                            }
-
-                            Section { title: "numbering"; icon: "format_list_numbered" }
-                            Flow {
-                                Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; spacing: 7
-                                Repeater {
-                                    model: root.wsLabelChoices
-                                    delegate: Chip {
-                                        required property var modelData
-                                        label: modelData.l
-                                        labelFont: modelData.k === "dice" ? root.symbolFamily : Tok.mono
-                                        visible: modelData.k !== "dice" || root.symbolFamily !== ""
-                                        on: root.apWsLabel === modelData.k
-                                        onPicked: { root.apWsLabel = modelData.k; root.saveAppearance() }
-                                    }
-                                }
-                            }
-                            Text {
-                                text: "each scheme falls back to the plain number once it runs out of symbols — "
-                                      + "\u2685 is the last die and \u2473 the last circled numeral"
-                                color: theme.faint; font.pixelSize: 10; font.family: Tok.mono
-                                Layout.leftMargin: 14; Layout.rightMargin: 14
-                                Layout.fillWidth: true; wrapMode: Text.WordWrap
-                            }
-
-                            Section { title: "the mark"; icon: "stars" }
-                            Text {
-                                text: "auto reads /etc/os-release · cachyos and sea-shell are drawn and recolour with the "
-                                      + "theme, the rest are Nerd Font glyphs"
-                                color: theme.faint; font.pixelSize: 10; font.family: Tok.mono
-                                Layout.leftMargin: 14; Layout.rightMargin: 14
-                                Layout.fillWidth: true; wrapMode: Text.WordWrap
-                            }
-                            Flow {
-                                Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; spacing: 7
-                                Repeater {
-                                    model: root.barLogoChoices
-                                    delegate: Rectangle {
-                                        required property var modelData
-                                        readonly property bool sel: root.apBarLogo === modelData.k
-                                        implicitWidth: lgRow.implicitWidth + 20; implicitHeight: 36; radius: Tok.r
-                                        color: sel ? theme.iris : (lgMa.containsMouse ? theme.a(theme.iris, 0.16) : theme.a(theme.line, 0.4))
-                                        border.width: 1; border.color: sel ? theme.iris : theme.a(theme.iris, 0.16)
-                                        Behavior on color { ColorAnimation { duration: Tok.mFast } }
-                                        Row {
-                                            id: lgRow; anchors.centerIn: parent; spacing: 7
-                                            // The choice IS the picture. A list of distro names with
-                                            // no logos beside them is the same mistake the theme
-                                            // presets used to make with `accent: #dbc0c8`.
-                                            BarLogo {
-                                                anchors.verticalCenter: parent.verticalCenter
-                                                visible: modelData.k !== "auto" && modelData.k !== "custom"
-                                                kind: modelData.k; size: 18
-                                                card: sel ? Tok.accentInk : theme.panel
-                                                accent: sel ? Tok.accentInk : theme.iris
-                                                highlight: sel ? Tok.accentInk : theme.frost
-                                                rim: sel ? Tok.accentInk : theme.iris
-                                            }
-                                            Sym {
-                                                anchors.verticalCenter: parent.verticalCenter
-                                                visible: modelData.k === "auto" || modelData.k === "custom"
-                                                text: modelData.k === "auto" ? "auto_awesome" : "image"
-                                                sz: 16; color: sel ? Tok.accentInk : theme.frost
-                                            }
-                                            Text {
-                                                anchors.verticalCenter: parent.verticalCenter
-                                                text: modelData.l
-                                                color: sel ? Tok.accentInk : Tok.ink
-                                                font.pixelSize: 11; font.family: Tok.mono; font.bold: sel
-                                            }
-                                        }
-                                        MouseArea {
-                                            id: lgMa; anchors.fill: parent; hoverEnabled: true
-                                            cursorShape: Qt.PointingHandCursor
-                                            onClicked: {
-                                                root.apBarLogo = modelData.k;
-                                                root.saveAppearance();
-                                                if (modelData.k === "custom" && !root.apBarLogoPath.length)
-                                                    root.pickFile("bar logo image", "*.png", function (f) {
-                                                        root.apBarLogoPath = f; root.saveAppearance();
-                                                    });
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            RowLayout {
-                                visible: root.apBarLogo === "custom"
-                                Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; spacing: 10
-                                Rectangle {
-                                    Layout.fillWidth: true; implicitHeight: 34; radius: Tok.r
-                                    color: theme.a(theme.line, 0.4)
-                                    border.width: 1; border.color: theme.a(theme.iris, 0.16)
-                                    Text {
-                                        anchors { fill: parent; leftMargin: 12; rightMargin: 12 }
-                                        verticalAlignment: Text.AlignVCenter
-                                        text: root.apBarLogoPath.length ? root.apBarLogoPath : "no image chosen"
-                                        color: root.apBarLogoPath.length ? theme.text : theme.faint
-                                        font.pixelSize: 11; font.family: Tok.mono; elide: Text.ElideLeft
-                                    }
-                                }
-                                Chip {
-                                    label: "choose…"; icon: "folder_open"
-                                    onPicked: root.pickFile("bar logo image", "*.png", function (f) {
-                                        root.apBarLogoPath = f; root.saveAppearance();
-                                    })
-                                }
-                            }
-
-                                Section { title: "bar shape"; icon: "tune" }
-                                SliderRow { icon: "rounded_corner"; label: "roundness"; value: root.apRadius/26; readout: Math.round(root.apRadius)+"px"
-                                    onMoved: (v)=>{ root.apRadius = v*26; root.saveAppearance() } }
-                                RowLayout { Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; spacing: 12
-                                    Sym { text: "dock_to_right"; sz: 18; color: theme.sub; Layout.alignment: Qt.AlignVCenter }
-                                    Text { text: "position"; color: theme.sub; font.pixelSize: 12; font.family: Tok.mono; Layout.minimumWidth: 76 }
-                                    Flow { Layout.fillWidth: true; spacing: 6
-                                        Repeater { model: root.edges
-                                            delegate: Chip { required property var modelData; label: modelData; on: root.apEdge===modelData
-                                                onPicked: { root.apEdge=modelData; root.saveAppearance() } } } } }
-                                ToggleCard { icon: "animation"; title: "reduced motion"; desc: "minimize shell movement and show transitions immediately"
-                                    on: root.apReducedMotion; onToggled: { root.apReducedMotion=!root.apReducedMotion; root.saveAppearance() } }
-                                Text { text: "Panels, menus and the bar use solid backgrounds for readability."; color: theme.sub
-                                    font.pixelSize: 11; font.family: Tok.sans; Layout.fillWidth: true; Layout.leftMargin: 14 }
-                                RowLayout { Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; spacing: 12
-                                    Sym { text: "format_color_fill"; sz: 18; color: theme.sub; Layout.alignment: Qt.AlignVCenter }
-                                    Text { text: "bar fill"; color: theme.sub; font.pixelSize: 12; font.family: Tok.mono; Layout.minimumWidth: 76 }
-                                    Flow { Layout.fillWidth: true; spacing: 6
-                                        Repeater { model: [{k:"matugen",l:"matugen"},{k:"black",l:"black"},{k:"white",l:"white"}]
-                                            delegate: Chip { required property var modelData; label: modelData.l; on: root.apBarFill===modelData.k
-                                                onPicked: { root.apBarFill=modelData.k; root.saveAppearance() } } } } }
-                                SliderRow { icon: "height"; label: "bar height"; tint: theme.good; value: (root.apHeight-34)/20; readout: Math.round(root.apHeight)+"px"
-                                    onMoved: (v)=>{ root.apHeight = 34 + v*20; root.saveAppearance() } }
-                                ToggleCard { icon: "swipe_up"; title: "auto-hide bar"; desc: "tucks the bar away · push the cursor to the edge to reveal it"
-                                    on: root.apAutoHide; onToggled: { root.apAutoHide=!root.apAutoHide; root.saveAppearance() } }
-                                ToggleCard { visible: !root.apAutoHide; icon: "fullscreen"; title: "hide when fullscreen"; desc: "only auto-hides while a window is fullscreen (e.g. video, games)"
-                                    on: root.apHideFullscreen; onToggled: { root.apHideFullscreen=!root.apHideFullscreen; root.saveAppearance() } }
-                        }
-
-                        // ================= BAR WIDGETS =================
-                        ColumnLayout {
-                            property int tabIdx: 12
-                            visible: root.tab === 12; Layout.fillWidth: true; spacing: 14
-                            Section { title: "bar widgets"; icon: "widgets" }
-                            Text {
-                                text: "Toggle widgets, drag ⠿ to reorder, or open ⚙ to change their appearance."
-                                color: theme.faint; font.pixelSize: 11; font.family: root.apFont; Layout.bottomMargin: 6
-                                Layout.fillWidth: true; wrapMode: Text.WordWrap
-                            }
-                            // drag-to-reorder list. ListView (non-interactive so the settings page still
-                            // scrolls) over wgOrderModel; dragging the handle moves rows via ListModel.move
-                            // and commits the new order to apWidgetOrder on release.
-                            ListView {
-                                id: wgList
-                                Layout.fillWidth: true
-                                Layout.preferredHeight: contentHeight
-                                interactive: false
-                                spacing: 8
-                                cacheBuffer: 100000
-                                model: wgOrderModel
-                                displaced: Transition { NumberAnimation { properties: "y"; duration: 150; easing.type: Easing.OutCubic } }
-                                delegate: Item {
-                                    id: wrap
-                                    required property int index
-                                    required property string wid
-                                    readonly property var meta: root.wgMeta[wrap.wid] || ({})
-                                    readonly property bool hasToggle: (wrap.meta.prop || "") !== ""
-                                    readonly property bool enabledVal: wrap.hasToggle ? root[wrap.meta.prop] : true
-                                    property bool held: false
-                                    readonly property bool styleOpen: root.wgOpenId === wrap.wid
-                                    width: wgList.width; height: 52 + (wrap.styleOpen ? 116 : 0)
-                                    Behavior on height { NumberAnimation { duration: Tok.mBase; easing.type: Tok.mEase } }
-                                    z: held ? 2 : 1
-
-                                    Rectangle {
-                                        id: card
-                                        width: wrap.width; height: wrap.height; radius: Tok.r
-                                        anchors.horizontalCenter: parent.horizontalCenter
-                                        anchors.verticalCenter: parent.verticalCenter
-                                        color: wrap.held ? Tok.raised : (wrap.styleOpen ? root.rowHover : "transparent")
-                                        border.width: wrap.held ? 1 : 0; border.color: theme.iris
-                                        Drag.active: wrap.held
-                                        Drag.source: wrap
-                                        Drag.hotSpot.x: width / 2; Drag.hotSpot.y: height / 2
-                                        states: State {
-                                            when: wrap.held
-                                            ParentChange { target: card; parent: wgList }
-                                            AnchorChanges { target: card; anchors.horizontalCenter: undefined; anchors.verticalCenter: undefined }
-                                        }
-                                        RowLayout {
-                                            id: hdr
-                                            anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top
-                                            height: 52
-                                            anchors.leftMargin: 8; anchors.rightMargin: 14; spacing: 10
-                                            // drag handle — grabbing this reorders the row
-                                            MouseArea {
-                                                id: handle
-                                                Layout.preferredWidth: 24; Layout.fillHeight: true
-                                                cursorShape: Qt.SizeVerCursor
-                                                drag.target: card; drag.axis: Drag.YAxis
-                                                onPressed: { root.wgOpenId = ""; root.wgDragging = true; wrap.held = true }
-                                                onReleased: { wrap.held = false; root.wgCommitOrder(); root.wgDragging = false }
-                                                Sym { anchors.centerIn: parent; text: "drag_indicator"; sz: 18; color: wrap.held ? theme.iris : theme.faint }
-                                            }
-                                            Sym { text: wrap.meta.i || "widgets"; sz: 19; color: wrap.enabledVal ? theme.frost : theme.faint }
-                                            ColumnLayout {
-                                                spacing: 1; Layout.fillWidth: true
-                                                Text { text: wrap.meta.l || wrap.wid; color: theme.text; font.pixelSize: 13; font.family: root.apFont
-                                                    Layout.fillWidth: true; elide: Text.ElideRight }
-                                                Text { text: wrap.meta.d || ""; color: theme.faint; font.pixelSize: 10; font.family: root.apFont
-                                                    Layout.fillWidth: true; elide: Text.ElideRight }
-                                            }
-                                            // Opens the appearance controls for THIS widget. A dot marks one that
-                                            // has been styled, so a bar that no longer looks like the defaults can
-                                            // be traced to the rows responsible without opening all twenty.
-                                            MouseArea {
-                                                Layout.preferredWidth: 26; Layout.fillHeight: true
-                                                cursorShape: Qt.PointingHandCursor
-                                                onClicked: root.wgOpenId = wrap.styleOpen ? "" : wrap.wid
-                                                Sym { anchors.centerIn: parent; text: "tune"; sz: 17
-                                                      color: wrap.styleOpen ? theme.iris : theme.faint }
-                                                Rectangle {
-                                                    visible: root.wgStyleTouched(wrap.wid) && !wrap.styleOpen
-                                                    width: 5; height: 5; radius: 2.5; color: theme.iris
-                                                    anchors.right: parent.right; anchors.top: parent.top; anchors.topMargin: 13
-                                                }
-                                            }
-                                            // toggle (hidden for no-toggle widgets like the recorder)
-                                            Rectangle {
-                                                visible: wrap.hasToggle
-                                                Layout.alignment: Qt.AlignVCenter
-                                                implicitWidth: 46; implicitHeight: 22; radius: Tok.r
-                                                color: wrap.enabledVal ? theme.iris : theme.a(theme.line, 0.85); border.width: 1; border.color: wrap.enabledVal ? theme.iris : theme.a(theme.iris, 0.3)
-                                                Rectangle {
-                                                    width: 16; height: 16; radius: Tok.r; y: 3; x: wrap.enabledVal ? 27 : 3
-                                                    color: theme.frost; Behavior on x { NumberAnimation { duration: 120 } }
-                                                }
-                                                MouseArea {
-                                                    anchors.fill: parent; cursorShape: Qt.PointingHandCursor
-                                                    onClicked: { if (wrap.hasToggle) { root[wrap.meta.prop] = !wrap.enabledVal; root.saveAppearance() } }
-                                                }
-                                            }
-                                        }
-
-                                        // ---- per-widget appearance ----
-                                        // Colour, what the pill draws, and what it draws it on. Chosen per
-                                        // widget because the reasons differ per widget: the clock wants to be
-                                        // read, the recorder wants to be noticed, and a pill you only keep for
-                                        // its dropdown wants to take as little of the bar as it can.
-                                        ColumnLayout {
-                                            id: styleBox
-                                            visible: wrap.styleOpen
-                                            anchors.top: hdr.bottom
-                                            anchors.left: parent.left; anchors.right: parent.right
-                                            anchors.leftMargin: 44; anchors.rightMargin: 14; anchors.topMargin: 1
-                                            spacing: 6
-
-                                            Rectangle { Layout.fillWidth: true; height: 1; color: theme.a(theme.iris, 0.14) }
-
-                                            RowLayout {
-                                                Layout.fillWidth: true; spacing: 8
-                                                Text { text: "COLOUR"; color: theme.faint; font.pixelSize: 10
-                                                       font.family: Tok.mono; font.letterSpacing: 0.7
-                                                       Layout.preferredWidth: 52 }
-                                                Repeater {
-                                                    model: root.wgAccentChoices
-                                                    delegate: Rectangle {
-                                                        required property var modelData
-                                                        readonly property bool sel: root.wgStyleGet(wrap.wid, "a") === modelData.k
-                                                        implicitWidth: 22; implicitHeight: 22; radius: 11
-                                                        color: modelData.k === "" ? "transparent" : root.wgTone(modelData.k)
-                                                        border.width: sel ? 2 : 1
-                                                        border.color: sel ? theme.text : theme.a(theme.iris, 0.35)
-                                                        // "default" has no colour of its own to show — it means the
-                                                        // widget keeps whatever it already decides for itself.
-                                                        Sym { visible: modelData.k === ""; anchors.centerIn: parent
-                                                              text: "block"; sz: 12; color: theme.faint }
-                                                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
-                                                            onClicked: root.wgStyleSet(wrap.wid, "a", modelData.k) }
-                                                    }
-                                                }
-                                            }
-
-                                            RowLayout {
-                                                Layout.fillWidth: true; spacing: 8
-                                                Text { text: "SHOWS"; color: theme.faint; font.pixelSize: 10
-                                                       font.family: Tok.mono; font.letterSpacing: 0.7
-                                                       Layout.preferredWidth: 52 }
-                                                Repeater {
-                                                    model: root.wgContentChoices
-                                                    delegate: Chip {
-                                                        required property var modelData
-                                                        label: modelData.l
-                                                        on: root.wgStyleGet(wrap.wid, "c") === modelData.k
-                                                        onPicked: root.wgStyleSet(wrap.wid, "c", modelData.k)
-                                                    }
-                                                }
-                                                Item { Layout.fillWidth: true }
-                                            }
-
-                                            RowLayout {
-                                                Layout.fillWidth: true; spacing: 8
-                                                Text { text: "GROUND"; color: theme.faint; font.pixelSize: 10
-                                                       font.family: Tok.mono; font.letterSpacing: 0.7
-                                                       Layout.preferredWidth: 52 }
-                                                Repeater {
-                                                    model: root.wgGroundChoices
-                                                    delegate: Chip {
-                                                        required property var modelData
-                                                        label: modelData.l
-                                                        on: root.wgStyleGet(wrap.wid, "g") === modelData.k
-                                                        onPicked: root.wgStyleSet(wrap.wid, "g", modelData.k)
-                                                    }
-                                                }
-                                                Item { Layout.fillWidth: true }
-                                            }
-                                        }
-                                    }
-                                    DropArea {
-                                        anchors.fill: parent
-                                        onEntered: (drag) => {
-                                            var from = drag.source.index; var to = wrap.index;
-                                            if (from !== to && from >= 0) wgOrderModel.move(from, to, 1);
-                                        }
-                                    }
-                                }
-                            }
-                            // ---- per-widget options ----
-                            // The first of these. sea-sysmon.sh samples cpu, ram, gpu, vram, temps and
-                            // power every 3 seconds and the pill rendered exactly one of them, so a 6GB
-                            // card had its VRAM measured on every tick and shown nowhere.
-                            Section { title: "system monitor"; icon: "speed"; Layout.topMargin: 8 }
-                            Text {
-                                text: "Choose bar readings; GPU readings appear when a discrete card is available."
-                                color: theme.faint; font.pixelSize: 11; font.family: root.apFont; Layout.bottomMargin: 6
-                                Layout.fillWidth: true; wrapMode: Text.WordWrap
-                            }
-                            Flow {
-                                Layout.fillWidth: true; Layout.bottomMargin: 4; spacing: 6
-                                Repeater {
-                                    model: [{k:"cpu",l:"CPU %"},{k:"cput",l:"CPU temp"},
-                                            {k:"ram",l:"RAM %"},{k:"ramg",l:"RAM GiB"},
-                                            {k:"gpu",l:"GPU %"},{k:"gput",l:"GPU temp"},
-                                            {k:"vram",l:"VRAM %"},{k:"vramg",l:"VRAM GiB"}]
-                                    delegate: Rectangle {
-                                        required property var modelData
-                                        readonly property bool on: root.apSysShow.indexOf(modelData.k) >= 0
-                                        height: 27; radius: Tok.r; width: smTxt.implicitWidth + 20
-                                        color: on ? theme.a(theme.iris, 0.25)
-                                             : (smMa.containsMouse ? theme.a(theme.line, 0.7) : theme.a(theme.line, 0.4))
-                                        border.width: 1; border.color: on ? theme.iris : theme.a(theme.iris, 0.2)
-                                        Text { id: smTxt; anchors.centerIn: parent; text: modelData.l
-                                            color: on ? theme.text : theme.sub
-                                            font.pixelSize: 11; font.family: root.apFont; font.bold: on }
-                                        MouseArea { id: smMa; anchors.fill: parent; hoverEnabled: true
-                                            cursorShape: Qt.PointingHandCursor
-                                            onClicked: root.sysShowToggle(modelData.k) }
-                                    }
-                                }
-                            }
-
-                            // ---- left cluster order (logo · workspaces · window-title) ----
-                            Section { title: "left side"; icon: "align_horizontal_left"; Layout.topMargin: 8 }
-                            Text {
-                                text: "drag to reorder the items on the left of the bar."
-                                color: theme.faint; font.pixelSize: 11; font.family: root.apFont; Layout.bottomMargin: 6
-                                Layout.fillWidth: true; wrapMode: Text.WordWrap
-                            }
-                            ListView {
-                                id: lgList
-                                Layout.fillWidth: true
-                                Layout.preferredHeight: contentHeight
-                                interactive: false
-                                spacing: 8
-                                cacheBuffer: 100000
-                                model: lgOrderModel
-                                displaced: Transition { NumberAnimation { properties: "y"; duration: 150; easing.type: Easing.OutCubic } }
-                                delegate: Item {
-                                    id: lwrap
-                                    required property int index
-                                    required property string wid
-                                    readonly property var meta: root.lgMeta[lwrap.wid] || ({})
-                                    property bool held: false
-                                    width: lgList.width; height: 46
-                                    z: held ? 2 : 1
-                                    Rectangle {
-                                        id: lcard
-                                        width: lwrap.width; height: lwrap.height; radius: Tok.r
-                                        anchors.horizontalCenter: parent.horizontalCenter
-                                        anchors.verticalCenter: parent.verticalCenter
-                                        color: lwrap.held ? Tok.raised : "transparent"
-                                        border.width: lwrap.held ? 1 : 0; border.color: theme.iris
-                                        Drag.active: lwrap.held
-                                        Drag.source: lwrap
-                                        Drag.hotSpot.x: width / 2; Drag.hotSpot.y: height / 2
-                                        states: State {
-                                            when: lwrap.held
-                                            ParentChange { target: lcard; parent: lgList }
-                                            AnchorChanges { target: lcard; anchors.horizontalCenter: undefined; anchors.verticalCenter: undefined }
-                                        }
-                                        RowLayout {
-                                            anchors.fill: parent; anchors.leftMargin: 8; anchors.rightMargin: 14; spacing: 10
-                                            MouseArea {
-                                                id: lhandle
-                                                Layout.preferredWidth: 24; Layout.fillHeight: true
-                                                cursorShape: Qt.SizeVerCursor
-                                                drag.target: lcard; drag.axis: Drag.YAxis
-                                                onPressed: { root.wgDragging = true; lwrap.held = true }
-                                                onReleased: { lwrap.held = false; root.lgCommitOrder(); root.wgDragging = false }
-                                                Sym { anchors.centerIn: parent; text: "drag_indicator"; sz: 18; color: lwrap.held ? theme.iris : theme.faint }
-                                            }
-                                            Sym { text: lwrap.meta.i || "widgets"; sz: 19; color: theme.frost }
-                                            ColumnLayout {
-                                                spacing: 1; Layout.fillWidth: true
-                                                Text { text: lwrap.meta.l || lwrap.wid; color: theme.text; font.pixelSize: 13; font.family: root.apFont
-                                                    Layout.fillWidth: true; elide: Text.ElideRight }
-                                                Text { text: lwrap.meta.d || ""; color: theme.faint; font.pixelSize: 10; font.family: root.apFont
-                                                    Layout.fillWidth: true; elide: Text.ElideRight }
-                                            }
-                                        }
-                                    }
-                                    DropArea {
-                                        anchors.fill: parent
-                                        onEntered: (drag) => {
-                                            var from = drag.source.index; var to = lwrap.index;
-                                            if (from !== to && from >= 0) lgOrderModel.move(from, to, 1);
-                                        }
-                                    }
-                                }
-                            }
-                            // ---- the global menu (it lives in the window-title slot) ----
-                            Section { title: "global menu"; icon: "menu_open"; Layout.topMargin: 8 }
-                            Text {
-                                text: "Show the active app’s menu in place of its window title when available."
-                                color: theme.faint; font.pixelSize: 11; font.family: root.apFont; Layout.bottomMargin: 6
-                                Layout.fillWidth: true; wrapMode: Text.WordWrap
-                            }
-                            ToggleCard {
-                                icon: "menu_open"; title: "show the global menu"
-                                desc: "replaces the window title when the focused window has a menu bar"
-                                on: root.gmEnabled
-                                onToggled: { root.gmEnabled = !root.gmEnabled; root.gmSave() }
-                            }
-                            ToggleCard {
-                                visible: root.gmEnabled
-                                icon: "keyboard"; title: "show keyboard shortcuts"
-                                desc: "the accelerator beside each item, where the application reports one"
-                                on: root.gmAccel
-                                onToggled: { root.gmAccel = !root.gmAccel; root.gmSave() }
-                            }
-                            ToggleCard {
-                                visible: root.gmEnabled
-                                icon: "bolt"; title: "read menus in the background"
-                                desc: "firefox and electron only describe a menu once it has been opened, and opening it is real — their own popup appears. off: it happens on the click that needs it, one menu at a time. on: backgrounded windows are read in advance, which is faster but can be seen if you switch to one mid-read."
-                                on: root.gmPrime
-                                onToggled: { root.gmPrime = !root.gmPrime; root.gmSave() }
-                            }
-                            Text {
-                                visible: root.gmEnabled
-                                text: "SUPER+M opens it · SUPER+SHIFT+M searches every command in it · arrows walk it, / searches, escape backs out"
-                                color: theme.faint; font.pixelSize: 10; font.family: root.apFont
-                                Layout.fillWidth: true; wrapMode: Text.WordWrap; Layout.topMargin: 2
-                            }
-                            AccentBtn {
-                                visible: root.gmEnabled
-                                label: root.gmDoctorBusy ? "checking…" : "why has a window no menu?"
-                                icon: "stethoscope"
-                                enabled: !root.gmDoctorBusy
-                                Layout.topMargin: 4
-                                onClicked: root.gmRunDoctor()
-                            }
-                            Rectangle {
-                                visible: root.gmEnabled && root.gmDoctor.length > 0
-                                Layout.fillWidth: true
-                                implicitHeight: docTxt.implicitHeight + 20
-                                radius: Tok.r
-                                color: theme.a(theme.line, 0.4)
-                                border.width: 1; border.color: theme.a(theme.iris, 0.14)
-                                Text {
-                                    id: docTxt
-                                    anchors.fill: parent; anchors.margins: 10
-                                    text: root.gmDoctor
-                                    color: theme.sub; font.pixelSize: 10; font.family: Tok.mono
-                                    wrapMode: Text.WordWrap
-                                }
-                            }
-
-                            // ---- per-app setup ----
-                            Text {
-                                visible: root.gmEnabled && root.gmApps.length > 0
-                                text: "apps on this machine"
-                                color: theme.faint; font.pixelSize: 10; font.family: Tok.mono
-                                Layout.topMargin: 8
-                            }
-                            Repeater {
-                                model: root.gmEnabled ? root.gmApps : []
-                                delegate: Rectangle {
-                                    required property var modelData
-                                    Layout.fillWidth: true
-                                    implicitHeight: Math.max(40, appCol.implicitHeight + 14)
-                                    radius: Tok.r
-                                    color: theme.a(theme.line, 0.4)
-                                    border.width: 1
-                                    border.color: modelData.ok ? theme.a(theme.good, 0.35)
-                                                               : theme.a(theme.warn, 0.35)
-                                    RowLayout {
-                                        anchors.fill: parent
-                                        anchors.leftMargin: 12; anchors.rightMargin: 12
-                                        spacing: 10
-                                        Sym { text: modelData.ok ? "check_circle" : "error"
-                                              sz: 17
-                                              color: modelData.ok ? theme.good : theme.warn
-                                              Layout.alignment: Qt.AlignVCenter }
-                                        ColumnLayout { id: appCol; spacing: 2; Layout.fillWidth: true
-                                            Text { text: modelData.label; color: theme.text
-                                                   font.pixelSize: 13; font.family: Tok.mono
-                                                   Layout.fillWidth: true; elide: Text.ElideRight }
-                                            Text { text: modelData.ok ? "ready" : modelData.how
-                                                   color: theme.faint; font.pixelSize: 10
-                                                   font.family: Tok.mono
-                                                   Layout.fillWidth: true; wrapMode: Text.WordWrap } }
-                                    }
-                                }
-                            }
-                            AccentBtn {
-                                visible: root.gmEnabled && root.gmNeeds > 0
-                                enabled: !root.gmSetupBusy
-                                icon: "auto_fix_high"
-                                label: root.gmSetupBusy ? "setting up…"
-                                       : "set up " + root.gmNeeds + " app" + (root.gmNeeds === 1 ? "" : "s")
-                                Layout.topMargin: 4
-                                onClicked: root.gmSetupAll()
-                            }
-                            Text {
-                                visible: root.gmEnabled && root.gmApps.length > 0
-                                Layout.fillWidth: true; wrapMode: Text.WordWrap
-                                text: root.gmNeeds > 0
-                                      ? "firefox needs two prefs; electron apps need to run under xwayland so they can hand their menu over as data. each app has to be restarted afterwards."
-                                      : "every app found here can publish its menu. qt and gtk apps need nothing at all."
-                                color: theme.faint; font.pixelSize: 10; font.family: Tok.mono
-                            }
-
-                            // ---- bar layout presets (save/restore the whole bar layout) ----
-                            Section { title: "layout presets"; icon: "bookmarks"; Layout.topMargin: 8 }
-                            Text {
-                                text: "save the current widget order, left-side order and on/off toggles as a named preset, then restore it in one click."
-                                color: theme.faint; font.pixelSize: 11; font.family: root.apFont; Layout.bottomMargin: 4
-                                Layout.fillWidth: true; wrapMode: Text.WordWrap
-                            }
-                            RowLayout {
-                                Layout.fillWidth: true; spacing: 10
-                                Rectangle {
-                                    Layout.fillWidth: true; implicitHeight: 36; radius: Tok.r
-                                    color: theme.a(theme.line, 0.4); border.width: 1; border.color: blNameIn.activeFocus ? theme.iris : theme.a(theme.iris, 0.16)
-                                    TextInput {
-                                        id: blNameIn; anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 12
-                                        verticalAlignment: TextInput.AlignVCenter
-                                        color: theme.text; font.pixelSize: 12; font.family: root.apFont; clip: true
-                                        onAccepted: { root.saveBarLayout(text); text = "" }
-                                        Text { anchors.verticalCenter: parent.verticalCenter; visible: !blNameIn.text; text: "layout name…"; color: theme.faint; font.pixelSize: 12; font.family: root.apFont }
-                                    }
-                                }
-                                Rectangle {
-                                    implicitWidth: 84; implicitHeight: 36; radius: Tok.r
-                                    color: blSaveMa.containsMouse ? theme.iris : theme.a(theme.iris, 0.22); border.width: 1; border.color: theme.iris
-                                    enabled: blNameIn.text.trim() !== ""; opacity: enabled ? 1 : 0.5
-                                    Row { anchors.centerIn: parent; spacing: 5
-                                        Sym { anchors.verticalCenter: parent.verticalCenter; text: "save"; sz: 15; color: blSaveMa.containsMouse ? theme.bg : theme.frost }
-                                        Text { anchors.verticalCenter: parent.verticalCenter; text: "save"; color: blSaveMa.containsMouse ? theme.bg : theme.text; font.pixelSize: 12; font.family: root.apFont } }
-                                    MouseArea { id: blSaveMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: { root.saveBarLayout(blNameIn.text); blNameIn.text = "" } }
-                                }
-                            }
-                            Text { visible: root.barLayouts.length === 0; text: "no saved layouts yet."; color: theme.faint; font.pixelSize: 11; font.family: root.apFont; Layout.topMargin: 2 }
-                            Repeater { model: root.barLayouts
-                                delegate: Rectangle { required property var modelData; required property int index
-                                    Layout.fillWidth: true; implicitHeight: 44; radius: Tok.r
-                                    color: theme.a(theme.line, 0.4); border.width: 1; border.color: theme.a(theme.iris, 0.16)
-                                    RowLayout { anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 10; spacing: 8
-                                        Sym { text: "bookmark"; sz: 17; color: theme.frost }
-                                        Text { text: modelData.name; color: theme.text; font.pixelSize: 13; font.family: root.apFont; Layout.fillWidth: true; elide: Text.ElideRight }
-                                        Rectangle { implicitWidth: 70; implicitHeight: 28; radius: Tok.r
-                                            color: blLoadMa.containsMouse ? theme.iris : theme.a(theme.iris, 0.18); border.width: 1; border.color: theme.a(theme.iris, 0.4)
-                                            Text { anchors.centerIn: parent; text: "load"; color: blLoadMa.containsMouse ? theme.bg : theme.text; font.pixelSize: 11; font.family: root.apFont }
-                                            MouseArea { id: blLoadMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.loadBarLayout(modelData) } }
-                                        Rectangle { implicitWidth: 30; implicitHeight: 28; radius: Tok.r
-                                            color: blDelMa.containsMouse ? theme.a(theme.bad, 0.25) : theme.a(theme.line, 0.5)
-                                            Sym { anchors.centerIn: parent; text: "delete"; sz: 15; color: blDelMa.containsMouse ? theme.bad : theme.faint }
-                                            MouseArea { id: blDelMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.deleteBarLayout(index) } } }
-                                }
-                            }
-                        }
-
-                        // ================= THEME PROFILES =================
-                        ColumnLayout {
-                            property int tabIdx: 13
-                            visible: root.tab === 13; Layout.fillWidth: true; spacing: 14
-                            Section { title: "theme profiles & presets"; icon: "auto_awesome" }
-                            Text {
-                                text: "save your active layout configuration as a custom preset, or load an existing preset profile."
-                                color: theme.faint; font.pixelSize: 11; font.family: root.apFont; Layout.bottomMargin: 6
-                            }
-                            
-                            // Save section
-                            RowLayout {
-                                Layout.fillWidth: true; spacing: 10
-                                Rectangle {
-                                    Layout.fillWidth: true; implicitHeight: 36; radius: Tok.r
-                                    color: theme.a(theme.line, 0.4); border.width: 1; border.color: profNameIn.activeFocus ? theme.iris : theme.a(theme.iris, 0.16)
-                                    TextInput {
-                                        id: profNameIn; anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 12
-                                        verticalAlignment: TextInput.AlignVCenter
-                                        color: theme.text; font.pixelSize: 12; font.family: root.apFont
-                                        Text { anchors.verticalCenter: parent.verticalCenter; visible: !profNameIn.text; text: "Enter preset name..."; color: theme.faint; font.pixelSize: 12 }
-                                    }
-                                }
-                                Rectangle {
-                                    implicitWidth: 120; implicitHeight: 36; radius: Tok.r
-                                    color: savePrMa.containsMouse ? theme.iris : theme.a(theme.line, 0.6)
-                                    border.width: 1; border.color: theme.a(theme.iris, 0.16)
-                                    Text { anchors.centerIn: parent; text: "Save Preset"; color: savePrMa.containsMouse ? theme.bg : theme.frost; font.pixelSize: 11; font.bold: true; font.family: root.apFont }
-                                    MouseArea {
-                                        id: savePrMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
-                                        onClicked: {
-                                            if (profNameIn.text.trim() !== "") {
-                                                root.saveProfile(profNameIn.text);
-                                                profNameIn.text = "";
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            
-                            // ---- the rack ----
-                            // Cartridges, not a list of rows with a Load button. A preset
-                            // has a palette and no words for it, and the row this replaces
-                            // spent its width on "font: Adwaita Sans · radius: 14px ·
-                            // accent: #dbc0c8" — a description of a colour scheme in the
-                            // one format that cannot show you a colour scheme.
-                            ColumnLayout {
-                                Layout.fillWidth: true; spacing: 8
-                                visible: root.profilesList.length > 0
-                                Section { title: "saved presets"; icon: "inventory_2" }
-                                Text {
-                                    text: "click a cartridge to load it · the lit lamp is the one you are on"
-                                    color: theme.faint; font.pixelSize: 10; font.family: Tok.mono
-                                    Layout.leftMargin: 14; Layout.bottomMargin: 4
-                                }
-                                Flow {
-                                    Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14
-                                    spacing: 10
-                                    Repeater {
-                                        model: root.profilesList
-                                        delegate: ProfileCart {
-                                            required property var modelData
-                                            required property int index
-                                            profile: modelData
-                                            loaded: root.profLoaded(modelData)
-                                            onLoad: root.loadProfile(modelData)   // it persists itself
-                                            onEject: root.deleteProfile(index)
-                                        }
-                                    }
-                                }
-                            }
-
-                            // Placeholder
-                            Text {
-                                text: "no presets saved yet — set the shell up how you like it, name it above, and save."
-                                visible: root.profilesList.length === 0
-                                color: theme.faint; font.pixelSize: 11; font.family: Tok.mono
-                                Layout.topMargin: 20; horizontalAlignment: Text.AlignHCenter
-                                Layout.fillWidth: true
-                            }
-                        }
-
-                        // ================= ACTIONS =================
-                        ColumnLayout {
-                            property int tabIdx: 5
-                            visible: root.tab === 5; Layout.fillWidth: true; spacing: 14
-                            Section { title: "quick actions"; icon: "bolt" }
-                            GridLayout {
-                                columns: 2; columnSpacing: 10; rowSpacing: 8; Layout.fillWidth: true
-                                Row2 { icon: "refresh"; label: "Reload Hyprland"; cmd: "hyprctl reload"; quitAfter: true }
-                                Row2 { icon: "restart_alt"; label: "Restart bar"; cmd: "sh ~/.config/quickshell/sea-shell/sea-bar-supervisor.sh --restart"; quitAfter: true }
-                                Row2 { icon: "terminal"; label: "Terminal"; cmd: "kitty & disown"; quitAfter: true }
-                                Row2 { icon: "wallpaper"; label: "Wallpapers"; cmd: "qs -p " + root.repo + "/wallpaper.qml & disown"; quitAfter: true }
-                                // The first-run tour, on demand. It shows itself once on a
-                                // fresh install and is otherwise unreachable — which for a
-                                // screen that explains where things are is the wrong way round.
-                                Row2 { icon: "auto_awesome"; label: "Show the welcome tour again"
-                                       cmd: "qs -c sea-shell ipc call welcome open"; quitAfter: true }
-                                Row2 { icon: "content_paste"; label: "Clipboard history"; cmd: "qs -c sea-shell ipc call launcher clipboard"; quitAfter: true }
-                                Row2 { icon: "photo_camera"; label: "Screenshot region"; cmd: "sleep 0.2; grim -g \"$(slurp)\" - | wl-copy"; quitAfter: true }
-                                Row2 { icon: "keyboard"; label: "Keybinds editor"; cmd: "qs -p " + root.repo + "/keybinds.qml & disown"; quitAfter: true }
-                                Row2 { icon: "edit_note"; label: "Edit keybinds"; cmd: "xdg-open \"$(dirname \"$(readlink -f ~/.config/quickshell/sea-shell)\")/hypr/keybinds.conf\" & disown"; quitAfter: true }
-                                Row2 { icon: "settings"; label: "Edit configs"; cmd: "kitty --directory " + root.repo + "/.. & disown"; quitAfter: true }
-                            }
-                        }
-
-                        // ================= KEYBINDS =================
-                        ColumnLayout {
-                            property int tabIdx: 7
-                            visible: root.tab === 7; Layout.fillWidth: true; spacing: 10
-                            Section { title: "keybinds"; icon: "keyboard" }
-                            // search
-                            RowLayout {
-                                spacing: 10; Layout.fillWidth: true
-                                Rectangle {
-                                    Layout.fillWidth: true; implicitHeight: 32; radius: Tok.r
-                                    color: theme.a(theme.line, 0.4)
-                                    border.width: 1; border.color: kbField.text!=="" ? theme.a(theme.iris,0.5) : theme.a(theme.iris,0.2)
-                                    Sym { id: kbLens; text: "search"; sz: 15; color: theme.faint
-                                        anchors { left: parent.left; leftMargin: 10; verticalCenter: parent.verticalCenter } }
-                                    TextInput {
-                                        id: kbField
-                                        anchors { left: kbLens.right; leftMargin: 8; right: parent.right; rightMargin: 10; verticalCenter: parent.verticalCenter }
-                                        color: theme.text; font.pixelSize: 13; font.family: Tok.mono; clip: true
-                                        onTextChanged: root.kbQuery = text
-                                        Text { text: "type to filter · click a bind to edit it"; visible: kbField.text===""
-                                            color: theme.faint; font.pixelSize: 12; font.family: Tok.mono; anchors.verticalCenter: parent.verticalCenter }
-                                        Keys.onPressed: (e)=> {
-                                            if (e.key === Qt.Key_Escape) { root.closePanel(); e.accepted = true; }
-                                        }
-                                    }
-                                }
-                                // Add Button → opens the editor popup in "add" mode
-                                Rectangle {
-                                    implicitWidth: 32; implicitHeight: 32; radius: Tok.r
-                                    color: kbAddBtnMa.containsMouse ? theme.iris : theme.a(theme.line, 0.4)
-                                    border.width: 1; border.color: theme.a(theme.iris, 0.2)
-                                    Sym { anchors.centerIn: parent; text: "add"; sz: 18; color: kbAddBtnMa.containsMouse ? theme.bg : theme.frost }
-                                    MouseArea {
-                                        id: kbAddBtnMa
-                                        anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
-                                        onClicked: root.kbOpenAdd()
-                                    }
-                                }
-                            }
-
-                            // bind rows — a table, because that is what a keymap is. The chip
-                            // column carries the combo; `_tone: accent` marks the bind currently
-                            // being re-recorded so it stands out mid-capture.
-                            IndTable {
-                                Layout.fillWidth: true
-                                rowHeight: 30
-                                selectable: true
-                                rows: root.kbShown
-                                emptyText: root.kbQuery !== "" ? "no bind matches that" : "—"
-                                columns: [
-                                    { label: "Action",  key: "desc", flex: true },
-                                    { label: "Binding", key: "keys", w: 200, chip: true, num: true, toneKey: "_tone" }
-                                ]
-                                onActivated: (i, row) => { if (row.canEdit) root.kbOpenEdit(row) }
-                            }
-                            Text { Layout.fillWidth: true; elide: Text.ElideRight; text: root.kbShown.length + "/" + root.kbBinds.length + " binds · rebinds rewrite keybinds.lua + reload hyprland"
-                                color: theme.faint; font.pixelSize: 10; font.family: Tok.mono }
-                        }
-
-                        ColumnLayout {
-                            property int tabIdx: 23
-                            visible: root.tab === 23; Layout.fillWidth: true; spacing: 14
-                            Section { title: "Your profile"; icon: "account_circle" }
-                            ProfileSettings { id: userProfileEditor; Layout.fillWidth: true; part: "identity"
-                                onSaved: lockProfileEditor.reload()
-                                onBrowseRequested: root.pickFile("Choose profile picture", "*.png *.jpg *.jpeg *.webp", function(path) { userProfileEditor.setAvatar(path) })
-                            }
-                        }
-                        // ================= SYSTEM =================
-                        // ================= SYSTEM / ABOUT =================
-                        ColumnLayout {
-                            property int tabIdx: 8
-                            visible: root.tab === 8; Layout.fillWidth: true; spacing: 12
-
-                            // ---- hero: brand · version · host ----
-                            // Was a horizontal accent gradient behind a brand hero. Flat surface
-                            // and a hairline now — an internal tool opens on its data, not on a
-                            // decorated masthead.
-                            ProfileCard { Layout.fillWidth: true; profile: root.userProfile
-                                subtitleIcon: root.sysInfo.id === "cachyos" ? Qt.resolvedUrl("brand-cachyos.svg") : ""
-                                subtitle: (root.sysInfo.os || "sea-shell") + " · " + (root.sysInfo.host || "") + " · up " + (root.sysInfo.up || "…")
-                            }
-
-                            // ---- system info grid ----
-                            Section { title: "system"; icon: "monitor_heart" }
-                            GridLayout {
-                                Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; columns: 2; columnSpacing: 10; rowSpacing: 8
-                                InfoTile { icon: root.nfKernel; iconFont: "Symbols Nerd Font"; label: "KERNEL"; value: root.sysInfo.kernel || "…" }
-                                InfoTile { logo: Qt.resolvedUrl("brand-hyprland.svg"); icon: root.nfHypr;   iconFont: "Symbols Nerd Font"; label: "COMPOSITOR"; value: root.sysInfo.wm ? ("Hyprland " + root.sysInfo.wm) : "Hyprland" }
-                                InfoTile { logo: root.sysInfo.session === "wayland" ? Qt.resolvedUrl("brand-wayland-symbol.svg") : ""; iconFont: "Symbols Nerd Font"; label: "SESSION"
-                                    icon: (root.sysInfo.session === "x11" || root.sysInfo.session === "tty") ? root.nfXorg : root.nfWayland
-                                    value: root.sysInfo.session ? (root.sysInfo.session.charAt(0).toUpperCase() + root.sysInfo.session.slice(1)) : "Wayland" }
-                                InfoTile { icon: "aspect_ratio";    label: "RESOLUTION"; value: root.sysInfo.res || "…" }
-                                InfoTile { logo: Qt.resolvedUrl("brand-quickshell-symbol.svg"); icon: "code";            label: "SHELL";      value: root.sysInfo.shell || "…" }
-                                InfoTile { icon: "inventory_2";     label: "PACKAGES";   value: root.sysInfo.pkgs ? (root.sysInfo.pkgs + "  ·  pacman") : "…" }
-                                InfoTile { icon: "architecture";    label: "ARCH";       value: root.sysInfo.arch || "…" }
-                                InfoTile { icon: "monitoring";      label: "LOAD AVG";   value: root.sysInfo.load || "…" }
-                            }
-
-                            // ---- hardware ----
-                            Section { title: "hardware"; icon: "memory" }
-                            InfoTile { Layout.leftMargin: 14; Layout.rightMargin: 14; logo: (root.sysInfo.cpu || "").toLowerCase().indexOf("intel") >= 0 ? Qt.resolvedUrl("brand-intel.svg") : (root.sysInfo.cpu || "").toLowerCase().indexOf("amd") >= 0 ? Qt.resolvedUrl("brand-amd.svg") : ""; icon: "developer_board"; label: "CPU"
-                                value: (root.sysInfo.cpu || "…") + (root.sysInfo.cores ? ("  ·  " + root.sysInfo.cores + " threads") : "") }
-                            Repeater { model: root.sysInfo.gpus || []
-                                delegate: InfoTile { required property var modelData; Layout.leftMargin: 14; Layout.rightMargin: 14
-                                    logo: /nvidia|geforce|rtx|gtx/i.test(modelData) ? Qt.resolvedUrl("brand-nvidia.svg") : /intel|iris|uhd/i.test(modelData) ? Qt.resolvedUrl("brand-intel.svg") : /amd|radeon/i.test(modelData) ? Qt.resolvedUrl("brand-amd.svg") : ""
-                                    icon: "view_in_ar"; label: "GPU"; value: modelData } }
-                            ColumnLayout { Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; Layout.topMargin: 4; spacing: 10
-                                Meter { label: "memory"; pct: parseInt(root.sysInfo.rampct) || 0; value: root.sysInfo.ram || "…"; fill: theme.iris }
-                                Meter { label: "disk /"; pct: parseInt(root.sysInfo.diskpct) || 0; value: root.sysInfo.disk || "…"; fill: theme.frost }
-                            }
-
-                            // ---- updates (OTA) ----
-                            Section { title: "sea-shell updates"; icon: "cloud_download" }
-                            RowLayout {
-                                Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; spacing: 8
-                                ColumnLayout {
-                                    Layout.fillWidth: true; spacing: 2
-                                    RowLayout {
-                                        spacing: 8
-                                        Text { text: "installed " + (root.otaLocal || "…"); color: theme.text
-                                            font.pixelSize: 12; font.family: Tok.mono }
-                                        Rectangle {
-                                            visible: root.otaState !== ""
-                                            implicitHeight: 16; implicitWidth: otaTxt.width + 12; radius: Tok.r
-                                            color: theme.a(root.otaColor, 0.18)
-                                            border.width: 1; border.color: theme.a(root.otaColor, 0.5)
-                                            Text { id: otaTxt; anchors.centerIn: parent
-                                                text: root.otaState === "available" ? (root.otaBehind + " update" + (root.otaBehind === 1 ? "" : "s"))
-                                                      : root.otaState
-                                                color: root.otaColor; font.pixelSize: 9; font.family: Tok.mono; font.bold: true }
-                                        }
-                                    }
-                                    Text {
-                                        Layout.fillWidth: true; wrapMode: Text.WordWrap
-                                        text: root.otaBusy ? "working…"
-                                              : (root.otaDetail || "check github for a newer sea-shell")
-                                        color: theme.faint; font.pixelSize: 10; font.family: Tok.mono
-                                    }
-                                }
-                                IndBtn { text: "Check"; rank: "secondary"; enabled: !root.otaBusy
-                                    onActivated: otaProc.running = true }
-                                IndBtn { text: "Update"; rank: "primary"; enabled: root.otaCanApply
-                                    onActivated: otaApply.running = true }
-                            }
-                            Text {
-                                Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14
-                                wrapMode: Text.WordWrap
-                                // Being explicit about the refusal rules up front is the point: an
-                                // updater that might eat unpushed work is one nobody should press.
-                                text: "pulls from your git remote and re-runs install.sh. it only ever fast-forwards — "
-                                    + "if the repo has uncommitted changes, local commits, or has diverged, the update "
-                                    + "is refused rather than merged, so nothing unpushed can be lost."
-                                color: theme.faint; font.pixelSize: 10; font.family: Tok.mono
-                            }
-
-                            // ---- health check ----
-                            Section { title: "health check"; icon: "stethoscope" }
-                            RowLayout {
-                                Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; spacing: 8
-                                Text {
-                                    Layout.fillWidth: true; wrapMode: Text.WordWrap
-                                    text: root.docRows.length === 0
-                                          ? "checks dependencies, config validity, deployment and the bar's crash history."
-                                          : (root.docCrit > 0 ? (root.docCrit + " problem" + (root.docCrit === 1 ? "" : "s")
-                                                                + (root.docWarn > 0 ? " · " + root.docWarn + " warning" + (root.docWarn === 1 ? "" : "s") : ""))
-                                             : root.docWarn > 0 ? (root.docWarn + " warning" + (root.docWarn === 1 ? "" : "s") + " · nothing broken")
-                                             : "all " + root.docRows.length + " checks passed")
-                                    color: root.docCrit > 0 ? theme.bad : root.docWarn > 0 ? theme.warn : theme.sub
-                                    font.pixelSize: 11; font.family: Tok.mono
-                                }
-                                IndBtn { text: root.docRunning ? "Checking…" : "Run check"; rank: "primary"
-                                    enabled: !root.docRunning; onActivated: docProc.running = true }
-                            }
-                            IndTable {
-                                visible: root.docRows.length > 0
-                                Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14
-                                rowHeight: 26
-                                rows: root.docSorted
-                                maxRows: 14
-                                columns: [
-                                    { label: "",       key: "st",     w: 54, chip: true },
-                                    { label: "Area",   key: "cat",    w: 88, mono: true },
-                                    { label: "Item",   key: "item",   w: 150, mono: true },
-                                    { label: "Detail", key: "detail", flex: true }
-                                ]
-                            }
-
-                            // ---- backup & restore ----
-                            Section { title: "backup"; icon: "archive" }
-                            Text {
-                                Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14
-                                wrapMode: Text.WordWrap
-                                text: root.bkMsg !== "" ? root.bkMsg
-                                      : "archives every setting, pin, rule, gesture, keybind and layout to ~/Documents. "
-                                        + "restoring saves your current config first, so it is itself undoable. "
-                                        + "wallpaper files are not included — only the path to them."
-                                color: root.bkMsg !== "" ? theme.frost : theme.faint
-                                font.pixelSize: 10; font.family: Tok.mono
-                            }
-                            RowLayout {
-                                Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; spacing: 8
-                                IndBtn { text: "Back up now"; rank: "primary"; onActivated: root.bkCreate() }
-                                IndBtn { text: "Refresh list"; rank: "secondary"; onActivated: bkListProc.running = true }
-                                Item { Layout.fillWidth: true }
-                            }
-                            IndTable {
-                                Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14
-                                rowHeight: 28
-                                rows: root.bkList
-                                maxRows: 6
-                                selectable: true
-                                emptyText: "no backups yet"
-                                columns: [
-                                    { label: "Archive", key: "file", flex: true, mono: true },
-                                    { label: "Size",    key: "size", w: 70,  num: true },
-                                    { label: "Made",    key: "when", w: 120, mono: true }
-                                ]
-                                onActivated: (i, row) => root.bkRestore(row)
-                            }
-                            Text {
-                                Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14
-                                wrapMode: Text.WordWrap
-                                text: "click an archive to restore it. restart the bar afterwards to pick everything up."
-                                color: theme.faint; font.pixelSize: 10; font.family: Tok.mono
-                            }
-
-                            // ---- refresh ----
-                            RowLayout { Layout.topMargin: 6; Layout.fillWidth: true
-                                Item { Layout.fillWidth: true }
-                                Rectangle {
-                                    implicitHeight: 30; implicitWidth: rfRow.width + 22; radius: Tok.r
-                                    color: rfMa.containsMouse ? theme.a(theme.iris, 0.2) : theme.a(theme.line, 0.4)
-                                    border.width: 1; border.color: theme.a(theme.iris, 0.2)
-                                    RowLayout { id: rfRow; anchors.centerIn: parent; spacing: 7
-                                        Sym { text: "refresh"; sz: 15; color: theme.frost }
-                                        Text { text: "refresh"; color: theme.sub; font.pixelSize: 11; font.family: Tok.mono } }
-                                    MouseArea { id: rfMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
-                                        onClicked: { sysProc.running = true; diskProc.running = true } }
-                                }
-                            }
-                        }
-
-                        // ================= DISKS =================
-                        ColumnLayout {
-                            property int tabIdx: 19
-                            visible: root.tab === 19; Layout.fillWidth: true; spacing: 14
-
-                            // ---- overview ----
-                            // Numbers first, detail below: how many drives, how much of the root
-                            // filesystem is gone, and whether anything is plugged in.
-                            Section { title: "overview"; icon: "monitoring" }
-                            RowLayout {
-                                Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14
-                                Layout.topMargin: 4; spacing: Tok.s8
-                                IndKpi {
-                                    label: "DRIVES"; value: "" + root.diskDrives.length
-                                    sub: root.diskRemovableCount > 0 ? (root.diskRemovableCount + " removable") : "all internal"
-                                }
-                                Rectangle { Layout.preferredWidth: 1; Layout.fillHeight: true; color: Tok.rule }
-                                IndKpi {
-                                    label: "ROOT USED"; value: root.diskRootPct >= 0 ? ("" + root.diskRootPct) : "—"
-                                    unit: root.diskRootPct >= 0 ? "%" : ""
-                                    sub: root.diskRootFree !== "" ? (root.diskRootFree + " free") : ""
-                                    tone: root.diskRootPct >= 90 ? "crit" : root.diskRootPct >= 80 ? "warn" : "ok"
-                                }
-                                Rectangle { Layout.preferredWidth: 1; Layout.fillHeight: true; color: Tok.rule }
-                                IndKpi {
-                                    label: "MOUNTED"; value: "" + root.diskMountedCount
-                                    sub: "of " + root.diskRows.length + " partitions"
-                                }
-                                Item { Layout.fillWidth: true }
-                            }
-
-                            // ---- one panel per physical drive ----
-                            Section { title: "drives"; icon: "hard_drive" }
-                            Repeater {
-                                model: root.diskDrives
-                                delegate: ColumnLayout {
-                                    required property var modelData
-                                    Layout.fillWidth: true
-                                    Layout.leftMargin: 14; Layout.rightMargin: 14; Layout.topMargin: 10
-                                    spacing: 6
-
-                                    // drive header: what it is, how it connects, and eject if removable
-                                    RowLayout {
-                                        Layout.fillWidth: true; spacing: 8
-                                        Sym { text: modelData.removable ? "usb" : "hard_drive"; sz: 16
-                                            color: modelData.removable ? theme.frost : theme.sub }
-                                        Text { text: modelData.name; color: theme.text
-                                            font.pixelSize: 13; font.family: Tok.mono; font.bold: true
-                                            elide: Text.ElideRight; Layout.maximumWidth: 300 }
-                                        Rectangle {
-                                            implicitHeight: 15; implicitWidth: busT.width + 12; radius: Tok.r
-                                            color: theme.a(theme.iris, 0.14); border.width: 1; border.color: theme.a(theme.iris, 0.3)
-                                            Text { id: busT; anchors.centerIn: parent; text: modelData.bus
-                                                color: theme.frost; font.pixelSize: 9; font.family: Tok.mono; font.bold: true }
-                                        }
-                                        Text { text: modelData.size + "  ·  /dev/" + modelData.dev
-                                            color: theme.faint; font.pixelSize: 10; font.family: Tok.mono }
-                                        Item { Layout.fillWidth: true }
-                                        IndBtn {
-                                            visible: modelData.removable
-                                            text: "Eject"; rank: "secondary"
-                                            onActivated: root.diskEject({ path: modelData.path, name: modelData.name,
-                                                                          mounted: modelData.mounted })
-                                        }
-                                    }
-                                    Rectangle { Layout.fillWidth: true; height: 1; color: Tok.ruleHard }
-
-                                    // partitions of this drive
-                                    Repeater {
-                                        model: modelData.parts
-                                        delegate: Rectangle {
-                                            id: partRow
-                                            required property var modelData
-                                            readonly property bool sys: modelData.system
-                                            Layout.fillWidth: true
-                                            implicitHeight: 46
-                                            radius: Tok.rSmall
-                                            color: pma.containsMouse && !partRow.sys ? Tok.surface : "transparent"
-
-                                            ColumnLayout {
-                                                anchors.fill: parent
-                                                anchors.leftMargin: 4; anchors.rightMargin: 4
-                                                anchors.topMargin: 5; anchors.bottomMargin: 5
-                                                spacing: 3
-                                                RowLayout {
-                                                    Layout.fillWidth: true; spacing: 8
-                                                    Text { text: modelData.dev; color: theme.text
-                                                        font.pixelSize: 11; font.family: Tok.mono
-                                                        Layout.minimumWidth: 92 }
-                                                    Text { text: modelData.label !== "" ? modelData.label : "—"
-                                                        color: theme.sub; font.pixelSize: 11; font.family: Tok.mono
-                                                        Layout.minimumWidth: 76; elide: Text.ElideRight }
-                                                    Text { text: modelData.fs; color: theme.faint
-                                                        font.pixelSize: 10; font.family: Tok.mono
-                                                        Layout.minimumWidth: 48 }
-                                                    Text { text: modelData.size; color: theme.sub
-                                                        font.pixelSize: 11; font.family: Tok.mono
-                                                        Layout.minimumWidth: 62; horizontalAlignment: Text.AlignRight }
-                                                    Text {
-                                                        Layout.fillWidth: true; elide: Text.ElideMiddle
-                                                        text: modelData.mounted ? modelData.mount : "not mounted"
-                                                        color: modelData.mounted ? theme.frost : theme.faint
-                                                        font.pixelSize: 10; font.family: Tok.mono
-                                                    }
-                                                    Rectangle {
-                                                        implicitHeight: 15; implicitWidth: stT.width + 12; radius: Tok.r
-                                                        readonly property color tone: partRow.sys ? theme.line
-                                                                       : modelData.mounted ? theme.good : theme.iris
-                                                        color: theme.a(tone, 0.18)
-                                                        border.width: 1
-                                                        border.color: theme.a(tone, 0.45)
-                                                        Text { id: stT; anchors.centerIn: parent
-                                                            text: partRow.sys ? "system"
-                                                                  : modelData.mounted ? "mounted" : "idle"
-                                                            color: partRow.sys ? theme.faint
-                                                                   : modelData.mounted ? theme.good : theme.frost
-                                                            font.pixelSize: 9; font.family: Tok.mono; font.bold: true }
-                                                    }
-                                                }
-                                                // usage bar — only where a usage figure genuinely exists
-                                                RowLayout {
-                                                    Layout.fillWidth: true; spacing: 8
-                                                    visible: modelData.pct >= 0
-                                                    Rectangle {
-                                                        Layout.fillWidth: true; implicitHeight: 5
-                                                        radius: 2.5; color: theme.a(theme.line, 0.8)
-                                                        Rectangle {
-                                                            height: parent.height; radius: 2.5
-                                                            width: parent.width * Math.max(0, Math.min(1, modelData.pct / 100))
-                                                            color: modelData.pct >= 90 ? theme.bad
-                                                                 : modelData.pct >= 78 ? theme.warn : theme.iris
-                                                            Behavior on width { NumberAnimation { duration: 240; easing.type: Easing.OutCubic } }
-                                                        }
-                                                    }
-                                                    Text {
-                                                        text: modelData.used + " used  ·  " + modelData.avail + " free  ·  " + modelData.pct + "%"
-                                                        color: theme.faint; font.pixelSize: 9; font.family: Tok.mono
-                                                        Layout.minimumWidth: 200; horizontalAlignment: Text.AlignRight
-                                                    }
-                                                }
-                                            }
-                                            MouseArea {
-                                                id: pma
-                                                anchors.fill: parent; hoverEnabled: true
-                                                cursorShape: partRow.sys ? Qt.ArrowCursor : Qt.PointingHandCursor
-                                                onClicked: root.diskToggle({ _system: modelData.system,
-                                                                             _mounted: modelData.mounted,
-                                                                             _path: modelData.path,
-                                                                             dev: modelData.dev })
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-
-                            Text {
-                                Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; Layout.topMargin: 8
-                                wrapMode: Text.WordWrap
-                                text: root.diskMsg !== "" ? root.diskMsg
-                                      : "click a partition to mount or unmount it. removable media mounts silently; internal "
-                                        + "partitions ask for an admin password once per session. / and /boot are shown but never unmounted. "
-                                        + "usage is only known for mounted filesystems."
-                                color: root.diskMsg !== "" ? theme.frost : theme.faint
-                                font.pixelSize: 10; font.family: Tok.mono
-                            }
-
-                        }
-
-                        // ================= SCREEN TIME =================
-                        ColumnLayout {
-                            property int tabIdx: 18
-                            visible: root.tab === 18; Layout.fillWidth: true; spacing: 14
-
-                            Section { title: "today"; icon: "hourglass_top" }
-                            IndTable {
-                                Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14
-                                rowHeight: 30
-                                rows: root.usageLimitRows
-                                selectable: true
-                                selectedIndex: root.usageSel
-                                maxRows: 12
-                                emptyText: "nothing recorded yet — the bar starts counting from its next restart"
-                                columns: [
-                                    { label: "App",   key: "app",   flex: true, mono: true },
-                                    { label: "Today", key: "today", w: 84, num: true },
-                                    { label: "Limit", key: "limit", w: 84, num: true },
-                                    { label: "",      key: "state", w: 62, chip: true }
-                                ]
-                                onActivated: (i, row) => root.usageSel = i
-                            }
-                            Text {
-                                Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14
-                                wrapMode: Text.WordWrap
-                                text: "time each app held focus, paused while the session is idle. pick a row to set its daily limit."
-                                color: theme.faint; font.pixelSize: 10; font.family: Tok.mono
-                            }
-
-                            Section { title: "daily limit"; icon: "timer"
-                                visible: root.usageSel >= 0 && root.usageSel < root.usageLimitRows.length }
-                            RowLayout {
-                                visible: root.usageSel >= 0 && root.usageSel < root.usageLimitRows.length
-                                Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; spacing: 8
-                                readonly property string app: (root.usageSel >= 0 && root.usageSel < root.usageLimitRows.length)
-                                                              ? root.usageLimitRows[root.usageSel].app : ""
-                                Text { text: parent.app; color: theme.text; font.pixelSize: 12; font.family: Tok.mono
-                                    Layout.minimumWidth: 170; elide: Text.ElideRight }
-                                Repeater {
-                                    model: [0, 30, 60, 120, 180, 240]
-                                    delegate: Chip {
-                                        required property var modelData
-                                        label: modelData === 0 ? "off" : (modelData + "m")
-                                        on: (root.usageLimits[parent.parent.app] || 0) === modelData
-                                        onPicked: root.ulimSet(parent.parent.app, modelData)
-                                    }
-                                }
-                                Item { Layout.fillWidth: true }
-                            }
-                            Text {
-                                visible: root.usageSel >= 0
-                                Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14
-                                wrapMode: Text.WordWrap
-                                text: "you get one notification the first time an app passes its limit each day. it does not block anything."
-                                color: theme.faint; font.pixelSize: 10; font.family: Tok.mono
-                            }
-
-                            Section { title: "daily summary"; icon: "summarize" }
-                            ToggleCard {
-                                icon: "notifications_active"; title: "Send a daily summary"
-                                desc: "one notification with your total and top three apps"
-                                on: root.usageSummary
-                                onToggled: { root.usageSummary = !root.usageSummary; root.ulimSave() }
-                            }
-                            RowLayout {
-                                visible: root.usageSummary
-                                Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; spacing: 8
-                                Text { text: "at"; color: theme.sub; font.pixelSize: 11; font.family: Tok.mono; Layout.minimumWidth: 30 }
-                                Repeater {
-                                    model: ["17:00","19:00","21:00","23:00"]
-                                    delegate: Chip {
-                                        required property var modelData
-                                        label: modelData; on: root.usageSummaryTime === modelData
-                                        onPicked: { root.usageSummaryTime = modelData; root.ulimSave() }
-                                    }
-                                }
-                                Item { Layout.fillWidth: true }
-                            }
-                        }
-
-                        // ================= WINDOW RULES =================
-                        ColumnLayout {
-                            property int tabIdx: 17
-                            visible: root.tab === 17; Layout.fillWidth: true; spacing: 14
-
-                            Section { title: "window rules"; icon: "picture_in_picture" }
-                            Text {
-                                Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14
-                                wrapMode: Text.WordWrap
-                                text: "match a window by class (and optionally title), then change how it opens. "
-                                    + "hyprland applies rules when a window MAPS, so an edit affects the next window "
-                                    + "of that class — windows already open keep what they were given."
-                                color: theme.faint; font.pixelSize: 10; font.family: Tok.mono
-                            }
-                            IndTable {
-                                Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14
-                                rowHeight: 30
-                                rows: root.wrRows
-                                selectable: true
-                                selectedIndex: root.wrSel
-                                emptyText: "no rules yet — add one below"
-                                columns: [
-                                    { label: "Class",  key: "cls", w: 190, mono: true },
-                                    { label: "Title",  key: "ttl", w: 130, mono: true },
-                                    { label: "Does",   key: "act", flex: true }
-                                ]
-                                onActivated: (i, row) => root.wrSel = i
-                            }
-                            RowLayout {
-                                Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; spacing: 8
-                                IndBtn { text: "Add rule"; rank: "primary"; onActivated: root.wrAdd() }
-                                IndBtn { text: "Delete"; rank: "danger"; enabled: root.wrSel >= 0
-                                    onActivated: root.wrDel(root.wrSel) }
-                                Item { Layout.fillWidth: true }
-                                IndBtn { text: "Re-apply all"; rank: "secondary"; onActivated: root.wrSave() }
-                            }
-
-                            // ---- editor for the selected rule ----
-                            ColumnLayout {
-                                id: wrEdit
-                                visible: root.wrSel >= 0 && root.wrSel < root.wrRules.length
-                                Layout.fillWidth: true; spacing: 10
-                                readonly property var r: (root.wrSel >= 0 && root.wrSel < root.wrRules.length)
-                                                          ? root.wrRules[root.wrSel] : ({})
-
-                                Section { title: "match"; icon: "search" }
-                                RowLayout {
-                                    Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; spacing: 8
-                                    Text { text: "class"; color: theme.sub; font.pixelSize: 11; font.family: Tok.mono; Layout.minimumWidth: 54 }
-                                    Rectangle { Layout.fillWidth: true; implicitHeight: 30; radius: Tok.r
-                                        color: theme.a(theme.line, 0.5); border.width: 1
-                                        border.color: wrC.activeFocus ? theme.iris : theme.a(theme.iris, 0.2)
-                                        TextInput { id: wrC; anchors.fill: parent; anchors.leftMargin: 8; anchors.rightMargin: 8
-                                            verticalAlignment: TextInput.AlignVCenter; clip: true; selectByMouse: true
-                                            color: theme.text; font.pixelSize: 11; font.family: Tok.mono
-                                            text: wrEdit.r["class"] || ""
-                                            onEditingFinished: root.wrSet(root.wrSel, "class", text.trim())
-                                            Text { anchors.verticalCenter: parent.verticalCenter; visible: !wrC.text
-                                                text: "^(firefox)$"; color: theme.faint; font.pixelSize: 11; font.family: Tok.mono } } }
-                                }
-                                RowLayout {
-                                    Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; spacing: 8
-                                    Text { text: "title"; color: theme.sub; font.pixelSize: 11; font.family: Tok.mono; Layout.minimumWidth: 54 }
-                                    Rectangle { Layout.fillWidth: true; implicitHeight: 30; radius: Tok.r
-                                        color: theme.a(theme.line, 0.5); border.width: 1
-                                        border.color: wrT.activeFocus ? theme.iris : theme.a(theme.iris, 0.2)
-                                        TextInput { id: wrT; anchors.fill: parent; anchors.leftMargin: 8; anchors.rightMargin: 8
-                                            verticalAlignment: TextInput.AlignVCenter; clip: true; selectByMouse: true
-                                            color: theme.text; font.pixelSize: 11; font.family: Tok.mono
-                                            text: wrEdit.r.title || ""
-                                            onEditingFinished: root.wrSet(root.wrSel, "title", text.trim())
-                                            Text { anchors.verticalCenter: parent.verticalCenter; visible: !wrT.text
-                                                text: "optional — e.g. ^(Picture-in-Picture)$"; color: theme.faint; font.pixelSize: 11; font.family: Tok.mono } } }
-                                }
-                                Text {
-                                    Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; wrapMode: Text.WordWrap
-                                    visible: !wrEdit.r["class"] && !wrEdit.r.title
-                                    text: "a rule with no class and no title would match every window — it is skipped until you fill one in."
-                                    color: theme.bad; font.pixelSize: 10; font.family: Tok.mono
-                                }
-                                Text {
-                                    Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; wrapMode: Text.WordWrap
-                                    text: "tip: run  hyprctl clients -j | grep class  to find a window's class. open windows right now: "
-                                          + root.wrOpenClasses
-                                    color: theme.faint; font.pixelSize: 10; font.family: Tok.mono
-                                }
-
-                                Section { title: "do this"; icon: "bolt" }
-                                Grid {
-                                    Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14
-                                    columns: 3; columnSpacing: 8; rowSpacing: 8
-                                    Repeater {
-                                        model: [ { k: "float", l: "float" }, { k: "tile", l: "force tile" },
-                                                 { k: "center", l: "center" }, { k: "pin", l: "pin" },
-                                                 { k: "noblur", l: "no blur" }, { k: "noshadow", l: "no shadow" } ]
-                                        delegate: Rectangle {
-                                            required property var modelData
-                                            readonly property var rr: (root.wrSel >= 0 && root.wrSel < root.wrRules.length) ? root.wrRules[root.wrSel] : ({})
-                                            readonly property bool on: !!rr[modelData.k]
-                                            width: 150; height: 34; radius: Tok.r
-                                            color: on ? theme.a(theme.iris, 0.22) : theme.a(theme.line, 0.4)
-                                            border.width: 1; border.color: on ? theme.iris : theme.a(theme.iris, 0.14)
-                                            Row { anchors.centerIn: parent; spacing: 7
-                                                Sym { anchors.verticalCenter: parent.verticalCenter
-                                                    text: on ? "check_box" : "check_box_outline_blank"; sz: 15
-                                                    color: on ? theme.iris : theme.sub }
-                                                Text { anchors.verticalCenter: parent.verticalCenter; text: modelData.l
-                                                    color: on ? theme.text : theme.sub; font.pixelSize: 11; font.family: Tok.mono } }
-                                            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
-                                                onClicked: root.wrSet(root.wrSel, modelData.k, !parent.on) }
-                                        }
-                                    }
-                                }
-                                SliderRow {
-                                    icon: "opacity"; label: "opacity"
-                                    value: {
-                                        var o = wrEdit.r.opacity;
-                                        return (o === undefined || o === null) ? 1 : Math.max(0.2, Math.min(1, o));
-                                    }
-                                    readout: {
-                                        var o = wrEdit.r.opacity;
-                                        return (o === undefined || o >= 1) ? "off" : Number(o).toFixed(2);
-                                    }
-                                    onMoved: (v) => root.wrSet(root.wrSel, "opacity", Math.max(0.2, Math.min(1, v)))
-                                }
-                                RowLayout {
-                                    Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; spacing: 8
-                                    Text { text: "workspace"; color: theme.sub; font.pixelSize: 11; font.family: Tok.mono; Layout.minimumWidth: 74 }
-                                    Rectangle { implicitWidth: 90; implicitHeight: 30; radius: Tok.r
-                                        color: theme.a(theme.line, 0.5); border.width: 1
-                                        border.color: wrW.activeFocus ? theme.iris : theme.a(theme.iris, 0.2)
-                                        TextInput { id: wrW; anchors.fill: parent; anchors.leftMargin: 8; anchors.rightMargin: 8
-                                            verticalAlignment: TextInput.AlignVCenter; clip: true; selectByMouse: true
-                                            color: theme.text; font.pixelSize: 11; font.family: Tok.mono
-                                            text: wrEdit.r.workspace || ""
-                                            onEditingFinished: root.wrSet(root.wrSel, "workspace", text.trim())
-                                            Text { anchors.verticalCenter: parent.verticalCenter; visible: !wrW.text
-                                                text: "3"; color: theme.faint; font.pixelSize: 11; font.family: Tok.mono } } }
-                                    Text { text: "size"; color: theme.sub; font.pixelSize: 11; font.family: Tok.mono; Layout.leftMargin: 10 }
-                                    Rectangle { implicitWidth: 120; implicitHeight: 30; radius: Tok.r
-                                        color: theme.a(theme.line, 0.5); border.width: 1
-                                        border.color: wrS.activeFocus ? theme.iris : theme.a(theme.iris, 0.2)
-                                        TextInput { id: wrS; anchors.fill: parent; anchors.leftMargin: 8; anchors.rightMargin: 8
-                                            verticalAlignment: TextInput.AlignVCenter; clip: true; selectByMouse: true
-                                            color: theme.text; font.pixelSize: 11; font.family: Tok.mono
-                                            text: wrEdit.r.size || ""
-                                            onEditingFinished: root.wrSet(root.wrSel, "size", text.trim())
-                                            Text { anchors.verticalCenter: parent.verticalCenter; visible: !wrS.text
-                                                text: "800x600"; color: theme.faint; font.pixelSize: 11; font.family: Tok.mono } } }
-                                    Item { Layout.fillWidth: true }
-                                }
-                            }
-                        }
-
-                        // ================= DOCK =================
-                        ColumnLayout {
-                            property int tabIdx: 16
-                            visible: root.tab === 16; Layout.fillWidth: true; spacing: 14
-
-                            Section { title: "dock"; icon: "dock_to_bottom" }
-                            ToggleCard {
-                                icon: "apps"; title: "Enable dock"
-                                desc: "a second surface for pinned and running apps. right-click an icon on the dock to pin or unpin it, middle-click to open another window."
-                                on: root.apDock; onToggled: { root.apDock = !root.apDock; root.saveAppearance() }
-                            }
-
-                            Section { title: "placement"; icon: "open_with" }
-                            RowLayout {
-                                Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; spacing: 8
-                                Text { text: "edge"; color: theme.sub; font.pixelSize: 12; font.family: Tok.mono; Layout.minimumWidth: 76 }
-                                Repeater {
-                                    model: ["bottom","top","left","right"]
-                                    delegate: Chip {
-                                        required property var modelData
-                                        label: modelData; on: root.apDockEdge === modelData
-                                        onPicked: { root.apDockEdge = modelData; root.saveAppearance() }
-                                    }
-                                }
-                                Item { Layout.fillWidth: true }
-                            }
-                            // The bar and the dock are independent surfaces on the same layer, so
-                            // nothing stops them being docked to the same edge — say so rather than
-                            // silently stacking them.
-                            Text {
-                                visible: root.apDockEdge === root.apEdge
-                                Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14
-                                wrapMode: Text.WordWrap
-                                text: "the dock and the bar are both on the " + root.apEdge + " edge — they will overlap. move one of them."
-                                color: theme.warn; font.pixelSize: 10; font.family: Tok.mono
-                            }
-                            SliderRow {
-                                icon: "photo_size_select_large"; label: "icon size"
-                                value: Math.max(0, Math.min(1, (root.apDockIcon - 24) / 40))
-                                readout: Math.round(root.apDockIcon) + " px"
-                                onMoved: (v) => { root.apDockIcon = Math.round(24 + v * 40); root.saveAppearance() }
-                            }
-
-                            Section { title: "behaviour"; icon: "visibility" }
-                            RowLayout {
-                                Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; spacing: 8
-                                Text { text: "when"; color: theme.sub; font.pixelSize: 12; font.family: Tok.mono; Layout.minimumWidth: 76 }
-                                Chip { label: "always";      on: root.apDockMode === "always"
-                                       onPicked: { root.apDockMode = "always"; root.saveAppearance() } }
-                                Chip { label: "auto-hide";   on: root.apDockMode === "autohide"
-                                       onPicked: { root.apDockMode = "autohide"; root.saveAppearance() } }
-                                Chip { label: "when free";   on: root.apDockMode === "intelligent"
-                                       onPicked: { root.apDockMode = "intelligent"; root.saveAppearance() } }
-                                Item { Layout.fillWidth: true }
-                            }
-                            Text {
-                                Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14
-                                wrapMode: Text.WordWrap
-                                text: root.apDockMode === "always"
-                                        ? "always visible, and reserves its strip so maximised windows stop above it."
-                                      : root.apDockMode === "autohide"
-                                        ? "hidden until you push the cursor into the screen edge."
-                                        : "visible while nothing covers it, and slides away when a window moves underneath. windows keep the full screen."
-                                color: theme.faint; font.pixelSize: 10; font.family: Tok.mono
-                            }
-
-                            ToggleCard {
-                                icon: "zoom_in"; title: "Magnify on hover"
-                                desc: "the icon under the cursor and its neighbours grow. slots keep their width, so the row never shifts under you."
-                                on: root.apDockZoom; onToggled: { root.apDockZoom = !root.apDockZoom; root.saveAppearance() }
-                            }
-                            ToggleCard {
-                                icon: "playlist_add"; title: "Show running apps"
-                                desc: "apps that are open but not pinned appear after the pinned ones, and leave when they close."
-                                on: root.apDockRunning; onToggled: { root.apDockRunning = !root.apDockRunning; root.saveAppearance() }
-                            }
-                            ToggleCard {
-                                icon: "label"; title: "Show names on hover"
-                                desc: "app name above the icon, with the window count when more than one is open."
-                                on: root.apDockLabels; onToggled: { root.apDockLabels = !root.apDockLabels; root.saveAppearance() }
-                            }
-
-                            // ---- attention ----
-                            Section { title: "attention"; icon: "notifications_active" }
-                            Text {
-                                Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; Layout.bottomMargin: 4
-                                wrapMode: Text.WordWrap
-                                text: "Choose whether app activation changes your workspace or brings the window to you."
-                                color: theme.faint; font.pixelSize: 10; font.family: Tok.mono
-                            }
-                            ToggleCard {
-                                icon: "notifications_active"; title: "Flash the dock icon"
-                                desc: "three beats on the app that is asking, so you can see which one it was."
-                                on: root.apAttnFlash; onToggled: { root.apAttnFlash = !root.apAttnFlash; root.saveAppearance() }
-                            }
-                            ToggleCard {
-                                icon: "arrow_forward"; title: "Switch to it"
-                                desc: "go to the window, changing workspace if it is on another one. works whether or not the dock is on."
-                                on: root.apAttnFocus; onToggled: { root.apAttnFocus = !root.apAttnFocus; root.saveAppearance() }
-                            }
-
-                            Text {
-                                Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; Layout.topMargin: 4
-                                wrapMode: Text.WordWrap
-                                text: "The dock uses the monitors selected for the bar in Display."
-                                color: theme.faint; font.pixelSize: 10; font.family: Tok.mono
-                            }
-                        }
-
-                        // ================= CALENDAR =================
-                        ColumnLayout {
-                            property int tabIdx: 11
-                            visible: root.tab === 11; Layout.fillWidth: true; spacing: 14
-
-                            // header + live count
-                            Section { title: "calendar"; icon: "calendar_month" }
-                            RowLayout {
-                                Layout.fillWidth: true; spacing: 8
-                                Text { text: "calendar"; color: Tok.ink; font.pixelSize: 13; font.family: Tok.sans }
-                                Item { Layout.fillWidth: true }
-                                Rectangle { visible: root.calEvents.length > 0; implicitHeight: 20; implicitWidth: cntTxt.width + 16; radius: Tok.r
-                                    color: theme.a(theme.iris, 0.16); border.width: 1; border.color: theme.a(theme.iris, 0.3)
-                                    Text { id: cntTxt; anchors.centerIn: parent; text: root.calEvents.length + (root.calEvents.length===1 ? " event" : " events")
-                                        color: theme.frost; font.pixelSize: 10; font.family: Tok.mono; font.bold: true } }
-                            }
-
-                            // ---- import card ----
-                            Rectangle {
-                                Layout.fillWidth: true; radius: Tok.r; implicitHeight: impCol.implicitHeight + 24
-                                color: "transparent"
-                                ColumnLayout {
-                                    id: impCol
-                                    anchors.left: parent.left; anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
-                                    anchors.leftMargin: 12; anchors.rightMargin: 12; spacing: 10
-                                    Text { text: "IMPORT EVENTS"; color: theme.faint; font.pixelSize: 9; font.family: Tok.mono; font.bold: true; font.letterSpacing: 1 }
-                                    // url + import link
-                                    RowLayout {
-                                        Layout.fillWidth: true; spacing: 8
-                                        Rectangle {
-                                            Layout.fillWidth: true; implicitHeight: 36; radius: Tok.r
-                                            color: theme.bg; border.width: 1
-                                            border.color: calUrlIn.activeFocus ? theme.iris : theme.a(theme.iris, 0.16)
-                                            RowLayout { anchors.fill: parent; anchors.leftMargin: 10; anchors.rightMargin: 10; spacing: 8
-                                                Sym { text: "link"; sz: 15; color: theme.faint }
-                                                TextInput {
-                                                    id: calUrlIn
-                                                    Layout.fillWidth: true
-                                                    verticalAlignment: TextInput.AlignVCenter
-                                                    color: theme.text; font.pixelSize: 12; font.family: Tok.mono
-                                                    clip: true; selectByMouse: true; selectionColor: theme.a(theme.iris, 0.4)
-                                                    Text { anchors.verticalCenter: parent.verticalCenter; visible: calUrlIn.text === ""
-                                                        text: "paste an .ics link…"; color: theme.faint; font.pixelSize: 12; font.family: Tok.mono }
-                                                    Keys.onReturnPressed: { if (calUrlIn.text.trim()) { root.importICS(calUrlIn.text.trim()); calUrlIn.text = ""; } } } }
-                                        }
-                                        Rectangle {
-                                            implicitWidth: 108; implicitHeight: 36; radius: Tok.r
-                                            color: calUrlMa.containsMouse ? theme.iris : theme.a(theme.iris, 0.2)
-                                            border.width: 1; border.color: theme.iris
-                                            RowLayout { anchors.centerIn: parent; spacing: 6
-                                                Sym { text: "download"; sz: 15; color: calUrlMa.containsMouse ? theme.bg : theme.frost }
-                                                Text { text: "Import"; color: calUrlMa.containsMouse ? theme.bg : theme.text; font.pixelSize: 11; font.family: Tok.mono; font.bold: true } }
-                                            MouseArea { id: calUrlMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
-                                                onClicked: { if (calUrlIn.text.trim()) { root.importICS(calUrlIn.text.trim()); calUrlIn.text = ""; } } } }
-                                    }
-                                    // file picker + clear
-                                    RowLayout {
-                                        Layout.fillWidth: true; spacing: 8
-                                        Rectangle {
-                                            Layout.fillWidth: true; implicitHeight: 36; radius: Tok.r
-                                            color: calImpMa.containsMouse ? theme.iris : theme.a(theme.iris, 0.14)
-                                            border.width: 1; border.color: theme.a(theme.iris, 0.6)
-                                            RowLayout { anchors.centerIn: parent; spacing: 6
-                                                Sym { text: "upload_file"; sz: 15; color: calImpMa.containsMouse ? theme.bg : theme.frost }
-                                                Text { text: "Import .ics file"; color: calImpMa.containsMouse ? theme.bg : theme.text; font.pixelSize: 11; font.family: Tok.mono; font.bold: true } }
-                                            MouseArea { id: calImpMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
-                                                onClicked: root.pickFile("Select Calendar iCalendar (.ics) File", "iCalendar (*.ics) | *.ics", function(path) { root.importICS(path); }) } }
-                                        Rectangle {
-                                            implicitWidth: 128; implicitHeight: 36; radius: Tok.r
-                                            visible: root.calEvents.length > 0
-                                            color: calClrMa.containsMouse ? theme.a(theme.bad, 0.22) : "transparent"
-                                            border.width: 1; border.color: calClrMa.containsMouse ? theme.bad : theme.a(theme.bad, 0.4)
-                                            RowLayout { anchors.centerIn: parent; spacing: 6
-                                                Sym { text: "delete_sweep"; sz: 15; color: theme.bad }
-                                                Text { text: "Clear all"; color: theme.bad; font.pixelSize: 11; font.family: Tok.mono; font.bold: true } }
-                                            MouseArea { id: calClrMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
-                                                onClicked: root.clearEvents() } }
-                                    }
-                                    Text { visible: root.calMsg !== ""; text: root.calMsg; color: theme.frost; font.pixelSize: 11; font.family: Tok.mono; Layout.fillWidth: true; wrapMode: Text.Wrap }
-                                }
-                            }
-
-                            // ---- subscriptions (imported links are remembered & auto-refreshed) ----
-                            RowLayout { Layout.fillWidth: true; spacing: 8; visible: root.calSubs.length > 0
-                                Text { text: "SUBSCRIPTIONS"; color: theme.faint; font.pixelSize: 9; font.family: Tok.mono; font.bold: true; font.letterSpacing: 1 }
-                                Rectangle { Layout.fillWidth: true; height: 1; color: theme.a(theme.iris, 0.1) }
-                                Sym { text: "sync"; sz: 14; color: resyncMa.containsMouse ? theme.iris : theme.faint
-                                    MouseArea { id: resyncMa; anchors.fill: parent; anchors.margins: -4; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: { root.calMsg = "re-syncing subscriptions…"; root.calMutate(["--resync"]) } } }
-                                Text { text: "re-sync"; color: resyncMa.containsMouse ? theme.iris : theme.faint; font.pixelSize: 9; font.family: Tok.mono }
-                            }
-                            Repeater {
-                                model: root.calSubs
-                                delegate: Rectangle {
-                                    required property var modelData
-                                    Layout.fillWidth: true; implicitHeight: 32; radius: Tok.r
-                                    color: theme.a(theme.line, 0.3); border.width: 1; border.color: theme.a(theme.iris, 0.1)
-                                    RowLayout { anchors.fill: parent; anchors.leftMargin: 10; anchors.rightMargin: 8; spacing: 8
-                                        Sym { text: "link"; sz: 14; color: theme.frost }
-                                        Text { text: modelData; color: theme.sub; font.pixelSize: 10; font.family: Tok.mono; elide: Text.ElideMiddle; Layout.fillWidth: true }
-                                        Sym { text: "close"; sz: 15; color: unsubMa.containsMouse ? theme.bad : theme.faint
-                                            MouseArea { id: unsubMa; anchors.fill: parent; anchors.margins: -4; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.calMutate(["--unsub", modelData]) } } }
-                                }
-                            }
-
-                            // ---- reminders ----
-                            RowLayout { Layout.fillWidth: true; spacing: 8; Layout.topMargin: 2
-                                Text { text: "REMINDERS"; color: theme.faint; font.pixelSize: 9; font.family: Tok.mono; font.bold: true; font.letterSpacing: 1 }
-                                Rectangle { Layout.fillWidth: true; height: 1; color: theme.a(theme.iris, 0.1) }
-                            }
-                            Rectangle {
-                                Layout.fillWidth: true; implicitHeight: 46; radius: Tok.r
-                                color: "transparent"
-                                RowLayout { anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 12; spacing: 10
-                                    Sym { text: "notifications_active"; sz: 18; color: root.calRemind ? theme.frost : theme.faint }
-                                    ColumnLayout { spacing: 0; Layout.fillWidth: true
-                                        Text { text: "notify before events"; color: theme.text; font.pixelSize: 13; font.family: Tok.mono }
-                                        Text { text: "timed: " + root.calLead + " min ahead · all-day: at 8:00 am"; color: theme.faint; font.pixelSize: 10; font.family: Tok.mono } }
-                                    Rectangle { implicitWidth: 46; implicitHeight: 22; radius: Tok.r
-                                        color: root.calRemind ? theme.iris : theme.a(theme.line, 0.85); border.width: 1; border.color: root.calRemind ? theme.iris : theme.a(theme.iris, 0.3)
-                                        Rectangle { width: 16; height: 16; radius: Tok.r; y: 3; x: root.calRemind ? 27 : 3; color: theme.frost; Behavior on x { NumberAnimation { duration: 120 } } }
-                                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.calMutate(["--set","remind", root.calRemind ? "false" : "true"]) } } }
-                            }
-                            RowLayout { Layout.fillWidth: true; spacing: 6; visible: root.calRemind
-                                Text { text: "lead"; color: theme.sub; font.pixelSize: 11; font.family: Tok.mono; Layout.rightMargin: 4 }
-                                Repeater { model: [10, 15, 30, 60]
-                                    delegate: Rectangle { required property var modelData
-                                        readonly property bool sel: root.calLead === modelData
-                                        implicitWidth: 48; implicitHeight: 26; radius: Tok.r
-                                        color: sel ? theme.iris : (ldMa.containsMouse ? theme.a(theme.iris, 0.16) : theme.a(theme.line, 0.4)); border.width: 1; border.color: sel ? theme.iris : theme.a(theme.iris, 0.14)
-                                        Text { anchors.centerIn: parent; text: modelData + "m"; color: sel ? theme.bg : theme.sub; font.pixelSize: 10; font.family: Tok.mono; font.bold: sel }
-                                        MouseArea { id: ldMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.calMutate(["--set","lead", "" + modelData]) } } }
-                                Item { Layout.fillWidth: true }
-                            }
-
-                            // ---- events list header + refresh ----
-                            RowLayout {
-                                Layout.fillWidth: true; spacing: 8; Layout.topMargin: 2
-                                Text { text: "EVENTS"; color: theme.faint; font.pixelSize: 9; font.family: Tok.mono; font.bold: true; font.letterSpacing: 1 }
-                                Rectangle { Layout.fillWidth: true; height: 1; color: theme.a(theme.iris, 0.1) }
-                                Sym { text: "refresh"; sz: 15; color: calRefMa.containsMouse ? theme.iris : theme.faint
-                                    MouseArea { id: calRefMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: reloadEventsProc.running = true } }
-                            }
-
-                            Text { visible: root.calEvents.length === 0; text: "no events yet — import an .ics file or link above";
-                                color: theme.faint; font.pixelSize: 11; font.family: Tok.mono; Layout.fillWidth: true; wrapMode: Text.Wrap }
-
-                            Repeater {
-                                model: root.calSorted
-                                delegate: Rectangle {
-                                    required property var modelData
-                                    readonly property var rel: root.evRel(modelData.date)
-                                    Layout.fillWidth: true; implicitHeight: bodyRow.implicitHeight + 16; radius: Tok.r
-                                    opacity: rel.past ? 0.45 : 1
-                                    color: theme.a(theme.line, 0.32); border.width: 1
-                                    border.color: rel.soon ? theme.a(theme.iris, 0.4) : theme.a(theme.iris, 0.1)
-                                    RowLayout {
-                                        id: bodyRow
-                                        anchors.left: parent.left; anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
-                                        anchors.leftMargin: 8; anchors.rightMargin: 12; spacing: 12
-                                        // date chip
-                                        Rectangle {
-                                            implicitWidth: 44; implicitHeight: 42; radius: Tok.r
-                                            color: rel.soon ? theme.iris : theme.a(theme.iris, 0.14)
-                                            ColumnLayout { anchors.centerIn: parent; spacing: 0
-                                                Text { Layout.alignment: Qt.AlignHCenter; text: Qt.formatDate(root.evDate(modelData.date), "ddd").toUpperCase()
-                                                    color: rel.soon ? theme.bg : theme.frost; font.pixelSize: 9; font.family: Tok.mono; font.bold: true }
-                                                Text { Layout.alignment: Qt.AlignHCenter; text: (""+modelData.date).slice(8)
-                                                    color: rel.soon ? theme.bg : theme.text; font.pixelSize: 17; font.family: Tok.mono; font.bold: true } }
-                                        }
-                                        ColumnLayout {
-                                            Layout.fillWidth: true; spacing: 2
-                                            Text { text: modelData.title; color: theme.text; font.pixelSize: 12; font.family: Tok.mono; font.bold: true
-                                                Layout.fillWidth: true; wrapMode: Text.Wrap; maximumLineCount: 2; elide: Text.ElideRight }
-                                            RowLayout { spacing: 6
-                                                Text { text: rel.t; color: rel.past ? theme.faint : theme.frost; font.pixelSize: 10; font.family: Tok.mono; font.bold: true }
-                                                Text { visible: !!modelData.time; text: "· " + (modelData.time||""); color: theme.faint; font.pixelSize: 10; font.family: Tok.mono }
-                                                Text { text: "· " + Qt.formatDate(root.evDate(modelData.date), "d MMM yyyy"); color: theme.faint; font.pixelSize: 10; font.family: Tok.mono }
-                                            }
-                                        }
-                                        Sym { text: "close"; sz: 16; Layout.alignment: Qt.AlignVCenter
-                                            color: delMa.containsMouse ? theme.bad : theme.a(theme.faint, 0.55)
-                                            MouseArea { id: delMa; anchors.fill: parent; anchors.margins: -5; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
-                                                onClicked: root.calMutate(["--delete", root.evKey(modelData)]) } }
-                                    }
-                                }
-                            }
-                        }
-
-                        // ================= BLUETOOTH =================
-                        ColumnLayout {
-                            property int tabIdx: 9
-                            visible: root.tab === 9; Layout.fillWidth: true; spacing: 12
-                            Section { title: "bluetooth"; icon: "bluetooth" }
-                            RowLayout {
-                                Layout.fillWidth: true; spacing: 8
-                                Text { text: "bluetooth"; color: Tok.ink; font.pixelSize: 13; font.family: Tok.sans }
-                                Item { Layout.fillWidth: true }
-                                Sym { text: (root.btAdapter && root.btAdapter.discovering) ? "sync" : "search"; sz: 16; color: theme.sub
-                                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
-                                        onClicked: if (root.btAdapter) root.btAdapter.discovering = !root.btAdapter.discovering } }
-                                Rectangle { implicitWidth: 46; implicitHeight: 22; radius: Tok.r
-                                    color: (root.btAdapter && root.btAdapter.enabled) ? theme.a(theme.iris, 0.35) : theme.a(theme.line, 0.7)
-                                    border.width: 1; border.color: (root.btAdapter && root.btAdapter.enabled) ? theme.iris : theme.a(theme.line, 0.9)
-                                    Rectangle { width: 16; height: 16; radius: Tok.r; y: 3
-                                        x: (root.btAdapter && root.btAdapter.enabled) ? parent.width - 19 : 3
-                                        color: (root.btAdapter && root.btAdapter.enabled) ? theme.frost : theme.faint
-                                        Behavior on x { NumberAnimation { duration: 120 } } }
-                                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
-                                        onClicked: if (root.btAdapter) root.btAdapter.enabled = !root.btAdapter.enabled } }
-                            }
-                            Text { visible: root.btAdapter === null; text: "no bluetooth adapter found"; color: theme.faint; font.pixelSize: 11; font.family: Tok.mono }
-                            IndTable {
-                                Layout.fillWidth: true
-                                rowHeight: 34
-                                rows: root.btRows
-                                emptyText: ""       // the tab prints its own richer empty message below
-                                columns: [
-                                    { label: "Device",  key: "name",    flex: true },
-                                    { label: "Battery", key: "battery", w: 70,  num: true },
-                                    { label: "State",   key: "state",   w: 110, chip: true, num: true }
-                                ]
-                                onActivated: (i, row) => {
-                                    if (!row._dev) return;
-                                    row._dev.connected ? row._dev.disconnect() : row._dev.connect();
-                                }
-                            }
-                            Text { visible: root.btAdapter !== null && root.btDevices.length === 0
-                                text: (root.btAdapter && root.btAdapter.enabled) ? "no paired devices — hit search to discover" : "bluetooth is off"
-                                color: theme.faint; font.pixelSize: 11; font.family: Tok.mono }
-                        }
-
-                        // ================= KDE CONNECT =================
-                        ColumnLayout {
-                            property int tabIdx: 14
-                            visible: root.tab === 14; Layout.fillWidth: true; spacing: 12
-                            Section { title: "kde connect"; icon: "phonelink" }
-                            RowLayout {
-                                Layout.fillWidth: true; spacing: 8
-                                Text { text: "kde connect"; color: Tok.ink; font.pixelSize: 13; font.family: Tok.sans }
-                                Item { Layout.fillWidth: true }
-                                Sym { text: "sync"; sz: 16; color: theme.sub
-                                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.reloadKde() } }
-                            }
-                            ColumnLayout {
-                                visible: root.kdeDevices.length === 0; Layout.fillWidth: true; spacing: 2
-                                Text { text: "no devices found"; color: theme.sub; font.pixelSize: 12; font.family: Tok.mono }
-                                Text { text: "open KDE Connect on the other device, on the same network, then refresh"
-                                    color: theme.faint; font.pixelSize: 10; font.family: Tok.mono }
-                            }
-                            ColumnLayout {
-                                Layout.fillWidth: true; spacing: 8
-                                Repeater {
-                                    model: root.kdeDevices
-                                    delegate: Rectangle {
-                                        id: kdeCard
-                                        required property var modelData
-                                        readonly property bool online: modelData.isPaired && modelData.isReachable
-                                        Layout.fillWidth: true; radius: Tok.r
-                                        implicitHeight: kdeCardCol.implicitHeight + 22
-                                        color: online ? theme.a(theme.iris, 0.14) : theme.a(theme.line, 0.3)
-                                        border.width: 1; border.color: online ? theme.a(theme.iris, 0.55) : theme.a(theme.iris, 0.12)
-                                        ColumnLayout {
-                                            id: kdeCardCol
-                                            anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top
-                                            anchors.margins: 11; spacing: 9
-                                            // name + state
-                                            RowLayout {
-                                                Layout.fillWidth: true; spacing: 10
-                                                Rectangle {
-                                                    implicitWidth: 36; implicitHeight: 36; radius: Tok.r
-                                                    color: kdeCard.online ? theme.a(theme.iris, 0.22) : theme.a(theme.line, 0.5)
-                                                    Sym { anchors.centerIn: parent; sz: 19
-                                                        text: kdeCard.modelData.type === "phone" ? "smartphone"
-                                                            : (kdeCard.modelData.type === "tablet" ? "tablet_android"
-                                                            : (kdeCard.modelData.type === "tv" ? "tv" : "computer"))
-                                                        color: kdeCard.online ? theme.iris : theme.faint }
-                                                }
-                                                ColumnLayout {
-                                                    spacing: 2; Layout.fillWidth: true
-                                                    Text { text: kdeCard.modelData.name; color: theme.text; font.pixelSize: 13; font.family: Tok.mono; font.bold: true; elide: Text.ElideRight; Layout.fillWidth: true }
-                                                    RowLayout {
-                                                        spacing: 6
-                                                        Text {
-                                                            text: !kdeCard.modelData.isPaired
-                                                                    ? (kdeCard.modelData.isPairRequestedByPeer ? "wants to pair"
-                                                                       : (kdeCard.modelData.isPairRequested ? "waiting for a reply…" : "not paired"))
-                                                                    : (kdeCard.modelData.isReachable
-                                                                       ? ("online" + (kdeCard.modelData.network ? " · " + kdeCard.modelData.network : ""))
-                                                                       : "away")
-                                                            color: kdeCard.online ? theme.frost : theme.faint; font.pixelSize: 10; font.family: Tok.mono
-                                                        }
-                                                        Text { visible: kdeCard.modelData.address !== ""
-                                                            text: "· " + kdeCard.modelData.address; color: theme.faint; font.pixelSize: 10; font.family: Tok.mono }
-                                                        // cellular strength, 0–4 bars
-                                                        Row {
-                                                            visible: kdeCard.modelData.signal >= 0
-                                                            spacing: 2; height: 11
-                                                            Repeater { model: 4
-                                                                delegate: Rectangle { required property int index
-                                                                    width: 3; height: 4 + index * 2; radius: 1; anchors.bottom: parent.bottom
-                                                                    color: index < kdeCard.modelData.signal ? theme.frost : theme.a(theme.faint, 0.35) } }
-                                                        }
-                                                    }
-                                                }
-                                                Sym { visible: kdeCard.modelData.isCharging; text: "bolt"; sz: 15; color: theme.good }
-                                            }
-                                            // battery — NOT the Meter component: that one goes red
-                                            // above 88%, which is right for RAM and backwards for a battery
-                                            RowLayout {
-                                                visible: kdeCard.modelData.charge >= 0
-                                                Layout.fillWidth: true; spacing: 11
-                                                Text { text: "battery"; color: theme.faint; font.pixelSize: 11; font.family: Tok.mono; Layout.preferredWidth: 58 }
-                                                Rectangle {
-                                                    Layout.fillWidth: true; implicitHeight: 9; radius: Tok.r; color: theme.a(theme.line, 0.8)
-                                                    Rectangle {
-                                                        height: parent.height; radius: Tok.r
-                                                        width: parent.width * Math.max(0, Math.min(1, kdeCard.modelData.charge / 100))
-                                                        color: kdeCard.modelData.isCharging ? theme.good
-                                                             : (kdeCard.modelData.charge <= 20 ? theme.bad : theme.iris)
-                                                        Behavior on width { NumberAnimation { duration: 260; easing.type: Easing.OutCubic } }
-                                                    }
-                                                }
-                                                Text {
-                                                    text: kdeCard.modelData.charge + "%" + (kdeCard.modelData.isCharging ? " charging" : "")
-                                                    color: theme.sub; font.pixelSize: 11; font.family: Tok.mono
-                                                    Layout.preferredWidth: 96; horizontalAlignment: Text.AlignRight
-                                                }
-                                            }
-                                            // what you can actually do with it
-                                            Flow {
-                                                visible: kdeCard.online
-                                                Layout.fillWidth: true; spacing: 6
-                                                Chip { label: "ring"; icon: "ring_volume"; enabled: kdeCard.modelData.canRing; opacity: enabled ? 1 : 0.4
-                                                    onPicked: root.kdeAction(["--ring", kdeCard.modelData.id]) }
-                                                Chip { label: "ping"; icon: "wifi_tethering"; enabled: kdeCard.modelData.canPing; opacity: enabled ? 1 : 0.4
-                                                    onPicked: root.kdeAction(["--ping", kdeCard.modelData.id]) }
-                                                Chip { label: "send file"; icon: "upload_file"; enabled: kdeCard.modelData.canShare; opacity: enabled ? 1 : 0.4
-                                                    onPicked: root.kdeAction(["--send-file", kdeCard.modelData.id]) }
-                                                Chip { label: "clipboard"; icon: "content_paste_go"; enabled: kdeCard.modelData.canShare; opacity: enabled ? 1 : 0.4
-                                                    onPicked: root.kdeAction(["--send-clipboard", kdeCard.modelData.id]) }
-                                                Chip { label: "browse files"; icon: "folder_open"; enabled: kdeCard.modelData.canBrowse; opacity: enabled ? 1 : 0.4
-                                                    onPicked: root.kdeAction(["--browse", kdeCard.modelData.id]) }
-                                                Chip { label: "messages"; icon: "sms"; enabled: kdeCard.modelData.canSms; opacity: enabled ? 1 : 0.4
-                                                    onPicked: root.kdeAction(["--sms", kdeCard.modelData.id]) }
-                                            }
-                                            // pairing
-                                            Text {
-                                                visible: kdeCard.modelData.isPairRequestedByPeer || kdeCard.modelData.isPairRequested
-                                                text: "verification key " + kdeCard.modelData.verificationKey + " — it must match the one on the device"
-                                                color: theme.sub; font.pixelSize: 10; font.family: Tok.mono; Layout.fillWidth: true; wrapMode: Text.WordWrap
-                                            }
-                                            RowLayout {
-                                                Layout.fillWidth: true; spacing: 6
-                                                Chip { visible: kdeCard.modelData.isPairRequestedByPeer; label: "accept"; icon: "check_circle"
-                                                    onPicked: root.kdeAction(["--accept", kdeCard.modelData.id]) }
-                                                Chip { visible: kdeCard.modelData.isPairRequestedByPeer; label: "reject"; icon: "cancel"
-                                                    onPicked: root.kdeAction(["--reject", kdeCard.modelData.id]) }
-                                                Chip {
-                                                    visible: !kdeCard.modelData.isPaired && kdeCard.modelData.isReachable
-                                                             && !kdeCard.modelData.isPairRequested && !kdeCard.modelData.isPairRequestedByPeer
-                                                    label: "pair"; icon: "link"
-                                                    onPicked: root.kdeAction(["--pair", kdeCard.modelData.id]) }
-                                                Item { Layout.fillWidth: true }
-                                                Text {
-                                                    visible: kdeCard.modelData.isPaired
-                                                    text: "unpair"; color: unpairMa.containsMouse ? theme.bad : theme.a(theme.faint, 0.85)
-                                                    font.pixelSize: 11; font.family: Tok.mono
-                                                    MouseArea { id: unpairMa; anchors.fill: parent; anchors.margins: -7; hoverEnabled: true
-                                                        cursorShape: Qt.PointingHandCursor; onClicked: root.kdeAction(["--unpair", kdeCard.modelData.id]) }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            Text {
-                                Layout.fillWidth: true; wrapMode: Text.WordWrap
-                                text: "the bar widget has the same shortcuts — click the phone pill for battery, ring, send file, clipboard and file browsing"
-                                color: theme.faint; font.pixelSize: 10; font.family: Tok.mono
-                            }
-                        }
-
-                        // ================= IDLE & LOCK =================
-                        ColumnLayout {
-                            property int tabIdx: 10
-                            visible: root.tab === 10; Layout.fillWidth: true; spacing: 14
-
-                            Section { title: "Login screen"; icon: "login" }
-                            SddmSettings {
-                                id: loginThemeSettings
-                                onAuthenticatingChanged: root.authenticationPending = authenticating
-                                Layout.fillWidth: true; ink: theme.text
-                                // the live login preview exists only while it can be seen
-                                previewLive: root.shown && root.tab === 10 && !root.authenticationPending
-                                onAvatarBrowseRequested: root.pickFile("Choose user picture", "*.png *.jpg *.jpeg *.webp", function(path) {
-                                    loginThemeSettings.setAvatar(path)
-                                })
-                                onBrowseRequested: root.pickFile("Choose login background", "*.png *.jpg *.jpeg *.webp *.gif *.mp4 *.webm", function(path) {
-                                    loginThemeSettings.setBackground(path)
-                                })
-                            }
-
-                            // segmented horizontal navigation bar for Idle & Lock sub-menus
-                            RowLayout {
-                                Layout.fillWidth: true; spacing: 6; Layout.bottomMargin: 8
-                                Repeater {
-                                    model: [
-                                        { i: "timer", l: "timeouts" },
-                                        { i: "security", l: "lock screen" }
-                                    ]
-                                    delegate: Rectangle {
-                                        required property var modelData; required property int index
-                                        readonly property bool sel: root.idlSubTab === index
-                                        Layout.fillWidth: true; implicitHeight: 34; radius: Tok.r
-                                        color: sel ? theme.iris : (subIdMa.containsMouse ? theme.a(theme.iris, 0.16) : theme.a(theme.line, 0.4))
-                                        border.width: 1; border.color: sel ? theme.iris : theme.a(theme.iris, 0.14)
-                                        RowLayout {
-                                            anchors.centerIn: parent; spacing: 6
-                                            Sym { text: modelData.i; sz: 14; color: sel ? theme.bg : theme.frost }
-                                            Text { text: modelData.l; color: sel ? theme.bg : theme.text; font.pixelSize: 11; font.family: root.apFont; font.bold: sel }
-                                        }
-                                        MouseArea { id: subIdMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.idlSubTab = index }
-                                    }
-                                }
-                            }
-
-                            // SUB-TAB 0: Timeouts
-                            ColumnLayout {
-                                visible: root.idlSubTab === 0; Layout.fillWidth: true; spacing: 14
-                                Section { title: "idle daemon"; icon: "bedtime" }
-                                RowLayout {
-                                    Layout.fillWidth: true; spacing: 10
-                                    Sym { text: root.idleOn ? "bedtime" : "coffee"; sz: 18; color: root.idleOn ? theme.iris : theme.warn }
-                                    ColumnLayout { spacing: 0; Layout.fillWidth: true
-                                        Text { text: root.idleOn ? "idle daemon running" : "caffeine mode — idle daemon stopped"; color: theme.text; font.pixelSize: 13; font.family: root.apFont }
-                                        Text {
-                                            text: {
-                                                if (!root.idleOn) return "screen stays on until you turn hypridle back on";
-                                                var d = root.lockDim >= 60 ? (root.lockDim / 60).toFixed(0) + "m" : root.lockDim + "s";
-                                                var l = (root.lockLock / 60).toFixed(0) + "m";
-                                                var o = (root.lockDpms / 60).toFixed(0) + "m";
-                                                var s = root.lockSuspendEnabled ? " · suspend " + (root.lockSuspend / 60).toFixed(0) + "m" : "";
-                                                return "dim " + d + " · lock " + l + " · screen off " + o + s;
-                                            }
-                                            color: theme.faint; font.pixelSize: 10; font.family: root.apFont
-                                        }
-                                    }
-                                    Rectangle { implicitWidth: 46; implicitHeight: 22; radius: Tok.r
-                                        color: root.idleOn ? theme.a(theme.iris, 0.35) : theme.a(theme.warn, 0.3)
-                                        border.width: 1; border.color: root.idleOn ? theme.iris : theme.warn
-                                        Rectangle { width: 16; height: 16; radius: Tok.r; y: 3
-                                            x: root.idleOn ? parent.width - 19 : 3
-                                            color: root.idleOn ? theme.frost : theme.warn
-                                            Behavior on x { NumberAnimation { duration: 120 } } }
-                                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.toggleIdle() } }
-                                }
-
-                                Section { title: "timeouts"; icon: "timer" }
-                                
-                                // Dim Backlight
-                                RowLayout { Layout.fillWidth: true; spacing: 10
-                                    Sym { text: "brightness_medium"; sz: 20 }
-                                    Text { text: "dim display"; color: theme.sub; font.pixelSize: 12; font.family: root.apFont; Layout.minimumWidth: 100 }
-                                    Item { Layout.fillWidth: true }
-                                    RowLayout { spacing: 6
-                                        Repeater {
-                                            model: [{l:"15s",v:15},{l:"30s",v:30},{l:"1m",v:60},{l:"2m",v:120},{l:"5m",v:300}]
-                                            delegate: Rectangle { required property var modelData; readonly property bool sel: root.lockDim === modelData.v
-                                                implicitWidth: chipDim.implicitWidth+14; implicitHeight: 26; radius: Tok.r
-                                                color: sel ? theme.iris : (chipDimMa.containsMouse ? theme.a(theme.iris, 0.16) : theme.a(theme.line, 0.4))
-                                                border.width: 1; border.color: sel ? theme.iris : theme.a(theme.iris, 0.14)
-                                                Text { id: chipDim; anchors.centerIn: parent; text: modelData.l; color: sel ? theme.bg : theme.sub; font.pixelSize: 11; font.family: root.apFont; font.bold: sel }
-                                                MouseArea { id: chipDimMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.lockDim = modelData.v } } }
-                                        Rectangle { implicitWidth: 64; implicitHeight: 26; radius: Tok.r; color: theme.a(theme.line, 0.5)
-                                            border.width: 1; border.color: customDimIn.activeFocus ? theme.iris : theme.a(theme.iris, 0.2)
-                                            TextInput { id: customDimIn; anchors.fill: parent; horizontalAlignment: TextInput.AlignHCenter; verticalAlignment: TextInput.AlignVCenter
-                                                color: theme.text; font.pixelSize: 11; font.family: Tok.mono; text: root.lockDim.toString(); selectByMouse: true
-                                                onEditingFinished: { var v = parseInt(text); if(!isNaN(v)) root.lockDim = Math.max(1, v) }
-                                                Text { anchors.right: parent.right; anchors.rightMargin: 6; anchors.verticalCenter: parent.verticalCenter; visible: !customDimIn.activeFocus; text: "s"; color: theme.faint; font.pixelSize: 10 } } } }
-                                }
-
-                                // Lock Screen
-                                RowLayout { Layout.fillWidth: true; spacing: 10
-                                    Sym { text: "lock"; sz: 20 }
-                                    Text { text: "lock screen"; color: theme.sub; font.pixelSize: 12; font.family: root.apFont; Layout.minimumWidth: 100 }
-                                    Item { Layout.fillWidth: true }
-                                    RowLayout { spacing: 6
-                                        Repeater {
-                                            model: [{l:"1m",v:60},{l:"2m",v:120},{l:"5m",v:300},{l:"10m",v:600},{l:"30m",v:1800}]
-                                            delegate: Rectangle { required property var modelData; readonly property bool sel: root.lockLock === modelData.v
-                                                implicitWidth: chipLck.implicitWidth+14; implicitHeight: 26; radius: Tok.r
-                                                color: sel ? theme.iris : (chipLckMa.containsMouse ? theme.a(theme.iris, 0.16) : theme.a(theme.line, 0.4))
-                                                border.width: 1; border.color: sel ? theme.iris : theme.a(theme.iris, 0.14)
-                                                Text { id: chipLck; anchors.centerIn: parent; text: modelData.l; color: sel ? theme.bg : theme.sub; font.pixelSize: 11; font.family: root.apFont; font.bold: sel }
-                                                MouseArea { id: chipLckMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.lockLock = modelData.v } } }
-                                        Rectangle { implicitWidth: 64; implicitHeight: 26; radius: Tok.r; color: theme.a(theme.line, 0.5)
-                                            border.width: 1; border.color: customLckIn.activeFocus ? theme.iris : theme.a(theme.iris, 0.2)
-                                            TextInput { id: customLckIn; anchors.fill: parent; horizontalAlignment: TextInput.AlignHCenter; verticalAlignment: TextInput.AlignVCenter
-                                                color: theme.text; font.pixelSize: 11; font.family: Tok.mono; text: Math.round(root.lockLock / 60).toString(); selectByMouse: true
-                                                onEditingFinished: { var v = parseInt(text); if(!isNaN(v)) root.lockLock = Math.max(1, v * 60) }
-                                                Text { anchors.right: parent.right; anchors.rightMargin: 6; anchors.verticalCenter: parent.verticalCenter; visible: !customLckIn.activeFocus; text: "m"; color: theme.faint; font.pixelSize: 10 } } } }
-                                }
-
-                                // Screen Off (DPMS)
-                                RowLayout { Layout.fillWidth: true; spacing: 10
-                                    Sym { text: "settings_brightness"; sz: 20 }
-                                    Text { text: "screen off"; color: theme.sub; font.pixelSize: 12; font.family: root.apFont; Layout.minimumWidth: 100 }
-                                    Item { Layout.fillWidth: true }
-                                    RowLayout { spacing: 6
-                                        Repeater {
-                                            model: [{l:"1m",v:60},{l:"2m",v:120},{l:"5m",v:300},{l:"10m",v:600},{l:"30m",v:1800}]
-                                            delegate: Rectangle { required property var modelData; readonly property bool sel: root.lockDpms === modelData.v
-                                                implicitWidth: chipDpms.implicitWidth+14; implicitHeight: 26; radius: Tok.r
-                                                color: sel ? theme.iris : (chipDpmsMa.containsMouse ? theme.a(theme.iris, 0.16) : theme.a(theme.line, 0.4))
-                                                border.width: 1; border.color: sel ? theme.iris : theme.a(theme.iris, 0.14)
-                                                Text { id: chipDpms; anchors.centerIn: parent; text: modelData.l; color: sel ? theme.bg : theme.sub; font.pixelSize: 11; font.family: root.apFont; font.bold: sel }
-                                                MouseArea { id: chipDpmsMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.lockDpms = modelData.v } } }
-                                        Rectangle { implicitWidth: 64; implicitHeight: 26; radius: Tok.r; color: theme.a(theme.line, 0.5)
-                                            border.width: 1; border.color: customDpmsIn.activeFocus ? theme.iris : theme.a(theme.iris, 0.2)
-                                            TextInput { id: customDpmsIn; anchors.fill: parent; horizontalAlignment: TextInput.AlignHCenter; verticalAlignment: TextInput.AlignVCenter
-                                                color: theme.text; font.pixelSize: 11; font.family: Tok.mono; text: Math.round(root.lockDpms / 60).toString(); selectByMouse: true
-                                                onEditingFinished: { var v = parseInt(text); if(!isNaN(v)) root.lockDpms = Math.max(1, v * 60) }
-                                                Text { anchors.right: parent.right; anchors.rightMargin: 6; anchors.verticalCenter: parent.verticalCenter; visible: !customDpmsIn.activeFocus; text: "m"; color: theme.faint; font.pixelSize: 10 } } } }
-                                }
-
-                                // Suspend
-                                RowLayout { Layout.fillWidth: true; spacing: 10
-                                    Sym { text: "power"; sz: 20; color: root.lockSuspendEnabled ? theme.frost : theme.faint }
-                                    Text { text: "suspend system"; color: root.lockSuspendEnabled ? theme.sub : theme.faint; font.pixelSize: 12; font.family: root.apFont; Layout.minimumWidth: 100 }
-                                    Item { Layout.fillWidth: true }
-                                    RowLayout { spacing: 6; visible: root.lockSuspendEnabled
-                                        Repeater {
-                                            model: [{l:"10m",v:600},{l:"30m",v:1800},{l:"1h",v:3600},{l:"2h",v:7200}]
-                                            delegate: Rectangle { required property var modelData; readonly property bool sel: root.lockSuspend === modelData.v
-                                                implicitWidth: chipSsp.implicitWidth+14; implicitHeight: 26; radius: Tok.r
-                                                color: sel ? theme.iris : (chipSspMa.containsMouse ? theme.a(theme.iris, 0.16) : theme.a(theme.line, 0.4))
-                                                border.width: 1; border.color: sel ? theme.iris : theme.a(theme.iris, 0.14)
-                                                Text { id: chipSsp; anchors.centerIn: parent; text: modelData.l; color: sel ? theme.bg : theme.sub; font.pixelSize: 11; font.family: root.apFont; font.bold: sel }
-                                                MouseArea { id: chipSspMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.lockSuspend = modelData.v } } }
-                                        Rectangle { implicitWidth: 64; implicitHeight: 26; radius: Tok.r; color: theme.a(theme.line, 0.5)
-                                            border.width: 1; border.color: customSspIn.activeFocus ? theme.iris : theme.a(theme.iris, 0.2)
-                                            TextInput { id: customSspIn; anchors.fill: parent; horizontalAlignment: TextInput.AlignHCenter; verticalAlignment: TextInput.AlignVCenter
-                                                color: theme.text; font.pixelSize: 11; font.family: Tok.mono; text: Math.round(root.lockSuspend / 60).toString(); selectByMouse: true
-                                                onEditingFinished: { var v = parseInt(text); if(!isNaN(v)) root.lockSuspend = Math.max(1, v * 60) }
-                                                Text { anchors.right: parent.right; anchors.rightMargin: 6; anchors.verticalCenter: parent.verticalCenter; visible: !customSspIn.activeFocus; text: "m"; color: theme.faint; font.pixelSize: 10 } } } }
-                                    Rectangle { implicitWidth: 40; implicitHeight: 20; radius: Tok.r
-                                        color: root.lockSuspendEnabled ? theme.a(theme.iris, 0.35) : theme.a(theme.line, 0.3)
-                                        border.width: 1; border.color: root.lockSuspendEnabled ? theme.iris : theme.faint
-                                        Rectangle { width: 14; height: 14; radius: Tok.r; y: 3
-                                            x: root.lockSuspendEnabled ? parent.width - 17 : 3
-                                            color: root.lockSuspendEnabled ? theme.frost : theme.faint
-                                            Behavior on x { NumberAnimation { duration: 120 } } }
-                                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.lockSuspendEnabled = !root.lockSuspendEnabled } }
-                                }
-
-                                // Laptop Lid Close
-                                RowLayout { Layout.fillWidth: true; spacing: 10
-                                    Sym { text: "laptop"; sz: 20; color: theme.frost }
-                                    Text { text: "lid close action"; color: theme.sub; font.pixelSize: 12; font.family: root.apFont; Layout.minimumWidth: 100 }
-                                    Item { Layout.fillWidth: true }
-                                    RowLayout { spacing: 6
-                                        Repeater {
-                                            model: [
-                                                {l:"Suspend",  v:"suspend",   i:"bedtime"},
-                                                {l:"Lock",     v:"lock",      i:"lock"},
-                                                {l:"Screen Off",v:"dpms",     i:"settings_brightness"},
-                                                {l:"Hibernate",v:"hibernate", i:"save_as"},
-                                                {l:"Shut down",v:"shutdown",  i:"power_settings_new"},
-                                                {l:"Ignore",   v:"ignore",    i:"block"}
-                                            ]
-                                            delegate: Rectangle {
-                                                required property var modelData
-                                                readonly property bool sel: root.lockLidAction === modelData.v
-                                                implicitWidth: chipLidRow.implicitWidth + 18; implicitHeight: 26; radius: Tok.r
-                                                color: sel ? theme.iris : (chipLidMa.containsMouse ? theme.a(theme.iris, 0.16) : theme.a(theme.line, 0.4))
-                                                border.width: 1; border.color: sel ? theme.iris : theme.a(theme.iris, 0.14)
-                                                RowLayout {
-                                                    id: chipLidRow
-                                                    anchors.centerIn: parent; spacing: 4
-                                                    Sym { text: modelData.i; sz: 14; color: sel ? theme.bg : (chipLidMa.containsMouse ? theme.frost : theme.sub) }
-                                                    Text { text: modelData.l; color: sel ? theme.bg : theme.sub; font.pixelSize: 11; font.family: root.apFont; font.bold: sel }
-                                                }
-                                                MouseArea {
-                                                    id: chipLidMa
-                                                    anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
-                                                    onClicked: {
-                                                        root.lockLidAction = modelData.v;
-                                                        root.saveLockSettings();
-                                                        root.run("pkill -x hypridle; sleep 0.3; hyprctl dispatch \"hl.dsp.exec_cmd('hypridle')\"; hyprctl reload");
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-
-                            // SUB-TAB 1: Style & Wallpaper
-                            ColumnLayout {
-                                visible: root.idlSubTab === 1; Layout.fillWidth: true; spacing: 14
-                                Section { title: "lock screen"; icon: "lock" }
-                                ProfileSettings { id: lockProfileEditor; Layout.fillWidth: true; part: "lock"
-                                    onSaved: userProfileEditor.reload() }
-                                Section { title: "lock screen options"; icon: "security" }
-
-                                // Grace period
-                                RowLayout { Layout.fillWidth: true; spacing: 10
-                                    Sym { text: "av_timer"; sz: 20 }
-                                    Text { text: "grace period"; color: theme.sub; font.pixelSize: 12; font.family: root.apFont; Layout.minimumWidth: 110 }
-                                    Item { Layout.fillWidth: true }
-                                    RowLayout { spacing: 6
-                                        Repeater {
-                                            model: [{l:"0s",v:0},{l:"2s",v:2},{l:"5s",v:5},{l:"10s",v:10}]
-                                            delegate: Rectangle { required property var modelData; readonly property bool sel: root.lockGrace === modelData.v
-                                                implicitWidth: chipGrc.implicitWidth+14; implicitHeight: 26; radius: Tok.r
-                                                color: sel ? theme.iris : (chipGrcMa.containsMouse ? theme.a(theme.iris, 0.16) : theme.a(theme.line, 0.4))
-                                                border.width: 1; border.color: sel ? theme.iris : theme.a(theme.iris, 0.14)
-                                                Text { id: chipGrc; anchors.centerIn: parent; text: modelData.l; color: sel ? theme.bg : theme.sub; font.pixelSize: 11; font.family: root.apFont; font.bold: sel }
-                                                MouseArea { id: chipGrcMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.lockGrace = modelData.v } } }
-                                        Rectangle { implicitWidth: 64; implicitHeight: 26; radius: Tok.r; color: theme.a(theme.line, 0.5)
-                                            border.width: 1; border.color: customGrcIn.activeFocus ? theme.iris : theme.a(theme.iris, 0.2)
-                                            TextInput { id: customGrcIn; anchors.fill: parent; horizontalAlignment: TextInput.AlignHCenter; verticalAlignment: TextInput.AlignVCenter
-                                                color: theme.text; font.pixelSize: 11; font.family: Tok.mono; text: root.lockGrace.toString(); selectByMouse: true
-                                                onEditingFinished: { var v = parseInt(text); if(!isNaN(v)) root.lockGrace = Math.max(0, v) }
-                                                Text { anchors.right: parent.right; anchors.rightMargin: 6; anchors.verticalCenter: parent.verticalCenter; visible: !customGrcIn.activeFocus; text: "s"; color: theme.faint; font.pixelSize: 10 } } } }
-                                }
-
-                                // Hide cursor Toggle
-                                RowLayout { Layout.fillWidth: true; spacing: 10
-                                    Sym { text: "navigation"; sz: 20 }
-                                    Text { text: "hide cursor on lock"; color: theme.sub; font.pixelSize: 12; font.family: root.apFont; Layout.fillWidth: true }
-                                    Rectangle { implicitWidth: 40; implicitHeight: 20; radius: Tok.r
-                                        color: root.lockHideCursor ? theme.a(theme.iris, 0.35) : theme.a(theme.line, 0.3)
-                                        border.width: 1; border.color: root.lockHideCursor ? theme.iris : theme.faint
-                                        Rectangle { width: 14; height: 14; radius: Tok.r; y: 3
-                                            x: root.lockHideCursor ? parent.width - 17 : 3
-                                            color: root.lockHideCursor ? theme.frost : theme.faint
-                                            Behavior on x { NumberAnimation { duration: 120 } } }
-                                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.lockHideCursor = !root.lockHideCursor } }
-                                }
-
-                                // Ignore empty input Toggle
-                                RowLayout { Layout.fillWidth: true; spacing: 10
-                                    Sym { text: "space_bar"; sz: 20 }
-                                    Text { text: "ignore empty input"; color: theme.sub; font.pixelSize: 12; font.family: root.apFont; Layout.fillWidth: true }
-                                    Rectangle { implicitWidth: 40; implicitHeight: 20; radius: Tok.r
-                                        color: root.lockIgnoreEmpty ? theme.a(theme.iris, 0.35) : theme.a(theme.line, 0.3)
-                                        border.width: 1; border.color: root.lockIgnoreEmpty ? theme.iris : theme.faint
-                                        Rectangle { width: 14; height: 14; radius: Tok.r; y: 3
-                                            x: root.lockIgnoreEmpty ? parent.width - 17 : 3
-                                            color: root.lockIgnoreEmpty ? theme.frost : theme.faint
-                                            Behavior on x { NumberAnimation { duration: 120 } } }
-                                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.lockIgnoreEmpty = !root.lockIgnoreEmpty } }
-                                }
-
-                                Section { title: "blur & background"; icon: "wallpaper" }
-
-                                // Blur Passes
-                                RowLayout { Layout.fillWidth: true; spacing: 10
-                                    Sym { text: "blur_on"; sz: 20 }
-                                    Text { text: "blur passes"; color: theme.sub; font.pixelSize: 12; font.family: root.apFont; Layout.minimumWidth: 110 }
-                                    Item { Layout.fillWidth: true }
-                                    RowLayout { spacing: 6
-                                        Repeater {
-                                            model: [{l:"1",v:1},{l:"2",v:2},{l:"3",v:3},{l:"5",v:5},{l:"8",v:8}]
-                                            delegate: Rectangle { required property var modelData; readonly property bool sel: root.lockBlurPasses === modelData.v
-                                                implicitWidth: chipPas.implicitWidth+14; implicitHeight: 26; radius: Tok.r
-                                                color: sel ? theme.iris : (chipPasMa.containsMouse ? theme.a(theme.iris, 0.16) : theme.a(theme.line, 0.4))
-                                                border.width: 1; border.color: sel ? theme.iris : theme.a(theme.iris, 0.14)
-                                                Text { id: chipPas; anchors.centerIn: parent; text: modelData.l.toString(); color: sel ? theme.bg : theme.sub; font.pixelSize: 11; font.family: root.apFont; font.bold: sel }
-                                                MouseArea { id: chipPasMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.lockBlurPasses = modelData.v } } }
-                                        Rectangle { implicitWidth: 64; implicitHeight: 26; radius: Tok.r; color: theme.a(theme.line, 0.5)
-                                            border.width: 1; border.color: customPasIn.activeFocus ? theme.iris : theme.a(theme.iris, 0.2)
-                                            TextInput { id: customPasIn; anchors.fill: parent; horizontalAlignment: TextInput.AlignHCenter; verticalAlignment: TextInput.AlignVCenter
-                                                color: theme.text; font.pixelSize: 11; font.family: Tok.mono; text: root.lockBlurPasses.toString(); selectByMouse: true
-                                                onEditingFinished: { var v = parseInt(text); if(!isNaN(v)) root.lockBlurPasses = Math.max(0, v) } } } }
-                                }
-
-                                // Blur Size
-                                RowLayout { Layout.fillWidth: true; spacing: 10
-                                    Sym { text: "photo_size_select_large"; sz: 20 }
-                                    Text { text: "blur size"; color: theme.sub; font.pixelSize: 12; font.family: root.apFont; Layout.minimumWidth: 110 }
-                                    Item { Layout.fillWidth: true }
-                                    RowLayout { spacing: 6
-                                        Repeater {
-                                            model: [{l:"2px",v:2},{l:"4px",v:4},{l:"8px",v:8},{l:"12px",v:12},{l:"16px",v:16}]
-                                            delegate: Rectangle { required property var modelData; readonly property bool sel: root.lockBlurSize === modelData.v
-                                                implicitWidth: chipSz.implicitWidth+14; implicitHeight: 26; radius: Tok.r
-                                                color: sel ? theme.iris : (chipSzMa.containsMouse ? theme.a(theme.iris, 0.16) : theme.a(theme.line, 0.4))
-                                                border.width: 1; border.color: sel ? theme.iris : theme.a(theme.iris, 0.14)
-                                                Text { id: chipSz; anchors.centerIn: parent; text: modelData.l; color: sel ? theme.bg : theme.sub; font.pixelSize: 11; font.family: root.apFont; font.bold: sel }
-                                                MouseArea { id: chipSzMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.lockBlurSize = modelData.v } } }
-                                        Rectangle { implicitWidth: 64; implicitHeight: 26; radius: Tok.r; color: theme.a(theme.line, 0.5)
-                                            border.width: 1; border.color: customSzIn.activeFocus ? theme.iris : theme.a(theme.iris, 0.2)
-                                            TextInput { id: customSzIn; anchors.fill: parent; horizontalAlignment: TextInput.AlignHCenter; verticalAlignment: TextInput.AlignVCenter
-                                                color: theme.text; font.pixelSize: 11; font.family: Tok.mono; text: root.lockBlurSize.toString(); selectByMouse: true
-                                                onEditingFinished: { var v = parseInt(text); if(!isNaN(v)) root.lockBlurSize = Math.max(0, v) }
-                                                Text { anchors.right: parent.right; anchors.rightMargin: 6; anchors.verticalCenter: parent.verticalCenter; visible: !customSzIn.activeFocus; text: "px"; color: theme.faint; font.pixelSize: 10 } } } }
-                                }
-
-                                // Vibrancy
-                                RowLayout { Layout.fillWidth: true; spacing: 10
-                                    Sym { text: "vignette"; sz: 20 }
-                                    Text { text: "vibrancy"; color: theme.sub; font.pixelSize: 12; font.family: root.apFont; Layout.minimumWidth: 110 }
-                                    Item { Layout.fillWidth: true }
-                                    RowLayout { spacing: 6
-                                        Repeater {
-                                            model: [{l:"0%",v:0.0},{l:"25%",v:0.25},{l:"50%",v:0.5},{l:"75%",v:0.75},{l:"100%",v:1.0}]
-                                            delegate: Rectangle { required property var modelData; readonly property bool sel: Math.abs(root.lockVibrancy - modelData.v) < 0.02
-                                                implicitWidth: chipVib.implicitWidth+14; implicitHeight: 26; radius: Tok.r
-                                                color: sel ? theme.iris : (chipVibMa.containsMouse ? theme.a(theme.iris, 0.16) : theme.a(theme.line, 0.4))
-                                                border.width: 1; border.color: sel ? theme.iris : theme.a(theme.iris, 0.14)
-                                                Text { id: chipVib; anchors.centerIn: parent; text: modelData.l; color: sel ? theme.bg : theme.sub; font.pixelSize: 11; font.family: root.apFont; font.bold: sel }
-                                                MouseArea { id: chipVibMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.lockVibrancy = modelData.v } } }
-                                        Rectangle { implicitWidth: 64; implicitHeight: 26; radius: Tok.r; color: theme.a(theme.line, 0.5)
-                                            border.width: 1; border.color: customVibIn.activeFocus ? theme.iris : theme.a(theme.iris, 0.2)
-                                            TextInput { id: customVibIn; anchors.fill: parent; horizontalAlignment: TextInput.AlignHCenter; verticalAlignment: TextInput.AlignVCenter
-                                                color: theme.text; font.pixelSize: 11; font.family: Tok.mono; text: Math.round(root.lockVibrancy * 100).toString(); selectByMouse: true
-                                                onEditingFinished: { var v = parseFloat(text); if(!isNaN(v)) root.lockVibrancy = Math.max(0, Math.min(100, v)) / 100 }
-                                                Text { anchors.right: parent.right; anchors.rightMargin: 6; anchors.verticalCenter: parent.verticalCenter; visible: !customVibIn.activeFocus; text: "%"; color: theme.faint; font.pixelSize: 10 } } } }
-                                }
-
-                                // Wallpaper path text input
-                                Text { text: "wallpaper image path"; color: theme.faint; font.pixelSize: 10; font.family: root.apFont; Layout.topMargin: 4 }
-                                RowLayout {
-                                    Layout.fillWidth: true; spacing: 10
-                                    Rectangle {
-                                        Layout.fillWidth: true; implicitHeight: 36; radius: Tok.r
-                                        color: theme.a(theme.line, 0.4); border.width: 1
-                                        border.color: bgIn.activeFocus ? theme.iris : theme.a(theme.iris, 0.16)
-                                        TextInput {
-                                            id: bgIn
-                                            anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 12
-                                            verticalAlignment: TextInput.AlignVCenter
-                                            color: theme.text; font.pixelSize: 12; font.family: Tok.mono
-                                            clip: true; selectByMouse: true; selectionColor: theme.a(theme.iris, 0.4)
-                                            text: root.lockBg
-                                            onTextChanged: root.lockBg = text
-                                        }
-                                    }
-                                    Rectangle {
-                                        implicitWidth: 36; implicitHeight: 36; radius: Tok.r
-                                        color: bgBrowseMa.containsMouse ? theme.a(theme.iris, 0.25) : theme.a(theme.line, 0.4)
-                                        border.width: 1; border.color: theme.a(theme.iris, 0.25)
-                                        Sym { anchors.centerIn: parent; text: "folder_open"; sz: 16; color: theme.frost }
-                                        MouseArea {
-                                            id: bgBrowseMa
-                                            anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
-                                            onClicked: {
-                                                root.pickFile("Select Wallpaper Image", "Images (*.png *.jpg *.jpeg) | *.png;*.jpg;*.jpeg", function(path) {
-                                                    bgIn.text = path;
-                                                }); } } }
-                                }
-                            }
-
-                            // Save & Actions Row (always visible at bottom of tab)
-                            RowLayout {
-                                Layout.fillWidth: true; spacing: 10; Layout.topMargin: 8
-                                Rectangle {
-                                    Layout.fillWidth: true; implicitHeight: 38; radius: Tok.r
-                                    color: svLockM.containsMouse ? theme.iris : theme.a(theme.iris, 0.18)
-                                    border.width: 1; border.color: theme.iris
-                                    RowLayout {
-                                        anchors.centerIn: parent; spacing: 6
-                                        Sym { text: "save"; sz: 16; color: svLockM.containsMouse ? theme.bg : theme.frost }
-                                        Text { text: "Apply & Restart Daemon"; color: svLockM.containsMouse ? theme.bg : theme.text; font.pixelSize: 13; font.family: root.apFont; font.bold: true }
-                                    }
-                                    MouseArea {
-                                        id: svLockM
-                                        anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
-                                        onClicked: {
-                                            root.saveLockSettings();
-                                            // Restart daemon
-                                            root.run("pkill -x hypridle; sleep 0.3; hyprctl dispatch \"hl.dsp.exec_cmd('hypridle')\"");
-                                            // Notify user
-                                            root.run("notify-send 'sea-shell' 'Lock & Idle settings applied live!'");
-                                        }
-                                    }
-                                }
-                                Rectangle {
-                                    implicitWidth: 120; implicitHeight: 38; radius: Tok.r
-                                    color: lkNowM.containsMouse ? theme.warn : theme.a(theme.line, 0.38)
-                                    border.width: 1; border.color: lkNowM.containsMouse ? theme.warn : theme.a(theme.iris, 0.16)
-                                    RowLayout {
-                                        anchors.centerIn: parent; spacing: 6
-                                        Sym { text: "lock"; sz: 16; color: lkNowM.containsMouse ? theme.bg : theme.warn }
-                                        Text { text: "Lock Now"; color: lkNowM.containsMouse ? theme.bg : theme.text; font.pixelSize: 13; font.family: root.apFont }
-                                    }
-                                    MouseArea {
-                                        id: lkNowM
-                                        anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
-                                        onClicked: { root.run("~/.config/quickshell/sea-shell/sea-lock.sh"); root.closePanel() }
-                                    }
-                                }
-                            }
-                        }
-
-                        // ================= INPUT =================
-                        ColumnLayout {
-                            property int tabIdx: 15
-                            visible: root.tab === 15; Layout.fillWidth: true; spacing: 12
-
-                            Section { title: "mouse"; icon: "mouse" }
-                            SliderRow {
-                                icon: "speed"; label: "sensitivity"
-                                value: (root.apMouseSens + 1) / 2      // -1..1 mapped onto the 0..1 track
-                                readout: (root.apMouseSens >= 0 ? "+" : "") + root.apMouseSens.toFixed(2)
-                                onMoved: (v) => { root.apMouseSens = Math.round((v * 2 - 1) * 100) / 100
-                                                  root.saveAppearance(); root.applyInput() }
-                            }
-                            RowLayout {
-                                Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; spacing: 8
-                                Text { text: "accel"; color: theme.sub; font.pixelSize: 12; font.family: Tok.mono; Layout.minimumWidth: 76 }
-                                Repeater {
-                                    model: [ { v: "",         l: "default" },
-                                             { v: "adaptive", l: "adaptive" },
-                                             { v: "flat",     l: "flat" } ]
-                                    delegate: Chip {
-                                        required property var modelData
-                                        label: modelData.l; on: root.apAccelProfile === modelData.v
-                                        onPicked: { root.apAccelProfile = modelData.v; root.saveAppearance(); root.applyInput() }
-                                    }
-                                }
-                                Item { Layout.fillWidth: true }
-                            }
-                            ToggleCard {
-                                icon: "swap_vert"; title: "natural scrolling"
-                                desc: "invert mouse wheel direction"
-                                on: root.apMouseNatural
-                                onToggled: { root.apMouseNatural = !root.apMouseNatural; root.saveAppearance(); root.applyInput() }
-                            }
-
-                            Section { title: "touchpad"; icon: "touch_app" }
-                            ToggleCard {
-                                icon: "swap_vert"; title: "natural scrolling"
-                                desc: "content follows your fingers"
-                                on: root.apTpNatural
-                                onToggled: { root.apTpNatural = !root.apTpNatural; root.saveAppearance(); root.applyInput() }
-                            }
-                            SliderRow {
-                                icon: "unfold_more"; label: "scroll speed"
-                                value: Math.min(1, root.apTpScroll / 3)
-                                readout: root.apTpScroll.toFixed(2) + "×"
-                                onMoved: (v) => { root.apTpScroll = Math.max(0.1, Math.round(v * 3 * 100) / 100)
-                                                  root.saveAppearance(); root.applyInput() }
-                            }
-                            ToggleCard {
-                                icon: "ads_click"; title: "tap to click"
-                                on: root.apTpTap
-                                onToggled: { root.apTpTap = !root.apTpTap; root.saveAppearance(); root.applyInput() }
-                            }
-                            ToggleCard {
-                                icon: "edit_off"; title: "disable while typing"
-                                desc: "ignore the touchpad mid-keystroke so a stray palm can't move the caret"
-                                on: root.apTpDwt
-                                onToggled: { root.apTpDwt = !root.apTpDwt; root.saveAppearance(); root.applyInput() }
-                            }
-
-                            Text {
-                                Layout.fillWidth: true; Layout.leftMargin: 14; Layout.topMargin: 4
-                                wrapMode: Text.WordWrap
-                                text: "applied live via hyprctl eval, and re-applied at login — an eval only lasts as long as the current hyprland session"
-                                color: theme.faint; font.pixelSize: 10; font.family: Tok.mono
-                            }
-
-                            // ---- touchpad gestures ----
-                            Section { title: "gestures"; icon: "gesture" }
-                            Text {
-                                Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14
-                                wrapMode: Text.WordWrap
-                                text: "swipe on the touchpad to do something. hyprland allows one gesture per "
-                                    + "finger-count + direction pair, so a second one on the same pair never fires."
-                                color: theme.faint; font.pixelSize: 10; font.family: Tok.mono
-                            }
-                            IndTable {
-                                Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14
-                                rowHeight: 30
-                                rows: root.gsRows
-                                selectable: true
-                                selectedIndex: root.gsSel
-                                emptyText: "no gestures — hyprland ships none by default"
-                                columns: [
-                                    { label: "Fingers",   key: "fing", w: 90,  mono: true },
-                                    { label: "Direction", key: "dir",  w: 110, mono: true },
-                                    { label: "Does",      key: "act",  w: 120, mono: true },
-                                    { label: "",          key: "note", flex: true }
-                                ]
-                                onActivated: (i, row) => root.gsSel = i
-                            }
-                            RowLayout {
-                                Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; spacing: 8
-                                IndBtn { text: "Add gesture"; rank: "primary"; onActivated: root.gsAdd() }
-                                IndBtn { text: "Delete"; rank: "danger"; enabled: root.gsSel >= 0
-                                    onActivated: root.gsDel(root.gsSel) }
-                                Item { Layout.fillWidth: true }
-                            }
-                            ColumnLayout {
-                                id: gsEdit
-                                visible: root.gsSel >= 0 && root.gsSel < root.gsList.length
-                                Layout.fillWidth: true; spacing: 8
-                                readonly property var g: (root.gsSel >= 0 && root.gsSel < root.gsList.length)
-                                                          ? root.gsList[root.gsSel] : ({})
-                                RowLayout {
-                                    Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; spacing: 6
-                                    Text { text: "fingers"; color: theme.sub; font.pixelSize: 11; font.family: Tok.mono; Layout.minimumWidth: 68 }
-                                    Repeater { model: [2,3,4,5]
-                                        delegate: Chip { required property var modelData
-                                            label: "" + modelData; on: gsEdit.g.fingers === modelData
-                                            onPicked: root.gsSet(root.gsSel, "fingers", modelData) } }
-                                    Item { Layout.fillWidth: true }
-                                }
-                                RowLayout {
-                                    Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; spacing: 6
-                                    Text { text: "direction"; color: theme.sub; font.pixelSize: 11; font.family: Tok.mono; Layout.minimumWidth: 68 }
-                                    Flow { Layout.fillWidth: true; spacing: 6
-                                        Repeater { model: root.gsDirs
-                                            delegate: Chip { required property var modelData
-                                                label: modelData; on: gsEdit.g.direction === modelData
-                                                onPicked: root.gsSet(root.gsSel, "direction", modelData) } } }
-                                }
-                                RowLayout {
-                                    Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; spacing: 6
-                                    Text { text: "action"; color: theme.sub; font.pixelSize: 11; font.family: Tok.mono; Layout.minimumWidth: 68 }
-                                    Flow { Layout.fillWidth: true; spacing: 6
-                                        Repeater { model: root.gsActions
-                                            delegate: Chip { required property var modelData
-                                                label: modelData; on: gsEdit.g.action === modelData
-                                                onPicked: root.gsSet(root.gsSel, "action", modelData) } } }
-                                }
-                            }
-                        }
-
-                        // ================= POWER =================
-                        ColumnLayout {
-                            property int tabIdx: 6
-                            visible: root.tab === 6; Layout.fillWidth: true; spacing: 14
-                            Section { title: "battery"; icon: "battery_full" }
-                            RowLayout {
-                                Layout.fillWidth: true; spacing: 10
-                                visible: UPower.displayDevice && UPower.displayDevice.isLaptopBattery
-                                Sym { text: UPower.onBattery ? "battery_5_bar" : "battery_charging_full"; sz: 18
-                                    color: UPower.onBattery && UPower.displayDevice.percentage < 0.2 ? theme.bad : theme.good }
-                                Rectangle { Layout.fillWidth: true; implicitHeight: 8; radius: Tok.r; color: theme.a(theme.line, 0.8)
-                                    Rectangle { height: parent.height; radius: Tok.r
-                                        width: parent.width * (UPower.displayDevice ? UPower.displayDevice.percentage : 0)
-                                        color: UPower.onBattery && UPower.displayDevice.percentage < 0.2 ? theme.bad : theme.good } }
-                                Text { text: UPower.displayDevice ? Math.round(UPower.displayDevice.percentage * 100) + "%" + (UPower.onBattery ? "" : " ⚡") : ""
-                                    color: theme.sub; font.pixelSize: 12; font.family: Tok.mono }
-                            }
-
-                            // ---- health / wear ----
-                            // Charge % says how full the pack is; THIS says how much pack is
-                            // left to fill. UPower doesn't expose it, so it comes from sysfs.
-                            Section { visible: !!root.battHealth.present; title: "health"; icon: "health_and_safety" }
-                            RowLayout {
-                                visible: !!root.battHealth.present
-                                Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; spacing: 24
-                                IndKpi {
-                                    label: "capacity"
-                                    value: "" + (root.battHealth.pct || 0)
-                                    unit: "%"
-                                    size: Tok.tKpi
-                                    sub: "of design"
-                                    // a pack under ~80% of design is meaningfully worn; under 60% is near replacement
-                                    tone: (root.battHealth.pct || 0) < 60 ? "crit"
-                                        : (root.battHealth.pct || 0) < 80 ? "warn" : "ok"
-                                }
-                                IndRule { Layout.fillHeight: true; Layout.preferredWidth: 1 }
-                                IndKpi {
-                                    label: "cycles"
-                                    value: (root.battHealth.cycles || 0) > 0 ? "" + root.battHealth.cycles : "—"
-                                    size: Tok.tKpi
-                                    sub: (root.battHealth.cycles || 0) > 0 ? "charge cycles" : "not reported"
-                                }
-                                IndRule { Layout.fillHeight: true; Layout.preferredWidth: 1 }
-                                IndKpi {
-                                    label: "pack"
-                                    value: root.battHealth.model || "—"
-                                    size: Tok.tPanel
-                                    sub: [root.battHealth.vendor,
-                                          root.battHealth.design > 0
-                                            ? Math.round(root.battHealth.design / 1000) + " mAh design" : ""]
-                                         .filter(function (x) { return x }).join("  ·  ")
-                                }
-                                Item { Layout.fillWidth: true }
-                            }
-
-                            Text { text: "power profile"; color: theme.faint; font.pixelSize: 10; font.family: Tok.mono }
-                            RowLayout {
-                                Layout.fillWidth: true; spacing: 8
-                                Repeater {
-                                    model: [ {k:"power-saver", i:"eco", l:"saver"}, {k:"balanced", i:"balance", l:"balanced"}, {k:"performance", i:"speed", l:"performance"} ]
-                                    delegate: Rectangle {
-                                        required property var modelData
-                                        readonly property bool cur: root.powerProfile === modelData.k
-                                        Layout.fillWidth: true; implicitHeight: 34; radius: Tok.r
-                                        color: cur ? theme.a(theme.iris, 0.2) : (ppm.containsMouse ? theme.a(theme.line, 0.5) : theme.a(theme.line, 0.3))
-                                        border.width: 1; border.color: cur ? theme.iris : theme.a(theme.iris, 0.12)
-                                        RowLayout { anchors.centerIn: parent; spacing: 7
-                                            Sym { text: modelData.i; sz: 16; color: cur ? theme.iris : theme.frost }
-                                            Text { text: modelData.l; color: cur ? theme.frost : theme.text; font.pixelSize: 12; font.family: Tok.mono; font.bold: cur } }
-                                        MouseArea { id: ppm; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
-                                            onClicked: root.setProfile(modelData.k) }
-                                    }
-                                }
-                            }
-                            Section { title: "laptop lid action"; icon: "laptop" }
-                            RowLayout {
-                                Layout.fillWidth: true; spacing: 8
-                                Repeater {
-                                    model: [
-                                        {l:"Suspend",  v:"suspend",   i:"bedtime"},
-                                        {l:"Lock",     v:"lock",      i:"lock"},
-                                        {l:"Screen Off",v:"dpms",     i:"settings_brightness"},
-                                        {l:"Hibernate",v:"hibernate", i:"save_as"},
-                                        {l:"Shut down",v:"shutdown",  i:"power_settings_new"},
-                                        {l:"Ignore",   v:"ignore",    i:"block"}
-                                    ]
-                                    delegate: Rectangle {
-                                        required property var modelData
-                                        readonly property bool cur: root.lockLidAction === modelData.v
-                                        Layout.fillWidth: true; implicitHeight: 34; radius: Tok.r
-                                        color: cur ? theme.a(theme.iris, 0.2) : (ppmLid.containsMouse ? theme.a(theme.line, 0.5) : theme.a(theme.line, 0.3))
-                                        border.width: 1; border.color: cur ? theme.iris : theme.a(theme.iris, 0.12)
-                                        RowLayout { anchors.centerIn: parent; spacing: 6
-                                            Sym { text: modelData.i; sz: 15; color: cur ? theme.iris : theme.frost }
-                                            Text { text: modelData.l; color: cur ? theme.frost : theme.text; font.pixelSize: 11; font.family: Tok.mono; font.bold: cur } }
-                                        MouseArea { id: ppmLid; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
-                                            onClicked: {
-                                                root.lockLidAction = modelData.v;
-                                                root.saveLockSettings();
-                                                root.run("pkill -x hypridle; sleep 0.3; hyprctl dispatch \"hl.dsp.exec_cmd('hypridle')\"; hyprctl reload");
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            Section { title: "session"; icon: "power_settings_new" }
-                            GridLayout {
-                                columns: 2; columnSpacing: 10; rowSpacing: 8; Layout.fillWidth: true
-                                Row2 { icon: "lock"; label: "Lock"; cmd: "~/.config/quickshell/sea-shell/sea-lock.sh"; quitAfter: true }
-                                Row2 { icon: "bedtime"; label: "Suspend"; cmd: "systemctl suspend"; quitAfter: true }
-                                Row2 { icon: "logout"; label: "Logout"; cmd: "systemctl --user is-active -q 'wayland-wm@*.service' && uwsm stop || { hyprctl dispatch 'hl.dsp.exit()'; sleep 3; loginctl terminate-session self; }"; quitAfter: true }
-                                Row2 { icon: "restart_alt"; label: "Reboot"; cmd: "systemctl reboot"; tint: theme.bad; quitAfter: true }
-                                Row2 { icon: "power_settings_new"; label: "Shutdown"; cmd: "systemctl poweroff"; tint: theme.bad; quitAfter: true }
-                            }
-                        }
-                    }
+                    // Existing & redesigned pages (all original tab IDs preserved)
+                    PageLoader { page: 0;  source: Qt.resolvedUrl("SettingsPageAudio.qml") }
+                    PageLoader { page: 1;  source: Qt.resolvedUrl("SettingsPageDisplay.qml") }
+                    PageLoader { page: 2;  source: Qt.resolvedUrl("SettingsPageNetwork.qml") }
+                    PageLoader { page: 2;  source: Qt.resolvedUrl("SettingsPageVpn.qml") }
+                    PageLoader { page: 3;  source: Qt.resolvedUrl("SettingsPageWeather.qml") }
+                    PageLoader { page: 4;  source: Qt.resolvedUrl("SettingsPageAppearance.qml") }
+                    PageLoader { page: 5;  source: Qt.resolvedUrl("SettingsPageActions.qml") }
+                    PageLoader { page: 6;  source: Qt.resolvedUrl("SettingsPagePower.qml") }
+                    PageLoader { page: 7;  source: Qt.resolvedUrl("SettingsPageKeybinds.qml") }
+                    PageLoader { page: 8;  source: Qt.resolvedUrl("SettingsPageSystem.qml") }
+                    PageLoader { page: 9;  source: Qt.resolvedUrl("SettingsPageBluetooth.qml") }
+                    PageLoader { page: 10; source: Qt.resolvedUrl("SettingsPageIdleLock.qml") }
+                    PageLoader { page: 11; source: Qt.resolvedUrl("SettingsPageCalendar.qml") }
+                    PageLoader { page: 12; source: Qt.resolvedUrl("SettingsPageBarWidgets.qml") }
+                    PageLoader { page: 13; source: Qt.resolvedUrl("SettingsPageThemeProfiles.qml") }
+                    PageLoader { page: 14; source: Qt.resolvedUrl("SettingsPageKdeConnect.qml") }
+                    PageLoader { page: 15; source: Qt.resolvedUrl("SettingsPageInput.qml") }
+                    PageLoader { page: 16; source: Qt.resolvedUrl("SettingsPageDock.qml") }
+                    PageLoader { page: 17; source: Qt.resolvedUrl("SettingsPageWindowRules.qml") }
+                    PageLoader { page: 18; source: Qt.resolvedUrl("SettingsPageScreenTime.qml") }
+                    PageLoader { page: 19; source: Qt.resolvedUrl("SettingsPageDisks.qml") }
+                    PageLoader { page: 20; source: Qt.resolvedUrl("SettingsPageBar.qml") }
+                    PageLoader { page: 21; source: Qt.resolvedUrl("SettingsPageDesktop.qml") }
+                    PageLoader { page: 22; source: Qt.resolvedUrl("SettingsPageDefaultApps.qml") }
+                    PageLoader { page: 23; source: Qt.resolvedUrl("SettingsPageProfile.qml") }
+                    PageLoader { page: 24; source: Qt.resolvedUrl("SettingsPageNotifications.qml") }
+                    PageLoader { page: 25; source: Qt.resolvedUrl("SettingsPageGaming.qml") }
+
+                    // New macOS & Linux/Hyprland pages
+                    PageLoader { page: 26; source: Qt.resolvedUrl("SettingsPageAccessibility.qml") }
+                    PageLoader { page: 27; source: Qt.resolvedUrl("SettingsPagePrivacy.qml") }
+                    PageLoader { page: 28; source: Qt.resolvedUrl("SettingsPageAbout.qml") }
+                    PageLoader { page: 29; source: Qt.resolvedUrl("SettingsPageUpdates.qml") }
+                    PageLoader { page: 30; source: Qt.resolvedUrl("SettingsPageStartup.qml") }
+                    PageLoader { page: 31; source: Qt.resolvedUrl("SettingsPageDateTime.qml") }
+                    PageLoader { page: 32; source: Qt.resolvedUrl("SettingsPageLanguage.qml") }
+                    PageLoader { page: 33; source: Qt.resolvedUrl("SettingsPageBackup.qml") }
+                    PageLoader { page: 34; source: Qt.resolvedUrl("SettingsPageHealth.qml") }
+                    PageLoader { page: 35; source: Qt.resolvedUrl("SettingsPageWindowEffects.qml") }
                 }
+            }
 
             // ================= KEYBIND EDITOR POPUP =================
             Item {
@@ -8672,8 +3957,8 @@ Scope {
                         RowLayout { Layout.fillWidth: true; spacing: 10
                             Sym { text: root.kbAdding ? "add_circle" : "keyboard"; sz: 20; color: theme.frost }
                             Text { Layout.fillWidth: true; elide: Text.ElideRight
-                                text: root.kbAdding ? "new keybind" : (root.kbRec ? root.kbRec.desc : "")
-                                color: theme.text; font.pixelSize: 15; font.family: Tok.mono; font.bold: true }
+                                text: root.kbAdding ? "New keybind" : (root.kbRec ? root.kbRec.desc : "")
+                                color: theme.text; font.pixelSize: 15; font.family: Tok.sans; font.bold: true }
                             Rectangle { implicitWidth: 28; implicitHeight: 28; radius: Tok.r
                                 color: kbXMa.containsMouse ? theme.a(theme.bad,0.25) : "transparent"
                                 Sym { anchors.centerIn: parent; text: "close"; sz: 16; color: kbXMa.containsMouse ? theme.bad : theme.faint }
@@ -8681,18 +3966,18 @@ Scope {
                         }
                         // add-mode only: description + action inputs
                         ColumnLayout { visible: root.kbAdding; spacing: 4; Layout.fillWidth: true
-                            Text { text: "description"; color: theme.faint; font.pixelSize: 10; font.family: Tok.mono }
+                            Text { text: "Description"; color: theme.faint; font.pixelSize: 11; font.family: Tok.sans }
                             Rectangle { Layout.fillWidth: true; implicitHeight: 32; radius: Tok.r; color: theme.a(theme.line,0.4); border.width: 1; border.color: kbDescIn2.activeFocus ? theme.iris : theme.a(theme.iris,0.14)
-                                TextInput { id: kbDescIn2; anchors.fill: parent; anchors.leftMargin: 8; anchors.rightMargin: 8; verticalAlignment: TextInput.AlignVCenter; color: theme.text; font.pixelSize: 12; font.family: Tok.mono; clip: true; text: root.kbAddDesc; onTextChanged: root.kbAddDesc = text
-                                    Text { visible: kbDescIn2.text===""; text: "e.g. Launch Firefox"; color: theme.faint; font.pixelSize: 12; font.family: Tok.mono; anchors.verticalCenter: parent.verticalCenter } } }
-                            Text { text: "action / command"; color: theme.faint; font.pixelSize: 10; font.family: Tok.mono; Layout.topMargin: 4 }
+                                TextInput { id: kbDescIn2; anchors.fill: parent; anchors.leftMargin: 8; anchors.rightMargin: 8; verticalAlignment: TextInput.AlignVCenter; color: theme.text; font.pixelSize: 12; font.family: Tok.sans; clip: true; text: root.kbAddDesc; onTextChanged: root.kbAddDesc = text
+                                    Text { visible: kbDescIn2.text===""; text: "E.g. Launch Firefox"; color: theme.faint; font.pixelSize: 12; font.family: Tok.sans; anchors.verticalCenter: parent.verticalCenter } } }
+                            Text { text: "Action / command"; color: theme.faint; font.pixelSize: 11; font.family: Tok.sans; Layout.topMargin: 4 }
                             Rectangle { Layout.fillWidth: true; implicitHeight: 32; radius: Tok.r; color: theme.a(theme.line,0.4); border.width: 1; border.color: kbActIn2.activeFocus ? theme.iris : theme.a(theme.iris,0.14)
-                                TextInput { id: kbActIn2; anchors.fill: parent; anchors.leftMargin: 8; anchors.rightMargin: 8; verticalAlignment: TextInput.AlignVCenter; color: theme.text; font.pixelSize: 12; font.family: Tok.mono; clip: true; text: root.kbAddAction; onTextChanged: root.kbAddAction = text } }
+                                TextInput { id: kbActIn2; anchors.fill: parent; anchors.leftMargin: 8; anchors.rightMargin: 8; verticalAlignment: TextInput.AlignVCenter; color: theme.text; font.pixelSize: 12; font.family: Tok.sans; clip: true; text: root.kbAddAction; onTextChanged: root.kbAddAction = text } }
                         }
                         // edit-mode: what the bind actually runs
                         ColumnLayout { visible: !root.kbAdding && root.kbRec !== null; spacing: 4; Layout.fillWidth: true
-                            Text { text: root.kbRec && root.kbRec.isExec ? "command" : "action (read-only)"
-                                color: theme.faint; font.pixelSize: 10; font.family: Tok.mono }
+                            Text { text: root.kbRec && root.kbRec.isExec ? "Command" : "Action (read-only)"
+                                color: theme.faint; font.pixelSize: 11; font.family: Tok.sans }
                             Rectangle { Layout.fillWidth: true; implicitHeight: 32; radius: Tok.r
                                 color: theme.a(theme.line, root.kbRec && root.kbRec.isExec ? 0.4 : 0.22)
                                 border.width: 1
@@ -8701,7 +3986,7 @@ Scope {
                                     anchors.fill: parent; anchors.leftMargin: 8; anchors.rightMargin: 8
                                     verticalAlignment: TextInput.AlignVCenter
                                     color: root.kbRec && root.kbRec.isExec ? theme.text : theme.faint
-                                    font.pixelSize: 12; font.family: Tok.mono; clip: true
+                                    font.pixelSize: 12; font.family: Tok.sans; clip: true
                                     readOnly: !(root.kbRec && root.kbRec.isExec)
                                     text: root.kbRec ? (root.kbRec.isExec ? root.kbRecAction
                                                        : (root.kbRec.dispatcher + (root.kbRec.arg ? " " + root.kbRec.arg : "")))
@@ -8709,11 +3994,11 @@ Scope {
                                     onTextChanged: if (root.kbRec && root.kbRec.isExec) root.kbRecAction = text } }
                             Text { visible: !!(root.kbRec && !root.kbRec.isExec)
                                 Layout.fillWidth: true; wrapMode: Text.WordWrap
-                                text: "this one runs a compositor action, not a command — only its shortcut can be changed here"
-                                color: theme.faint; font.pixelSize: 10; font.family: Tok.mono }
+                                text: "This one runs a compositor action, not a command — only its shortcut can be changed here"
+                                color: theme.faint; font.pixelSize: 11; font.family: Tok.sans }
                         }
                         // shortcut picker (both modes)
-                        Text { text: "shortcut"; color: theme.faint; font.pixelSize: 10; font.family: Tok.mono }
+                        Text { text: "Shortcut"; color: theme.faint; font.pixelSize: 11; font.family: Tok.sans }
                         Flow { Layout.fillWidth: true; spacing: 6
                             Repeater { model: ["SUPER","CTRL","ALT","SHIFT"]
                                 delegate: Rectangle { required property string modelData
@@ -8721,7 +4006,7 @@ Scope {
                                     readonly property bool on: mods.indexOf(modelData) >= 0
                                     width: kmcT.width + 16; height: 26; radius: Tok.r
                                     color: on ? theme.a(theme.iris,0.3) : theme.a(theme.line,0.5); border.width: 1; border.color: on ? theme.iris : theme.a(theme.line,0.9)
-                                    Text { id: kmcT; anchors.centerIn: parent; text: modelData; color: on ? theme.frost : theme.faint; font.pixelSize: 11; font.family: Tok.mono; font.bold: on }
+                                    Text { id: kmcT; anchors.centerIn: parent; text: modelData; color: on ? theme.frost : theme.faint; font.pixelSize: 11; font.family: Tok.sans; font.bold: on }
                                     MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
                                         onClicked: {
                                             if (root.kbAdding) { var m = root.kbAddMods.slice(); var i = m.indexOf(modelData); if(i>=0)m.splice(i,1); else m.push(modelData); root.kbAddMods = ["SUPER","CTRL","ALT","SHIFT"].filter(x=>m.indexOf(x)>=0); }
@@ -8731,22 +4016,22 @@ Scope {
                         }
                         // key capture
                         RowLayout { Layout.fillWidth: true; spacing: 10
-                            Text { text: "key"; color: theme.faint; font.pixelSize: 10; font.family: Tok.mono; Layout.minimumWidth: 30 }
+                            Text { text: "Key"; color: theme.faint; font.pixelSize: 11; font.family: Tok.sans; Layout.minimumWidth: 30 }
                             Rectangle { id: kbKeyBox; Layout.fillWidth: true; implicitHeight: 34; radius: Tok.r
                                 readonly property bool rec: root.kbAdding ? root.kbAddRecording : root.kbRecRecording
                                 readonly property string keyv: root.kbAdding ? root.kbAddKey : root.kbRecKey
                                 color: rec ? theme.a(theme.bad,0.18) : theme.a(theme.line,0.4); border.width: 1; border.color: rec ? theme.bad : theme.a(theme.iris,0.3)
                                 Text { anchors.centerIn: parent
-                                    text: kbKeyBox.rec ? "press a key…" : (kbKeyBox.keyv ? root.kbPretty(kbKeyBox.keyv) : "click, then press a key")
-                                    color: kbKeyBox.rec ? theme.bad : (kbKeyBox.keyv ? theme.frost : theme.faint); font.pixelSize: 12; font.family: Tok.mono; font.bold: true }
+                                    text: kbKeyBox.rec ? "Press a key…" : (kbKeyBox.keyv ? root.kbPretty(kbKeyBox.keyv) : "Click, then press a key")
+                                    color: kbKeyBox.rec ? theme.bad : (kbKeyBox.keyv ? theme.frost : theme.faint); font.pixelSize: 12; font.family: Tok.sans; font.bold: true }
                                 MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
                                     onClicked: { if (root.kbAdding) root.kbAddRecording = true; else root.kbRecRecording = true; kbCapture.forceActiveFocus() } }
                             }
                         }
                         // conflict / hint
                         Text { Layout.fillWidth: true; wrapMode: Text.WordWrap
-                            text: root.kbConflict !== "" ? root.kbConflict : "pick modifiers, click the key box and press a key"
-                            color: root.kbConflict !== "" ? theme.bad : theme.faint; font.pixelSize: 10; font.family: Tok.mono }
+                            text: root.kbConflict !== "" ? root.kbConflict : "Pick modifiers, click the key box and press a key"
+                            color: root.kbConflict !== "" ? theme.bad : theme.faint; font.pixelSize: 11; font.family: Tok.sans }
                         // actions
                         RowLayout { Layout.fillWidth: true; spacing: 10; Layout.topMargin: 2
                             Rectangle { visible: !root.kbAdding; implicitWidth: 110; implicitHeight: 32; radius: Tok.r
@@ -8758,13 +4043,13 @@ Scope {
                             Item { Layout.fillWidth: true }
                             Rectangle { implicitWidth: 76; implicitHeight: 32; radius: Tok.r
                                 color: kbCanMa.containsMouse ? theme.a(theme.bad,0.14) : "transparent"; border.width: 1; border.color: kbCanMa.containsMouse ? theme.bad : theme.a(theme.line,0.6)
-                                Text { anchors.centerIn: parent; text: "cancel"; color: kbCanMa.containsMouse ? theme.bad : theme.text; font.pixelSize: 12; font.family: Tok.mono }
+                                Text { anchors.centerIn: parent; text: "Cancel"; color: kbCanMa.containsMouse ? theme.bad : theme.text; font.pixelSize: 12; font.family: Tok.sans }
                                 MouseArea { id: kbCanMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.kbCloseEditor() } }
                             Rectangle { id: kbOkBtn
                                 readonly property bool valid: root.kbAdding ? (root.kbAddDesc.trim()!=="" && root.kbAddKey!=="" && root.kbAddAction.trim()!=="") : (root.kbRecKey!=="")
                                 implicitWidth: 92; implicitHeight: 32; radius: Tok.r
                                 color: kbOkBtn.valid ? (kbOkMa.containsMouse ? theme.iris : theme.a(theme.iris,0.22)) : theme.a(theme.line,0.3); border.width: 1; border.color: kbOkBtn.valid ? theme.iris : theme.a(theme.line,0.5)
-                                Text { anchors.centerIn: parent; text: root.kbAdding ? "add bind" : "save"; color: kbOkBtn.valid ? (kbOkMa.containsMouse ? theme.bg : theme.text) : theme.faint; font.pixelSize: 12; font.family: Tok.mono; font.bold: true }
+                                Text { anchors.centerIn: parent; text: root.kbAdding ? "Add bind" : "Save"; color: kbOkBtn.valid ? (kbOkMa.containsMouse ? theme.bg : theme.text) : theme.faint; font.pixelSize: 12; font.family: Tok.sans; font.bold: true }
                                 MouseArea { id: kbOkMa; anchors.fill: parent; enabled: kbOkBtn.valid; hoverEnabled: true; cursorShape: kbOkBtn.valid ? Qt.PointingHandCursor : Qt.ArrowCursor
                                     onClicked: { if (root.kbAdding) root.kbApplyAddBind(); else root.kbApply(root.kbRecKey); } }
                             }
@@ -8792,7 +4077,7 @@ Scope {
                     RowLayout {
                         Layout.fillWidth: true; spacing: 10
                         Sym { text: "folder_open"; sz: 22; color: theme.frost }
-                        Text { text: root.fileBrowserTitle; color: theme.text; font.pixelSize: 15; font.family: Tok.mono; font.bold: true; Layout.fillWidth: true }
+                        Text { text: root.fileBrowserTitle; color: theme.text; font.pixelSize: 15; font.family: Tok.sans; font.bold: true; Layout.fillWidth: true }
                         // Confirm — folder mode only, where the answer is where you are
                         Rectangle {
                             visible: root.fileBrowserDirs
@@ -8803,8 +4088,8 @@ Scope {
                             RowLayout {
                                 id: fbUseRow; anchors.centerIn: parent; spacing: 7
                                 Sym { text: "check"; sz: 16; color: fbUseMa.containsMouse ? Tok.accentInk : Tok.ink }
-                                Text { text: "use this folder"; color: fbUseMa.containsMouse ? Tok.accentInk : Tok.ink
-                                       font.pixelSize: 12; font.family: Tok.mono; font.bold: true }
+                                Text { text: "Use this folder"; color: fbUseMa.containsMouse ? Tok.accentInk : Tok.ink
+                                       font.pixelSize: 12; font.family: Tok.sans; font.bold: true }
                             }
                             MouseArea {
                                 id: fbUseMa; anchors.fill: parent; hoverEnabled: true
@@ -8838,7 +4123,7 @@ Scope {
                             color: theme.bg; border.width: 1; border.color: theme.a(theme.iris, 0.2)
                             Text { anchors { fill: parent; leftMargin: 12; rightMargin: 12 }
                                 verticalAlignment: Text.AlignVCenter
-                                text: root.fileBrowserPath; color: theme.frost; font.pixelSize: 12; font.family: Tok.mono; elide: Text.ElideLeft } }
+                                text: root.fileBrowserPath; color: theme.frost; font.pixelSize: 12; font.family: Tok.sans; elide: Text.ElideLeft } }
                     }
 
                     // Content list (scrollable)
@@ -8859,7 +4144,7 @@ Scope {
                                 RowLayout {
                                     anchors.fill: parent; anchors.leftMargin: 14; anchors.rightMargin: 14; spacing: 10
                                     Sym { text: "drive_folder_upload"; sz: 16; color: theme.iris }
-                                    Text { text: ".."; color: theme.sub; font.pixelSize: 12; font.family: Tok.mono; font.bold: true } }
+                                    Text { text: ".."; color: theme.sub; font.pixelSize: 12; font.family: Tok.sans; font.bold: true } }
                                 MouseArea { id: fbItemUpMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.goUpDir() } }
 
                             Repeater {
@@ -8882,7 +4167,7 @@ Scope {
                                             sz: 16; color: isDir ? theme.frost : theme.faint }
                                         Text {
                                             text: modelData.name; color: theme.text
-                                            font.pixelSize: 12; font.family: Tok.mono; font.bold: isDir; elide: Text.ElideRight; Layout.fillWidth: true } }
+                                            font.pixelSize: 12; font.family: Tok.sans; font.bold: isDir; elide: Text.ElideRight; Layout.fillWidth: true } }
                                     MouseArea {
                                         id: fbItemMa
                                         anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor

@@ -4,7 +4,12 @@ moondrophub_reverse
 __pycache__/
 
 # Rust build output
-native/sea-fm-core/target/
+native/*/target/
+native/antiwebui-spike/
+
+# Local editor / UI capture scratch artifacts
+.cursor/
+.ui-capture/
 
 # local notes for whoever continues the release; not part of the project
 HANDOFF-7.0.md
@@ -12,7 +17,7 @@ HANDOFF-7.0.md
 # Local Cloudflare deployment state
 website
 docs
-scripts
+/scripts
 # personal stickers (power menu / media) are chosen in Settings and live in ~/.config/sea-shell/stickers
 *miku*.gif
 quickshell/assets/*.gif

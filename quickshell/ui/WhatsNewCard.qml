@@ -1,6 +1,9 @@
 import QtQuick
 import QtQuick.Layouts
 
+// The once-per-release page an existing install sees after updating (welcome.qml shows it when
+// sea-whats-new.py says "show"). Colours come in as properties so it stays plain QtQuick.
+// Drawn in settings' language: one sheet, a coloured tile per item, quiet fills, a pill button.
 Rectangle {
     id: card
     property color surface: "#f7f7fa"
@@ -14,72 +17,87 @@ Rectangle {
     property string mono: "JetBrains Mono"
     property real controlRadius: 7
     property real rounding: 20
+    property string version: "7.1"
     signal finished()
     width: 620
-    implicitHeight: contents.implicitHeight + 48
+    implicitHeight: contents.implicitHeight + 56
     height: implicitHeight
-    radius: rounding; color: surface
-    border.width: 1; border.color: rule
+    radius: rounding + 6; color: surface
+    border.width: 1; border.color: Qt.rgba(ink.r, ink.g, ink.b, 0.075)
+    // a tile colour per row, turned round the colour wheel from the accent as Settings does
+    function tile(i) {
+        var h = card.accent.hslHue < 0 ? 0.6 : card.accent.hslHue;
+        return Qt.hsla((h + i * 0.085) % 1, Math.max(0.42, card.accent.hslSaturation), 0.52, 1);
+    }
     ColumnLayout {
         id: contents
-        anchors { left: parent.left; right: parent.right; top: parent.top; margins: 24 }
-        spacing: 16
+        anchors { left: parent.left; right: parent.right; top: parent.top; margins: 28 }
+        spacing: 18
         RowLayout {
             Layout.fillWidth: true; spacing: 12
-            Text { text: "waves"; font.family: "Material Symbols Outlined"; font.pixelSize: 24; color: card.accent }
-            Text { text: "sea-shell"; font.family: card.mono; font.pixelSize: 13; font.weight: Font.DemiBold; color: card.ink }
-            Text { text: "v7.0.0"; font.family: card.mono; font.pixelSize: 11; color: card.secondary }
-            Item { Layout.fillWidth: true }
+            ColumnLayout {
+                Layout.fillWidth: true; spacing: 3
+                Text { text: "What’s new in sea-shell " + card.version; font.family: card.sans; font.pixelSize: 22; font.weight: Font.Bold; color: card.ink }
+                Text { text: "Your settings were kept. Here is what changed."; font.family: card.sans; font.pixelSize: 13; color: card.secondary }
+            }
             Rectangle {
-                implicitWidth: 26; implicitHeight: 26; radius: card.controlRadius
-                color: closeMouse.containsMouse ? card.wash : "transparent"
-                Text { anchors.centerIn: parent; text: "close"; font.family: "Material Symbols Outlined"; font.pixelSize: 16; color: card.secondary }
+                Layout.alignment: Qt.AlignTop
+                implicitWidth: 30; implicitHeight: 30; radius: 15
+                color: closeMouse.containsMouse ? Qt.rgba(card.ink.r, card.ink.g, card.ink.b, 0.09) : Qt.rgba(card.ink.r, card.ink.g, card.ink.b, 0.05)
+                Text { anchors.centerIn: parent; text: "close"; font.family: "Material Symbols Outlined"; font.pixelSize: 17; color: card.secondary }
                 MouseArea { id: closeMouse; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: card.finished() }
             }
         }
-        Rectangle { Layout.fillWidth: true; height: 1; color: card.rule }
-        ColumnLayout {
-            Layout.fillWidth: true; spacing: 4
-            Text { text: "what’s new"; font.family: card.mono; font.pixelSize: 20; font.weight: Font.DemiBold; color: card.ink }
-            Text { text: "lock · power · notifications · desktop"; font.family: card.mono; font.pixelSize: 11; color: card.secondary }
-        }
-        ColumnLayout {
-            Layout.fillWidth: true; spacing: 0
-            Repeater {
-                model: [
-                    {icon:"lock", title:"lock screen", line:"Your clock, wallpaper and notifications, with a built-in unlock screen."},
-                    {icon:"power_settings_new", title:"power menu", line:"Hold to confirm session actions, or schedule a shutdown for later."},
-                    {icon:"shield", title:"password prompts", line:"Permission requests now appear inside the shell."},
-                    {icon:"notifications", title:"grouped notifications", line:"Messages group by app, with dismiss and undo."},
-                    {icon:"tune", title:"dropdowns", line:"Sound, Bluetooth, battery and calendar use the same controls."},
-                    {icon:"widgets", title:"desktop widgets", line:"Calendar and batteries, with text that adapts to the wallpaper."}
-                ]
-                delegate: ColumnLayout {
-                    required property var modelData
-                    required property int index
-                    Layout.fillWidth: true; spacing: 0
-                    RowLayout {
-                        Layout.fillWidth: true; Layout.topMargin: 12; Layout.bottomMargin: 12; spacing: 12
-                        Text { Layout.alignment: Qt.AlignTop; text: modelData.icon; font.family: "Material Symbols Outlined"; font.pixelSize: 18; color: card.accent }
-                        ColumnLayout {
-                            Layout.fillWidth: true; spacing: 4
-                            Text { text: modelData.title; font.family: card.mono; font.pixelSize: 13; font.weight: Font.Medium; color: card.ink }
-                            Text { text: modelData.line; Layout.fillWidth: true; wrapMode: Text.WordWrap; font.family: card.sans; font.pixelSize: 12; color: card.secondary }
+        Rectangle {
+            Layout.fillWidth: true
+            implicitHeight: list.implicitHeight + 12
+            radius: 14
+            color: Qt.rgba(card.ink.r, card.ink.g, card.ink.b, 0.04)
+            ColumnLayout {
+                id: list
+                anchors { left: parent.left; right: parent.right; top: parent.top; margins: 6 }
+                spacing: 0
+                Repeater {
+                    model: [
+                        {icon:"space_dashboard", title:"A new dashboard", line:"Redesigned, and it opens the moment you press Super D."},
+                        {icon:"screenshot_region", title:"Screenshots and recording", line:"A capture bar, a tidier editor and a recorder that opens at once."},
+                        {icon:"widgets", title:"Four new widgets", line:"Network, notifications, photos and a quote a day, with guides that line them up as you drag."},
+                        {icon:"lock_clock", title:"The lock screen at a glance", line:"The weather and your next events sit under the clock."},
+                        {icon:"devices", title:"A layout for each set of displays", line:"Dock or undock and your widgets, dock and bar come back as they were there."},
+                        {icon:"palette", title:"One look throughout", line:"Shortcuts, the dock, Files, password prompts and the welcome tour now match Settings."}
+                    ]
+                    delegate: ColumnLayout {
+                        required property var modelData
+                        required property int index
+                        Layout.fillWidth: true; spacing: 0
+                        RowLayout {
+                            Layout.fillWidth: true; Layout.margins: 10; spacing: 14
+                            Rectangle {
+                                Layout.alignment: Qt.AlignTop
+                                implicitWidth: 32; implicitHeight: 32; radius: 9
+                                color: card.tile(index)
+                                Text { anchors.centerIn: parent; text: modelData.icon; font.family: "Material Symbols Outlined"; font.pixelSize: 19; color: "white" }
+                            }
+                            ColumnLayout {
+                                Layout.fillWidth: true; spacing: 2
+                                Text { text: modelData.title; font.family: card.sans; font.pixelSize: 14; font.weight: Font.DemiBold; color: card.ink }
+                                Text { text: modelData.line; Layout.fillWidth: true; wrapMode: Text.WordWrap; font.family: card.sans; font.pixelSize: 12; color: card.secondary }
+                            }
                         }
+                        Rectangle { visible: index < 5; Layout.fillWidth: true; Layout.leftMargin: 56; height: 1
+                            color: Qt.rgba(card.ink.r, card.ink.g, card.ink.b, 0.075) }
                     }
-                    Rectangle { visible: index < 5; Layout.fillWidth: true; height: 1; color: card.rule }
                 }
             }
         }
-        Rectangle { Layout.fillWidth: true; height: 1; color: card.rule }
         RowLayout {
             Layout.fillWidth: true
-            Text { text: "settings kept"; Layout.fillWidth: true; font.family: card.mono; font.pixelSize: 11; color: card.secondary }
+            Item { Layout.fillWidth: true }
             Rectangle {
-                implicitWidth: 86; implicitHeight: 32; radius: card.controlRadius
-                color: buttonMouse.containsMouse ? card.wash : "transparent"
-                border.width: 1; border.color: card.rule
-                Text { anchors.centerIn: parent; text: "done"; font.family: card.mono; font.pixelSize: 12; color: card.ink }
+                implicitWidth: 112; implicitHeight: 36; radius: 18
+                color: buttonMouse.containsMouse ? Qt.lighter(card.accent, 1.08) : card.accent
+                Text { anchors.centerIn: parent; text: "Continue"; font.family: card.sans; font.pixelSize: 13; font.weight: Font.DemiBold
+                    color: (0.2126 * card.accent.r + 0.7152 * card.accent.g + 0.0722 * card.accent.b) > 0.55 ? "#15161c" : "white" }
                 MouseArea { id: buttonMouse; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: card.finished() }
             }
         }

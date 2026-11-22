@@ -16,6 +16,8 @@ import Quickshell.Bluetooth
 import QtQuick
 import QtQuick.Effects
 import QtQuick.Layouts
+import "WifiEnterprise.js" as WifiEnterprise
+import "WallpaperState.js" as WallpaperState
 
 ShellRoot {
     id: root
@@ -29,18 +31,8 @@ ShellRoot {
         onLoaded: { try { root.userProfile = JSON.parse(text()) } catch(e){} }
         onFileChanged: reload()
     }
-    // Auto-detect HDMI monitor plugin to switch audio to HDMI (TV)
-    readonly property int screenCount: Quickshell.screens.length
-    onScreenCountChanged: {
-        if (screenCount > 1) {
-            Quickshell.execDetached(["sh", Qt.resolvedUrl("sea-hdmi-audio.sh").toString().replace("file://", "")]);
-        }
-    }
-    Component.onCompleted: {
-        if (Quickshell.screens.length > 1) {
-            Quickshell.execDetached(["sh", Qt.resolvedUrl("sea-hdmi-audio.sh").toString().replace("file://", "")]);
-        }
-    }
+    // WirePlumber owns output selection and remembers the user's chosen DAC/sink.
+    // Starting the shell or connecting a display must not override that choice.
 
     // ---- KDE Connect Integration ----
     // `--watch` is a resident process that re-prints the device array whenever the
@@ -70,8 +62,16 @@ ShellRoot {
     }
     // starts the watcher, stops it when the widget is switched off, and revives it if it
     // ever dies (kdeconnectd restart / D-Bus hiccup). Re-asserting the same value is a no-op.
-    Timer { interval: 8000; running: true; repeat: true; triggeredOnStart: true
-        onTriggered: kdeWatch.running = root.cfgKdeconnect }
+    Timer { interval: 8000; running: !root.gameHibernate; repeat: true; triggeredOnStart: true
+        onTriggered: kdeWatch.running = root.cfgKdeconnect && !root.gameOn }
+
+    // ---- laptop screen (Settings → Display) ----
+    // turns the laptop panel off while an external display is connected / the lid is closed;
+    // resident so it follows hotplug and the lid. Revived if it dies (compositor restart).
+    // sea-panel.sh prefers the Rust binary when install.sh built it; SEA_PANEL_PY=1 forces Python.
+    Process { id: panelWatch; command: ["sh", Qt.resolvedUrl("sea-panel.sh").toString().replace("file://", ""), "--watch"] }
+    Timer { interval: 8000; running: !root.gameHibernate; repeat: true; triggeredOnStart: true
+        onTriggered: panelWatch.running = true }
 
     function kdeRun(args) { Quickshell.execDetached(["python3", root.kdeScript].concat(args)) }
     function kdeIcon(d) {
@@ -93,7 +93,7 @@ ShellRoot {
     // independently (`{"<name>": {"bar": false, "dock": false}}`).
     Dock {
         id: appDock
-        dockEnabled: root.cfgDock
+        dockEnabled: root.cfgDock && !root.gameOn
         edge: root.cfgDockEdge
         iconSize: root.cfgDockIcon
         mode: root.cfgDockMode
@@ -107,18 +107,243 @@ ShellRoot {
         cfgScale: root.cfgScale
     }
 
-    // resident launcher — no process-spawn delay; open via `qs -c sea-shell ipc call launcher …`
-    Launcher { id: launcher }
-    // The power menu lives here so SUPER+ESC opens it at once (sea-toggle.sh power → this IPC);
-    // power.qml runs the same component on its own only when the shell is down.
-    PowerMenu { id: powerMenu; sticker: root.stickerUrl(root.cfgStickerPower) }
+    // Launcher / power / recorder load on first use (Phase 3). Facades keep the old call
+    // sites (`launcher.toggle()`, …) working while the Loader is still cold.
+    property string _launcherPending: ""
+    property string _launcherPrefix: ""
+    Loader {
+        id: launcherLoader
+        asynchronous: true; active: false
+        source: Qt.resolvedUrl("Launcher.qml")
+        onStatusChanged: {
+            if (status !== Loader.Ready) return;
+            if (root._launcherPending === "toggle") item.toggle();
+            else if (root._launcherPending === "open") item.open(root._launcherPrefix);
+            root._launcherPending = "";
+        }
+    }
+    QtObject {
+        id: launcher
+        readonly property bool shown: !!(launcherLoader.item && launcherLoader.item.shown)
+        function toggle() {
+            if (launcherLoader.item) launcherLoader.item.toggle();
+            else { root._launcherPending = "toggle"; launcherLoader.active = true }
+        }
+        function open(prefix) {
+            if (launcherLoader.item) launcherLoader.item.open(prefix);
+            else { root._launcherPending = "open"; root._launcherPrefix = prefix || ""; launcherLoader.active = true }
+        }
+        function close() { if (launcherLoader.item) launcherLoader.item.close() }
+    }
+
+    // Visual clipboard manager (Super+V) + Emoji picker (Super+.) — lazy loaded on first open.
+    property string _clipPending: ""
+    property string _clipTab: "history"
+    Loader {
+        id: clipLoader
+        asynchronous: true; active: false
+        source: Qt.resolvedUrl("ClipboardPanel.qml")
+        onStatusChanged: {
+            if (status !== Loader.Ready) return;
+            item.uiFor = root.uiFor;
+            if (root._clipPending === "toggle") item.toggle(root._clipTab);
+            else if (root._clipPending === "open") item.open(root._clipTab);
+            root._clipPending = "";
+        }
+    }
+    Connections {
+        target: clipLoader.item
+        enabled: clipLoader.item !== null
+        function onClosed() { coolTimer.restart() }
+    }
+    function toggleClipboard(tab) {
+        if (clipLoader.item) clipLoader.item.toggle(tab || "history");
+        else { root._clipPending = "toggle"; root._clipTab = tab || "history"; clipLoader.active = true }
+    }
+    function openClipboard(tab) {
+        if (clipLoader.item) clipLoader.item.open(tab || "history");
+        else { root._clipPending = "open"; root._clipTab = tab || "history"; clipLoader.active = true }
+    }
+    IpcHandler {
+        target: "clipboard"
+        function toggle(): void { root.toggleClipboard("history") }
+        function open(): void { root.openClipboard("history") }
+        function pins(): void { root.toggleClipboard("pins") }
+        function emoji(): void { root.toggleClipboard("emoji") }
+        function close(): void { if (clipLoader.item) clipLoader.item.close() }
+    }
+
+    // Instant Scratchpad / Markdown Notes (Super+Alt+N) — lazy loaded
+    property string _notesPending: ""
+    Loader {
+        id: notesLoader; asynchronous: true; active: false; source: Qt.resolvedUrl("ScratchNotes.qml")
+        onStatusChanged: {
+            if (status !== Loader.Ready) return;
+            item.uiFor = root.uiFor;
+            if (root._notesPending === "toggle") item.toggle();
+            else if (root._notesPending === "open") item.open();
+            root._notesPending = "";
+        }
+    }
+    Connections { target: notesLoader.item; enabled: notesLoader.item !== null; function onClosed() { coolTimer.restart() } }
+    IpcHandler {
+        target: "notes"
+        function toggle(): void { if (notesLoader.item) notesLoader.item.toggle(); else { root._notesPending = "toggle"; notesLoader.active = true } }
+        function open(): void   { if (notesLoader.item) notesLoader.item.open();   else { root._notesPending = "open";   notesLoader.active = true } }
+        function close(): void  { if (notesLoader.item) notesLoader.item.close() }
+    }
+
+    // File Drop Shelf & Instant QR Share (Super+Alt+S) — lazy loaded
+    property string _dropPending: ""
+    Loader {
+        id: dropLoader; asynchronous: true; active: false; source: Qt.resolvedUrl("DropShelf.qml")
+        onStatusChanged: {
+            if (status !== Loader.Ready) return;
+            item.uiFor = root.uiFor;
+            if (root._dropPending === "toggle") item.toggle();
+            else if (root._dropPending === "open") item.open();
+            root._dropPending = "";
+        }
+    }
+    Connections { target: dropLoader.item; enabled: dropLoader.item !== null; function onClosed() { coolTimer.restart() } }
+    IpcHandler {
+        target: "dropzone"
+        function toggle(): void { if (dropLoader.item) dropLoader.item.toggle(); else { root._dropPending = "toggle"; dropLoader.active = true } }
+        function open(): void   { if (dropLoader.item) dropLoader.item.open();   else { root._dropPending = "open";   dropLoader.active = true } }
+        function close(): void  { if (dropLoader.item) dropLoader.item.close() }
+    }
+
+    // Color Studio & Eyedropper History (Super+Alt+C) — lazy loaded
+    property string _colorPending: ""
+    Loader {
+        id: colorLoader; asynchronous: true; active: false; source: Qt.resolvedUrl("ColorStudio.qml")
+        onStatusChanged: {
+            if (status !== Loader.Ready) return;
+            item.uiFor = root.uiFor;
+            if (root._colorPending === "toggle") item.toggle();
+            else if (root._colorPending === "open") item.open();
+            root._colorPending = "";
+        }
+    }
+    Connections { target: colorLoader.item; enabled: colorLoader.item !== null; function onClosed() { coolTimer.restart() } }
+    IpcHandler {
+        target: "colors"
+        function toggle(): void { if (colorLoader.item) colorLoader.item.toggle(); else { root._colorPending = "toggle"; colorLoader.active = true } }
+        function open(): void   { if (colorLoader.item) colorLoader.item.open();   else { root._colorPending = "open";   colorLoader.active = true } }
+        function close(): void  { if (colorLoader.item) colorLoader.item.close() }
+    }
+
+    // Workspace App Sessions (Super+Alt+L) — lazy loaded
+    property string _sessionsPending: ""
+    Loader {
+        id: sessionsLoader; asynchronous: true; active: false; source: Qt.resolvedUrl("SessionsPanel.qml")
+        onStatusChanged: {
+            if (status !== Loader.Ready) return;
+            item.uiFor = root.uiFor;
+            if (root._sessionsPending === "toggle") item.toggle();
+            else if (root._sessionsPending === "open") item.open();
+            root._sessionsPending = "";
+        }
+    }
+    Connections { target: sessionsLoader.item; enabled: sessionsLoader.item !== null; function onClosed() { coolTimer.restart() } }
+    IpcHandler {
+        target: "sessions"
+        function toggle(): void { if (sessionsLoader.item) sessionsLoader.item.toggle(); else { root._sessionsPending = "toggle"; sessionsLoader.active = true } }
+        function open(): void   { if (sessionsLoader.item) sessionsLoader.item.open();   else { root._sessionsPending = "open";   sessionsLoader.active = true } }
+        function close(): void  { if (sessionsLoader.item) sessionsLoader.item.close() }
+    }
+
+    // Screen Ruler & Pixel Measurer (Super+Alt+R) — lazy loaded
+    property string _rulerPending: ""
+    Loader {
+        id: rulerLoader; asynchronous: true; active: false; source: Qt.resolvedUrl("ScreenRuler.qml")
+        onStatusChanged: {
+            if (status !== Loader.Ready) return;
+            item.uiFor = root.uiFor;
+            if (root._rulerPending === "toggle") item.toggle();
+            else if (root._rulerPending === "open") item.open();
+            root._rulerPending = "";
+        }
+    }
+    Connections { target: rulerLoader.item; enabled: rulerLoader.item !== null; function onClosed() { coolTimer.restart() } }
+    IpcHandler {
+        target: "ruler"
+        function toggle(): void { if (rulerLoader.item) rulerLoader.item.toggle(); else { root._rulerPending = "toggle"; rulerLoader.active = true } }
+        function open(): void   { if (rulerLoader.item) rulerLoader.item.open();   else { root._rulerPending = "open";   rulerLoader.active = true } }
+        function close(): void  { if (rulerLoader.item) rulerLoader.item.close() }
+    }
+
+    // Screen OCR -> Instant Translate (Super+Shift+T) — lazy loaded
+    property string _transPending: ""
+    Loader {
+        id: transLoader; asynchronous: true; active: false; source: Qt.resolvedUrl("TranslatePopup.qml")
+        onStatusChanged: {
+            if (status !== Loader.Ready) return;
+            item.uiFor = root.uiFor;
+            if (root._transPending === "ocr") item.openOcr();
+            else if (root._transPending === "toggle") item.toggle();
+            else if (root._transPending === "open") item.open();
+            root._transPending = "";
+        }
+    }
+    Connections { target: transLoader.item; enabled: transLoader.item !== null; function onClosed() { coolTimer.restart() } }
+    IpcHandler {
+        target: "translate"
+        function ocr(): void    { if (transLoader.item) transLoader.item.openOcr(); else { root._transPending = "ocr";    transLoader.active = true } }
+        function toggle(): void { if (transLoader.item) transLoader.item.toggle();  else { root._transPending = "toggle"; transLoader.active = true } }
+        function open(): void   { if (transLoader.item) transLoader.item.open();    else { root._transPending = "open";   transLoader.active = true } }
+        function close(): void  { if (transLoader.item) transLoader.item.close() }
+    }
+
+    // Power menu — same lazy rule. SUPER+ESC pays a short first-open compile once.
+    property string _powerPending: ""
+    Loader {
+        id: powerLoader
+        asynchronous: true; active: false
+        source: Qt.resolvedUrl("PowerMenu.qml")
+        onStatusChanged: {
+            if (status !== Loader.Ready) return;
+            item.sticker = root.stickerUrl(root.cfgStickerPower);
+            if (root._powerPending === "toggle") item.toggle();
+            else if (root._powerPending === "open") item.open();
+            root._powerPending = "";
+        }
+    }
+    QtObject {
+        id: powerMenu
+        readonly property bool shown: !!(powerLoader.item && powerLoader.item.shown)
+        function toggle() {
+            if (powerLoader.item) powerLoader.item.toggle();
+            else { root._powerPending = "toggle"; powerLoader.active = true }
+        }
+        function open() {
+            if (powerLoader.item) powerLoader.item.open();
+            else { root._powerPending = "open"; powerLoader.active = true }
+        }
+        function close() { if (powerLoader.item) powerLoader.item.close() }
+    }
+    // Keep the sticker current if the profile changes after first load.
+    onCfgStickerPowerChanged: if (powerLoader.item) powerLoader.item.sticker = root.stickerUrl(root.cfgStickerPower)
 
     // ---------- polkit: the shell answers "allow this change?" itself ----------
     // Only one agent can serve a session. hyprpolkitagent is no longer started at login; if
     // registering here fails anyway (something else already holds the session), it is started
     // as before so a prompt is never left with nobody to answer it.
     PolkitAgent { id: polkitAgent }
-    PolkitDialog { flow: polkitAgent.flow; profile: root.userProfile }
+    property bool _polkitLive: !!polkitAgent.flow && !polkitAgent.flow.isCompleted
+    property bool _polkitHeld: false
+    on_PolkitLiveChanged: {
+        if (root._polkitLive) { polkitHoldTimer.stop(); root._polkitHeld = true }
+        else polkitHoldTimer.restart();
+    }
+    Timer { id: polkitHoldTimer; interval: 220; onTriggered: { root._polkitHeld = false; coolTimer.restart() } }
+    Loader {
+        id: polkitLoader
+        active: root._polkitLive || root._polkitHeld
+        source: Qt.resolvedUrl("PolkitDialog.qml")
+    }
+    Binding { when: polkitLoader.item !== null; target: polkitLoader.item; property: "flow"; value: polkitAgent.flow }
+    Binding { when: polkitLoader.item !== null; target: polkitLoader.item; property: "profile"; value: root.userProfile }
     Timer { interval: 4000; running: true
         onTriggered: if (!polkitAgent.isRegistered)
             Quickshell.execDetached(["sh", "-c", "pgrep -x hyprpolkitagent >/dev/null || { [ -x /usr/lib/hyprpolkitagent/hyprpolkitagent ] && exec /usr/lib/hyprpolkitagent/hyprpolkitagent; }"]) }
@@ -160,8 +385,39 @@ ShellRoot {
         desktopProc.command = ["python3", root.desktopScript].concat(args);
         desktopProc.running = true;
     }
+    // The widgets live on a full-screen layer. While a window already covers that
+    // screen they are not visible, and the layer plus five widget trees is a large
+    // part of the idle footprint. The arrangement file is what brings them back.
+    property int desktopCoverGen: 0
+    Timer { interval: 800; running: !root.desktopEditing && !root.gameOn; repeat: true; triggeredOnStart: true
+        onTriggered: root.desktopCoverGen++ }
+    readonly property bool desktopCovered: {
+        var _ = root.desktopCoverGen;
+        var screens = Quickshell.screens;
+        if (!screens.length) return false;
+        var tops = Hyprland.toplevels ? Hyprland.toplevels.values : [];
+        var mons = Hyprland.monitors ? Hyprland.monitors.values : [];
+        for (var s = 0; s < screens.length; s++) {
+            var scr = screens[s], hit = false, aws = -999;
+            for (var q = 0; q < mons.length; q++)
+                if (mons[q].name === scr.name && mons[q].activeWorkspace) aws = mons[q].activeWorkspace.id;
+            for (var i = 0; i < tops.length; i++) {
+                var t = tops[i];
+                if (!t || !t.monitor || t.monitor.name !== scr.name) continue;
+                if (t.workspace && t.workspace.id !== undefined && t.workspace.id !== aws) continue;
+                var o = null;
+                try { o = t.lastIpcObject; } catch (e) { o = null; }
+                if (!o || o.hidden || o.floating) continue;
+                if (o.fullscreen > 0) { hit = true; break; }
+                var ww = (o.size && o.size[0]) || 0, wh = (o.size && o.size[1]) || 0;
+                if (ww * wh > scr.width * scr.height * 0.82) { hit = true; break; }
+            }
+            if (!hit) return false;
+        }
+        return true;
+    }
     Variants {
-        model: Quickshell.screens
+        model: (!root.gameOn && !(root.desktopCovered && !root.desktopEditing)) ? Quickshell.screens : []
         Desktop {
             required property var modelData
             screen: modelData
@@ -169,6 +425,8 @@ ShellRoot {
             uiFont: Tok.sans
             ui: root.uiFor(modelData)
             editing: root.desktopEditing
+            suspended: root.gameOn
+            seen: root.desktopSeen || root.desktopEditing
             // right-click on the desktop while arranging: finish, and close the gallery with it
             onDoneRequested: { root.desktopEditing = false; root.widgetsScreen = "" }
             // One bound object rather than a property per reading: the desktop is a viewer,
@@ -182,7 +440,13 @@ ShellRoot {
                 "gpuName": root.gpuName, "gpu": root.gpuUsage, "gpuTemp": root.gpuTemp,
                 "netRx": root.netRx, "netTx": root.netTx,
                 "calEvents": root.calUpcoming.slice(0, 8),
-                "batteries": root.widgetBatteries, "batEta": root.widgetBatEta
+                "batteries": root.widgetBatteries, "batEta": root.widgetBatEta,
+                "ssid": root.ssid, "wifiOn": root.wifiOn, "wifiSig": root.wifiSig, "netIf": root.netIf,
+                "notes": root.widgetNotes, "noteCount": root.notes.length, "dnd": root.dnd,
+                "aiUsage": root.aiShownUsage, "aiLive": root.aiLive, "aiDigits": root.cfgAiDigits,
+                "github": root.github, "timer": root.timerReading, "clips": root.widgetClips,
+                "privacy": root.privacyLabel !== "", "batPct": root.widgetBatteries.length ? root.widgetBatteries[0].p : 100,
+                "bottles": root.bottleFloating.length
             })
             player: root.player
             // The same bars the media pill draws — real cava, or the ambient wave in
@@ -196,7 +460,10 @@ ShellRoot {
     }
     property string widgetsScreen: ""
     // the gallery is where widgets are arranged, so the desktop arranges while it is open
-    onWidgetsScreenChanged: root.desktopEditing = root.widgetsScreen !== ""
+    onWidgetsScreenChanged: {
+        root.desktopEditing = root.widgetsScreen !== "";
+        if (root.widgetsScreen !== "") root.closePanels();
+    }
     function toggleWidgets() {
         var focused = Hyprland.focusedMonitor;
         var name = focused ? focused.name : (Quickshell.screens.length ? Quickshell.screens[0].name : "");
@@ -204,12 +471,15 @@ ShellRoot {
     }
     IpcHandler { target: "widgets"; function toggle(): void { root.toggleWidgets() } function close(): void { root.widgetsScreen = "" } }
     Variants {
-        model: Quickshell.screens
+        // Built after Settings (see lateReady): it is only ever used while arranging, and it
+        // was 0.7s of the time between login and a visible bar.
+        model: root.lateReady ? Quickshell.screens : []
         WidgetsDrawer {
             required property var modelData
             screen: modelData; ui: root.uiFor(modelData)
             opened: root.widgetsScreen === modelData.name
             edgeEnabled: {
+                if (root.gameOn) return false;
                 var win = Hyprland.activeToplevel;
                 var obj = win ? win.lastIpcObject : null;
                 return !(obj && obj.fullscreen > 0);
@@ -218,7 +488,12 @@ ShellRoot {
                          wxForecast: root.wxForecast, wxLoc: root.wxLoc, cpu: root.cpuUsage, cpuTemp: root.cpuTemp,
                          memPct: root.memPct, memUsed: root.memUsed, memTotal: root.memTotal,
                          gpuName: root.gpuName, gpu: root.gpuUsage, gpuTemp: root.gpuTemp, netRx: root.netRx,
-                         calEvents: root.calUpcoming.slice(0, 8), batteries: root.widgetBatteries, batEta: root.widgetBatEta })
+                         calEvents: root.calUpcoming.slice(0, 8), batteries: root.widgetBatteries, batEta: root.widgetBatEta,
+                         netTx: root.netTx, ssid: root.ssid, wifiOn: root.wifiOn, wifiSig: root.wifiSig, netIf: root.netIf,
+                         notes: root.widgetNotes, noteCount: root.notes.length, dnd: root.dnd, aiUsage: root.aiShownUsage, aiLive: root.aiLive, aiDigits: root.cfgAiDigits,
+                         github: root.github, timer: root.timerReading, clips: root.widgetClips,
+                         privacy: root.privacyLabel !== "", batPct: root.widgetBatteries.length ? root.widgetBatteries[0].p : 100,
+                         bottles: root.bottleFloating.length })
             player: root.player; viz: root.vizBars
             insetTop: root.cfgEdge === "top" ? root.cfgHeight + 6 : 6
             insetBottom: root.cfgEdge === "bottom" ? root.cfgHeight + 6 : (root.cfgDock ? 78 : 6)
@@ -239,11 +514,14 @@ ShellRoot {
         }
         function remove(id: string): void { root.desktopRun(["--remove", id]) }
         function clear(): void { root.desktopRun(["--clear"]) }
+        function tidy(): void { root.desktopRun(["--tidy"]) }
     }
     IpcHandler {
         target: "launcher"
         function toggle(): void { launcher.toggle() }
         function clipboard(): void { launcher.open(";") }
+        function open(prefix: string): void { launcher.open(prefix || "") }
+        function bottle(): void { launcher.open("!") }
     }
 
     // ---------- the sea menu (the logo) ----------
@@ -264,7 +542,7 @@ ShellRoot {
     // clear of the word they belong to. It was noise that read as a rendering fault, so the
     // shortcut column carries the information instead.
     readonly property var seaMenuItems: [
-        { id: "about",    label: "About sea-shell",  icon: "sailing" },
+        { id: "about",    label: "About sea-shell",  icon: "" },
         { id: "settings", label: "Settings",      icon: "tune",             key: "Super+S" },
         { sep: true },
         { id: "dash",     label: "Dashboard",        icon: "space_dashboard",  key: "Super+D" },
@@ -285,11 +563,11 @@ ShellRoot {
         // the version badge — so pointing "Settings…" there as well would give the menu two
         // items that do exactly the same thing; it opens Appearance instead, and the nav down
         // the side of the panel is right there for everything else.
-        if (id === "about")    { settingsLoader.item && settingsLoader.item.openTab(8); return }
-        if (id === "settings") { settingsLoader.item && settingsLoader.item.openTab(4); return }
+        if (id === "about")    { root.openSettings(8); return }
+        if (id === "settings") { root.openSettings(4); return }
         if (id === "launcher") { launcher.toggle(); return }
         var sh = function (c) { Quickshell.execDetached(["sh", "-c", c]) };
-        if (id === "dash")  sh(root.seaScripts + "sea-toggle.sh Dashboard");
+        if (id === "dash")  root.toggleDashboard();
         if (id === "wall")  sh(root.seaScripts + "sea-toggle.sh wallpaper");
         if (id === "keys")  sh(root.seaScripts + "sea-toggle.sh keybinds");
         if (id === "lock")  sh(root.seaScripts + "sea-lock.sh");
@@ -320,29 +598,410 @@ ShellRoot {
         }
     }
 
-    // resident settings (control center) — preloaded in the background so opening is instant
-    // instead of spawning a ~0.5s `qs -p settings.qml`. Toggle via its own "settings" IPC
-    // (SUPER+S) or, in-process, settingsLoader.item.openTab(n). asynchronous → never blocks
-    // the bar at login; the item lands ~½s after startup, long before the user opens it.
-    Loader { id: settingsLoader; asynchronous: true; active: true; source: Qt.resolvedUrl("settings.qml") }
+    // resident settings (control center) — preloaded so opening is instant instead of spawning
+    // a ~0.5s `qs -p settings.qml`. Toggle via its own "settings" IPC (SUPER+S) or, in-process,
+    // root.openSettings(n).
+    //
+    // NOT LOADED UNTIL THE BAR IS UP. `asynchronous` did not keep it off the startup path: the
+    // shell is not "loaded" — and nothing is on screen — until every Loader started during
+    // construction has finished, and compiling settings.qml is ~3s that no cache can save
+    // (Quickshell serves the config from qs:@/ URLs, which Qt's disk cache does not cover).
+    // That was half of a six-second login. So the bar comes first and the rest follows in a
+    // chain: settings, then the welcome tour and the widget drawer.
+    //
+    // Settings / dashboard / screenshot stay unloaded until asked for. Preloading them on
+    // idle used to cost well over 100 MB while closed (Phase 3 efficiency plan). First open
+    // pays a short async compile; after that the Loader keeps them warm.
+    property bool lateReady: false
+    property int pendingSettingsTab: -1
+    // WidgetsDrawer waits on lateReady; welcome needs to be up early to decide first-run /
+    // what's-new. Neither needs the 4k-line settings tree.
+    Timer {
+        interval: 2000; running: true
+        onTriggered: {
+            root.lateReady = true;
+            welcomeLoader.active = true;
+        }
+    }
+    Loader {
+        id: settingsLoader; asynchronous: true; active: false; source: Qt.resolvedUrl("settings.qml")
+        onStatusChanged: {
+            if (status !== Loader.Ready && status !== Loader.Error) return;
+            if (status === Loader.Ready && root.pendingSettingsTab >= 0) item.openTab(root.pendingSettingsTab);
+            root.pendingSettingsTab = -1;
+        }
+    }
 
-    // The first-run tour. Resident like settings, and for the same reason: it owns an IPC
-    // target ("welcome") that Settings → System calls to show it again, and it decides for
-    // itself whether this is a first run. A Loader rather than a type, because a QML file
-    // whose name starts lowercase cannot be used as one.
-    Loader { id: welcomeLoader; asynchronous: true; active: true; source: Qt.resolvedUrl("welcome.qml") }
-    function openSettings(tab) { if (settingsLoader.item) settingsLoader.item.openTab(tab) }
+    // The first-run tour. Loaded shortly after the bar so a new install still sees the tour,
+    // then dropped again if it has nothing to show. IPC stays here so the target exists
+    // while the QML is cold.
+    property string _welcomePending: ""
+    Loader {
+        id: welcomeLoader; asynchronous: true; active: false; source: Qt.resolvedUrl("welcome.qml")
+        onStatusChanged: {
+            if (status !== Loader.Ready) return;
+            if (root._welcomePending === "open") item.open();
+            else if (root._welcomePending === "toggle") { if (item.shown) item.close(); else item.open() }
+            else if (root._welcomePending === "close") item.close();
+            root._welcomePending = "";
+            welcomeCool.restart();
+        }
+    }
+    IpcHandler {
+        target: "welcome"
+        function open(): void {
+            if (welcomeLoader.item) welcomeLoader.item.open();
+            else { root._welcomePending = "open"; welcomeLoader.active = true }
+        }
+        function close(): void {
+            if (welcomeLoader.item) welcomeLoader.item.close();
+            else root._welcomePending = "";
+        }
+        function toggle(): void {
+            if (welcomeLoader.item) { if (welcomeLoader.item.shown) welcomeLoader.item.close(); else welcomeLoader.item.open() }
+            else { root._welcomePending = "toggle"; welcomeLoader.active = true }
+        }
+    }
+    Timer { id: welcomeCool; interval: 12000; onTriggered: root.coolPanels() }
+    // The dashboard (SUPER+D). Loads on first open; stays warm after that.
+    // One desktop arrangement per set of displays (sea-setups.py): when a monitor comes or goes,
+    // the widgets, dock and bar placement you had last time on this set come back. Settled for
+    // three seconds first, because docking brings displays up one at a time.
+    Timer { id: setupSwitch; interval: 3000; running: true
+        onTriggered: Quickshell.execDetached(["python3", root.seaScripts + "sea-setups.py", "--switch"]) }
+    Connections { target: Quickshell; function onScreensChanged() { setupSwitch.restart() } }
+    property bool pendingDash: false
+    property string pendingDashTab: ""
+    Loader {
+        id: dashLoader; asynchronous: true; active: false; source: Qt.resolvedUrl("DashboardPanel.qml")
+        onStatusChanged: if (status === Loader.Ready && root.pendingDash) {
+            root.pendingDash = false;
+            var tab = root.pendingDashTab; root.pendingDashTab = "";
+            item.open(tab || "");
+        }
+    }
+    Binding { when: dashLoader.item !== null; target: dashLoader.item; property: "liveGameId"
+        value: root.gameLive && root.gameLive.appid ? "" + root.gameLive.appid : "" }
+    function toggleDashboard() {
+        if (dashLoader.item) dashLoader.item.toggle();
+        else { root.pendingDashTab = ""; root.pendingDash = true; dashLoader.active = true }
+    }
+    function openDashboardGaming() {
+        root.openPop = "";
+        if (dashLoader.item) dashLoader.item.open("gaming");
+        else { root.pendingDashTab = "gaming"; root.pendingDash = true; dashLoader.active = true }
+    }
+    function openDashboardDev() {
+        root.openPop = "";
+        if (dashLoader.item) dashLoader.item.open("dev");
+        else { root.pendingDashTab = "dev"; root.pendingDash = true; dashLoader.active = true }
+    }
+    Binding { when: dashLoader.item !== null; target: dashLoader.item; property: "github"
+        value: root.github }
+    Binding { when: dashLoader.item !== null; target: dashLoader.item; property: "aiTools"
+        value: root.aiTools }
+    Binding { when: dashLoader.item !== null; target: dashLoader.item; property: "aiShown"
+        value: root.aiShown }
+    Binding { when: dashLoader.item !== null; target: dashLoader.item; property: "aiBarValue"
+        value: root.aiBarValue }
+    Binding { when: dashLoader.item !== null; target: dashLoader.item; property: "player"
+        value: root.player }
+    Binding { when: dashLoader.item !== null; target: dashLoader.item; property: "powerProfile"
+        value: root.powerProfile }
+    Binding { when: dashLoader.item !== null; target: dashLoader.item; property: "netRx"
+        value: root.netRx }
+    Binding { when: dashLoader.item !== null; target: dashLoader.item; property: "netTx"
+        value: root.netTx }
+    Binding { when: dashLoader.item !== null; target: dashLoader.item; property: "batPct"
+        value: (UPower.displayDevice && UPower.displayDevice.isLaptopBattery) ? Math.round((UPower.displayDevice.percentage || 0) * 100) : -1 }
+    Binding { when: dashLoader.item !== null; target: dashLoader.item; property: "batCharging"
+        value: !UPower.onBattery }
+    Binding { when: dashLoader.item !== null; target: dashLoader.item; property: "batRate"
+        value: (UPower.displayDevice && UPower.displayDevice.isLaptopBattery) ? (UPower.displayDevice.changeRate || 0) : 0 }
+    Binding { when: dashLoader.item !== null; target: dashLoader.item; property: "batEta"
+        value: root.widgetBatEta }
+    Connections {
+        target: dashLoader.item
+        enabled: dashLoader.item !== null
+        function onFocusAi(id) { root.setAiFocus(id) }
+        function onSetPowerProfile(p) { root.setProfile(p) }
+    }
+    IpcHandler { target: "dashboard"
+        function toggle(): void { root.toggleDashboard() }
+        function close(): void { if (dashLoader.item) dashLoader.item.close() }
+        function gaming(): void { root.openDashboardGaming() }
+        function dev(): void { root.openDashboardDev() } }
+    // ---------- big picture ----------
+    // The console mode, opened from the Gaming tab or the controller's home button. sea-gamepad.py
+    // runs all the time because that button has to work from the desktop; it lets go of the
+    // devices while a game is up. While this mode is the screen in front, it holds the pads
+    // so Steam's own Big Picture does not move as well. The mode itself is only built the first time it is opened.
+    property bool pendingBigPicture: false
+    property var bigPictureCfg: ({ screen: "auto", other: "black", home: true, sfx: "on" })
+    property var gamepads: []
+    // pause: a game has the pad. relay: Steam Big Picture has it, except home. grab: this screen.
+    readonly property string gamepadMode: {
+        var bp = bigPictureLoader.item;
+        if (root.gameLive !== null || (bp && bp.shown && bp.gameShowing)) return "pause";
+        if (bp && bp.shown && bp.steamHandoff) return "relay";
+        if (bp && bp.shown) return "grab";
+        return "ungrab";
+    }
+    onGamepadModeChanged: if (gamepadProc.running) gamepadProc.write(root.gamepadMode + "\n")
+    FileView {
+        id: bigPictureFile
+        path: Quickshell.env("HOME") + "/.config/sea-shell/bigpicture.json"
+        printErrors: false
+        onLoaded: {
+            try { root.bigPictureCfg = Object.assign({}, root.bigPictureCfg, JSON.parse(text())); } catch (e) {}
+        }
+    }
+    function setBigPictureCfg(patch) {
+        root.bigPictureCfg = Object.assign({}, root.bigPictureCfg, patch);
+        bigPictureFile.setText(JSON.stringify(root.bigPictureCfg));
+    }
+    Loader {
+        id: bigPictureLoader; asynchronous: true; active: false; source: Qt.resolvedUrl("BigPicture.qml")
+        onStatusChanged: if (status === Loader.Ready && root.pendingBigPicture) {
+            root.pendingBigPicture = false;
+            item.open();
+        }
+    }
+    Binding { when: bigPictureLoader.item !== null; target: bigPictureLoader.item; property: "cfg"; value: root.bigPictureCfg }
+    Binding { when: bigPictureLoader.item !== null; target: bigPictureLoader.item; property: "pads"; value: root.gamepads }
+    Connections {
+        target: bigPictureLoader.item
+        function onSetCfg(patch) { root.setBigPictureCfg(patch) }
+    }
+    function openBigPicture() {
+        if (bigPictureLoader.item) bigPictureLoader.item.open();
+        else { root.pendingBigPicture = true; bigPictureLoader.active = true }
+    }
+    IpcHandler { target: "bigpicture"
+        function open(): void { root.openBigPicture() }
+        function close(): void { if (bigPictureLoader.item) bigPictureLoader.item.close() }
+        function toggle(): void { if (bigPictureLoader.item && bigPictureLoader.item.shown) bigPictureLoader.item.close(); else root.openBigPicture() }
+        // A pad button by name (a, b, x, y, up, down, left, right, l, r, menu, view, home), for
+        // scripts and testing: the same path sea-gamepad.py's presses take.
+        function press(button: string): void {
+            if (!bigPictureLoader.item) return;
+            bigPictureLoader.item.press(button);
+            bigPictureLoader.item.release(button);
+        } }
+    function gamepadLine(line) {
+        var m;
+        try { m = JSON.parse(line); } catch (e) { return; }
+        if (m.t === "pads") { root.gamepads = m.pads; return; }
+        if (m.t === "error") { gamepadRestart.stop(); root.gamepadGiveUp = true; return; }
+        var bp = bigPictureLoader.item;
+        if (bp && bp.shown) {
+            if (m.t === "press") bp.press(m.b);
+            else if (m.t === "release") bp.release(m.b);
+        // Not over a game that is running, which is where Steam's own overlay expects that button.
+        } else if (m.t === "press" && m.b === "home" && root.bigPictureCfg.home !== false && root.gameLive === null) {
+            root.openDashClosed();
+            root.openBigPicture();
+        }
+    }
+    function openDashClosed() { if (dashLoader.item) dashLoader.item.close(); }
+    property bool gamepadGiveUp: false
+    Process {
+        id: gamepadProc
+        // sea-gamepad.sh prefers the Rust binary when present; SEA_GAMEPAD_PY=1 forces Python.
+        command: ["sh", Qt.resolvedUrl("sea-gamepad.sh").toString().replace("file://", "")]
+        stdinEnabled: true
+        stdout: SplitParser { onRead: data => root.gamepadLine(data) }
+        onExited: if (!root.gamepadGiveUp) gamepadRestart.restart()
+        onStarted: gamepadProc.write(root.gamepadMode + "\n")
+    }
+    Timer { id: gamepadRestart; interval: 5000; onTriggered: gamepadProc.running = true }
+    // After the bar has had its turn at startup.
+    Timer { interval: 3000; running: true; onTriggered: gamepadProc.running = true }
 
-    // Screen recorder chooser — resident overlay, toggled via its "recorder" IPC
-    // (SUPER+R). It owns the whole SUPER+R semantic: stops a running recording,
-    // otherwise opens. `recording` is fed from the status poll above so it knows which.
-    // The exclusive hold is passed through so it can warn that system audio recorded
-    // from a monitor will be silent while something is playing bit-perfect past pipewire.
-    RecorderPanel {
+    // The screenshot picker (Print), resident for the same reason and on the same chain.
+    property bool pendingShot: false
+    Loader {
+        id: shotLoader; asynchronous: true; active: false; source: Qt.resolvedUrl("ScreenshotPanel.qml")
+        onStatusChanged: if (status === Loader.Ready && root.pendingShot) { root.pendingShot = false; item.open() }
+    }
+    IpcHandler { target: "screenshot"
+        function toggle(): void {
+            if (shotLoader.item) shotLoader.item.toggle();
+            else { root.pendingShot = true; shotLoader.active = true }
+        }
+        function close(): void { if (shotLoader.item) shotLoader.item.close() } }
+
+    // Asked for before it has finished loading: remembered, and opened when it lands.
+    function openSettings(tab) {
+        if (settingsLoader.item) settingsLoader.item.openTab(tab);
+        else { root.pendingSettingsTab = tab; settingsLoader.active = true }
+    }
+    // The panel used to own this target, which meant it could not be unloaded: SUPER+S
+    // would have had nothing to call. The shell keeps the target and builds the panel
+    // on the first call.
+    IpcHandler {
+        target: "settings"
+        function toggle(): void {
+            if (settingsLoader.item) settingsLoader.item.togglePanel();
+            else root.openSettings(8);
+        }
+        function open(): void { root.openSettings(8) }
+        function openTab(requestedTab: int): void { root.openSettings(requestedTab) }
+        function close(): void { if (settingsLoader.item) settingsLoader.item.closePanel() }
+    }
+
+    // Screen recorder chooser — lazy like launcher/power. SUPER+R IPC lives here so
+    // it works while the panel is cold; stop/cancel never need the QML loaded.
+    readonly property string recScript: Qt.resolvedUrl(".").toString().replace("file://", "").replace(/\/$/, "") + "/sea-record.sh"
+    property string _recPending: ""
+    Loader {
+        id: recLoader
+        asynchronous: true; active: false
+        source: Qt.resolvedUrl("RecorderPanel.qml")
+        onStatusChanged: {
+            if (status !== Loader.Ready) return;
+            item.recording = root.recordingActive;
+            item.exclusiveHold = root.exclusiveHold;
+            item.exclusiveName = root.exclHolder;
+            if (root._recPending === "toggle") item.toggle();
+            else if (root._recPending === "open") item.open();
+            root._recPending = "";
+        }
+    }
+    Binding { when: recLoader.item !== null; target: recLoader.item; property: "recording"; value: root.recordingActive }
+    Binding { when: recLoader.item !== null; target: recLoader.item; property: "exclusiveHold"; value: root.exclusiveHold }
+    Binding { when: recLoader.item !== null; target: recLoader.item; property: "exclusiveName"; value: root.exclHolder }
+    QtObject {
         id: recPanel
-        recording: root.recordingActive
-        exclusiveHold: root.exclusiveHold
-        exclusiveName: root.exclHolder
+        readonly property bool shown: !!(recLoader.item && recLoader.item.shown)
+        function toggle() {
+            if (root.recordingActive) { stop(); return }
+            if (recLoader.item) recLoader.item.toggle();
+            else { root._recPending = "toggle"; recLoader.active = true }
+        }
+        function open() {
+            if (root.recordingActive) return;
+            if (recLoader.item) recLoader.item.open();
+            else { root._recPending = "open"; recLoader.active = true }
+        }
+        function close() { if (recLoader.item) recLoader.item.close() }
+        function stop() { Quickshell.execDetached([root.recScript, "stop"]) }
+        function cancel() { Quickshell.execDetached([root.recScript, "cancel"]) }
+    }
+    IpcHandler {
+        target: "recorder"
+        function toggle(): void { recPanel.toggle() }
+        function open(): void { recPanel.open() }
+        function close(): void { recPanel.close() }
+        function stop(): void { recPanel.stop() }
+        function cancel(): void { recPanel.cancel() }
+    }
+    // ---------- one panel at a time ----------
+    // Each panel is its own overlay and knows nothing of the others, so SUPER+D over Settings
+    // over the launcher stacked all three. Whichever opens last closes the rest, and the bar's
+    // dropdowns and the widgets drawer with them.
+    // The screenshot picker never closes anything: what it is for is capturing what is open.
+    // Big picture is only ever the one closing: leaving it hands the pads back and restores the
+    // screens, which is not something a stray keybind should do.
+    function panelList() {
+        return [
+            { name: "dashboard", item: dashLoader.item, close: function (p) { p.close() } },
+            { name: "settings", item: settingsLoader.item, close: function (p) { p.closePanel() } },
+            { name: "launcher", item: launcher, close: function (p) { p.close() } },
+            { name: "power", item: powerMenu, close: function (p) { p.close() } },
+            { name: "recorder", item: recPanel, close: function (p) { p.close() } },
+            { name: "welcome", item: welcomeLoader.item, close: function (p) { p.close() } },
+            { name: "screenshot", item: shotLoader.item, close: function (p) { p.close() } }
+        ];
+    }
+    function panelOpened(name) {
+        if (name === "screenshot") return;
+        var list = root.panelList();
+        for (var i = 0; i < list.length; i++) {
+            var p = list[i];
+            if (p.name !== name && p.item && p.item.shown) p.close(p.item);
+        }
+        root.openPop = "";
+        root.widgetsScreen = "";
+    }
+    function closePanels() {
+        var list = root.panelList();
+        for (var i = 0; i < list.length; i++) {
+            var p = list[i];
+            if (p.name !== "screenshot" && p.item && p.item.shown) p.close(p.item);
+        }
+    }
+    // Hold the outside-click grab until a lazy Drop registers (otherwise openPop is
+    // cleared in the same frame the Loader starts). Backup timer covers a failed load.
+    Timer { id: dropArmTimer; interval: 400; onTriggered: root.grabHold = false }
+    onOpenPopChanged: {
+        if (root.openPop !== "") {
+            root.closePanels();
+            root.grabHold = true;
+            dropArmTimer.restart();
+        } else {
+            dropArmTimer.stop();
+            root.grabHold = false;
+            // Dropdown LazyLoaders unload via activeAsync once their 90ms close hold ends;
+            // schedule a sweep so V4 GC releases the torn-down subtree promptly.
+            gcTimer.restart();
+        }
+    }
+    // Closed panels used to stay compiled for the rest of the session (settings alone is
+    // well over 100 MB once built). Drop them a moment after they hide so a reopen
+    // animation can finish, and so a second open in that window does not compile twice.
+    Timer { id: coolTimer; interval: 2500; onTriggered: root.coolPanels() }
+    Timer { id: gcTimer; interval: 450; onTriggered: gc() }
+    function coolPanels() {
+        var dropped = false;
+        function drop(loader, live) {
+            if (!loader || !loader.item || loader.status !== Loader.Ready || live) return;
+            loader.active = false;
+            dropped = true;
+        }
+        drop(settingsLoader, settingsLoader.item && settingsLoader.item.shown);
+        drop(dashLoader, dashLoader.item && dashLoader.item.shown);
+        drop(bigPictureLoader, bigPictureLoader.item && bigPictureLoader.item.shown);
+        drop(launcherLoader, launcherLoader.item && launcherLoader.item.shown);
+        drop(clipLoader, clipLoader.item && clipLoader.item.shown);
+        drop(notesLoader, notesLoader.item && notesLoader.item.shown);
+        drop(dropLoader, dropLoader.item && dropLoader.item.shown);
+        drop(colorLoader, colorLoader.item && colorLoader.item.shown);
+        drop(sessionsLoader, sessionsLoader.item && sessionsLoader.item.shown);
+        drop(rulerLoader, rulerLoader.item && rulerLoader.item.shown);
+        drop(transLoader, transLoader.item && transLoader.item.shown);
+        drop(powerLoader, powerLoader.item && powerLoader.item.shown);
+        drop(shotLoader, shotLoader.item && shotLoader.item.shown);
+        drop(recLoader, (recLoader.item && recLoader.item.shown) || root.recordingActive);
+        drop(welcomeLoader, welcomeLoader.item && welcomeLoader.item.shown);
+        drop(wallStripLoader, wallStripLoader.item && wallStripLoader.item.shown);
+        if (dropped) gcTimer.restart();
+    }
+    Connections { target: dashLoader.item; ignoreUnknownSignals: true
+        function onShownChanged() { if (dashLoader.item.shown) root.panelOpened("dashboard"); else coolTimer.restart() } }
+    Connections { target: settingsLoader.item; ignoreUnknownSignals: true
+        function onShownChanged() { if (settingsLoader.item.shown) root.panelOpened("settings"); else coolTimer.restart() } }
+    Connections { target: launcher
+        function onShownChanged() { if (launcher.shown) root.panelOpened("launcher"); else coolTimer.restart() } }
+    Connections { target: powerMenu
+        function onShownChanged() { if (powerMenu.shown) root.panelOpened("power"); else coolTimer.restart() } }
+    Connections { target: recPanel
+        function onShownChanged() { if (recPanel.shown) root.panelOpened("recorder"); else coolTimer.restart() } }
+    Connections { target: welcomeLoader.item; ignoreUnknownSignals: true
+        function onShownChanged() { if (welcomeLoader.item.shown) root.panelOpened("welcome"); else coolTimer.restart() } }
+    Connections { target: bigPictureLoader.item; ignoreUnknownSignals: true
+        function onShownChanged() { if (bigPictureLoader.item.shown) root.panelOpened("bigpicture"); else coolTimer.restart() } }
+    Connections { target: shotLoader.item; ignoreUnknownSignals: true
+        function onShownChanged() { if (!shotLoader.item.shown) coolTimer.restart() } }
+
+    // Opens a bar dropdown on the named screen's bar, or the focused one's.
+    function openWidgetOn(name, screenName) {
+        if (name === "") { root.openPop = ""; return; }
+        if (["wifi","bt","vol","bat","cal","pwr","notif","cc","wx","sys","upd","kde","mpris","ai"].indexOf(name) < 0) return;
+        var bars = root.grabWins.filter(function(w) { return w && w.widgetBar === true && w.visible; });
+        var want = screenName || (Hyprland.focusedMonitor ? Hyprland.focusedMonitor.name : "");
+        var chosen = bars.find(function(w) { return want && w.screen && w.screen.name === want; }) || bars[0];
+        if (chosen) { root.openBar = chosen; root.openPop = name; }
     }
     property string openPop: ""      // only one dropdown open at a time
     property var openBar: null       // …and only on the monitor whose pill was clicked
@@ -354,14 +1013,18 @@ ShellRoot {
     IpcHandler {
         target: "shell"
         // Public keyboard/automation entry point uses the same per-monitor menu state as pills.
-        function openWidget(name: string): void {
-            if (name === "") { root.openPop = ""; return; }
-            if (["wifi","bt","vol","bat","cal","pwr","notif","cc","wx","sys","upd","kde","mpris"].indexOf(name) < 0) return;
-            var bars = root.grabWins.filter(function(w) { return w && w.widgetBar === true && w.visible; });
-            var focused = Hyprland.focusedMonitor;
-            var chosen = bars.find(function(w) { return focused && w.screen && w.screen.name === focused.name; }) || bars[0];
-            if (chosen) { root.openBar = chosen; root.openPop = name; }
+        function openWidget(name: string): void { root.openWidgetOn(name, "") }
+        // Settings owns its own "settings" target, which does not exist until it has loaded, up to
+        // 30s after login. These go through the bar, which can load it and open it once it lands.
+        function toggleSettings(): void {
+            if (settingsLoader.item) settingsLoader.item.togglePanel();
+            else root.openSettings(8);
         }
+        function openSettingsTab(tab: int): void { root.openSettings(tab) }
+        // The Notifications page shows these and asks here, so each keeps one owner.
+        function setDnd(on: bool): void { root.setDnd(on) }
+        function toggleMute(app: string): void { root.toggleMute(app) }
+        function applyFocus(id: string): void { root.applyFocus(id || "clear") }
         function mediaTab(index: int): void { if (index >= 0 && index <= 2) root.mediaTab = index }
         function pin(): void { root.grabHold = true }
         function unpin(): void { root.grabHold = false }
@@ -373,77 +1036,23 @@ ShellRoot {
         function reload(): void { Quickshell.reload(true) }
     }
 
-    // ---------- alt-tab window switcher (resident, driven by ALT+Tab binds) ----------
-    property bool switcherOpen: false
-    // Show the switcher ONLY on the focused monitor, not mirrored onto every screen —
-    // a full card on each output reads like a second switcher "behind" the real one.
-    readonly property var switcherScreen: {
-        var fm = Hyprland.focusedMonitor, scrs = Quickshell.screens;
-        if (fm && fm.name) for (var i = 0; i < scrs.length; i++) if (scrs[i].name === fm.name) return scrs[i];
-        return scrs.length ? scrs[0] : null;
-    }
-    // every open window, most-recently-used first (focusHistoryID 0 = current)
-    // Membership is decided by the WAYLAND handle, never by lastIpcObject: `Hyprland.toplevels`
-    // keeps ghost entries whose wayland handle is null, and — the reason ALT+Tab used to do
-    // nothing at all — lastIpcObject goes empty on a long-lived shell until something calls
-    // refreshToplevels(). Gating on it meant every window was filtered out and switcherStep()
-    // bailed on n === 0. hyprctl data is now used only to ENRICH (MRU order), never to include.
-    readonly property var switcherWins: {
-        try {
-            var m = (Hyprland && Hyprland.toplevels) ? Hyprland.toplevels.values : [];
-            var out = [];
-            for (var i=0; i<m.length; i++) {
-                var t = m[i];
-                if (t && t.wayland && t.wayland.appId && (""+t.wayland.appId).trim() !== "") out.push(t);
-            }
-            out.sort(function(a, b) {
-                try {
-                    var ai = (a && a.lastIpcObject && a.lastIpcObject.focusHistoryID !== undefined) ? a.lastIpcObject.focusHistoryID : 9999;
-                    var bi = (b && b.lastIpcObject && b.lastIpcObject.focusHistoryID !== undefined) ? b.lastIpcObject.focusHistoryID : 9999;
-                    return ai - bi;
-                } catch(e) { return 0; }
-            });
-            return out;
-        } catch(e) { return []; }
-    }
-    // The selection tracks the WINDOW, not its index — refreshToplevels() lands a moment after
-    // the switcher opens and can reorder the list under the highlight.
-    property var switcherSelWin: null
-    readonly property int switcherSel: {
-        var i = root.switcherWins.indexOf(root.switcherSelWin);
-        return i < 0 ? 0 : i;
-    }
-    function switcherStep(dir) {
-        Hyprland.refreshToplevels();          // titles + MRU order; async, list already stands on its own
-        var wins = root.switcherWins, n = wins.length; if (n === 0) return;
-        if (!root.switcherOpen) { root.switcherOpen = true; root.switcherSelWin = wins[n > 1 ? (dir > 0 ? 1 : n - 1) : 0]; }
-        else root.switcherSelWin = wins[((root.switcherSel + dir) % n + n) % n];
-    }
-    function switcherCommit() {
-        if (!root.switcherOpen) return; root.switcherOpen = false;
-        var w = root.switcherSelWin; if (!w) return;
-        if (w.lastIpcObject && w.lastIpcObject.address)
-            Hyprland.dispatch("hl.dsp.focus({ window = 'address:" + w.lastIpcObject.address + "' })");
-        else if (w.wayland)
-            w.wayland.activate();             // no hyprctl data yet — the wayland handle still focuses
-    }
+    // ---------- alt-tab window switcher (WindowSwitcher.qml) ----------
+    WindowSwitcher { id: windowSwitcher; uiFor: root.uiFor }
     IpcHandler {
         target: "switcher"
-        function next(): void { root.switcherStep(1) }
-        function prev(): void { root.switcherStep(-1) }
-        function commit(): void { root.switcherCommit() }
-        function cancel(): void { root.switcherOpen = false }
+        function next(): void { windowSwitcher.step(1) }
+        function prev(): void { windowSwitcher.step(-1) }
+        function commit(): void { windowSwitcher.commit() }
+        function cancel(): void { windowSwitcher.cancel() }
     }
 
     // ---------- wallpaper switch transition ----------
-    // swww/awww animate a static→static change themselves, but ANIMATED wallpapers go to
-    // mpvpaper, which has no transition at all: switching one means `pkill mpvpaper`, a gap,
-    // then a fresh process — a hard cut with a black flash. Most of this user's library is
-    // video, so the backend transition almost never ran.
+    // swww/awww animate a static→static change themselves, but a change to or from a VIDEO
+    // has no backend transition: the player has to open the new clip and decode a first frame.
+    // Most of this user's library is video, so the backend transition almost never ran.
     //
-    // The compositor can't fix that, but the shell can: cover the seam with a full-screen
-    // layer, let the swap happen behind it, and uncover once the new wallpaper is up. It
-    // works for EVERY backend — mpvpaper, awww, hyprpaper — because it never touches them.
+    // The shell covers the seam with a full-screen layer, lets the swap happen behind it,
+    // and uncovers once the new wallpaper is up — for a clip, on VideoWallpaper's ready().
     //
     // It used to do that by dipping to black, which states nothing except that something
     // stalled: the same darkness for next as for previous, and no way to tell a transition
@@ -454,7 +1063,7 @@ ShellRoot {
     property real wallPanelX: 1                // screen widths: +1/-1 = off-stage, 0 = covering
     property int  wallPanelDir: 1              // +1 next (enters from the right), -1 previous
     property bool wallPanelAnim: false         // off while the panel is parked off-stage
-    // What it switched TO. The panel has to sit covered for as long as mpvpaper needs to put
+    // What it switched TO. The panel has to sit covered until the new wallpaper has put
     // a first frame up, and a blank hold is the whole reason this read as a stall: the eye is
     // given six hundred milliseconds and nothing to do with them. Naming the wallpaper turns
     // the wait into the answer to "which one did I just land on".
@@ -498,8 +1107,8 @@ ShellRoot {
         } }
     }
     property bool wallFading: false
-    // Kept short on purpose. The covered hold below is fixed by how long mpvpaper takes to
-    // show a first frame, so the slides are the only part worth trimming — at 0.45× the whole
+    // Kept short on purpose. The covered hold below is fixed by how long the new wallpaper
+    // takes to show a first frame, so the slides are the only part worth trimming — at 0.45× the whole
     // switch sat near 1.6s of nothing, which reads as a stall rather than a transition.
     readonly property int wallSlideMs: Math.max(160, Math.round(root.cfgWpTransitionDur * 1000 * 0.26))
     property real cfgWpTransitionDur: 1        // mirrors appearance.json wpTransitionDur
@@ -519,6 +1128,182 @@ ShellRoot {
         // wanting to change the wallpaper could write the config file and get none of the
         // rest. sea-wallpaper-set.sh is now that sequence, and this is the door to it.
         function set(path: string): void { root.wallSet(path) }
+        // the strip of wallpapers along the foot of the screen, for a few seconds
+        function strip(): void { wallStrip.open() }
+        // video wallpaper control: pause/play is a manual hold on top of the automatic rules
+        function pause(): void { root.wpForce = "pause" }
+        function play(): void { root.wpForce = "" }
+        function status(): string { return root.wpMode + " " + (root.wpVideo || root.wpPath) }
+        // put the video surface back above an awww-daemon that mapped after it
+        function remap(): void { root.wpRemap() }
+    }
+    // Shown for a moment on every cycle, so Super+N says where you are in the collection.
+    // Built on first use and cooled after it hides.
+    property string _wallStripPending: ""
+    Loader {
+        id: wallStripLoader
+        asynchronous: true; active: false
+        source: Qt.resolvedUrl("WallpaperStrip.qml")
+        onStatusChanged: {
+            if (status !== Loader.Ready) return;
+            if (root._wallStripPending === "flash") item.flash();
+            else if (root._wallStripPending === "open") item.open();
+            root._wallStripPending = "";
+        }
+    }
+    Connections {
+        target: wallStripLoader.item
+        ignoreUnknownSignals: true
+        function onPicked(p) { root.wallSet(p) }
+        function onShownChanged() { if (!wallStripLoader.item.shown) coolTimer.restart() }
+    }
+    QtObject {
+        id: wallStrip
+        function flash() {
+            if (wallStripLoader.item) wallStripLoader.item.flash();
+            else { root._wallStripPending = "flash"; wallStripLoader.active = true }
+        }
+        function open() {
+            if (wallStripLoader.item) wallStripLoader.item.open();
+            else { root._wallStripPending = "open"; wallStripLoader.active = true }
+        }
+        function close() { if (wallStripLoader.item) wallStripLoader.item.close() }
+    }
+
+    // ---------- video wallpaper (VideoWallpaper.qml, one per screen) ----------
+    // The bar decodes the clip itself; awww keeps the still/poster underneath. Everything
+    // that decides play / pause / freeze is already in this process — game mode, Hyprland's
+    // fullscreen state, UPower — so it is one binding instead of a listener script talking
+    // to a decoder over a socket.
+    property string wpPath: ""
+    property string wpPoster: ""
+    property string wpVideo: ""                // what the player opens: the optimized copy once built
+    property string wpForce: ""                // IPC override: "" | "pause"
+    property bool cfgWpCoverStill: true
+    property bool cfgWpBatteryStill: false
+    property int cfgWpVidFps: 0
+    readonly property bool wpMotion: WallpaperState.isMotion(root.wpPath)
+    readonly property bool wpCovered: {
+        var ms = Hyprland.monitors.values, n = 0;
+        for (var i = 0; i < ms.length; i++) {
+            var w = ms[i].activeWorkspace;
+            if (!w) continue;
+            n++;
+            if (!w.hasFullscreen) return false;
+        }
+        return n > 0;
+    }
+    readonly property string wpMode: {
+        var m = WallpaperState.decide({
+            motion: root.wpMotion, gameOn: root.gameOn, coveredAll: root.wpCovered,
+            onBattery: UPower.onBattery, coverStill: root.cfgWpCoverStill,
+            batteryStill: root.cfgWpBatteryStill,
+            occluded: root.desktopCovered && !root.desktopEditing });
+        return (m === "play" && root.wpForce === "pause") ? "pause" : m;
+    }
+    // Encode for the biggest panel attached, in device pixels.
+    readonly property string wpTargetSize: {
+        var w = 0, h = 0, ss = Quickshell.screens;
+        for (var i = 0; i < ss.length; i++) {
+            var r = ss[i].devicePixelRatio || 1;
+            var sw = Math.round(ss[i].width * r), sh = Math.round(ss[i].height * r);
+            if (sw * sh > w * h) { w = sw; h = sh }
+        }
+        return w > 0 ? w + "x" + h : "1920x1080";
+    }
+    readonly property int wpTargetFps: root.cfgWpVidFps > 0 ? root.cfgWpVidFps : 24
+    FileView {
+        path: Quickshell.env("HOME") + "/.config/sea-shell/wallpaper"
+        watchChanges: true
+        onFileChanged: reload()
+        onLoaded: root.wpSetPath(text().trim())
+        onLoadFailed: root.wpSetPath("")
+    }
+    function wpSetPath(p) {
+        if (p === root.wpPath) return;
+        root.wpPath = p;
+        root.wpPoster = "";
+        if (!root.wpMotion) { root.wpVideo = ""; return }
+        root.wpAwaitReady = root.wallHold;
+        if (root.wallHold) { wallLiftTimer.interval = 1600; wallLiftTimer.restart() }
+        wpPosterProc.running = false;
+        wpPosterProc.command = ["python3", root.seaScripts + "sea-wallpaper-index.py", "--fullposter", p];
+        wpPosterProc.running = true;
+        root.wpResolve();
+    }
+    function wpResolve() {
+        if (!root.wpMotion) return;
+        wpBuildProc.running = false;
+        wpResolveProc.running = false;
+        wpResolveProc.command = ["python3", root.seaScripts + "sea-wallpaper-optimize.py", root.wpPath,
+                                 "--size", root.wpTargetSize, "--fps", "" + root.wpTargetFps];
+        wpResolveProc.running = true;
+    }
+    onWpTargetSizeChanged: root.wpResolve()
+    onWpTargetFpsChanged: root.wpResolve()
+    Process {
+        id: wpPosterProc
+        stdout: StdioCollector { id: wpPosterOut; onStreamFinished: root.wpPoster = wpPosterOut.text.trim() }
+    }
+    // A clip that is bigger than the panel is not played as-is. The original stays on disk;
+    // awww holds its poster until the screen-sized copy exists. Decoding a 1440p or 4K
+    // file inside the bar is what pushed this process into the 600–700 MB range.
+    Process {
+        id: wpResolveProc
+        stdout: StdioCollector { id: wpResolveOut; onStreamFinished: {
+            var l = wpResolveOut.text.trim().split("\n");
+            if (!l[0]) return;
+            if (l[1] === "pending") {
+                root.wpVideo = "";
+                wpBuildProc.command = wpResolveProc.command.concat(["--build"]);
+                wpBuildProc.running = true;
+            } else root.wpVideo = l[0];
+        } }
+    }
+    Process {
+        id: wpBuildProc
+        property string forPath: ""
+        onStarted: forPath = root.wpPath
+        stdout: StdioCollector { id: wpBuildOut; onStreamFinished: {
+            var p = wpBuildOut.text.trim().split("\n")[0];
+            if (p && wpBuildProc.forPath === root.wpPath) root.wpVideo = p;
+        } }
+    }
+    property bool wpAwaitReady: false
+    function wpReady() {
+        if (!root.wpAwaitReady) return;
+        root.wpAwaitReady = false;
+        if (root.wallHold) { wallLiftTimer.interval = 60; wallLiftTimer.restart() }
+    }
+    // The clip is played by mpvpaper, not by Qt. A decoder inside this process kept its
+    // frames, FFmpeg and the VAAPI/CUDA probe in the same RSS the dashboard lists as `qs`.
+    // mpvpaper is its own process, and only while the wallpaper is actually on screen.
+    property string wpPlaying: ""
+    property bool wpRestart: false
+    function wpStart() {
+        if (root.wpPlaying === "") return;
+        wpPlay.command = ["sh", root.seaScripts + "sea-wallpaper-play.sh", "play", root.wpPlaying];
+        wpPlay.running = true;
+        root.wpReady();
+    }
+    function wpSync() {
+        var want = (root.wpMode === "play" && root.wpVideo !== "") ? root.wpVideo : "";
+        var same = want === root.wpPlaying && (want === "" ? !wpPlay.running : wpPlay.running);
+        if (same) return;
+        root.wpPlaying = want;
+        if (wpPlay.running) { root.wpRestart = want !== ""; wpPlay.running = false; }
+        else { root.wpRestart = false; if (want !== "") root.wpStart(); }
+    }
+    function wpRemap() {
+        if (!wpPlay.running) return;
+        root.wpRestart = true;
+        wpPlay.running = false;
+    }
+    onWpModeChanged: root.wpSync()
+    onWpVideoChanged: root.wpSync()
+    Process {
+        id: wpPlay
+        onExited: if (root.wpRestart && root.wpPlaying !== "") { root.wpRestart = false; root.wpStart() }
     }
 
     // Same curtain as a cycle: whatever asked for this is not the picker, so the panel is
@@ -533,6 +1318,7 @@ ShellRoot {
     property string wallCycleDir: "next"
     function wallCycle(dir) {
         if (root.wallFading) return;           // ignore a second press mid-transition
+        wallStrip.flash();
         root.wallCycleDir = (dir === "prev" || dir === "random" || dir === "set") ? dir : "next";
         root.wallPanelDir = (dir === "prev") ? -1 : 1;
         // Park the panel off-stage with the Behavior DISABLED, and only then create the
@@ -571,10 +1357,9 @@ ShellRoot {
             }
             wallNameRead.running = true;       // fills the hold with what it landed on
             root.wallHold = true;
-            // mpvpaper needs its pkill + 0.2s settle + process start before the first frame is
-            // up; lifting the curtain earlier just shows the flash we came here to hide. Static
-            // wallpapers are ready far sooner, but awww is doing its own transition underneath
-            // by then, so a slightly long hold costs nothing there.
+            // A still is awww's to animate underneath, so this hold only covers the swap. A clip
+            // extends it from wpSetPath() and lifts on VideoWallpaper's first frame instead,
+            // with a ceiling in case that frame never comes (game mode, a broken file).
             wallLiftTimer.interval = 620;
             wallLiftTimer.restart();
         }
@@ -598,8 +1383,71 @@ ShellRoot {
         }
     }
 
-    // One curtain per monitor. Bottom layer: above the background (where mpvpaper and awww
-    // draw) but below every real window, so it only ever darkens visible wallpaper — never
+    // ---------- hot corners ----------
+    property var cfgHotCorners: ({ "tl": "", "tr": "", "bl": "", "br": "" })
+    readonly property bool hotCornersOn: {
+        var c = root.cfgHotCorners || {};
+        return !!(c.tl || c.tr || c.bl || c.br);
+    }
+    readonly property bool hotCornersHeld: {
+        if (root.gameOn) return true;
+        var win = Hyprland.activeToplevel;
+        var obj = win ? win.lastIpcObject : null;
+        return !!(obj && obj.fullscreen > 0);
+    }
+    function hotCornerRun(action, screenName) {
+        if (action === "overview") root.toggleExpose();
+        else if (action === "launcher") launcher.toggle();
+        else if (action === "dashboard") root.toggleDashboard();
+        else if (action === "notif") root.openWidgetOn(root.openPop === "notif" ? "" : "notif", screenName);
+        else if (action === "widgets") root.toggleWidgets();
+    }
+    // A corner another monitor touches is where the pointer crosses over, not a corner.
+    function cornerOpen(scr, corner) {
+        if (!scr) return false;
+        var x = corner[1] === "r" ? scr.x + scr.width : scr.x;
+        var y = corner[0] === "b" ? scr.y + scr.height : scr.y;
+        var all = Quickshell.screens;
+        for (var i = 0; i < all.length; i++) {
+            var o = all[i];
+            if (!o || o.name === scr.name) continue;
+            if (x >= o.x && x <= o.x + o.width && y >= o.y && y <= o.y + o.height) return false;
+        }
+        return true;
+    }
+    component HotCorner: PanelWindow {
+        id: hc
+        property string corner: "tl"
+        property var scr: null
+        screen: scr
+        readonly property string action: (root.cfgHotCorners || {})[corner] || ""
+        visible: action !== "" && !root.hotCornersHeld && root.cornerOpen(scr, corner)
+        anchors { top: corner[0] === "t"; bottom: corner[0] === "b"; left: corner[1] === "l"; right: corner[1] === "r" }
+        implicitWidth: 2; implicitHeight: 2
+        color: "transparent"
+        WlrLayershell.namespace: "sea-shell:corner"
+        WlrLayershell.layer: WlrLayer.Overlay
+        WlrLayershell.keyboardFocus: WlrKeyboardFocus.None
+        exclusionMode: ExclusionMode.Ignore
+        // A short rest, so sweeping past the corner on the way somewhere else does nothing.
+        Timer { id: dwell; interval: 140; onTriggered: root.hotCornerRun(hc.action, hc.scr ? hc.scr.name : "") }
+        MouseArea { anchors.fill: parent; hoverEnabled: true
+            onEntered: dwell.restart()
+            onExited: dwell.stop() }
+    }
+    Variants {
+        model: root.hotCornersOn ? Quickshell.screens : []
+        Scope {
+            required property var modelData
+            HotCorner { scr: modelData; corner: "tl" }
+            HotCorner { scr: modelData; corner: "tr" }
+            HotCorner { scr: modelData; corner: "bl" }
+            HotCorner { scr: modelData; corner: "br" }
+        }
+    }
+
+    // One curtain per monitor. Bottom layer: above the background (where VideoWallpaper and
+    // awww draw) but below every real window, so it only ever darkens visible wallpaper — never
     // the user's apps. It takes no input: no keyboard focus and an empty mask.
     Variants {
         model: root.wallFading ? Quickshell.screens : []
@@ -760,17 +1608,13 @@ ShellRoot {
 
                     IndText {
                         anchors.horizontalCenter: parent.horizontalCenter
-                        mono: true
-                        sz: Math.round(Tok.tLabel * root.uiFor(modelData))
+                        sz: Math.round(Tok.tDense * root.uiFor(modelData))
                         font.weight: 600
-                        font.letterSpacing: 1.6
-                        font.capitalization: Font.AllUppercase
                         color: Tok.accent
-                        text: root.wallPanelDir > 0 ? "next  →" : "←  previous"
+                        text: root.wallPanelDir > 0 ? "Next  →" : "←  Previous"
                     }
                     IndText {
                         anchors.horizontalCenter: parent.horizontalCenter
-                        mono: true
                         sz: Math.round(Tok.tDense * root.uiFor(modelData))
                         color: Tok.ink
                         text: root.wallPanelName
@@ -778,7 +1622,7 @@ ShellRoot {
                         width: Math.min(implicitWidth, parent.parent.width * 0.6)
                         horizontalAlignment: Text.AlignHCenter
                     }
-                    // The wait, drawn. mpvpaper's first frame is not ours to hurry, so the
+                    // The wait, drawn. A clip's first frame is not ours to hurry, so the
                     // only decent thing to do with the hold is say how much of it is left —
                     // which is feedback, the one job that earns an animation. It fills for
                     // exactly the length of the hold, on a hairline track, in the accent.
@@ -797,125 +1641,6 @@ ShellRoot {
                         }
                     }
                 }
-                }
-            }
-        }
-    }
-    // Visual HUD for the ALT+Tab switcher — icon + title tiles, the current pick highlighted;
-    // hover to preview a pick, click to focus it. Purely visual (the ALT binds drive stepping,
-    // release commits), so it takes no keyboard focus and rides the Overlay layer above windows.
-    Variants {
-        model: (root.switcherOpen && root.switcherScreen) ? [root.switcherScreen] : []
-        PanelWindow {
-            id: swWin
-            required property var modelData
-            screen: modelData
-            readonly property real ui: root.uiFor(swWin.screen)
-            color: "transparent"
-            WlrLayershell.namespace: "sea-shell:switcher"
-            WlrLayershell.layer: WlrLayer.Overlay
-            WlrLayershell.keyboardFocus: WlrKeyboardFocus.None
-            exclusionMode: ExclusionMode.Ignore
-            anchors { top: true; left: true; right: true; bottom: true }
-
-            // dim + click-outside to dismiss without switching
-            Rectangle { anchors.fill: parent; color: "#000000"; opacity: 0.30
-                MouseArea { anchors.fill: parent; onClicked: root.switcherOpen = false } }
-
-            Rectangle {
-                id: swCardRoot
-                anchors.centerIn: parent
-                scale: swWin.ui                 // match the shell's per-monitor UI scale
-                radius: Tok.rCard
-                color: theme.panel
-                border.width: 1; border.color: theme.a(theme.iris, 0.28)
-                clip: true
-                // Composite the WHOLE card (all live captures) into one offscreen buffer.
-                // ScreencopyView's texture node escapes per-item clipping and was leaking a
-                // stray thumbnail to a screen corner; an FBO the size of the card physically
-                // confines every capture to the card rectangle.
-                layer.enabled: true
-                // Deterministic column count — depends only on the screen width and the
-                // window count, never on the grid's own size, so there is no binding loop.
-                // As many 132px tiles as fit in 86% of the screen, capped at the window count.
-                readonly property int cols: Math.max(1, Math.min(root.switcherWins.length,
-                                                                 Math.floor(((swWin.width / swWin.ui) * 0.86) / 218)))
-                width: swGrid.implicitWidth + 28
-                height: swInner.implicitHeight + 24
-                Column {
-                    id: swInner
-                    anchors.centerIn: parent
-                    spacing: 10
-                    Grid {
-                    id: swGrid
-                    anchors.horizontalCenter: parent.horizontalCenter
-                    columns: swCardRoot.cols
-                    columnSpacing: 10; rowSpacing: 10
-                    Repeater {
-                        model: root.switcherWins
-                        delegate: Rectangle {
-                            id: swTile
-                            required property int index
-                            required property var modelData
-                            readonly property bool sel: index === root.switcherSel
-                            // hyprctl class when we have it, wayland app id until then
-                            readonly property string cls: ("" + ((modelData.lastIpcObject && modelData.lastIpcObject.class)
-                                                                || (modelData.wayland && modelData.wayland.appId) || "")).toLowerCase()
-                            width: 208; height: 150; radius: Tok.r
-                            clip: true
-                            color: sel ? theme.a(theme.iris, 0.22) : theme.a(theme.line, 0.35)
-                            border.width: sel ? 2 : 1
-                            border.color: sel ? theme.iris : theme.a(theme.iris, 0.14)
-                            // live thumbnail of the window (falls back to the app icon until a
-                            // frame arrives, or if the window has no capturable wayland handle)
-                            Rectangle {
-                                anchors { top: parent.top; left: parent.left; right: parent.right; margins: 6 }
-                                height: 96; radius: Tok.r; clip: true; color: theme.bg
-                                ScreencopyView {
-                                    id: thumbScv
-                                    anchors.fill: parent
-                                    captureSource: (swTile.modelData && swTile.modelData.wayland) ? swTile.modelData.wayland : null
-                                    live: root.switcherOpen
-                                    visible: hasContent
-                                }
-                                Image {
-                                    anchors.centerIn: parent; visible: !thumbScv.hasContent
-                                    width: 40; height: 40; asynchronous: true
-                                    sourceSize.width: 80; sourceSize.height: 80; fillMode: Image.PreserveAspectFit
-                                    source: Quickshell.iconPath(swTile.cls, "application-x-executable")
-                                }
-                            }
-                            // app icon + title along the bottom
-                            Row {
-                                anchors { left: parent.left; right: parent.right; bottom: parent.bottom; leftMargin: 10; rightMargin: 10; bottomMargin: 8 }
-                                height: 32; spacing: 7
-                                Image {
-                                    anchors.verticalCenter: parent.verticalCenter
-                                    width: 18; height: 18; asynchronous: true
-                                    sourceSize.width: 36; sourceSize.height: 36; fillMode: Image.PreserveAspectFit
-                                    source: Quickshell.iconPath(swTile.cls, "application-x-executable")
-                                }
-                                Text {
-                                    anchors.verticalCenter: parent.verticalCenter
-                                    width: parent.width - 25; elide: Text.ElideRight
-                                    text: "" + ((swTile.modelData.lastIpcObject && (swTile.modelData.lastIpcObject.title || swTile.modelData.lastIpcObject.class))
-                                                || (swTile.modelData.wayland && (swTile.modelData.wayland.title || swTile.modelData.wayland.appId)) || "window")
-                                    color: swTile.sel ? theme.text : theme.sub; font.pixelSize: 11; font.family: root.cfgFont; font.bold: swTile.sel
-                                }
-                            }
-                            MouseArea {
-                                anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
-                                onEntered: root.switcherSelWin = swTile.modelData
-                                onClicked: { root.switcherSelWin = swTile.modelData; root.switcherCommit() }
-                            }
-                        }
-                    }
-                }
-                    Text {
-                        anchors.horizontalCenter: parent.horizontalCenter
-                        text: root.switcherWins.length + " window" + (root.switcherWins.length === 1 ? "" : "s") + "  ·  Tab cycles  ·  release Alt to focus  ·  Esc cancels"
-                        color: theme.faint; font.pixelSize: 10; font.family: root.cfgFont
-                    }
                 }
             }
         }
@@ -940,6 +1665,7 @@ ShellRoot {
     property real cfgRadius: 14
     property real cfgOpacity: 0.80
     property bool cfgBarOpaque: true
+    property string cfgGlass: "frosted"     // the bar, menus and notifications: solid | frosted | clear (Tok glass)
     readonly property real barSurfaceOpacity: 1.0
     property int  cfgHeight: 42
     // global UI scale — makes the whole shell legible on big/far displays (4K TVs, projectors).
@@ -964,7 +1690,7 @@ ShellRoot {
         return Math.min(2.5, h / 1080);
     }
     property string cfgAccent: "#63c7dd"
-    property string cfgFont: "Inter"
+    property string cfgFont: Tok.resolveFont("Inter")
     property bool   cfgLight: false          // dark (default) ↔ light palette
     property string cfgBarFill: "matugen"    // top-bar fill: matugen (accent-tinted) · black · white
     property string cfgEdge: "top"           // which screen edge the bar docks to: top or bottom
@@ -992,11 +1718,547 @@ ShellRoot {
     property bool cfgVolume: true
     property bool cfgBattery: true
     property bool cfgClock: true
+    property bool cfgClock24: true
+    property bool cfgClockSeconds: false
     property bool cfgPower: true
     property bool cfgQuick: true          // Control Center pill (quick toggles + power profile)
     property bool cfgUpdates: true        // pending pacman/AUR update count
     property bool cfgNet: true            // live network throughput
     property bool cfgNightWidget: false   // Night-light toggle pill on the bar
+    property bool cfgAi: true             // Claude, Codex, Cursor, Grok, and Antigravity usage
+    property bool cfgGithub: true         // contribution streak / today on the bar
+    property bool cfgTotem: true          // Totem 2FA codes from the phone
+    property var totemStatus: ({ ok: false, paired: false, missing: false, error: "", phone: null })
+    property var totemAccounts: []
+    property string totemQuery: ""
+    property string totemNotice: ""
+    property string totemCode: ""
+    property int totemCodeLeft: 0
+    property bool totemBusy: false
+    property var aiUsage: ({ tools: [] })
+    property string aiFocus: ""
+    property var github: ({ ok: false, today: 0, streak: 0, year: 0, weeks: [], repos: [], login: "", error: "" })
+    property string focusId: ""
+    property var focusProfiles: ({})
+    property var widgetClips: []
+    // Which plans are drawn, and which one leads. Empty default means the tightest allowance.
+    property var cfgAiOn: ({ "claude": true, "codex": true, "cursor": true, "cursor-alt": true, "gemini": true })
+    property string cfgAiDefault: ""
+    property int cfgAiDigits: 2
+    function aiPct(n) {
+        var d = root.cfgAiDigits;
+        if (d !== 0 && d !== 1 && d !== 2) d = 2;
+        var v = Number(n);
+        if (!isFinite(v)) v = 0;
+        return v.toFixed(d) + "%";
+    }
+    function aiKnown(id) {
+        return id === "claude" || id === "codex" || id === "grok" || id === "gemini"
+            || /^cursor(-alt\d*)?$/.test(id);
+    }
+    function aiPlanOn(id) {
+        if (id === "grok") id = "cursor";
+        else if (id.indexOf("cursor-alt") === 0) id = "cursor-alt";
+        var on = root.cfgAiOn || ({});
+        return on[id] !== false;
+    }
+    function aiFind(tools, id) {
+        for (var i = 0; i < tools.length; i++)
+            if (tools[i].id === id || (id === "grok" && tools[i].with === "grok")
+                || (id === "cursor" && tools[i].id === "cursor")) return tools[i];
+        return null;
+    }
+    readonly property var aiTools: {
+        var all = (root.aiUsage && root.aiUsage.tools) ? root.aiUsage.tools : [];
+        var out = [];
+        for (var i = 0; i < all.length; i++)
+            if (root.aiPlanOn(all[i].id)) out.push(all[i]);
+        var pref = root.cfgAiDefault;
+        if (pref) {
+            var hit = -1;
+            for (var j = 0; j < out.length; j++)
+                if (out[j].id === pref) hit = j;
+            if (hit > 0) {
+                var top = out[hit];
+                out.splice(hit, 1);
+                out.unshift(top);
+            }
+        }
+        return out;
+    }
+    readonly property var aiShownUsage: ({
+        tools: root.aiTools,
+        lead: root.aiUsage ? root.aiUsage.lead : null
+    })
+    readonly property var aiShown: {
+        var tools = root.aiTools;
+        var focused = root.aiFocus ? root.aiFind(tools, root.aiFocus) : null;
+        if (focused) return focused;
+        // Stale ai-focus (e.g. a plan that vanished) falls through to On top / lead.
+        var preferred = root.cfgAiDefault ? root.aiFind(tools, root.cfgAiDefault) : null;
+        if (preferred) return preferred;
+        if (root.aiUsage && root.aiUsage.lead)
+            for (var j = 0; j < tools.length; j++)
+                if (tools[j].name === root.aiUsage.lead.name
+                    || tools[j].id === root.aiUsage.lead.id) return tools[j];
+        return tools.length ? tools[0] : null;
+    }
+    readonly property string aiBarValue: (root.aiShown && root.aiShown.unit === "left")
+        ? root.aiPct(root.aiShown.today) : (root.aiShown ? (root.aiShown.todayLabel || "") : "")
+    readonly property int aiHot: {
+        var s = root.aiShown;
+        if (!s || !s.windows) return 0;
+        var m = 0;
+        for (var i = 0; i < s.windows.length; i++)
+            m = Math.max(m, Number(s.windows[i].used) || 0);
+        return m;
+    }
+    readonly property color aiAccent: root.aiBarValue === "" ? theme.frost
+        : (root.aiHot >= 95 ? theme.bad : (root.aiHot >= 80 ? theme.warn : theme.iris))
+    // Kept off the usage objects. A field named running on those objects does not
+    // come back through the binding, so the dot was never drawn.
+    property var aiLive: ({})
+    function aiIsLive(id) {
+        if (id === "grok") id = "cursor";
+        var m = root.aiLive || ({});
+        return !!m[id];
+    }
+    function aiSetLive(ids) {
+        var on = {};
+        if (ids) for (var n = 0; n < ids.length; n++) on["" + ids[n]] = true;
+        root.aiLive = on;
+    }
+    property var aiWarned: ({})
+    Process {
+        running: true
+        command: ["sh", "-c", "cat \"$HOME/.config/sea-shell/ai-warned.json\" 2>/dev/null || echo '{}'"]
+        stdout: StdioCollector {
+            onStreamFinished: {
+                try { root.aiWarned = JSON.parse(text.trim() || "{}"); } catch (e) { root.aiWarned = {}; }
+            }
+        }
+    }
+    function aiCheckWarn(tools) {
+        if (!tools) return;
+        var changed = false;
+        for (var i = 0; i < tools.length; i++) {
+            var plan = tools[i];
+            if (!root.aiPlanOn(plan.id)) continue;
+            var w = plan.warn;
+            if (!w || !w.key || root.aiWarned[w.key]) continue;
+            root.aiWarned[w.key] = 1;
+            changed = true;
+            Quickshell.execDetached(["notify-send", "-u", "normal", "-a", "sea-shell",
+                w.title || "Plan usage", w.body || ""]);
+        }
+        if (!changed) return;
+        Quickshell.execDetached(["sh", "-c",
+            "mkdir -p \"$HOME/.config/sea-shell\" && echo '" + Qt.btoa(JSON.stringify(root.aiWarned))
+            + "' | base64 -d > \"$HOME/.config/sea-shell/ai-warned.json\""]);
+    }
+    function setAiFocus(id) {
+        if (!root.aiKnown(id)) return;
+        root.aiFocus = id;
+        Quickshell.execDetached(["sh", "-c",
+            "mkdir -p \"$HOME/.config/sea-shell\" && printf %s " + id + " > \"$HOME/.config/sea-shell/ai-focus\""]);
+    }
+    FileView {
+        path: Quickshell.env("HOME") + "/.config/sea-shell/ai-focus"
+        watchChanges: true
+        printErrors: false
+        onLoaded: {
+            var t = text().trim();
+            if (root.aiKnown(t)) root.aiFocus = t;
+        }
+        onFileChanged: reload()
+    }
+    readonly property string aiScript: Quickshell.env("HOME") + "/.config/quickshell/sea-shell/sea-ai-usage.py"
+    Process {
+        id: aiProc
+        command: ["python3", root.aiScript]
+        stdout: StdioCollector {
+            id: aiOut
+            onStreamFinished: {
+                var t = aiOut.text.trim();
+                if (!t) return;
+                try {
+                    var parsed = JSON.parse(t);
+                    root.aiUsage = parsed;
+                    var ids = [];
+                    var tools = parsed.tools || [];
+                    for (var i = 0; i < tools.length; i++)
+                        if (tools[i].live) ids.push(tools[i].id);
+                    if (ids.length) root.aiSetLive(ids);
+                    root.aiCheckWarn(tools);
+                } catch (e) {}
+            }
+        }
+    }
+    Timer {
+        id: aiTimer
+        interval: 180000; repeat: true; running: !root.gameHibernate; triggeredOnStart: true
+        onTriggered: { if (!aiProc.running) aiProc.running = true }
+    }
+    property real aiFetchedAt: 0
+    Connections {
+        target: aiProc
+        function onRunningChanged() { if (aiProc.running) root.aiFetchedAt = Date.now() }
+    }
+    Connections {
+        target: root
+        function onOpenPopChanged() {
+            if (root.openPop === "ai" && !aiProc.running && Date.now() - root.aiFetchedAt > 30000) {
+                aiProc.running = true;
+                aiTimer.restart();
+            }
+            if (root.openPop === "gh" && !ghProc.running && Date.now() - root.ghFetchedAt > 30000) {
+                root.refreshGithub(false);
+                ghTimer.restart();
+            }
+        }
+    }
+
+    // ---------- GitHub contributions + watched repos ----------
+    readonly property string githubScript: Quickshell.env("HOME") + "/.config/quickshell/sea-shell/sea-github.py"
+    property bool ghUseCache: true
+    Process {
+        id: ghProc
+        command: root.ghUseCache
+            ? ["python3", root.githubScript, "--cache-ok"]
+            : ["python3", root.githubScript]
+        stdout: StdioCollector {
+            id: ghOut
+            onStreamFinished: {
+                var t = ghOut.text.trim();
+                root.ghUseCache = true;
+                if (!t) return;
+                try { root.github = JSON.parse(t); } catch (e) {}
+            }
+        }
+    }
+    function refreshGithub(force) {
+        if (ghProc.running) return;
+        root.ghUseCache = !force;
+        ghProc.running = true;
+    }
+    Timer {
+        id: ghTimer
+        interval: 300000; repeat: true; running: root.cfgGithub && !root.gameHibernate; triggeredOnStart: true
+        onTriggered: root.refreshGithub(false)
+    }
+    property real ghFetchedAt: 0
+    Connections {
+        target: ghProc
+        function onRunningChanged() { if (ghProc.running) root.ghFetchedAt = Date.now() }
+    }
+    readonly property string githubBarValue: {
+        if (!root.github || !root.github.ok) return "";
+        var n = Number(root.github.today) || 0;
+        if (n > 0) return String(n);
+        var s = Number(root.github.streak) || 0;
+        return s > 0 ? (s + "d") : "";
+    }
+    readonly property bool githubCiBad: {
+        var repos = (root.github && root.github.repos) ? root.github.repos : [];
+        for (var i = 0; i < repos.length; i++) if (repos[i].ci === "fail") return true;
+        return false;
+    }
+    // Streak flame: fire icon while a streak lives; sputters (warn + ember pulse) until you commit today.
+    readonly property bool githubLit: !!(root.github && root.github.ok && (Number(root.github.streak) || 0) > 0)
+    readonly property bool githubSputter: root.githubLit && (Number(root.github.today) || 0) === 0
+    readonly property string githubPillIcon: root.githubLit ? "local_fire_department" : "commit"
+    readonly property color githubPillAccent: root.githubCiBad ? theme.bad
+        : !root.githubLit ? theme.frost
+        : root.githubSputter ? theme.warn
+        : theme.iris
+    property real githubEmber: 1.0
+    Timer {
+        interval: 110; repeat: true
+        running: root.githubSputter && root.cfgGithub && !root.gameHibernate
+        onTriggered: root.githubEmber = 0.72 + Math.random() * 0.38
+        onRunningChanged: if (!running) root.githubEmber = 1.0
+    }
+
+
+    // ---------- Totem (2FA from phone) ----------
+    function totemSh() {
+        // install.sh flattens scripts into ~/.config/quickshell/sea-shell/
+        return Quickshell.env("HOME") + "/.config/quickshell/sea-shell/sea-totem.sh";
+    }
+    Process {
+        id: totemStatusProc
+        command: ["bash", root.totemSh(), "status"]
+        stdout: StdioCollector {
+            id: totemStatusOut
+            onStreamFinished: {
+                var t = totemStatusOut.text.trim();
+                if (!t) return;
+                try {
+                    var j = JSON.parse(t);
+                    root.totemStatus = j;
+                    if (j.missing) root.totemNotice = "totem CLI not found";
+                    else if (!j.paired) root.totemNotice = "Not paired — open Totem to pair";
+                    else root.totemNotice = j.phone && j.phone.name ? ("Phone: " + j.phone.name) : "Paired";
+                } catch (e) { root.totemNotice = "Couldn't read Totem status"; }
+            }
+        }
+    }
+    Process {
+        id: totemListProc
+        command: ["bash", root.totemSh(), "list"]
+        stdout: StdioCollector {
+            id: totemListOut
+            onStreamFinished: {
+                root.totemBusy = false;
+                var t = totemListOut.text.trim();
+                if (!t) return;
+                try {
+                    var j = JSON.parse(t);
+                    if (Array.isArray(j)) root.totemAccounts = j;
+                    else if (j && j.error) root.totemNotice = j.error;
+                } catch (e) { root.totemNotice = "Couldn't list accounts"; }
+            }
+        }
+    }
+    Process {
+        id: totemCodeProc
+        property string query: ""
+        command: ["bash", root.totemSh(), "code", query]
+        stdout: StdioCollector {
+            id: totemCodeOut
+            onStreamFinished: {
+                root.totemBusy = false;
+                var t = totemCodeOut.text.trim();
+                if (!t) return;
+                try {
+                    var j = JSON.parse(t);
+                    if (j.ok && j.code) {
+                        root.totemCode = j.code;
+                        root.totemCodeLeft = Number(j.seconds_left) || 0;
+                        root.totemNotice = "Copied " + (j.account && j.account.title ? j.account.title : "code");
+                        Quickshell.execDetached([
+                            "bash", "-c",
+                            'printf %s "$1" | wl-copy 2>/dev/null || printf %s "$1" | xclip -selection clipboard; ( sleep 20; c=$(wl-paste 2>/dev/null || xclip -selection clipboard -o 2>/dev/null); [ "$c" = "$1" ] && { wl-copy --clear 2>/dev/null || true; } ) &',
+                            "_", j.code
+                        ]);
+                    } else {
+                        root.totemNotice = (j && j.error) ? j.error : "Couldn't get code";
+                    }
+                } catch (e) { root.totemNotice = "Couldn't get code"; }
+            }
+        }
+    }
+    function refreshTotemStatus() {
+        if (totemStatusProc.running) return;
+        totemStatusProc.running = true;
+    }
+    function refreshTotemAccounts() {
+        if (totemListProc.running) return;
+        root.totemBusy = true;
+        root.totemNotice = "Asking phone…";
+        totemListProc.running = true;
+    }
+    function fetchTotemCode(q) {
+        if (!q || totemCodeProc.running) return;
+        root.totemBusy = true;
+        root.totemNotice = "Getting code…";
+        root.totemCode = "";
+        totemCodeProc.query = q;
+        totemCodeProc.running = false;
+        totemCodeProc.running = true;
+    }
+    function openTotemApp() {
+        Quickshell.execDetached(["bash", root.totemSh(), "open"]);
+    }
+    readonly property var totemFiltered: {
+        var q = (root.totemQuery || "").trim().toLowerCase();
+        var out = [];
+        var acc = root.totemAccounts || [];
+        for (var i = 0; i < acc.length; i++) {
+            var a = acc[i];
+            var hay = ((a.title || "") + " " + (a.subtitle || "") + " " + (a.issuer || "") + " " + (a.label || "")).toLowerCase();
+            if (!q || hay.indexOf(q) >= 0) out.push(a);
+        }
+        out.sort(function (a, b) { return (a.policy === "never") - (b.policy === "never"); });
+        return out;
+    }
+    readonly property string totemPillIcon: root.totemStatus && root.totemStatus.paired ? "password" : (root.totemStatus && root.totemStatus.missing ? "key_off" : "phonelink_lock")
+    readonly property color totemPillAccent: root.totemStatus && root.totemStatus.paired ? theme.iris : theme.warn
+    Timer {
+        interval: 120000; repeat: true; running: root.cfgTotem && !root.gameHibernate; triggeredOnStart: true
+        onTriggered: root.refreshTotemStatus()
+    }
+
+    // ---------- Focus profiles ----------
+    readonly property string focusScript: Quickshell.env("HOME") + "/.config/quickshell/sea-shell/sea-focus.py"
+    Process {
+        id: focusGetProc
+        command: ["python3", root.focusScript, "get"]
+        stdout: StdioCollector {
+            id: focusOut
+            onStreamFinished: {
+                try {
+                    var j = JSON.parse(focusOut.text.trim() || "{}");
+                    root.focusId = j.id || "";
+                    root.focusProfiles = j.profiles || ({});
+                } catch (e) {}
+            }
+        }
+    }
+    Timer { interval: 60000; running: !root.gameHibernate; repeat: true; triggeredOnStart: true; onTriggered: focusGetProc.running = true }
+    // Night/game owned by the current focus profile so Clear can put them back.
+    property bool focusSavedNight: false
+    property bool focusOwnedGame: false
+    property string focusPendingId: ""
+    function setNightOn(on) {
+        var want = !!on;
+        if (want === root.cfgNight && !root.cfgNightAuto) return;
+        Quickshell.execDetached(["python3", "-c",
+            "import json,os,sys\n"
+            + "p=os.path.expanduser('~/.config/sea-shell/appearance.json')\n"
+            + "os.makedirs(os.path.dirname(p),exist_ok=True)\n"
+            + "d={}\n"
+            + "try:\n d=json.load(open(p))\nexcept Exception:\n pass\n"
+            + "d['night']=sys.argv[1]=='1'\n"
+            + "d['nightAuto']=False\n"
+            + "t=p+'.tmp'\n"
+            + "json.dump(d,open(t,'w'))\n"
+            + "os.replace(t,p)\n",
+            want ? "1" : "0"]);
+    }
+    Process {
+        id: focusApplyProc
+        stdout: StdioCollector {
+            id: focusApplyOut
+            onStreamFinished: {
+                var raw = focusApplyOut.text.trim();
+                if (!raw) return;
+                try {
+                    var j = JSON.parse(raw);
+                    root._focusApplyActions(j);
+                } catch (e) {}
+            }
+        }
+    }
+    function _focusApplyActions(j) {
+        if (j.error) { focusGetProc.running = true; return; }
+        var act = j.actions || j.profile || ({});
+        var clearing = !!act.clear || !(j.id);
+        muteFile.reload();
+        if (Array.isArray(act.muteApps)) root.mutedApps = act.muteApps.slice();
+        if (clearing) {
+            root.setDnd(false);
+            if (root.cafWanted) root.toggleIdle();
+            root.setNightOn(root.focusSavedNight);
+            if (root.focusOwnedGame && root.gameOn)
+                Quickshell.execDetached(["sh", "-c", "$HOME/.config/quickshell/sea-shell/sea-gamemode.sh off"]);
+            root.focusOwnedGame = false;
+            root.focusId = "";
+            focusGetProc.running = true;
+            return;
+        }
+        root.focusSavedNight = root.cfgNight;
+        if (act.dnd !== undefined) root.setDnd(!!act.dnd);
+        if (act.caffeine) {
+            if (!root.cafWanted) root.toggleIdle();
+        } else if (root.cafWanted) {
+            root.toggleIdle();
+        }
+        if (act.night !== undefined) root.setNightOn(!!act.night);
+        if (act.gameMode) {
+            if (!root.gameOn) {
+                Quickshell.execDetached(["sh", "-c", "$HOME/.config/quickshell/sea-shell/sea-gamemode.sh on"]);
+                root.focusOwnedGame = true;
+            }
+        } else if (root.focusOwnedGame && root.gameOn) {
+            Quickshell.execDetached(["sh", "-c", "$HOME/.config/quickshell/sea-shell/sea-gamemode.sh off"]);
+            root.focusOwnedGame = false;
+        }
+        if (act.openDash === "dev") root.openDashboardDev();
+        else if (act.openDash === "gaming") root.openDashboardGaming();
+        else if (act.openDash === "overview") {
+            if (!dashLoader.item || !dashLoader.item.shown) root.toggleDashboard();
+        }
+        root.focusId = j.id || root.focusPendingId;
+        focusGetProc.running = true;
+    }
+    function applyFocus(id) {
+        id = id || "clear";
+        if (focusApplyProc.running) return;
+        root.focusPendingId = id;
+        // sea-focus.py owns notif-mutes.json (+ snapshot/restore); shell effects
+        // come from its stdout so we never depend on focusProfiles being loaded.
+        focusApplyProc.command = ["python3", root.focusScript, "apply", id];
+        focusApplyProc.running = true;
+    }
+
+    // ---------- Clipboard lines for the desktop widget ----------
+    Process {
+        id: clipWidgetProc
+        command: ["sh", "-c", "cliphist list 2>/dev/null | head -12"]
+        stdout: StdioCollector {
+            id: clipWidgetOut
+            onStreamFinished: {
+                var lines = clipWidgetOut.text.split("\n").filter(function(l) { return l.length > 0; });
+                var out = [];
+                for (var i = 0; i < lines.length; i++) {
+                    var line = lines[i];
+                    var tab = line.indexOf("\t");
+                    var body = tab >= 0 ? line.slice(tab + 1) : line;
+                    var img = body.indexOf("[[ binary data") === 0;
+                    var ocr = /^OCR\b/i.test(body) || body.indexOf("[ocr]") === 0;
+                    out.push({ text: img ? body.replace("[[ binary data", "image ·").replace("]]", "").trim() : body, img: img, ocr: ocr });
+                }
+                root.widgetClips = out;
+            }
+        }
+    }
+    Timer { interval: 8000; running: !root.gameOn; repeat: true; triggeredOnStart: true; onTriggered: { if (!clipWidgetProc.running) clipWidgetProc.running = true } }
+
+    readonly property var timerReading: ({
+        running: root.tmrRunning,
+        paused: root.tmrPaused,
+        remain: root.tmrRemain,
+        total: root.tmrTotal,
+        text: root.tmrText,
+        pomo: root.pomoActive,
+        phase: root.pomoPhase,
+        done: root.pomoDone
+    })
+    // Same rule as session_id() in sea-ai-usage.py: the Cursor editor stays up with nobody
+    // using it, so only the agent and its sandbox count.
+    function aiSessionOf(comm, args) {
+        if (comm === "claude") return "claude";
+        if (comm === "codex") return "codex";
+        if (comm === "gemini" || comm === "agy") return "gemini";
+        if (comm === "cursor-agent" || comm === "cursorsandbox") return "cursor";
+        if ((comm === "node" || comm === "cursor-agent")
+            && (args.indexOf("cursor-agent") >= 0 || args.indexOf("cursorsandbox") >= 0)) return "cursor";
+        if (args.indexOf("gemini") >= 0 || args.toLowerCase().indexOf("antigravity") >= 0) return "gemini";
+        return "";
+    }
+    Process {
+        id: aiLiveProc
+        command: ["ps", "-eo", "comm=,args="]
+        stdout: StdioCollector {
+            id: aiLiveOut
+            onStreamFinished: {
+                var lines = aiLiveOut.text.split("\n");
+                var ids = [];
+                for (var i = 0; i < lines.length; i++) {
+                    var m = /^\s*(\S+)\s*(.*)$/.exec(lines[i]);
+                    if (!m) continue;
+                    var id = root.aiSessionOf(m[1], m[2]);
+                    if (id && ids.indexOf(id) < 0) ids.push(id);
+                }
+                root.aiSetLive(ids);
+            }
+        }
+    }
+    Timer {
+        interval: 5000; repeat: true; running: !root.gameHibernate; triggeredOnStart: true
+        onTriggered: { if (!aiLiveProc.running) aiLiveProc.running = true }
+    }
     // ---------- bar shape, workspaces, and the mark ----------
     // All three used to be facts about the bar rather than settings: one continuous strip,
     // workspaces as circles that grow, and the sea-shell logo, always. The first thing on
@@ -1093,6 +2355,16 @@ ShellRoot {
     readonly property string wsFontFamily: root.wsNeedsSymbol && root.symbolFamily !== ""
                                            ? root.symbolFamily : root.cfgFont
 
+    // The strip's workspaces. A copy rather than Hyprland.workspaces itself: that model is in
+    // order, but a Repeater in a Grid put a workspace re-created mid-session at the wrong end, so
+    // Steam restarting on 1 read 2 1 3 along the bar.
+    readonly property var stripWorkspaces: {
+        var all = (Hyprland && Hyprland.workspaces) ? Hyprland.workspaces.values : [];
+        var out = [];
+        for (var i = 0; i < all.length; i++) if (all[i] && all[i].id > 0) out.push(all[i]);
+        return out.sort(function (a, b) { return a.id - b.id });
+    }
+
     // ---------- the scratchpad ----------
     // Hyprland builds a special workspace when the first window is thrown into it and tears
     // it down the moment the last one leaves. So there is no such thing as an empty stash to
@@ -1161,11 +2433,43 @@ ShellRoot {
 
     property bool cfgAutoHide: false      // auto-hide the bar; reveal by pushing the cursor to the edge
     property bool cfgHideFullscreen: false // hide the bar while a window is fullscreen (reveal on hover)
+    property bool cfgHideGaming: false     // hide the bar while game mode or a Steam window is active
+    property bool cfgSuspendShellGaming: false  // Level 2 Ultra mode: stop seashell + daemons in game mode
+    property bool cfgAutoPowerBattery: false    // auto power-saver + 60Hz on battery, restore on AC
+    function patchAppearanceBool(key, val) {
+        Quickshell.execDetached(["python3", "-c",
+            "import json,os,pathlib,sys; p=pathlib.Path(os.path.expanduser('~/.config/sea-shell/appearance.json')); " +
+            "p.parent.mkdir(parents=True,exist_ok=True); " +
+            "d=json.loads(p.read_text()) if p.is_file() else {}; " +
+            "d[sys.argv[1]]=(sys.argv[2]=='1'); " +
+            "t=p.with_suffix('.json.tmp'); t.write_text(json.dumps(d,indent=2)); os.replace(t,p)",
+            key, val ? "1" : "0"]);
+    }
+    function toggleSuspendShellGaming() {
+        root.cfgSuspendShellGaming = !root.cfgSuspendShellGaming;
+        root.patchAppearanceBool("suspendShellGaming", root.cfgSuspendShellGaming);
+    }
+    function toggleAutoPowerBattery() {
+        root.cfgAutoPowerBattery = !root.cfgAutoPowerBattery;
+        root.patchAppearanceBool("autoPowerBattery", root.cfgAutoPowerBattery);
+        if (root.cfgAutoPowerBattery && UPower.displayDevice && UPower.displayDevice.isLaptopBattery) {
+            Quickshell.execDetached(["sh", Qt.resolvedUrl("sea-power-auto.sh").toString().replace("file://", ""),
+                UPower.onBattery ? "battery" : "ac"]);
+        }
+    }
+    Connections {
+        target: UPower
+        function onOnBatteryChanged() {
+            if (!root.cfgAutoPowerBattery || root.gameOn) return;
+            Quickshell.execDetached(["sh", Qt.resolvedUrl("sea-power-auto.sh").toString().replace("file://", ""),
+                UPower.onBattery ? "battery" : "ac"]);
+        }
+    }
     // order of the right-hand bar widgets (drag-reorder in Settings → Bar widgets).
     // Values are the widget ids; the bar positions each right-group pill by its index here,
     // so reordering this list reorders the pills. Unknown/absent ids fall to the far end.
     // wgMpris is the centre pill and ignores its position; wgRec is the transient recorder.
-    readonly property var defaultWidgetOrder: ["wgMpris","wgTray","wgQuick","wgUpdates","wgNet","wgWeather","wgClipboard","wgNotif","wgWifi","wgBluetooth","wgKdeconnect","wgCaffeine","wgNight","wgSystem","wgMic","wgVolume","wgBattery","wgRec","wgClock","wgPower"]
+    readonly property var defaultWidgetOrder: ["wgMpris","wgTray","wgQuick","wgAi","wgGithub","wgTotem","wgUpdates","wgNet","wgWeather","wgClipboard","wgNotif","wgWifi","wgBluetooth","wgKdeconnect","wgCaffeine","wgNight","wgSystem","wgMic","wgVolume","wgBattery","wgRec","wgClock","wgPower"]
     property var cfgWidgetOrder: root.defaultWidgetOrder
     // left cluster order (logo · workspaces · window-title) — drag-reorder in Settings → Bar widgets
     readonly property var defaultLeftOrder: ["lgLogo","lgWork","lgScratch","lgTitle"]
@@ -1225,7 +2529,7 @@ ShellRoot {
     Process { id: modeProc }
 
     // Popup readability is independent of bar transparency and the window behind it.
-    readonly property real dropOpacity: 1.0
+    readonly property real dropOpacity: Tok.glassAlpha
     Process { running: true; command: ["sh","-c","d=\"$HOME/.config/sea-shell\"; mkdir -p \"$d\"; touch \"$d/kitty-matugen.conf\"; [ -f \"$d/appearance.json\" ] || printf '{\"radius\":14,\"opacity\":0.80,\"height\":42,\"accent\":\"#63c7dd\",\"font\":\"Inter\"}' > \"$d/appearance.json\"; echo \"$d/appearance.json\""]
         // Seeding only. It used to also be what TOLD the FileView below where the file is,
         // which meant the bar's own colours waited on a shell fork before they could even
@@ -1241,12 +2545,15 @@ ShellRoot {
         blockLoading: true
         watchChanges: true
         function apply() { try {
-            reload();                                  // pull the latest bytes (needed for live changes)
             var t = text(); if(!t || !t.trim()) return; var j = JSON.parse(t);
             if (j.radius  !== undefined) root.cfgRadius  = j.radius;
             if (j.opacity !== undefined) root.cfgOpacity = j.opacity;
             if (j.barOpaque !== undefined) root.cfgBarOpaque = !!j.barOpaque;
+            root.cfgGlass = (j.glass === "solid" || j.glass === "clear") ? j.glass : "frosted";
             if (j.wpTransitionDur !== undefined) root.cfgWpTransitionDur = j.wpTransitionDur;
+            root.cfgWpCoverStill = j.wpCoverStill !== false;
+            root.cfgWpBatteryStill = !!j.wpBatteryStill;
+            root.cfgWpVidFps = parseInt(j.wpVidFps) || 0;
             if (j.barFill !== undefined && (""+j.barFill).length>0) root.cfgBarFill = j.barFill;
             // top / bottom only — this shell is a horizontal bar; left/right were dropped.
             if (j.edge === "top" || j.edge === "bottom" || j.edge === "left" || j.edge === "right") root.cfgEdge = j.edge;
@@ -1260,7 +2567,7 @@ ShellRoot {
             if (j.dockLabels !== undefined) root.cfgDockLabels = !!j.dockLabels;
             if (j.scale   !== undefined) root.cfgScale   = j.scale;
             if (j.accent  !== undefined && (""+j.accent).length>0) root.cfgAccent = j.accent;
-            if (j.font    !== undefined && (""+j.font).length>0)   root.cfgFont   = j.font;
+            if (j.font    !== undefined && (""+j.font).length>0)   root.cfgFont   = Tok.resolveFont(j.font);
             if (j.mode    !== undefined) root.cfgLight = (""+j.mode === "light");
             if (j.wgMpris !== undefined) root.cfgMpris = !!j.wgMpris;
             if (j.wgMic !== undefined) root.cfgMic = !!j.wgMic;
@@ -1276,10 +2583,28 @@ ShellRoot {
             if (j.wgVolume !== undefined) root.cfgVolume = !!j.wgVolume;
             if (j.wgBattery !== undefined) root.cfgBattery = !!j.wgBattery;
             if (j.wgClock !== undefined) root.cfgClock = !!j.wgClock;
+            if (j.clock24 !== undefined) root.cfgClock24 = !!j.clock24;
+            if (j.clockSeconds !== undefined) root.cfgClockSeconds = !!j.clockSeconds;
             if (j.wgPower !== undefined) root.cfgPower = !!j.wgPower;
             if (j.wgQuick !== undefined) root.cfgQuick = !!j.wgQuick;
             if (j.wgUpdates !== undefined) root.cfgUpdates = !!j.wgUpdates;
             if (j.wgNet !== undefined) root.cfgNet = !!j.wgNet;
+            if (j.wgAi !== undefined) root.cfgAi = !!j.wgAi;
+            if (j.wgGithub !== undefined) root.cfgGithub = !!j.wgGithub;
+            if (j.wgTotem !== undefined) root.cfgTotem = !!j.wgTotem;
+            if (j.aiOn && typeof j.aiOn === "object") {
+                var prevDefault = root.cfgAiDefault;
+                root.cfgAiOn = j.aiOn;
+                if (typeof j.aiDefault === "string" && j.aiDefault !== "" && root.aiKnown(j.aiDefault)) {
+                    if (j.aiDefault !== prevDefault) root.aiFocus = j.aiDefault;
+                    root.cfgAiDefault = j.aiDefault;
+                } else if (j.aiDefault === "") root.cfgAiDefault = "";
+            } else if (j.aiDefault === "" || (typeof j.aiDefault === "string" && root.aiKnown(j.aiDefault))) {
+                if (j.aiDefault && j.aiDefault !== root.cfgAiDefault) root.aiFocus = j.aiDefault;
+                root.cfgAiDefault = j.aiDefault || "";
+            }
+            if (j.aiDigits === 0 || j.aiDigits === 1 || j.aiDigits === 2) root.cfgAiDigits = j.aiDigits;
+            if (j.hotCorners && typeof j.hotCorners === "object") root.cfgHotCorners = j.hotCorners;
             if (j.wgNight !== undefined) root.cfgNightWidget = !!j.wgNight;
             if (j.barShape === "bar" || j.barShape === "pills") root.cfgBarShape = j.barShape;
             if (j.wsStyle === "grow" || j.wsStyle === "pill" || j.wsStyle === "circle") root.cfgWsStyle = j.wsStyle;
@@ -1290,6 +2615,9 @@ ShellRoot {
             root.cfgStickerMedia = j.stickerMedia ? ""+j.stickerMedia : "";
             if (j.autoHide !== undefined) root.cfgAutoHide = !!j.autoHide;
             if (j.hideFullscreen !== undefined) root.cfgHideFullscreen = !!j.hideFullscreen;
+            if (j.hideGaming !== undefined) root.cfgHideGaming = !!j.hideGaming;
+            if (j.suspendShellGaming !== undefined) root.cfgSuspendShellGaming = !!j.suspendShellGaming;
+            if (j.autoPowerBattery !== undefined) root.cfgAutoPowerBattery = !!j.autoPowerBattery;
             if (j.night !== undefined) root.cfgNight = !!j.night;
             if (j.nightTemp !== undefined) root.cfgNightTemp = j.nightTemp;
             if (j.nightAuto !== undefined) root.cfgNightAuto = !!j.nightAuto;
@@ -1307,7 +2635,8 @@ ShellRoot {
         // bar draws its first frame against the defaults regardless.
         Component.onCompleted: apply()
         onLoaded: apply()
-        onFileChanged: apply()
+        // Reload only on disk changes; onLoaded parses without starting another load.
+        onFileChanged: reload()
     }
     // auto dark-mode schedule — sea-theme-schedule.sh flips `mode` in appearance.json
     // when the clock crosses the configured window; the FileView above then applies it.
@@ -1328,7 +2657,6 @@ ShellRoot {
         watchChanges: true
         function apply() {
             try {
-                reload();
                 var t = text();
                 var j = (t && t.trim()) ? JSON.parse(t) : null;
                 var its = (j && j.items) ? j.items : [];
@@ -1337,12 +2665,14 @@ ShellRoot {
                 root.desktopHasMedia = hit;
             } catch (e) { root.desktopHasMedia = false }
         }
-        onFileChanged: apply()
+        // Reload only on disk changes; onLoaded parses without starting another load.
+        onFileChanged: reload()
         onLoaded: apply()
         Component.onCompleted: apply()
     }
 
-    readonly property string appmenuScript: Qt.resolvedUrl("sea-appmenu.py").toString().replace("file://","")
+    // Wrapper prefers Rust sea-appmenu when install.sh built it (SEA_APPMENU_PY=1 → Python).
+    readonly property string appmenuScript: Qt.resolvedUrl("sea-appmenu.sh").toString().replace("file://","")
     // The global menu's own settings, shared with the sidecar — it re-reads this file on
     // every pass, so the background-reading switch takes effect without a restart. Kept out
     // of appearance.json for exactly that reason: python should not have to parse the bar's
@@ -1379,7 +2709,6 @@ ShellRoot {
         watchChanges: true
         function apply() {
             try {
-                reload();
                 var t = text();
                 var j = (t && t.trim()) ? JSON.parse(t) : {};
                 root.gmenuEnabled = (j.enabled === undefined) ? true : !!j.enabled;
@@ -1391,13 +2720,14 @@ ShellRoot {
                 // what made a burst of toggles end up disagreeing with the file on disk.
             }
         }
-        onFileChanged: apply()
+        // Reload only on disk changes; onLoaded parses without starting another load.
+        onFileChanged: reload()
         onLoaded: apply()
         Component.onCompleted: apply()
     }
     Process {
         id: appmenuDaemon
-        command: ["python3", root.appmenuScript, "--daemon"]
+        command: [root.appmenuScript, "--daemon"]
         // Switched off means OFF, not merely hidden: the sidecar walks an accessibility tree
         // on every focus change, and there is no reason to pay for that when nothing draws
         // the result.
@@ -1418,7 +2748,7 @@ ShellRoot {
     }
     Timer { id: appmenuRevive; interval: 5000
         onTriggered: if (root.gmenuEnabled) appmenuDaemon.running = true }
-    Timer { interval: 60000; running: true; repeat: true; triggeredOnStart: true; onTriggered: themeSched.running = true }
+    Timer { interval: 60000; running: !root.gameHibernate; repeat: true; triggeredOnStart: true; onTriggered: themeSched.running = true }
     // ---------- calendar events database ----------
     property var calEvents: []
     function calDate(s) { var p = (""+s).split("-"); return new Date(parseInt(p[0]), (parseInt(p[1])||1)-1, parseInt(p[2])||1); }
@@ -1456,7 +2786,7 @@ ShellRoot {
     Process { id: calResyncProc; command: ["python3", root._icsScript, "--resync"]
         stdout: StdioCollector { onStreamFinished: reloadEventsProc.running = true } }
     Timer { interval: 25000;          running: true; repeat: false; onTriggered: calResyncProc.running = true }   // freshen ~25s after login
-    Timer { interval: 6*3600*1000;    running: true; repeat: true;  onTriggered: calResyncProc.running = true }   // and every 6h
+    Timer { interval: 6*3600*1000;    running: !root.gameHibernate; repeat: true;  onTriggered: calResyncProc.running = true }   // and every 6h
 
     // ---- reminder settings (calendar.json, written by settings/import script) ----
     property bool calRemind: true
@@ -1464,7 +2794,7 @@ ShellRoot {
     Process { id: calCfgProc; running: true; command: ["sh","-c","cat ~/.config/sea-shell/calendar.json 2>/dev/null || echo '{}'"]
         stdout: StdioCollector { id: calCfgOut; onStreamFinished: { try { var j=JSON.parse(calCfgOut.text.trim()||"{}");
             if(j.remind!==undefined) root.calRemind=!!j.remind; if(j.lead!==undefined) root.calLead=j.lead; } catch(e){} } } }
-    Timer { interval: 5*60000; running: true; repeat: true; onTriggered: calCfgProc.running = true }   // pick up settings changes
+    Timer { interval: 5*60000; running: !root.gameHibernate; repeat: true; onTriggered: calCfgProc.running = true }   // pick up settings changes
 
     // ---- reminders: fire a notification a lead-time before each event (timed events) or at
     //      08:00 on the day (all-day). Fired keys persist so a bar restart won't re-notify. ----
@@ -1495,7 +2825,7 @@ ShellRoot {
             }
         }
     }
-    Timer { interval: 60000; running: true; repeat: true; triggeredOnStart: true; onTriggered: root.checkReminders() }
+    Timer { interval: 60000; running: !root.gameHibernate; repeat: true; triggeredOnStart: true; onTriggered: root.checkReminders() }
 
     // ---------- industrial token shim ----------
     // The ramp formulas now live once, in Tok.qml. This object survives only because ~190 call
@@ -1531,6 +2861,7 @@ ShellRoot {
     // file read race them. settings.qml takes over while its panel is open, for live preview.
     Binding { target: Tok; property: "accentRaw"; value: root.cfgAccent }
     Binding { target: Tok; property: "light";     value: root.cfgLight }
+    Binding { target: Tok; property: "glassMode"; value: root.cfgGlass }
 
     // ---------- audio ----------
     property var sinks: (Pipewire.nodes ? Pipewire.nodes.values : []).filter(function (n) { return n && n.isSink && !n.isStream && n.audio })
@@ -1657,7 +2988,7 @@ ShellRoot {
             var p = exclOut.text.trim().split("|");
             root.exclCard = p[0] || ""; root.exclUsbId = (p[1] || "").toLowerCase(); root.exclHolder = p[2] || "";
         } } }
-    Timer { interval: 8000; running: true; repeat: true; triggeredOnStart: true
+    Timer { interval: 8000; running: !root.gameHibernate; repeat: true; triggeredOnStart: true
             onTriggered: exclProc.running = true }
 
     // Short name for a sink: the nickname ("Speaker") beats the description
@@ -1670,28 +3001,34 @@ ShellRoot {
     // touched the source, so an open mic was invisible. wpctl is the authority rather than the
     // Pipewire binding because @DEFAULT_AUDIO_SOURCE@ follows the default-source change the same
     // way the volume keys do — tracking a node id instead would go stale the moment it moves.
-    property bool  micMuted: false
-    property real  micVol:   0
-    property string micName: ""
-    Process { id: micProc; running: true
-        command: ["sh","-c","wpctl get-volume @DEFAULT_AUDIO_SOURCE@ 2>/dev/null; "
-                          + "wpctl inspect @DEFAULT_AUDIO_SOURCE@ 2>/dev/null | grep -m1 node.nick"]
-        stdout: StdioCollector { id: micOut; onStreamFinished: {
-            var t = micOut.text;
-            var m = t.match(/Volume:\s*([0-9.]+)/);
-            root.micVol   = m ? parseFloat(m[1]) : 0;
-            root.micMuted = t.indexOf("MUTED") >= 0;
-            var n = t.match(/node\.nick\s*=\s*"([^"]*)"/);
-            root.micName = n ? n[1] : "";
-        } } }
-    Timer { interval: 3000; running: true; repeat: true; triggeredOnStart: true; onTriggered: micProc.running = true }
+    // Pipewire.defaultAudioSource follows that same default, and changes arrive as they happen.
+    readonly property var micSource: Pipewire.defaultAudioSource
+    PwObjectTracker { objects: root.micSource ? [root.micSource] : [] }
+    readonly property bool micMuted: !!(root.micSource && root.micSource.audio && root.micSource.audio.muted)
+    readonly property real micVol: (root.micSource && root.micSource.audio) ? root.micSource.audio.volume : 0
+    readonly property string micName: root.micSource ? (root.micSource.nickname || root.micSource.description || "") : ""
     function micToggle() {
         Quickshell.execDetached(["sh","-c","wpctl set-mute @DEFAULT_AUDIO_SOURCE@ toggle"]);
-        micSettle.restart();
     }
-    // act, then re-sample: wpctl can refuse, and a pill that reports what it was clicked to say
-    // rather than what is true is the bug IndToggle had.
-    Timer { id: micSettle; interval: 250; repeat: false; onTriggered: micProc.running = true }
+
+    // ---------- battery health ----------
+    // Read when the battery dropdown opens; wear moves over months, not minutes.
+    property int batHealth: -1
+    property int batCycles: -1
+    Process { id: batHealthProc
+        command: ["sh","-c","for b in /sys/class/power_supply/BAT*; do [ -d \"$b\" ] || continue; "
+            + "for k in charge_full charge_full_design energy_full energy_full_design cycle_count; do "
+            + "[ -r \"$b/$k\" ] && echo \"$k=$(cat \"$b/$k\")\"; done; break; done"]
+        stdout: StdioCollector { id: batHealthOut; onStreamFinished: {
+            var v = {};
+            batHealthOut.text.trim().split("\n").forEach(function(l) {
+                var kv = l.split("=");
+                if (kv.length === 2) v[kv[0]] = parseFloat(kv[1]);
+            });
+            var full = v.charge_full || v.energy_full, design = v.charge_full_design || v.energy_full_design;
+            root.batHealth = (full > 0 && design > 0) ? Math.min(100, Math.round(full / design * 100)) : -1;
+            root.batCycles = v.cycle_count > 0 ? Math.round(v.cycle_count) : -1;
+        } } }
 
     // ---------- wifi ----------
     property var wifiList: []
@@ -1699,6 +3036,11 @@ ShellRoot {
     readonly property bool wifiScanning: wifiScan.running
     property string ssid: ""
     property bool wifiOn: false
+    // the joined network's strength (0–100) from the last scan, for the network widget
+    readonly property int wifiSig: {
+        for (var i = 0; i < root.wifiList.length; i++) if (root.wifiList[i].active) return root.wifiList[i].signal || 0;
+        return 0;
+    }
     // A join in flight: the network we asked for, or the one NetworkManager is bringing up on
     // its own (auto-reconnect after resume). Without it the icon stayed on "off" and the row
     // on its old look for the whole handshake, so a click seemed to do nothing for 5–10 s.
@@ -1708,7 +3050,7 @@ ShellRoot {
     readonly property bool wifiBusy: root.wifiConnectingTo !== ""
     // steps the bars 1 → 2 → 3 while busy, so the pill reads as working rather than off
     property int wifiPhase: 0
-    Timer { interval: 420; repeat: true; running: root.wifiBusy
+    Timer { interval: 420; repeat: true; running: root.wifiBusy && !root.gameHibernate
         onRunningChanged: root.wifiPhase = 0
         onTriggered: root.wifiPhase = (root.wifiPhase + 1) % 3 }
     readonly property string wifiIcon: root.wifiBusy ? ["wifi_1_bar", "wifi_2_bar", "wifi"][root.wifiPhase]
@@ -1730,7 +3072,7 @@ ShellRoot {
             root.wifiDevConnecting = st.indexOf("connecting") === 0 ? (conn || "network") : "";
         } }
     }
-    Timer { interval: root.wifiBusy ? 1000 : 10000; running: true; repeat: true; triggeredOnStart: true; onTriggered: wifiStatus.running = true }
+    Timer { interval: root.wifiBusy ? 1000 : 10000; running: !root.gameHibernate; repeat: true; triggeredOnStart: true; onTriggered: wifiStatus.running = true }
     // the network list for the dropdown (styling only — active row cross-checks the
     // connected SSID from dev status so a stale ACTIVE column can't mis-highlight)
     //
@@ -1786,17 +3128,28 @@ ShellRoot {
         if (t.indexOf("WEP")  >= 0) return "WEP";
         return t.split(" ")[0];
     }
-    Timer { interval: 30000; running: true; repeat: true; triggeredOnStart: true; onTriggered: root.wifiRescan(false) }
+    Timer { interval: 30000; running: !root.gameHibernate; repeat: true; triggeredOnStart: true; onTriggered: root.wifiRescan(false) }
     // dropdown open → the list has to be live: re-probe on open (triggeredOnStart) and keep
     // re-probing, so signal bars move and vanished APs drop off without a manual poke.
     Timer { interval: 8000; running: root.openPop === "wifi"; repeat: true; triggeredOnStart: true
         onTriggered: root.wifiRescan(true) }
     property string wifiPwFor: ""     // edited independently from the volatile scan list
     property string wifiDraft: ""
+    property string wifiIdentity: ""
+    // latched when the card opens, so the network dropping out of a rescan can't flip the form
+    property bool wifiPwEnterprise: false
     property string wifiJoinMessage: ""
     property bool wifiJoinFailed: false
     readonly property bool wifiJoining: wifiJoinProc.running || wifiUp.running
-    onWifiPwForChanged: { root.wifiDraft = ""; root.wifiJoinMessage = ""; root.wifiJoinFailed = false }
+    onWifiPwForChanged: {
+        root.wifiDraft = ""; root.wifiJoinMessage = ""; root.wifiJoinFailed = false;
+        root.wifiPwEnterprise = root.wifiIsEnterprise(root.wifiPwFor);
+    }
+    function wifiIsEnterprise(s) {
+        for (var i = 0; i < root.wifiList.length; i++)
+            if (root.wifiList[i].ssid === s) return WifiEnterprise.isEnterprise(root.wifiList[i].sec);
+        return false;
+    }
     function wifiCancelDraft() { if (!root.wifiJoining) root.wifiPwFor = "" }
     Process {
         id: wifiJoinProc
@@ -1807,7 +3160,9 @@ ShellRoot {
                 root.wifiJoinFailed = false;
             } else {
                 root.wifiJoinFailed = true;
-                root.wifiJoinMessage = "Could not connect. Check the password and try again.";
+                root.wifiJoinMessage = root.wifiPwEnterprise
+                    ? "Could not sign in. Check your username and password."
+                    : "Could not connect. Check the password and try again.";
             }
             wifiJoinProc.command = [];
             root.wifiAsked = "";
@@ -1869,10 +3224,15 @@ ShellRoot {
     // Argument arrays preserve SSIDs/passwords exactly; completion comes from nmcli's exit code.
     function wifiJoin(s, pw) {
         if (root.wifiJoining || !s.length || !pw.length) return;
+        if (root.wifiPwEnterprise && !root.wifiIdentity.length) return;
         root.wifiJoinFailed = false;
         root.wifiJoinMessage = "Connecting…";
         root.wifiAsked = s;
-        wifiJoinProc.command = ["nmcli", "--wait", "25", "dev", "wifi", "connect", s, "password", pw];
+        if (root.wifiPwEnterprise) {
+            wifiJoinProc.command = WifiEnterprise.joinCmd(s, root.wifiIdentity, pw);
+        } else {
+            wifiJoinProc.command = ["nmcli", "--wait", "25", "dev", "wifi", "connect", s, "password", pw];
+        }
         wifiJoinProc.running = true;
     }
     function wifiToggle() { Quickshell.execDetached(["sh","-c","nmcli radio wifi | grep -q enabled && nmcli radio wifi off || nmcli radio wifi on"]); wifiRefresh.start() }
@@ -1894,7 +3254,7 @@ ShellRoot {
         stdout: StdioCollector { id: warpModeOut; onStreamFinished: {
             var m = warpModeOut.text.trim(); if (m) root.warpMode = m; } }
     }
-    Timer { interval: 15000; running: true; repeat: true; triggeredOnStart: true
+    Timer { interval: 15000; running: !root.gameHibernate; repeat: true; triggeredOnStart: true
         onTriggered: { warpPoll.running = true; warpModePoll.running = true } }
     function warpToggle() {
         if (root.warpConnected) {
@@ -1948,7 +3308,7 @@ ShellRoot {
             root.vpnList = out;
         } }
     }
-    Timer { interval: 15000; running: true; repeat: true; triggeredOnStart: true; onTriggered: vpnScan.running = true }
+    Timer { interval: 15000; running: !root.gameHibernate; repeat: true; triggeredOnStart: true; onTriggered: vpnScan.running = true }
     function vpnToggle(name) {
         if (root.vpnActionName !== "") return;
         root.vpnActionName = name;
@@ -2008,6 +3368,80 @@ ShellRoot {
     // ---------- weather (location + unit read from files each fetch) ----------
     property string wxTemp: ""      // e.g. 25°C
     property string wxCond: ""      // e.g. Patchy rain nearby
+    // The lock screen runs as its own process and fetches nothing, so the bar hands it the
+    // weather and the next two events through a small file in the runtime dir (lock.qml reads it).
+    function writeGlance() {
+        var g = { wxTemp: root.wxTemp, wxCond: root.wxCond, at: Date.now(),
+                  events: root.calUpcoming.slice(0, 2).map(e => ({ title: e.title || "", date: e.date || "", time: e.time || "" })),
+                  bottles: root.bottleShore.slice(0, 2).map(b => ({ id: b.id || "", text: b.text || "" })) };
+        Quickshell.execDetached(["sh", "-c", "printf '%s' \"$1\" > \"$2.tmp\" && mv -f \"$2.tmp\" \"$2\"", "sh",
+            JSON.stringify(g), (Quickshell.env("XDG_RUNTIME_DIR") || "/tmp") + "/sea-glance.json"]);
+    }
+    Timer { id: glanceWrite; interval: 1500; onTriggered: root.writeGlance() }
+    onWxTempChanged: glanceWrite.restart()
+    onWxCondChanged: glanceWrite.restart()
+    onCalUpcomingChanged: glanceWrite.restart()
+    onBottleShoreChanged: glanceWrite.restart()
+
+    // ---------- Message in a bottle ----------
+    readonly property string bottleScript: Qt.resolvedUrl("sea-bottle.py").toString().replace("file://", "")
+    property var bottleShore: []   // recently washed-up notes for the lock screen
+    property var bottleFloating: []
+    function castBottle(text) {
+        var t = ("" + (text || "")).trim();
+        if (!t) return;
+        Quickshell.execDetached(["python3", root.bottleScript, "cast", t]);
+        bottleListProc.running = true;
+        Quickshell.execDetached(["notify-send", "-a", "sea-shell", "-i", "mail-message-new",
+            "Bottle cast", "It will wash up later — keep an eye on the tide."]);
+    }
+    Process {
+        id: bottleDueProc
+        command: ["python3", root.bottleScript, "due"]
+        stdout: StdioCollector {
+            id: bottleDueOut
+            onStreamFinished: {
+                try {
+                    var due = JSON.parse(bottleDueOut.text.trim() || "[]") || [];
+                    for (var i = 0; i < due.length; i++) {
+                        var b = due[i];
+                        Quickshell.execDetached(["notify-send", "-u", "normal", "-a", "sea-shell", "-i", "mail-unread",
+                            "A bottle washed up", "" + (b.text || "")]);
+                        var shore = root.bottleShore.slice();
+                        shore.unshift(b);
+                        root.bottleShore = shore.slice(0, 6);
+                    }
+                    if (due.length) bottleListProc.running = true;
+                } catch (e) {}
+            }
+        }
+    }
+    Process {
+        id: bottleListProc
+        command: ["python3", root.bottleScript, "list"]
+        stdout: StdioCollector {
+            id: bottleListOut
+            onStreamFinished: {
+                try {
+                    var j = JSON.parse(bottleListOut.text.trim() || "{}") || {};
+                    root.bottleFloating = j.floating || [];
+                    // keep shore notes that are still in the washed list
+                    var washed = j.washed || [];
+                    if (washed.length && root.bottleShore.length === 0)
+                        root.bottleShore = washed.slice(0, 4);
+                } catch (e) {}
+            }
+        }
+    }
+    Timer {
+        interval: 45000; repeat: true; running: !root.gameHibernate; triggeredOnStart: true
+        onTriggered: { bottleDueProc.running = true; bottleListProc.running = true }
+    }
+    IpcHandler {
+        target: "bottle"
+        function cast(text: string): void { root.castBottle(text) }
+        function check(): void { bottleDueProc.running = true }
+    }
     property string wxFeels: ""
     property string wxHumid: ""
     property string wxWind: ""
@@ -2020,7 +3454,7 @@ ShellRoot {
             if (p.length >= 5) { root.wxTemp=p[0].trim(); root.wxCond=p[1].trim(); root.wxFeels=p[2].trim(); root.wxHumid=p[3].trim(); root.wxWind=p[4].trim(); }
         } }
     }
-    Timer { interval: 900000; running: true; repeat: true; triggeredOnStart: true; onTriggered: wxProc.running = true }
+    Timer { interval: 900000; running: !root.gameHibernate; repeat: true; triggeredOnStart: true; onTriggered: wxProc.running = true }
     // ---- forecast (3-day, from wttr.in j1) ----
     property var wxForecast: []     // [{day, icon, hi, lo, cond}]
     // the place the weather is for, as the widgets title it
@@ -2044,7 +3478,7 @@ ShellRoot {
                     var d = new Date(w.date+"T12:00:00");
                     var mid = (w.hourly && w.hourly.length>4) ? w.hourly[4] : (w.hourly?w.hourly[0]:null);
                     var cond = mid && mid.weatherDesc && mid.weatherDesc[0] ? mid.weatherDesc[0].value : "";
-                    out.push({ day: (i===0?"today":days[d.getDay()]),
+                    out.push({ day: (i===0?"Today":days[d.getDay()]),
                                hi: root.wxUnitU ? w.maxtempF+"°" : w.maxtempC+"°",
                                lo: root.wxUnitU ? w.mintempF+"°" : w.mintempC+"°",
                                cond: cond });
@@ -2056,7 +3490,7 @@ ShellRoot {
     property bool wxUnitU: false
     Process { id: wxUnitProbe; running: true; command: ["sh","-c","cat ~/.config/sea-shell/wxunit 2>/dev/null"]
         stdout: StdioCollector { id: wxuOut; onStreamFinished: root.wxUnitU = (wxuOut.text.trim()==="u") } }
-    Timer { interval: 1800000; running: true; repeat: true; triggeredOnStart: true; onTriggered: { wxUnitProbe.running=true; wxfProc.running = true } }
+    Timer { interval: 1800000; running: !root.gameHibernate; repeat: true; triggeredOnStart: true; onTriggered: { wxUnitProbe.running=true; wxfProc.running = true } }
     // pick a Material Symbol from the condition text
     function wxIcon(c) {
         c = (c||"").toLowerCase();
@@ -2074,13 +3508,13 @@ ShellRoot {
     property string powerProfile: "balanced"
     Process { id: ppGet; running: true; command: ["sh","-c","powerprofilesctl get 2>/dev/null"]
         stdout: StdioCollector { id: ppOut; onStreamFinished: root.powerProfile = (ppOut.text.trim() || "balanced") } }
-    Timer { interval: 15000; running: true; repeat: true; triggeredOnStart: true; onTriggered: { ppGet.running = true; fanGet.running = true } }
+    Timer { interval: 15000; running: !root.gameHibernate; repeat: true; triggeredOnStart: true; onTriggered: { ppGet.running = true; fanGet.running = true } }
     function setProfile(p) { Quickshell.execDetached(["powerprofilesctl","set",p]); root.powerProfile = p; ppRefresh.start() }
     Timer { id: ppRefresh; interval: 800; onTriggered: ppGet.running = true }
 
     // ---------- gaming fan preset (sea-perf.sh → root helper sea-fancurve) ----------
-    // The row only exists once /usr/local/bin/sea-fancurve is installed: fan curves need root
-    // and an lm_sensors fancontrol setup, which most machines do not have.
+    // The row only exists once /usr/local/bin/sea-fancurve is installed: fan control needs root
+    // and sea-fand, which only knows Acer's fan interface.
     property bool   hasFanCurve: false
     property string fanMode: "custom"     // auto | quiet | max | custom, read back by sea-perf.sh status
     Process { id: fanGet; running: true
@@ -2101,7 +3535,7 @@ ShellRoot {
     function ccActive(k) {
         if (k === "dark") return !root.cfgLight;                       // "dark mode" tile lit while dark
         if (k === "caf")  return !root.idleOn;                         // lit while caffeine keeps the screen awake (hypridle killed)
-        if (k === "dnd")  return root.dnd;
+        if (k === "dnd")  return root.silenced;
         if (k === "wifi") return root.wifiOn;
         if (k === "bt")   return !!(root.btAdapter && root.btAdapter.enabled);
         if (k === "night") return root.nightActive;
@@ -2111,7 +3545,7 @@ ShellRoot {
     function ccToggle(k) {
         if (k === "dark") { Quickshell.execDetached(["sh", Qt.resolvedUrl("sea-toggle-theme.sh").toString().replace("file://","")]); return; }
         if (k === "caf")  { root.toggleIdle(); return; }
-        if (k === "dnd")  { root.setDnd(!root.dnd); return; }
+        if (k === "dnd")  { root.toggleSilence(); return; }
         if (k === "wifi") { root.wifiToggle(); return; }
         if (k === "bt")   { if (root.btAdapter) root.btAdapter.enabled = !root.btAdapter.enabled; return; }
         if (k === "night"){ Quickshell.execDetached(["sh", Qt.resolvedUrl("sea-toggle-night.sh").toString().replace("file://","")]); return; }
@@ -2176,8 +3610,25 @@ ShellRoot {
             root.gpuMemTotal = parseFloat(p[10]) || 0;
         } }
     }
-    // only poll while a bar is visible; 3s is a good live/quiet balance
-    Timer { interval: 3000; running: true; repeat: true; triggeredOnStart: true; onTriggered: sysProc.running = true }
+    // A monitor whose workspace has no windows shows the desktop, and its widgets with it.
+    readonly property bool desktopSeen: {
+        var mons = Hyprland.monitors ? Hyprland.monitors.values : [];
+        var tops = Hyprland.toplevels ? Hyprland.toplevels.values : [];
+        for (var i = 0; i < mons.length; i++) {
+            var ws = mons[i] && mons[i].activeWorkspace;
+            if (!ws) continue;
+            var empty = true;
+            for (var j = 0; j < tops.length && empty; j++)
+                if (tops[j] && tops[j].workspace && tops[j].workspace.id === ws.id) empty = false;
+            if (empty) return true;
+        }
+        return false;
+    }
+    // Sampling runs nvidia-smi, so it only runs while something on screen shows a reading.
+    readonly property bool sysWanted: !root.gameHibernate && (root.cfgSystem || root.openPop === "sys" || root.widgetsScreen !== ""
+        || root.dashShown || root.desktopSeen)
+    Timer { interval: 3000; running: root.sysWanted; repeat: true; triggeredOnStart: true
+        onTriggered: if (!sysProc.running) sysProc.running = true }
     // WHICH of those the bar pill actually shows.
     //
     // sea-sysmon.sh has been sampling all eleven values every 3s since the pill was written, and
@@ -2300,9 +3751,18 @@ ShellRoot {
     property string recordingTime: "00:00"
     property string recordingAudio: ""     // none | mic | system | both
     property string recordingWhat: ""      // region, or the output name
+    // sea-record.sh writes this while recording. Reading it in-process each second costs
+    // nothing; the status script only runs while it is there, or once to sweep it away.
+    FileView {
+        id: recState
+        path: "/tmp/sea-record.pid"
+        printErrors: false
+        onLoaded: if (!recStatusProc.running) recStatusProc.running = true
+        onLoadFailed: if (root.recordingActive && !recStatusProc.running) recStatusProc.running = true
+    }
     Timer {
-        interval: 1000; running: true; repeat: true; triggeredOnStart: true
-        onTriggered: recStatusProc.running = true
+        interval: 1000; running: !root.gameHibernate || root.recordingActive; repeat: true; triggeredOnStart: true
+        onTriggered: recState.reload()
     }
     Process {
         id: recStatusProc
@@ -2363,7 +3823,7 @@ ShellRoot {
     property var fakeBars: []
     Timer {
         interval: 66; repeat: true
-        running: (root.openPop === "mpris" || root.widgetsScreen !== "" || root.desktopHasMedia) && !Tok.reducedMotion && root.hqInfo !== "" && root.player !== null && root.player.isPlaying
+        running: !root.gameOn && (root.openPop === "mpris" || root.widgetsScreen !== "" || root.desktopHasMedia) && !Tok.reducedMotion && root.hqInfo !== "" && root.player !== null && root.player.isPlaying
         onTriggered: {
             var t = Date.now() / 1000, prev = root.fakeBars, out = [];
             for (var i = 0; i < 22; i++) {
@@ -2623,7 +4083,7 @@ ShellRoot {
         // Also while a media widget is on the desktop and something is actually playing —
         // that widget draws these same bars, and until 6.4 cava only ever ran for the
         // dropdown, so the desktop visualiser was reading silence and drawing a flat line.
-        running: (root.openPop === "mpris" || root.widgetsScreen !== "" || root.desktopHasMedia)
+        running: !root.gameOn && (root.openPop === "mpris" || root.widgetsScreen !== "" || root.desktopHasMedia)
                  && root.player !== null && root.player.isPlaying && !Tok.reducedMotion
                  && root.hqInfo === ""   // no point capturing silence in bit-perfect mode
         // bash process substitution + exec → quickshell owns cava directly and can
@@ -2654,7 +4114,7 @@ ShellRoot {
                 Quickshell.execDetached(["sh","-c","pkill -x hypridle"]); root.idleOn = false;
             } else root.idleOn = running;
         } } }
-    Timer { id: idleTimer; interval: 5000; running: true; repeat: true; triggeredOnStart: true; onTriggered: idleChk.running = true }
+    Timer { id: idleTimer; interval: 5000; running: !root.gameHibernate; repeat: true; triggeredOnStart: true; onTriggered: idleChk.running = true }
     function saveCaffeine() { Quickshell.execDetached(["sh","-c","mkdir -p ~/.config/sea-shell && echo " + (root.cafWanted?"1":"0") + " > ~/.config/sea-shell/caffeine"]); }
     function toggleIdle() {
         if (!root.cafWanted) {
@@ -2674,8 +4134,12 @@ ShellRoot {
 
     // ---------- notifications (our own daemon: popups + bar center) ----------
     property var notes: []           // history for the center (persisted across restarts)
+    // the newest few, trimmed to what the notifications widget draws
+    readonly property var widgetNotes: root.notes.slice(0, 6).map(n => ({ summary: n.summary, body: n.body,
+        appName: n.appName, appIcon: n.appIcon, time: n.time, ts: n.ts }))
     property int noteSeq: 0
     property var mutedApps: []        // per-app DND: app names whose popups are suppressed (history still records)
+    property var priorityApps: []     // per-app bypass: app names allowed through DND / Quiet Hours
     // generic safe config writer — content is passed as argv (no shell quoting), so any
     // apostrophes / newlines / unicode in a notification body round-trip intact.
     function writeCfg(name, content) {
@@ -2689,12 +4153,24 @@ ShellRoot {
     property bool notesLoaded: false
     function saveNotes() { if (root.notesLoaded) root.writeCfg("notif-history.json", JSON.stringify(root.notes)); }
     function saveMutes() { root.writeCfg("notif-mutes.json", JSON.stringify(root.mutedApps)); }
+    function savePriorities() { root.writeCfg("notif-priority.json", JSON.stringify(root.priorityApps)); }
     function isMuted(app) { return root.mutedApps.indexOf(app) >= 0; }
+    function isPriority(app) { return root.priorityApps.indexOf(app) >= 0; }
     function toggleMute(app) {
         if (!app) return;
         var a = root.mutedApps.slice(); var i = a.indexOf(app);
         if (i >= 0) a.splice(i, 1); else a.push(app);
         root.mutedApps = a; root.saveMutes();
+    }
+    function togglePriority(app) {
+        if (!app) return;
+        var a = root.priorityApps.slice(); var i = a.indexOf(app);
+        if (i >= 0) a.splice(i, 1); else {
+            a.push(app);
+            // Promoting an app to priority automatically unmutes it
+            if (root.isMuted(app)) root.toggleMute(app);
+        }
+        root.priorityApps = a; root.savePriorities();
     }
     // restore persisted history + mutes at startup
     Process { running: true; command: ["sh","-c","cat ~/.config/sea-shell/notif-history.json 2>/dev/null || echo '[]'"]
@@ -2705,15 +4181,128 @@ ShellRoot {
                     root.notes = root.notes.concat(a).slice(0,40);
                     var mx = 0; for (var i=0;i<root.notes.length;i++) if ((root.notes[i].key||0) > mx) mx = root.notes[i].key; root.noteSeq = Math.max(root.noteSeq, mx); } } catch(e) {}
             root.notesLoaded = true; root.saveNotes() } } }
-    Process { running: true; command: ["sh","-c","cat ~/.config/sea-shell/notif-mutes.json 2>/dev/null || echo '[]'"]
-        stdout: StdioCollector { id: muteOut; onStreamFinished: {
-            try { var a = JSON.parse(muteOut.text.trim()||"[]"); if (Array.isArray(a)) root.mutedApps = a; } catch(e) {} } } }
+    FileView {
+        id: muteFile
+        path: Quickshell.env("HOME") + "/.config/sea-shell/notif-mutes.json"
+        watchChanges: true; printErrors: false
+        onLoaded: {
+            try {
+                var a = JSON.parse(text().trim() || "[]");
+                if (Array.isArray(a)) root.mutedApps = a;
+            } catch (e) {}
+        }
+        onFileChanged: reload()
+    }
+    FileView {
+        id: priorityFile
+        path: Quickshell.env("HOME") + "/.config/sea-shell/notif-priority.json"
+        watchChanges: true; printErrors: false
+        onLoaded: {
+            try {
+                var a = JSON.parse(text().trim() || "[]");
+                if (Array.isArray(a)) root.priorityApps = a;
+            } catch (e) {}
+        }
+        onFileChanged: reload()
+    }
     // Do Not Disturb: suppress on-screen popups (history still records everything). Persists
     // across restarts; critical-urgency notifications still pop through so alerts aren't lost.
     property bool dnd: false
     Process { running: true; command: ["sh","-c","cat ~/.config/sea-shell/dnd 2>/dev/null || echo 0"]
         stdout: StdioCollector { id: dndOut; onStreamFinished: root.dnd = (dndOut.text.trim() === "1") } }
     function setDnd(v) { root.dnd = v; Quickshell.execDetached(["sh","-c","echo " + (v?"1":"0") + " > \"$HOME/.config/sea-shell/dnd\""]); }
+
+    // ---------- quiet hours ----------
+    // Do Not Disturb on a schedule, and while the screen is being shared. Kept apart from root.dnd
+    // rather than flipping it: that one is your own choice and game mode and the pomodoro already
+    // save and restore it, so a schedule writing to it would fight them all.
+    property var quietCfg: ({ enabled: false, from: "22:00", to: "07:00", share: true })
+    Process { running: true
+        command: ["sh","-c","d=\"$HOME/.config/sea-shell\"; [ -f \"$d/notif-mutes.json\" ] || printf '[]' > \"$d/notif-mutes.json\"; [ -f \"$d/dnd\" ] || echo 0 > \"$d/dnd\"; f=\"$d/quiet.json\"; [ -f \"$f\" ] || printf '{}' > \"$f\"; echo \"$f\""]
+        stdout: StdioCollector { id: quietPathOut; onStreamFinished: quietFile.path = quietPathOut.text.trim() } }
+    FileView { id: quietFile; path: ""; watchChanges: true; printErrors: false
+        onLoaded: {
+            try {
+                var j = JSON.parse(text());
+                root.quietCfg = { enabled: !!j.enabled, from: j.from || "22:00", to: j.to || "07:00", share: j.share !== false };
+            } catch (e) {}
+            root.quietTick();
+        }
+        onFileChanged: reload() }
+    property bool quietScheduled: false
+    function quietTick() {
+        var c = root.quietCfg;
+        function mins(t) { var p = ("" + t).split(":"); return (+p[0]) * 60 + (+p[1]); }
+        var d = new Date(), n = d.getHours() * 60 + d.getMinutes(), a = mins(c.from), b = mins(c.to);
+        // the usual window runs past midnight, so from > to means "after from OR before to"
+        root.quietScheduled = !!c.enabled && a !== b && (a < b ? (n >= a && n < b) : (n >= a || n < b));
+    }
+    Timer { interval: 20000; running: !root.gameHibernate; repeat: true; triggeredOnStart: true; onTriggered: root.quietTick() }
+    readonly property bool quietWanted: root.quietScheduled || (root.quietCfg.share && root.screenShared)
+    // Turning it off from the bar lasts until this stretch of quiet ends, not for good.
+    property bool quietPaused: false
+    onQuietWantedChanged: if (!quietWanted) root.quietPaused = false
+    readonly property bool quietNow: root.quietWanted && !root.quietPaused
+    readonly property bool silenced: root.dnd || root.quietNow
+    function toggleSilence() {
+        if (root.quietNow) { root.quietPaused = true; if (root.dnd) root.setDnd(false); }
+        else root.setDnd(!root.dnd);
+    }
+
+    // ---------- what is using the mic, the camera and the screen ----------
+    // Input streams only, minus anything capturing a speaker rather than the mic: the bar's own
+    // visualiser (cava) is one of those, and would otherwise light this up all day.
+    readonly property var inStreams: (Pipewire.nodes ? Pipewire.nodes.values : []).filter(function (n) { return n && n.type === PwNodeType.AudioInStream })
+    PwObjectTracker { objects: root.inStreams }
+    readonly property var micApps: {
+        var out = [];
+        for (var i = 0; i < root.inStreams.length; i++) {
+            var n = root.inStreams[i], p = n.properties || {};
+            if (("" + p["stream.capture.sink"]) === "true") continue;
+            var name = "" + (p["application.name"] || p["application.process.binary"] || n.description || n.name || "An app");
+            if (out.indexOf(name) < 0) out.push(name);
+        }
+        return out;
+    }
+    // A webcam opened directly never appears in PipeWire, so ask who has the device open.
+    property var cameraApps: []
+    Process { id: camProc
+        command: ["sh","-c","set -- /dev/video*; [ -e \"$1\" ] || exit 0; for p in $(fuser \"$@\" 2>/dev/null); do read -r c < \"/proc/$p/comm\" && echo \"$c\"; done"]
+        stdout: StdioCollector { id: camOut; onStreamFinished: {
+            var l = camOut.text.trim();
+            var next = [];
+            if (l) l.split("\n").forEach(function(c) {
+                var name = /^(pipewire|wireplumber)/.test(c) ? "An app" : c;
+                if (next.indexOf(name) < 0) next.push(name);
+            });
+            next.sort();
+            if (JSON.stringify(next) !== JSON.stringify(root.cameraApps)) root.cameraApps = next;
+        } } }
+    Timer { interval: 3000; running: !root.gameHibernate; repeat: true; triggeredOnStart: true; onTriggered: camProc.running = true }
+    // Hyprland reports every capture, including one-frame screenshots and this shell's own live
+    // previews, so a window share only counts when no preview is open, and anything shorter
+    // than a few seconds does not count at all.
+    property int capMonitors: 0
+    property int capWindows: 0
+    readonly property bool ownPreviews: root.exposeActive || windowSwitcher.open || launcher.shown
+    readonly property bool captureSeen: root.capMonitors > 0 || (root.capWindows > 0 && !root.ownPreviews)
+    property bool screenShared: false
+    onCaptureSeenChanged: { if (captureSeen) capSettle.restart(); else { capSettle.stop(); root.screenShared = false; } }
+    Timer { id: capSettle; interval: 4000; onTriggered: root.screenShared = true }
+    Connections {
+        target: Hyprland
+        function onRawEvent(event) {
+            if (event.name !== "screencast") return;
+            var d = ("" + event.data).split(","), step = d[0] === "1" ? 1 : -1;
+            if (d[1] === "window") root.capWindows = Math.max(0, root.capWindows + step);
+            else root.capMonitors = Math.max(0, root.capMonitors + step);
+        }
+    }
+    readonly property string privacyLabel: {
+        var parts = root.micApps.concat(root.cameraApps.filter(function(c) { return root.micApps.indexOf(c) < 0 }));
+        if (parts.length) return parts.length > 2 ? parts.slice(0, 2).join(", ") + " +" + (parts.length - 2) : parts.join(", ");
+        return (root.screenShared && !root.recordingActive) ? "Sharing screen" : "";
+    }
 
     // ---------- network throughput ----------
     // /proc/net/dev holds cumulative counters, so a RATE needs two samples and the real elapsed
@@ -2751,7 +4340,7 @@ ShellRoot {
             root._netPrev = cur; root._netPrevT = now;
             if (rows.length > 0 || dt > 0.2) { root.netRx = trx; root.netTx = ttx; root.netIf = rows; }
         } } }
-    Timer { interval: 2000; repeat: true; running: root.cfgNet; triggeredOnStart: true
+    Timer { interval: 2000; repeat: true; running: root.cfgNet && !root.gameHibernate; triggeredOnStart: true
         onTriggered: netProc.running = true }
     function netFmt(b) {
         if (b < 1024) return Math.round(b) + " B";
@@ -2918,7 +4507,7 @@ ShellRoot {
                 "Today: " + root.usageFmt(root.usageTotal) + " active\n" + body]);
         }
     }
-    Timer { interval: 60000; repeat: true; running: true
+    Timer { interval: 60000; repeat: true; running: !root.gameHibernate
         onTriggered: { root.usageFlush(); root.usageSave(); root.usageCheck(); } }
 
     function usageFmt(s) {
@@ -2968,7 +4557,7 @@ ShellRoot {
     // 30 minutes. checkupdates syncs a private db over the NETWORK — this is a real request to a
     // mirror, not a local read — so a tight interval is rude for no gain. triggeredOnStart gives
     // a count at login rather than a blank pill for the first half hour.
-    Timer { interval: 30 * 60 * 1000; repeat: true; running: root.cfgUpdates; triggeredOnStart: true
+    Timer { interval: 30 * 60 * 1000; repeat: true; running: root.cfgUpdates && !root.gameHibernate; triggeredOnStart: true
         onTriggered: updProc.running = true }
     function updRefresh() { updProc.running = true }
     // Upgrades run in a terminal on purpose: pacman asks questions (replace this? keep that?) and
@@ -2979,13 +4568,19 @@ ShellRoot {
     }
 
     // ---------- game mode ----------
-    // sea-gamemode.sh owns the SYSTEM side (effects, power profile, mpvpaper) and writes its
+    // sea-gamemode.sh owns the SYSTEM side (effects, power profile, idle) and writes its
     // state file; the bar owns DND and the indicator. One owner per setting — the script never
     // touches root.dnd and the bar never touches blur, so neither can fight the other.
     // Watching the file rather than only reacting to our own IPC means running the script from
     // a terminal, a keybind or the panel all behave identically.
     property bool gameOn: false
+    property bool gameOnAuto: false   // started by Play / Feral; restore desktop when the game closes
     property bool gameWasDnd: false
+    readonly property bool dashShown: !!(dashLoader.item && dashLoader.item.shown)
+    readonly property bool settingsShown: !!(settingsLoader.item && settingsLoader.item.shown)
+    // Level 1 Smart Hibernate: freeze all non-essential polling, animations, and background
+    // subprocesses while Game Mode is active and no interactive shell overlay is open.
+    readonly property bool gameHibernate: root.gameOn && root.openPop === "" && !root.dashShown && !root.settingsShown && root.widgetsScreen === ""
     Process { running: true
         // create it if absent: a FileView cannot watch a path that has never existed
         command: ["sh","-c","f=\"${XDG_RUNTIME_DIR:-/tmp}/sea-gamemode.json\"; [ -f \"$f\" ] || printf '{\"on\":false}' > \"$f\"; echo \"$f\""]
@@ -2993,25 +4588,228 @@ ShellRoot {
     FileView {
         id: gmFile; path: ""; watchChanges: true
         function apply() { try {
-            reload();
             var t = text(); if (!t || !t.trim()) return;
-            root.applyGame(!!JSON.parse(t).on);
+            var j = JSON.parse(t);
+            root.gameOnAuto = !!j.auto;
+            root.applyGame(!!j.on);
         } catch (e) {} }
         // Same trap as Tok.qml: with blockLoading the bytes are present when construction
         // finishes and NO load signal is emitted, so onLoaded alone never fires and the
         // bar draws its first frame against the defaults regardless.
         Component.onCompleted: apply()
         onLoaded: apply()
-        onFileChanged: apply()
+        // Reload only on disk changes; onLoaded parses without starting another load.
+        onFileChanged: reload()
     }
     // Mirrors how the pomodoro handles DND: remember whether DND was ALREADY on, so leaving game
     // mode does not un-silence notifications the user had deliberately silenced.
+    readonly property string gamingScript: Qt.resolvedUrl("sea-gaming.py").toString().replace("file://", "")
+    property var  gameLive: null
+    property string gameTrackApp: ""
+    property string gameTrackTitle: ""
+    property real gameTrackStart: 0
+    property var  gameTrackSamples: []
+    property int  gameBarTick: 0
+    property string gamePlayApp: ""
+    property real gamePlaySince: 0
+    Timer { id: gameBarClock; interval: 1000; running: root.gameLive !== null && !root.gameHibernate; repeat: true
+        onTriggered: root.gameBarTick++ }
+    readonly property string gameBarValue: {
+        root.gameBarTick;
+        if (root.gameLive && root.gameTrackStart > 0) {
+            var sec = Math.max(0, Math.floor((Date.now() - root.gameTrackStart) / 1000));
+            var m = Math.floor(sec / 60), ss = sec % 60;
+            var t = (m < 10 ? "0" : "") + m + ":" + (ss < 10 ? "0" : "") + ss;
+            if (root.hasGpu && root.gpuUsage > 0) return t + " · " + Math.round(root.gpuUsage) + "%";
+            return t;
+        }
+        if (root.gameOn)
+            return root.hasGpu && root.gpuUsage > 0 ? Math.round(root.gpuUsage) + "% GPU" : "ON";
+        if (root.gameLive && root.gameLive.title) {
+            var n = "" + root.gameLive.title;
+            return n.length > 18 ? n.slice(0, 16) + "…" : n;
+        }
+        return "";
+    }
+    function gameFromTop(t) {
+        if (!t) return null;
+        var ipc = t.lastIpcObject || {};
+        var id = "" + ((t.wayland && t.wayland.appId) || ipc.class || "");
+        var title = "" + ((t.wayland && t.wayland.title) || ipc.title || "");
+        var m = id.match(/steam_app_(\d+)/);
+        if (m) return { appid: m[1], title: title.length ? title : ("Steam " + m[1]) };
+        if (/gamescope/i.test(id)) return { appid: "", title: title.length ? title : "Game" };
+        // Lutris and Twintail games run under Wine/Proton: the class is the .exe (or Proton's
+        // steam_app_default), and Minecraft's is its version; none says which game, so the
+        // process is asked once.
+        if (/\.exe$|^steam_app_default$|^steam_proton$|^minecraft/i.test(id)) {
+            var pid = (t.wayland && t.wayland.pid) || ipc.pid || 0;
+            if (!pid) return null;
+            var known = root.wineGames[pid];
+            if (known === undefined) { root.lookupWineGame(pid); return null; }
+            return known ? { appid: known.appid, title: known.title } : null;
+        }
+        return null;
+    }
+    // pid → {appid, title}, or false for a Wine window that is no library game (a launcher, an installer).
+    property var wineGames: ({})
+    property var wineQueue: []
+    function lookupWineGame(pid) {
+        if (root.wineQueue.indexOf(pid) >= 0) return;
+        root.wineQueue = root.wineQueue.concat([pid]);
+        if (!wineProc.running) root.nextWineLookup();
+    }
+    function nextWineLookup() {
+        if (!root.wineQueue.length) return;
+        wineProc.pid = root.wineQueue[0];
+        wineProc.command = ["python3", root.gamingScript, "which-game", String(wineProc.pid)];
+        wineProc.running = true;
+    }
+    Process {
+        id: wineProc
+        property int pid: 0
+        stdout: StdioCollector { id: wineOut; onStreamFinished: {
+            var hit = false;
+            try { var o = JSON.parse(wineOut.text.trim()); if (o && o.appid) hit = o; } catch (e) {}
+            var next = Object.assign({}, root.wineGames);
+            next[wineProc.pid] = hit;
+            root.wineGames = next;
+            root.wineQueue = root.wineQueue.filter(function (p) { return p !== wineProc.pid; });
+        } }
+        onExited: Qt.callLater(root.nextWineLookup)
+    }
+    function gamePlayFlush() {
+        if (!root.gamePlayApp || root.gamePlaySince <= 0) return;
+        var sec = Math.round((Date.now() - root.gamePlaySince) / 1000);
+        root.gamePlaySince = 0;
+        if (sec < 20) return;
+        Quickshell.execDetached(["python3", root.gamingScript, "playtime", root.gamePlayApp, String(sec)]);
+        root.gamePlayApp = "";
+    }
+    function refreshGameLive() {
+        try { Hyprland.refreshToplevels(); } catch (e) {}
+        var list = (Hyprland && Hyprland.toplevels) ? Hyprland.toplevels.values : [];
+        var pick = null;
+        for (var i = 0; i < list.length; i++) {
+            var g = root.gameFromTop(list[i]);
+            if (g) pick = g;
+        }
+        var had = root.gameLive;
+        if (had && !pick) root.gameTrackFinish(true);
+        if (pick && pick.appid) {
+            if (root.gameTrackApp && root.gameTrackApp !== pick.appid) root.gameTrackFinish(true);
+            if (root.gameTrackApp !== pick.appid) root.gameTrackBegin(pick);
+            if (pick.appid !== root.gamePlayApp) { root.gamePlayFlush(); root.gamePlayApp = pick.appid; root.gamePlaySince = Date.now(); }
+        } else root.gamePlayFlush();
+        root.gameLive = pick;
+        if (pick) {
+            root.gameSawWindow = true;
+            gameRestore.stop();
+        } else if (had && !pick && root.gameOn && (root.gameOnAuto || root.gamePlayOwned)) {
+            // Falling edge only — restarting this on every 2s poll while idle
+            // reset the countdown forever, so game mode never dropped.
+            gameRestore.restart();
+        }
+    }
+    property bool gamePlayOwned: false
+    property bool gameSawWindow: false
+    FileView {
+        id: playSessFile
+        path: (Quickshell.env("XDG_RUNTIME_DIR") || "/tmp") + "/sea-gaming-play"
+        watchChanges: true
+        printErrors: false
+        function apply() {
+            var id = (text() || "").trim();
+            root.gamePlayOwned = id.length > 0;
+            if (root.gamePlayOwned) { root.gameSawWindow = false; gameFailsafe.restart(); }
+        }
+        onLoaded: apply(); onFileChanged: reload()
+    }
+    // Play uses auto-on. Wait after the game WINDOW is gone, not after every empty poll.
+    Timer { id: gameRestore; interval: 8000; repeat: false
+        onTriggered: root.dropPlayGameMode() }
+    Timer { id: gameFailsafe; interval: 90000; repeat: false
+        onTriggered: { if (!root.gameSawWindow) root.dropPlayGameMode() } }
+    function dropPlayGameMode() {
+        if (root.gameLive) return;
+        if (!(root.gameOnAuto || root.gamePlayOwned)) return;
+        Quickshell.execDetached(["sh","-c","~/.config/quickshell/sea-shell/sea-gamemode.sh off; rm -f \"${XDG_RUNTIME_DIR:-/tmp}/sea-gaming-play\""]);
+        root.gamePlayOwned = false;
+        root.gameSawWindow = false;
+    }
+    function gameTrackBegin(g) {
+        root.gameTrackApp = g.appid || "";
+        root.gameTrackTitle = g.title || "Game";
+        root.gameTrackStart = Date.now();
+        root.gameTrackSamples = [];
+    }
+    function gameSessionStats() {
+        if (!root.gameTrackSamples.length) return {};
+        var gpu = 0, mx = 0, tmx = 0, vram = 0, cpu = 0;
+        for (var i = 0; i < root.gameTrackSamples.length; i++) {
+            var s = root.gameTrackSamples[i];
+            gpu += s.gpu || 0;
+            cpu += s.cpu || 0;
+            mx = Math.max(mx, s.gpu || 0);
+            tmx = Math.max(tmx, s.temp || 0);
+            vram = Math.max(vram, s.vram || 0);
+        }
+        return {
+            gpu_avg: Math.round(gpu / root.gameTrackSamples.length),
+            gpu_max: Math.round(mx),
+            gpu_temp_max: Math.round(tmx),
+            vram_peak: Math.round(vram * 10) / 10,
+            cpu_avg: Math.round(cpu / root.gameTrackSamples.length),
+        };
+    }
+    function gameTrackFinish(notify) {
+        var sec = root.gameTrackStart > 0 ? Math.round((Date.now() - root.gameTrackStart) / 1000) : 0;
+        if (sec < 30) {
+            root.gameTrackStart = 0; root.gameTrackApp = ""; root.gameTrackTitle = ""; root.gameTrackSamples = [];
+            return;
+        }
+        var payload = {
+            started: new Date(root.gameTrackStart).toISOString(),
+            ended: new Date().toISOString(),
+            appid: root.gameTrackApp,
+            title: root.gameTrackTitle,
+            seconds: sec,
+            game_mode: root.gameOn,
+            stats: root.gameSessionStats()
+        };
+        var b64 = Qt.btoa(JSON.stringify(payload));
+        var flag = notify ? " --notify" : "";
+        Quickshell.execDetached(["sh", "-c",
+            "echo '" + b64 + "' | base64 -d | python3 '" + root.gamingScript + "' append-session" + flag]);
+        root.gameTrackStart = 0; root.gameTrackApp = ""; root.gameTrackTitle = ""; root.gameTrackSamples = [];
+    }
+    Timer { id: gameLivePoll; interval: 2000; running: true; repeat: true; triggeredOnStart: true
+        onTriggered: root.refreshGameLive() }
+    Timer { id: gameSamplePoll; interval: 5000; running: root.gameLive !== null && !root.gameHibernate; repeat: true; triggeredOnStart: true
+        onTriggered: {
+            root.gameTrackSamples = root.gameTrackSamples.concat([{
+                gpu: root.gpuUsage, temp: root.gpuTemp, vram: root.gpuMemUsed, cpu: root.cpuUsage
+            }]).slice(-360);
+        } }
     function applyGame(v) {
         if (v === root.gameOn) return;
-        if (v) { root.gameWasDnd = root.dnd; root.setDnd(true); }
-        else if (!root.gameWasDnd) root.setDnd(false);
+        if (v) {
+            root.gameWasDnd = root.dnd;
+            root.setDnd(true);
+            if (root.openPop !== "") root.openPop = "";
+            kdeWatch.running = false;
+        } else {
+            if (!root.gameWasDnd) root.setDnd(false);
+            if (!root.gameLive) root.gameTrackFinish(true);
+            kdeWatch.running = root.cfgKdeconnect;
+        }
         root.gameOn = v;
-        fanRefresh.start();     // game mode changes the fans and the profile; show the result
+        if (v) {
+            // Reclaim idle panel memory (Dashboard, Settings, Launcher, etc.) right away.
+            root.coolPanels();
+            gcTimer.restart();
+        }
+        fanRefresh.start();
     }
     function toggleGame() { Quickshell.execDetached(["sh","-c","~/.config/quickshell/sea-shell/sea-gamemode.sh toggle"]) }
     IpcHandler {
@@ -3161,7 +4959,18 @@ ShellRoot {
         onNotification: (n) => {
             var k = ++root.noteSeq;
             var app = (n.appName||"notification");
-            var entry = { key: k, summary: (n.summary||""), body: (n.body||""),
+            var summary = (n.summary||""), body = (n.body||"");
+            // The shell's scripts say `notify-send 'sea-shell' 'Colours matched'`: that names the
+            // tool as the app and puts the shell's name where the title goes. Read it as meant.
+            if (app === "notify-send") {
+                app = "Notification";
+                if (summary.toLowerCase() === "sea-shell") {
+                    app = "sea-shell";
+                    summary = body;
+                    body = "";
+                }
+            }
+            var entry = { key: k, summary: summary, body: body,
                           appName: app, appIcon: (n.appIcon||""), urgency: n.urgency,
                           time: Qt.formatDateTime(new Date(), "HH:mm"),
                           ts: Date.now() };   // the lock screen shows what arrived while locked
@@ -3187,11 +4996,24 @@ ShellRoot {
             var piled = 1;
             for (var pi = popupModel.count - 1; pi >= 0; pi--) {
                 var pm = popupModel.get(pi);
-                if (pm.appName === app && pm.urg !== 2 && n.urgency !== 2) { piled += (pm.n || 1); popupModel.remove(pi) }
+                if (pm.appName === app && pm.urg !== 2 && n.urgency !== 2) {
+                    piled += (pm.n || 1);
+                    if (pm.acts === "[]") root.noteRelease(pm.key);
+                    popupModel.remove(pi);
+                }
             }
-            if ((!root.dnd && !root.isMuted(app)) || n.urgency === 2)
+            // A sender's photo or a song's cover lives only while the notification is tracked, so
+            // hold it for as long as the card is up. Not for the history: forty of them would
+            // sit in memory for a thumbnail nobody asked to keep.
+            var shown = ((!root.silenced || root.isPriority(app)) && !root.isMuted(app)) || n.urgency === 2;
+            var img = "" + (n.image || "");
+            if (img && shown && !root.noteObjs[k]) {
+                try { n.tracked = true; root.noteObjs[k] = n; root.noteObjsRev++; } catch (e) { img = ""; }
+            }
+            if (shown)
                 popupModel.insert(0, { key: k, summary: entry.summary, body: entry.body,
-                                       appName: entry.appName, urg: n.urgency, n: piled,
+                                       appName: entry.appName, appIcon: entry.appIcon || "", urg: n.urgency, n: piled,
+                                       image: img.indexOf("/") === 0 ? "file://" + img : img,
                                        // ListModel roles stay primitive; the array rides as JSON
                                        acts: JSON.stringify(acts) });
             // not tracked → server releases it after this handler; we've copied the fields
@@ -3334,10 +5156,10 @@ ShellRoot {
         width: parent ? parent.width : 0
         height: 14
         Text { anchors.left: parent.left; anchors.verticalCenter: parent.verticalCenter
-            text: ch.title; color: theme.frost; font.pixelSize: 9; font.family: root.cfgFont
-            font.bold: true; font.letterSpacing: 1 }
+            text: ch.title; color: theme.frost; font.pixelSize: 11; font.family: root.cfgFont
+            font.bold: true }
         Text { anchors.right: chev.left; anchors.rightMargin: 5; anchors.verticalCenter: parent.verticalCenter
-            text: ch.summary; color: theme.faint; font.pixelSize: 9; font.family: root.cfgFont }
+            text: ch.summary; color: theme.faint; font.pixelSize: 11; font.family: root.cfgFont }
         Sym { id: chev; anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
             text: ch.folded ? "expand_more" : "expand_less"; sz: 13
             color: chm.containsMouse ? theme.iris : theme.faint }
@@ -3441,7 +5263,7 @@ ShellRoot {
                 text: staticTxt.text; color: staticTxt.color; font: staticTxt.font
             }
             NumberAnimation on x {
-                running: mq.scrolling && root.player && root.player.isPlaying
+                running: mq.visible && mq.scrolling && !Tok.reducedMotion && root.player && root.player.isPlaying
                 loops: Animation.Infinite
                 from: 0
                 to: -mq.stride
@@ -3491,9 +5313,13 @@ ShellRoot {
         // from whether it fits.
         property bool overflowed: false
         property string icon: ""
+        property string mark: ""          // an AiMark id, drawn instead of the material glyph
+        property string markAlso: ""      // second brand when two products share the meter
         property string value: ""
         property string vertValue: ""    // compact value used on a vertical bar (falls back to value)
         property color accent: theme.frost
+        // 1 = steady; pulse below 1 for a sputtering flame (GitHub streak with no commits today)
+        property real ember: 1.0
         property string key: ""
         property bool scrollText: false
         property int maxTextW: 160
@@ -3547,7 +5373,7 @@ ShellRoot {
         // "value" hides the icon — but a pill whose value is empty right now (the clipboard, the
         // control centre, a battery still reading) would then draw nothing at all: an invisible
         // pill that still takes width and still answers clicks. The icon stays in that case.
-        readonly property bool showIcon: pill.icon !== "" && (pill.sContent !== "value" || pill.value === "")
+        readonly property bool showIcon: (pill.icon !== "" || pill.mark !== "") && (pill.sContent !== "value" || pill.value === "")
         implicitHeight: pill.vert ? (pr.implicitHeight + 12) : 26
         // vertical pills share ONE width (derived from bar thickness) so they stack into a
         // clean column with flush edges instead of a ragged centre-aligned zigzag
@@ -3573,11 +5399,14 @@ ShellRoot {
         Behavior on scale { NumberAnimation { duration: Tok.mMicro; easing.type: Easing.OutCubic } }
         // Hover and open still read on all three grounds — a bare pill that gave no feedback
         // would look like a label rather than a control.
-        color: pill.sGround === "filled" ? (pill.hot ? theme.a(theme.iris,0.18) : theme.a(theme.line,0.42))
-             : pill.hot                  ? theme.a(theme.iris, pill.sGround === "bare" ? 0.13 : 0.18)
+        // Filled is a quiet tint of the ink on the glass, no outline, as the website's bar and
+        // macOS's menu bar extras; open takes the accent. "outline" keeps its rim.
+        color: pill.open                 ? theme.a(theme.iris, 0.20)
+             : pill.sGround === "filled" ? (pm.containsMouse ? Tok.alpha(Tok.ink, 0.11) : Tok.alpha(Tok.ink, 0.055))
+             : pm.containsMouse          ? Tok.alpha(Tok.ink, pill.sGround === "bare" ? 0.08 : 0.10)
              : "transparent"
-        border.width: pill.sGround === "bare" ? 0 : 1
-        border.color: pill.hot ? theme.a(theme.iris,0.55) : theme.a(theme.iris,0.16)
+        border.width: pill.sGround === "outline" ? 1 : 0
+        border.color: pill.hot ? theme.a(theme.iris,0.55) : Tok.alpha(Tok.ink, 0.14)
         Behavior on color { ColorAnimation { duration: Tok.mFast } }
         Behavior on border.color { ColorAnimation { duration: Tok.mFast } }
 
@@ -3591,7 +5420,22 @@ ShellRoot {
             // Material Symbols glyphs sit ~0.16em left of their advance box, so a centred
             // icon-only pill looks left-shifted. A Translate nudges the paint right to centre
             // the ink WITHOUT changing layout width (so icon+value spacing is untouched).
-            Sym { text: pill.icon; color: pill.inkAccent; visible: pill.showIcon; sz: pill.vert ? 15 : 16
+            AiMark {
+                visible: pill.showIcon && pill.mark !== ""
+                width: pill.vert ? 15 : (pill.markAlso !== "" ? 26 : 16); height: pill.vert ? 15 : 16
+                tool: pill.mark; also: pill.markAlso; ink: pill.inkAccent
+            }
+            Rectangle {
+                visible: pill.key === "ai" && root.aiIsLive(pill.mark)
+                width: visible ? 7 : 0; height: visible ? 7 : 0; radius: 3.5
+                color: "#1b7a4b"
+                border.width: visible ? 1 : 0; border.color: Tok.bg
+            }
+            Sym { text: pill.icon; color: pill.inkAccent; visible: pill.showIcon && pill.mark === ""; sz: pill.vert ? 15 : 16
+                scale: pill.ember
+                opacity: 0.55 + 0.45 * pill.ember
+                Behavior on scale { NumberAnimation { duration: 70 } }
+                Behavior on opacity { NumberAnimation { duration: 70 } }
                 transform: Translate { x: Math.round((pill.vert ? 15 : 16) * 0.16) } }
             // Use Marquee only when scrollText is enabled (e.g. mprisPill), plain Text otherwise.
             // Marquee with maxW:9999 creates an implicit-width loop that causes flickering.
@@ -3606,7 +5450,7 @@ ShellRoot {
             }
             Component {
                 id: vertComp
-                Text { text: pill.vtext; color: theme.text; font.pixelSize: 10; font.family: root.cfgFont }
+                Text { text: pill.vtext; color: theme.text; font.pixelSize: 11; font.family: root.cfgFont }
             }
             Component {
                 id: marqueeComp
@@ -3699,7 +5543,19 @@ ShellRoot {
             else { openAnim.stop(); cardBg.openAnimFactor = 0.0; holdTimer.restart(); }
         }
         Timer { id: holdTimer; interval: 90; onTriggered: dw.held = false }
-        Component.onCompleted: dw.held = dw.shown
+        // Every dropdown has to be in the shared focus grab's list, or it is treated as outside
+        // the grab and dismissed the frame it opens. They are built lazily (LazyLoader, after
+        // startup), so each one adds itself when it exists and takes itself out when it goes.
+        Component.onCompleted: {
+            dw.held = dw.shown;
+            root.grabWins = root.grabWins.concat([dw]);
+            // Lazy Drops arm after openPop; release the hold once this surface is in the grab.
+            if (dw.shown) {
+                if (cardBg.openAnimFactor === 0.0 && !openAnim.running) openAnim.restart();
+                root.grabHold = false;
+            }
+        }
+        Component.onDestruction: root.grabWins = root.grabWins.filter(function(w) { return w && w !== dw })
         // Emphasized-decelerate: it leaves the bar quickly and settles, which is what makes a
         // card read as having been THROWN from the pill rather than faded up in place. Same
         // curve everything else in the shell now enters on.
@@ -3719,7 +5575,7 @@ ShellRoot {
         Binding { target: dw.contentItem; property: "transformOrigin"; value: Item.TopLeft }
         Binding { target: dw.contentItem; property: "scale"; value: dw.ui }
 
-        Rectangle {
+        Glass {
             id: cardBg
             property real openAnimFactor: 0.0
             width: dw.cardW; height: dw.cardH
@@ -3746,9 +5602,8 @@ ShellRoot {
             transformOrigin: root.cfgEdge === "bottom" ? Item.Bottom
                            : root.cfgEdge === "left"   ? Item.Left
                            : root.cfgEdge === "right"  ? Item.Right : Item.Top
-            // Stable, opaque material: blur is decoration, never the source of contrast.
-            color: Tok.surface
-            border.width: 1; border.color: Tok.alpha(Tok.ruleHard, 0.65)
+            // Glass (Tok's material): the tint never drops below what keeps text readable,
+            // and the blur behind is the wallpaper, so the app under a menu cannot dim it.
         }
     }
 
@@ -3763,7 +5618,9 @@ ShellRoot {
             // per-monitor: user can turn the bar off entirely on a given output.
             // Read modelData (the Variants source), NOT bar.screen — reading screen here
             // creates a visible↔screen-mapping binding loop.
-            visible: root.monBar(bar.modelData ? bar.modelData.name : "")
+            // Also unmap the layer surface entirely while Game Mode + "Hide bar while playing"
+            // are active so Hyprland has zero bar surface to composite during gameplay.
+            visible: root.monBar(bar.modelData ? bar.modelData.name : "") && !(root.gameOn && root.cfgHideGaming && root.openPop === "")
             // per-monitor UI scale — a 4K TV scales up while a 1080p laptop stays 1×
             readonly property real ui: root.uiFor(bar.screen)
             // which tray icon owns the shared tray menu dropdown
@@ -3778,8 +5635,9 @@ ShellRoot {
                     return !!(t && t.lastIpcObject && t.lastIpcObject.fullscreen);
                 } catch(e) { return false; }
             }
-            // the bar auto-hides when the user turned it on, or when configured to hide on fullscreen
-            readonly property bool autoHiding: root.cfgAutoHide || (root.cfgHideFullscreen && bar.fsActive)
+            readonly property bool gamingHide: root.cfgHideGaming && (root.gameOn || root.gameLive !== null)
+            // the bar auto-hides when the user turned it on, or when configured to hide on fullscreen / gaming
+            readonly property bool autoHiding: root.cfgAutoHide || (root.cfgHideFullscreen && bar.fsActive) || bar.gamingHide
             // the bar is "out" (fully shown) when not auto-hiding, or hovered, or a dropdown is open
             readonly property bool barOut: !bar.autoHiding || bar.revealed || root.openPop !== ""
             color: "transparent"
@@ -3793,6 +5651,8 @@ ShellRoot {
             Region { id: revealRegion; item: revealStrip }
             Timer { id: barHideTimer; interval: 550; onTriggered: if (root.openPop === "" && !bar.barHover) bar.revealed = false }
             // re-arm the hide once a dropdown closes or fullscreen kicks in, if the cursor's away
+            Connections { target: root; function onGameOnChanged() { if (bar.autoHiding && !bar.barHover && root.openPop === "") barHideTimer.restart() } }
+            Connections { target: root; function onGameLiveChanged() { if (bar.autoHiding && !bar.barHover && root.openPop === "") barHideTimer.restart() } }
             Connections { target: root; function onOpenPopChanged() { if (root.openPop === "" && bar.autoHiding && !bar.barHover) barHideTimer.restart() } }
             onAutoHidingChanged: if (bar.autoHiding && !bar.barHover && root.openPop === "") barHideTimer.restart()
             // a sliver pinned to the docked edge — hovering it slides the bar back out
@@ -3835,7 +5695,7 @@ ShellRoot {
                     Behavior on y { NumberAnimation { duration: 210; easing.type: Easing.OutCubic } }
                 }
                 HoverHandler { onHoveredChanged: { bar.barHover = hovered; if (hovered) { barHideTimer.stop(); bar.revealed = true } else if (bar.autoHiding) barHideTimer.restart() } }
-            Rectangle {
+            Glass {
                 id: barBg
                 width: barInset.width / bar.ui
                 height: barInset.height / bar.ui
@@ -3849,9 +5709,8 @@ ShellRoot {
                 // In PILL mode the strip itself carries nothing: the three clusters grow
                 // their own grounds below, and one continuous background behind them would
                 // just be the bar again with extra outlines drawn on it.
-                color: root.barPills ? "transparent" : theme.a(root.barFillColor, root.barSurfaceOpacity)
-                border.width: (root.barPills || root.barSurfaceOpacity < 0.06) ? 0 : 1
-                border.color: Tok.ruleHard
+                on: !root.barPills
+                tint: root.barFillColor
 
                 Item {
                     id: horizontalBarLayout
@@ -3865,7 +5724,7 @@ ShellRoot {
                     //
                     // z:-1 rather than declaration order, because these have to sit behind
                     // siblings that are declared further down and positioned by xFor().
-                    Rectangle {
+                    Glass {
                         z: -1
                         visible: root.barPills && leftGroup.width > 0
                         anchors.fill: leftGroup
@@ -3873,11 +5732,9 @@ ShellRoot {
                         anchors.leftMargin: -9
                         anchors.rightMargin: -9
                         radius: Tok.rCard
-                        color: theme.a(root.barFillColor, root.barSurfaceOpacity)
-                        border.width: root.barSurfaceOpacity < 0.06 ? 0 : 1
-                        border.color: Tok.ruleHard
+                        tint: root.barFillColor
                     }
-                    Rectangle {
+                    Glass {
                         z: -1
                         visible: root.barPills && rightGroup.width > 0
                         anchors.fill: rightGroup
@@ -3885,9 +5742,7 @@ ShellRoot {
                         anchors.leftMargin: -9
                         anchors.rightMargin: -9
                         radius: Tok.rCard
-                        color: theme.a(root.barFillColor, root.barSurfaceOpacity)
-                        border.width: root.barSurfaceOpacity < 0.06 ? 0 : 1
-                        border.color: Tok.ruleHard
+                        tint: root.barFillColor
                     }
                     // Never use visible:false — a hidden subtree collapses its Text pills'
                     // implicitWidth to 0 and doesn't recover on re-show, which is what wiped
@@ -3916,28 +5771,56 @@ ShellRoot {
                     // workspaces fade out first and the menu fades in where they were. On the
                     // way out the old menu is already gone (the snapshot is the new window's),
                     // so the workspaces just fade straight back in.
+                    //
+                    // Switching fast means most of these fades get interrupted. So only a real
+                    // change of content restarts from invisible; otherwise it carries on from
+                    // wherever it had got to, and going back and forth never blinks.
                     property bool menuShown: false
                     property real swapFade: 1
                     property real swapSlide: 0
+                    function settleSwap(shown) {
+                        swapAnim.stop();
+                        swapOut.stop();
+                        if (shown !== leftGroup.menuShown) {
+                            leftGroup.menuShown = shown;
+                            leftGroup.swapFade = 0;
+                            leftGroup.swapSlide = -6;
+                        }
+                        swapIn.start();
+                    }
                     Connections {
                         target: gmenu
                         function onAvailableChanged() {
-                            swapAnim.stop();
-                            if (gmenu.available) swapAnim.start();
-                            else { leftGroup.menuShown = false; swapIn.start(); }
+                            if (!gmenu.available) leftGroup.settleSwap(false);
+                            else if (leftGroup.menuShown) leftGroup.settleSwap(true);
+                            else { swapIn.stop(); swapOut.stop(); swapAnim.start(); }
+                        }
+                        // Focus has moved and the daemon has not caught up: the strip on screen
+                        // is about the last window, so it goes, and what replaces it waits.
+                        function onSwitchingChanged() {
+                            if (gmenu.switching) {
+                                if (!leftGroup.menuShown) return;
+                                swapAnim.stop();
+                                swapIn.stop();
+                                swapOut.start();
+                            } else if (leftGroup.menuShown) {
+                                leftGroup.settleSwap(gmenu.available);
+                            }
                         }
                     }
+                    NumberAnimation { id: swapOut; target: leftGroup; property: "swapFade"; to: 0
+                        duration: Math.min(Tok.mMicro, 50); easing.type: Easing.OutCubic }
                     SequentialAnimation {
                         id: swapAnim
                         NumberAnimation { target: leftGroup; property: "swapFade"; to: 0
-                            duration: Tok.mMicro; easing.type: Easing.InCubic }
-                        ScriptAction { script: { leftGroup.menuShown = gmenu.available; swapIn.start(); } }
+                            duration: Math.min(Tok.mMicro, 50); easing.type: Easing.OutCubic }
+                        ScriptAction { script: leftGroup.settleSwap(gmenu.available) }
                     }
                     ParallelAnimation {
                         id: swapIn
-                        NumberAnimation { target: leftGroup; property: "swapFade"; from: 0; to: 1
+                        NumberAnimation { target: leftGroup; property: "swapFade"; to: 1
                             duration: Tok.mBase; easing.type: Easing.OutCubic }
-                        NumberAnimation { target: leftGroup; property: "swapSlide"; from: -6; to: 0
+                        NumberAnimation { target: leftGroup; property: "swapSlide"; to: 0
                             duration: Tok.mBase; easing.type: Easing.OutCubic }
                     }
                     function oidx(w) { var i = leftGroup.order ? leftGroup.order.indexOf(w) : -1; return i < 0 ? 999 : i; }
@@ -3984,7 +5867,11 @@ ShellRoot {
                                 if (e.button === Qt.RightButton) { launcher.toggle(); return }
                                 root.openPop = (root.openPop === "sea") ? "" : "sea";
                             } } }
-                    Drop { screen: bar.screen
+                    LazyLoader {
+                        activeAsync: (root.openPop === "sea" && bar.modelData && Hyprland.focusedMonitor
+                                  && bar.modelData.name === Hyprland.focusedMonitor.name)
+                                 || !!(item && item.visible)
+                        Drop { screen: bar.screen
                         id: seaDrop; host: root.barVertical ? logoVert : seaMark
                         // NOT `root.openBar === bar`. That is the right test for a pill,
                         // because a pill click can say which bar it belongs to — but the
@@ -4020,7 +5907,11 @@ ShellRoot {
                                     Rectangle { anchors.fill: parent; anchors.topMargin: 1; anchors.bottomMargin: 1
                                         visible: smRow.lit
                                         radius: Math.min(7, Tok.r); color: theme.iris }
-                                    Sym { visible: !smRow.isSep
+                                    SeaLogo { visible: smRow.modelData.id === "about"
+                                        anchors.left: parent.left; anchors.leftMargin: 10
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        size: 15; accent: theme.iris }
+                                    Sym { visible: !smRow.isSep && smRow.modelData.id !== "about"
                                         anchors.left: parent.left; anchors.leftMargin: 10
                                         anchors.verticalCenter: parent.verticalCenter
                                         text: modelData.icon || ""; sz: 15
@@ -4051,6 +5942,7 @@ ShellRoot {
                             }
                         }
                     }
+                    }
                     Grid { property string lid: "lgWork"; x: leftGroup.xFor(lid); anchors.verticalCenter: parent.verticalCenter
                         // A menu bar is long, and the left cluster is the only place it can go
                         // without running into the media pill. So the workspaces stand down for
@@ -4065,7 +5957,7 @@ ShellRoot {
                         rowSpacing: 6; columnSpacing: 6
                         verticalItemAlignment: Grid.AlignVCenter
                         Repeater {
-                            model: Hyprland.workspaces
+                            model: root.stripWorkspaces
                             delegate: Rectangle {
                                 required property var modelData
                                 readonly property bool foc: Hyprland.focusedWorkspace && Hyprland.focusedWorkspace.id === modelData.id
@@ -4253,6 +6145,9 @@ ShellRoot {
                             // sat here labelled "code". The daemon's snapshot is the one thing
                             // that can say nothing is focused.
                             if (gmenu.snapSaysNoWindow) return "";
+                            // Not until the daemon has said this window has no menu of its own, or
+                            // an app about to show its menu flashes its raw class name here first.
+                            if (gmenu.available || gmenu.snapStale) return "";
                             // only on the bar of the screen the window is on (see focusedMonitor above)
                             if (bar.modelData && root.activeWinMonitor && bar.modelData.name !== root.activeWinMonitor) return "";
                             try {
@@ -4296,7 +6191,7 @@ ShellRoot {
                     onRightClicked: { if(root.player) root.player.togglePlaying() }
                     onScrolled: (dy)=>{ if(!root.player) return; if(dy>0) root.player.next(); else root.player.previous() }
                 }
-                Drop { screen: bar.screen
+                LazyLoader { activeAsync: (root.openPop ==="mpris" && root.openBar === bar) || !!(item && item.visible); Drop { screen: bar.screen
                     id: mprisDrop; host: root.barVertical ? mprisPillVert : mprisPill; shown: root.openPop ==="mpris" && root.openBar === bar
                     cardW: Math.min(748, mprisDrop.swN - 24); cardH: Math.min(300, mprisDrop.shN - root.cfgHeight - 24)
 
@@ -4319,32 +6214,58 @@ ShellRoot {
                                     property bool cur: index === Math.min(root.playerSel, root.players.length-1)
                                     width: pcTxt.width + 18; height: 20; radius: Tok.r
                                     color: cur ? theme.a(theme.iris,0.28) : (pcMa.containsMouse ? theme.a(theme.iris,0.14) : theme.a(theme.line,0.5))
-                                    border.width: 1; border.color: cur ? theme.iris : theme.a(theme.line,0.9)
-                                    Text { id: pcTxt; anchors.centerIn: parent; text: (root.players[index].identity||"player").toLowerCase()
-                                        color: cur ? theme.text : theme.sub; font.pixelSize: 9; font.family: Tok.sans }
+                                    border.width: cur ? 1 : 0; border.color: theme.iris
+                                    Text { id: pcTxt; anchors.centerIn: parent; text: root.players[index].identity||"Player"
+                                        color: cur ? theme.text : theme.sub; font.pixelSize: 11; font.family: Tok.sans }
                                     MouseArea { id: pcMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
                                         onClicked: root.playerSel = index } } } }
 
-                        MaterialWidget {
-                            width: parent.width; height: root.players.length > 1 ? 96 : 124
-                            kind: "media"; mediaPart: "controls"; player: root.player; viz: root.vizBars; active: mprisDrop.shown
-                            surface: Tok.surface; container: Tok.accentWash; accent: Tok.accent
-                            ink: Tok.ink; secondary: Tok.ink2; accentInk: Tok.accentInk; reducedMotion: Tok.reducedMotion
-                        }
-                        Row { spacing: 8; width: parent.width
-                            Rectangle { width: (parent.width-8)/2; height: 30; radius: 15
-                                color: root.player && root.player.shuffle ? Tok.accentWash : "transparent"
-                                Text { anchors.centerIn: parent; text: "Shuffle"; color: Tok.ink2; font.family: Tok.sans; font.pixelSize: 12 }
-                                opacity: root.player && root.player.shuffleSupported ? 1 : 0.4
-                                MouseArea { anchors.fill: parent; enabled: !!root.player && root.player.shuffleSupported; cursorShape: Qt.PointingHandCursor
-                                    onClicked: root.player.shuffle = !root.player.shuffle }
-                            }
-                            Rectangle { width: (parent.width-8)/2; height: 30; radius: 15
-                                color: root.player && root.player.loopState !== MprisLoopState.None ? Tok.accentWash : "transparent"
-                                Text { anchors.centerIn: parent; text: root.player && root.player.loopState===MprisLoopState.Track ? "Repeat track" : root.player && root.player.loopState===MprisLoopState.Playlist ? "Repeat playlist" : "Repeat off"; color: Tok.ink2; font.family: Tok.sans; font.pixelSize: 12 }
-                                opacity: root.player && root.player.loopSupported ? 1 : 0.4
-                                MouseArea { anchors.fill: parent; enabled: !!root.player && root.player.loopSupported; cursorShape: Qt.PointingHandCursor
-                                    onClicked: root.player.loopState = root.player.loopState===MprisLoopState.None ? MprisLoopState.Playlist : root.player.loopState===MprisLoopState.Playlist ? MprisLoopState.Track : MprisLoopState.None }
+                        // Shuffle and repeat sit either side of the transport, as on every player, and
+                        // the seek bar under it. All of it centres in what the rows below leave free.
+                        Item { width: parent.width
+                            height: mediaFrame.controlsHost.height - y - 7 - outputRow.height - (volumeRow.visible ? volumeRow.height + 7 : 0)
+                            Column { anchors.centerIn: parent; width: parent.width; spacing: 10
+                                Item { width: parent.width; height: 72
+                                    MaterialWidget { id: mprControls; anchors.fill: parent
+                                        kind: "media"; mediaPart: "controls"; player: root.player; viz: root.vizBars; active: mprisDrop.shown
+                                        surface: Tok.surface; container: Tok.accentWash; accent: Tok.accent
+                                        ink: Tok.ink; secondary: Tok.ink2; accentInk: Tok.accentInk; reducedMotion: Tok.reducedMotion
+                                    }
+                                    Rectangle { width: 36; height: 36; radius: 18
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        anchors.horizontalCenter: parent.horizontalCenter; anchors.horizontalCenterOffset: -118
+                                        readonly property bool on: !!root.player && root.player.shuffle
+                                        color: on ? Tok.alpha(Tok.accent, 0.18) : "transparent"
+                                        opacity: root.player && root.player.shuffleSupported ? 1 : 0.35
+                                        Sym { anchors.centerIn: parent; text: "shuffle"; sz: 20; color: parent.on ? Tok.accent : Tok.ink2 }
+                                        MouseArea { anchors.fill: parent; enabled: !!root.player && root.player.shuffleSupported; cursorShape: Qt.PointingHandCursor
+                                            onClicked: root.player.shuffle = !root.player.shuffle }
+                                    }
+                                    Rectangle { width: 36; height: 36; radius: 18
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        anchors.horizontalCenter: parent.horizontalCenter; anchors.horizontalCenterOffset: 118
+                                        readonly property bool on: !!root.player && root.player.loopState !== MprisLoopState.None
+                                        color: on ? Tok.alpha(Tok.accent, 0.18) : "transparent"
+                                        opacity: root.player && root.player.loopSupported ? 1 : 0.35
+                                        Sym { anchors.centerIn: parent; sz: 20; color: parent.on ? Tok.accent : Tok.ink2
+                                            text: root.player && root.player.loopState === MprisLoopState.Track ? "repeat_one" : "repeat" }
+                                        MouseArea { anchors.fill: parent; enabled: !!root.player && root.player.loopSupported; cursorShape: Qt.PointingHandCursor
+                                            onClicked: root.player.loopState = root.player.loopState===MprisLoopState.None ? MprisLoopState.Playlist : root.player.loopState===MprisLoopState.Playlist ? MprisLoopState.Track : MprisLoopState.None }
+                                    }
+                                }
+                                Item { width: parent.width; height: 28
+                                    visible: !!root.player && root.player.length > 0
+                                    Rectangle { anchors.left: parent.left; anchors.right: parent.right; y: 3; height: 4; radius: 2; color: theme.a(theme.line,0.85)
+                                        Rectangle { height: parent.height; radius: 2; color: theme.a(theme.iris,0.8)
+                                            width: parent.width * (root.player && root.player.length > 0 ? Math.max(0, Math.min(1, mprControls.playPosition / root.player.length)) : 0) } }
+                                    MouseArea { anchors.left: parent.left; anchors.right: parent.right; height: 12
+                                        enabled: !!root.player && root.player.canSeek; cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+                                        onClicked: (e) => mprControls.seek(e.x / width) }
+                                    Text { anchors.left: parent.left; anchors.bottom: parent.bottom; text: mprControls.timeText(root.player ? Math.min(mprControls.playPosition, root.player.length) : 0)
+                                        color: theme.sub; font.pixelSize: 11; font.family: Tok.sans }
+                                    Text { anchors.right: parent.right; anchors.bottom: parent.bottom; text: mprControls.timeText(root.player ? root.player.length : 0)
+                                        color: theme.sub; font.pixelSize: 11; font.family: Tok.sans }
+                                }
                             }
                         }
 
@@ -4353,19 +6274,19 @@ ShellRoot {
                         // going, and whether it is arriving untouched. It was two 10px lines wedged
                         // under the album name. It is the most specific fact this panel holds, so it
                         // gets a strip of its own and reads like the instrument readout it is.
-                        Rectangle {
+                        Rectangle { id: outputRow
                             width: parent.width; height: 26; radius: Tok.r
                             visible: root.player !== null
                             color: "transparent"
                             border.width: 0
                             border.color: theme.a(theme.line,0.9)
-                            Row { anchors.left: parent.left; anchors.leftMargin: 8
+                            Row { anchors.left: parent.left
                                 anchors.right: hqChip.left; anchors.rightMargin: 6
                                 anchors.verticalCenter: parent.verticalCenter; spacing: 6
                                 Sym { anchors.verticalCenter: parent.verticalCenter
                                     text: "volume_up"; sz: 13; color: theme.sub }
-                                IndText { anchors.verticalCenter: parent.verticalCenter; mono: true; sz: 9
-                                    text: "OUT"; color: theme.sub; font.letterSpacing: 1 }
+                                Text { anchors.verticalCenter: parent.verticalCenter
+                                    text: "Output"; color: theme.sub; font.pixelSize: 11; font.family: Tok.sans }
                                 Text { anchors.verticalCenter: parent.verticalCenter
                                     text: root.outputLabel; elide: Text.ElideRight
                                     color: theme.sub
@@ -4378,7 +6299,7 @@ ShellRoot {
                                 tone: "warn" } }
 
                         // ---- player volume ----
-                        Row { width: parent.width; spacing: 8; visible: root.player ? root.player.volumeSupported : false
+                        Row { id: volumeRow; width: parent.width; spacing: 8; visible: root.player ? root.player.volumeSupported : false
                             Sym { anchors.verticalCenter: parent.verticalCenter; text: "volume_down"; sz: 15; color: theme.sub }
                             Item { width: parent.width - 48; height: 12; anchors.verticalCenter: parent.verticalCenter
                                 Rectangle { anchors.verticalCenter: parent.verticalCenter; width: parent.width; height: 4; radius: Tok.r; color: theme.a(theme.line,0.85)
@@ -4408,22 +6329,22 @@ ShellRoot {
                                         delegate: Rectangle { required property var modelData
                                             readonly property bool on: modelData.k==="r" ? root.cfgLyrRomaji : root.cfgLyrTrans
                                             height: 20; radius: 6; width: languageLabel.implicitWidth+12
-                                            color: on ? Tok.accentWash : Tok.sunken
-                                            Text { id: languageLabel; anchors.centerIn: parent; text: modelData.l; color: Tok.ink2; font.pixelSize: 10; font.family: Tok.sans }
+                                            color: on ? Tok.alpha(Tok.accent, 0.18) : Tok.alpha(Tok.ink, 0.06)
+                                            Text { id: languageLabel; anchors.centerIn: parent; text: modelData.l; color: Tok.ink2; font.pixelSize: 11; font.family: Tok.sans }
                                             MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
                                                 onClicked: modelData.k==="r" ? root.lyrToggleRomaji() : root.lyrToggleTrans() }
                                         }
                                     }
                                     Text { anchors.verticalCenter: parent.verticalCenter; visible: root.lyricsState==="ok"
-                                        text: "Synced"; color: theme.sub; font.pixelSize: 10; font.family: Tok.sans }
+                                        text: "Synced"; color: theme.sub; font.pixelSize: 11; font.family: Tok.sans }
                                 }
                             }
                             Rectangle { width: parent.width; height: 1; color: theme.a(theme.iris,0.2) }
                             // height was hardcoded to `- 34` against a header that has since grown a
                             // row of 18px chips, so the list ran past the bottom of the panel
                             Item { width: parent.width; height: parent.height - 44
-                                Text { anchors.centerIn: parent; visible: root.lyricsState==="loading"; text: "fetching lyrics…"; color: theme.sub; font.pixelSize: 11; font.family: Tok.sans }
-                                Text { anchors.centerIn: parent; visible: root.lyricsState==="none"; text: "no lyrics found"; color: theme.sub; font.pixelSize: 11; font.family: Tok.sans }
+                                Text { anchors.centerIn: parent; visible: root.lyricsState==="loading"; text: "Fetching lyrics…"; color: theme.sub; font.pixelSize: 11; font.family: Tok.sans }
+                                Text { anchors.centerIn: parent; visible: root.lyricsState==="none"; text: "No lyrics found"; color: theme.sub; font.pixelSize: 11; font.family: Tok.sans }
                                 // synced: follows playback, current line highlighted, click to seek
                                 ListView { id: lyrView; anchors.fill: parent; visible: root.lyricsState==="ok"; clip: true
                                     model: root.lyrics; spacing: 3
@@ -4485,7 +6406,7 @@ ShellRoot {
                         Column { id: detailsCol; width: infoScroll.width; spacing: 6
                             Row { width: parent.width; spacing: 6
                                 Sym { anchors.verticalCenter: parent.verticalCenter; text: "info"; sz: 15; color: theme.iris }
-                                Text { anchors.verticalCenter: parent.verticalCenter; text: "track details"; color: theme.text; font.pixelSize: 12; font.bold: true; font.family: Tok.sans } }
+                                Text { anchors.verticalCenter: parent.verticalCenter; text: "Track details"; color: theme.text; font.pixelSize: 12; font.bold: true; font.family: Tok.sans } }
                             Rectangle { width: parent.width; height: 1; color: theme.a(theme.iris,0.2) }
                             // detail rows (static ones via a model; live time rows bound directly so they don't rebuild the list)
                             Column { id: infoRows; width: parent.width; spacing: 6
@@ -4543,6 +6464,7 @@ ShellRoot {
                         }
                         }
                     } }
+                }
 
                 // ---------- END: weather · tray · wifi · vol · battery · clock ----------
                 // Grid, same trick as leftGroup — horizontal (top/bottom) or vertical (left/right).
@@ -4564,6 +6486,8 @@ ShellRoot {
                     // position of a widget id in the saved order (unknown → far end)
                     function oidx(w) {
                         if (w === "wgOverflow") return -1;          // always the centre-most item
+                        if (w === "wgPrivacy") return -2;           // not a choice you make, so not in the saved order
+                        if (w === "wgGame") return -3;              // gaming session indicator (transient)
                         var i = rightGroup.order ? rightGroup.order.indexOf(w) : -1; return i < 0 ? 999 : i;
                     }
                     // x of a child = summed widths of visible siblings ordered before it (left→right)
@@ -4728,6 +6652,35 @@ ShellRoot {
                         accent: root.updTotal > 0 ? theme.warn : theme.frost
                         value: root.updTotal > 0 ? String(root.updTotal) : "" }
 
+                    // ---- AI USAGE (allowance left, and when that window resets) ----
+                    Pill { owner: bar; id: aiPill; key: "ai"
+                        wid: "wgAi"; x: rightGroup.xFor(wid); anchors.verticalCenter: parent.verticalCenter
+                        visible: root.cfgAi
+                        mark: root.aiShown ? root.aiShown.id : "claude"
+                        markAlso: (root.aiShown && root.aiShown.with) ? root.aiShown.with : ""
+                        accent: root.aiAccent
+                        value: root.aiBarValue
+                        maxTextW: 72 }
+
+                    // ---- GITHUB (today's commits / streak) ----
+                    Pill { owner: bar; id: ghPill; key: "gh"
+                        wid: "wgGithub"; x: rightGroup.xFor(wid); anchors.verticalCenter: parent.verticalCenter
+                        visible: root.cfgGithub
+                        icon: root.githubPillIcon
+                        accent: root.githubPillAccent
+                        ember: root.githubSputter ? root.githubEmber : 1.0
+                        value: root.githubBarValue
+                        maxTextW: 48 }
+
+                    // ---- TOTEM (2FA) ----
+                    Pill { owner: bar; id: totemPill; key: "totem"
+                        wid: "wgTotem"; x: rightGroup.xFor(wid); anchors.verticalCenter: parent.verticalCenter
+                        visible: root.cfgTotem
+                        icon: root.totemPillIcon
+                        accent: root.totemPillAccent
+                        value: root.totemCode !== "" ? root.totemCode : ""
+                        maxTextW: 72 }
+
                     // ---- NETWORK THROUGHPUT ----
                     // No dropdown: the pill IS the readout, and the per-interface detail lives in
                     // the Dashboard where there is room for it. Clicking opens Network settings.
@@ -4745,9 +6698,17 @@ ShellRoot {
                     Pill { owner: bar; id: bellPill; key: "notif"
                         wid: "wgNotif"; x: rightGroup.xFor(wid); anchors.verticalCenter: parent.verticalCenter
                         visible: root.cfgNotif
-                        icon: root.dnd ? "notifications_off" : (root.notes.length>0 ? "notifications" : "notifications_none")
-                        accent: root.dnd ? theme.warn : (root.notes.length>0 ? theme.iris : theme.frost)
-                        value: root.dnd ? "" : (root.notes.length>0 ? String(root.notes.length) : "") }
+                        icon: root.silenced ? "notifications_off" : (root.notes.length>0 ? "notifications" : "notifications_none")
+                        accent: root.silenced ? theme.warn : (root.notes.length>0 ? theme.iris : theme.frost)
+                        value: root.silenced ? "" : (root.notes.length>0 ? String(root.notes.length) : "") }
+
+                    // ---- IN USE: mic, camera, screen. Only there while something is ----
+                    Pill { owner: bar; id: privacyPill
+                        wid: "wgPrivacy"; x: rightGroup.xFor(wid); anchors.verticalCenter: parent.verticalCenter
+                        visible: root.privacyLabel !== ""
+                        icon: root.cameraApps.length ? "videocam" : (root.micApps.length ? "mic" : "screen_share")
+                        accent: theme.warn; value: root.privacyLabel; maxTextW: 130
+                        onClicked: root.openSettings(0) }
                     
 
                     // ---- WIFI ----
@@ -4792,6 +6753,19 @@ ShellRoot {
                               : (root.kdeBattery >= 0 && root.kdeBattery <= 20 ? theme.bad : theme.iris))
                         value: root.kdeBattery >= 0 ? root.kdeBattery + "%" : "" }
 
+
+                    // ---- GAMING ---- (game mode and/or an active Steam/gamescope window)
+                    Pill { owner: bar; id: gamePill
+                        wid: "wgGame"; x: rightGroup.xFor(wid); anchors.verticalCenter: parent.verticalCenter
+                        visible: root.gameOn || root.gameLive !== null
+                        icon: "sports_esports"
+                        accent: root.gameOn ? theme.iris : theme.frost
+                        value: root.gameBarValue
+                        maxTextW: 160
+                        onClicked: {
+                            if (root.gameOn) root.toggleGame();
+                            root.openDashboardGaming();
+                        } }
 
                     // ---- CAFFEINE ---- (mug icon; lit yellow when keeping the screen awake)
                     Pill { owner: bar
@@ -4873,8 +6847,8 @@ ShellRoot {
                         visible: root.cfgClock
                         // when a timer/pomodoro is live the pill becomes a countdown; otherwise it's the clock
                         icon: root.tmrRunning ? (root.pomoActive ? (root.pomoPhase==="focus" ? "local_fire_department" : "coffee") : "timer") : "schedule"
-                        value: root.tmrRunning ? root.tmrText : Qt.formatDateTime(clock.date,"ddd d MMM · HH:mm")
-                        vertValue: root.tmrRunning ? root.tmrText : Qt.formatDateTime(clock.date,"HH:mm")
+                        value: root.tmrRunning ? root.tmrText : Qt.formatDateTime(clock.date, root.cfgClock24 ? (root.cfgClockSeconds ? "ddd d MMM · HH:mm:ss" : "ddd d MMM · HH:mm") : (root.cfgClockSeconds ? "ddd d MMM · h:mm:ss ap" : "ddd d MMM · h:mm ap"))
+                        vertValue: root.tmrRunning ? root.tmrText : Qt.formatDateTime(clock.date, root.cfgClock24 ? (root.cfgClockSeconds ? "HH:mm:ss" : "HH:mm") : (root.cfgClockSeconds ? "h:mm:ss" : "h:mm"))
                         accent: root.tmrRunning ? (root.tmrPaused ? theme.warn : (root.pomoActive && root.pomoPhase!=="focus" ? theme.good : theme.iris)) : theme.iris }
                      
 
@@ -4891,7 +6865,482 @@ ShellRoot {
                 // their parent doesn't matter — parking them here keeps the Grid pill-only.
                 Item { id: rightGroupDrops
                     // ---- UPDATES dropdown: what is pending, and one button to install it ----
-                    Drop { screen: bar.screen
+                    LazyLoader { activeAsync: (root.openPop === "gh" && root.openBar === bar) || !!(item && item.visible); Drop { screen: bar.screen
+                        id: ghDrop; host: root.barVertical ? ghPillVert : ghPill; shown: root.openPop === "gh" && root.openBar === bar
+                        cardW: 340; cardH: ghCol.implicitHeight + 28
+                        Column { id: ghCol; anchors.fill: ghDrop.card; anchors.margins: 14; spacing: 12
+                            Row {
+                                width: parent.width
+                                Text { text: root.githubPillIcon; font.family: "Material Symbols Outlined"; font.pixelSize: 16; color: root.githubPillAccent; anchors.verticalCenter: parent.verticalCenter
+                                    scale: root.githubSputter ? root.githubEmber : 1.0 }
+                                Item { width: 8; height: 1 }
+                                Text {
+                                    text: (root.github && root.github.ok) ? ("@" + root.github.login) : "GitHub"
+                                    color: theme.text; font.pixelSize: 13; font.family: Tok.sans; font.bold: true
+                                    anchors.verticalCenter: parent.verticalCenter
+                                }
+                                Item { Layout.fillWidth: true; width: parent.width - x - refreshLbl.width - 4; height: 1 }
+                                Text {
+                                    id: refreshLbl
+                                    text: "Refresh"
+                                    color: theme.sub; font.pixelSize: 11; font.family: Tok.sans
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    MouseArea { anchors.fill: parent; anchors.margins: -6; cursorShape: Qt.PointingHandCursor; onClicked: root.refreshGithub(true) }
+                                }
+                            }
+                            // Stats: three equal columns, figures centred
+                            Row {
+                                width: parent.width
+                                Repeater {
+                                    model: [
+                                        { v: String((root.github && root.github.today) || 0), l: "today" },
+                                        { v: String((root.github && root.github.streak) || 0), l: "streak" },
+                                        { v: String((root.github && root.github.year) || 0), l: "year" }
+                                    ]
+                                    delegate: Item {
+                                        required property var modelData
+                                        width: parent.width / 3; height: statCol.implicitHeight
+                                        Column {
+                                            id: statCol
+                                            anchors.horizontalCenter: parent.horizontalCenter
+                                            spacing: 2
+                                            Text {
+                                                anchors.horizontalCenter: parent.horizontalCenter
+                                                text: modelData.v; color: theme.text; font.pixelSize: 22; font.family: Tok.sans; font.bold: true
+                                            }
+                                            Text {
+                                                anchors.horizontalCenter: parent.horizontalCenter
+                                                text: modelData.l; color: theme.sub; font.pixelSize: 11; font.family: Tok.sans
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            // Grid fills the card width
+                            Item {
+                                id: ghGridHost
+                                width: parent.width
+                                visible: root.github && root.github.ok && (root.github.weeks || []).length
+                                height: {
+                                    var weeks = (root.github && root.github.weeks) ? root.github.weeks : [];
+                                    var n = weeks.length;
+                                    if (n <= 0) return 0;
+                                    var gap = 2;
+                                    var cell = Math.max(5, Math.floor((width - gap * Math.max(0, n - 1)) / n));
+                                    return cell * 7 + gap * 6;
+                                }
+                                Row {
+                                    id: ghGridRow
+                                    anchors.horizontalCenter: parent.horizontalCenter
+                                    spacing: 2
+                                    readonly property int cell: {
+                                        var n = (root.github && root.github.weeks) ? root.github.weeks.length : 0;
+                                        if (n <= 0) return 8;
+                                        return Math.max(5, Math.floor((ghGridHost.width - 2 * Math.max(0, n - 1)) / n));
+                                    }
+                                    Repeater {
+                                        model: (root.github && root.github.weeks) ? root.github.weeks : []
+                                        delegate: Column {
+                                            required property var modelData
+                                            spacing: 2
+                                            Repeater {
+                                                model: modelData
+                                                delegate: Rectangle {
+                                                    required property var modelData
+                                                    width: ghGridRow.cell; height: ghGridRow.cell; radius: Math.max(1, ghGridRow.cell * 0.2)
+                                                    color: {
+                                                        var n = Number(modelData.level) || 0;
+                                                        if (n <= 0) return theme.a(theme.line, 0.9);
+                                                        if (n === 1) return theme.a(theme.iris, 0.28);
+                                                        if (n === 2) return theme.a(theme.iris, 0.48);
+                                                        if (n === 3) return theme.a(theme.iris, 0.72);
+                                                        return theme.iris;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            Column {
+                                width: parent.width; spacing: 4
+                                visible: root.github && (root.github.repos || []).length
+                                Text { text: "Watched"; color: theme.sub; font.pixelSize: 11; font.family: Tok.sans }
+                                Repeater {
+                                    model: (root.github && root.github.repos) ? root.github.repos.slice(0, 4) : []
+                                    delegate: Row {
+                                        required property var modelData
+                                        width: parent.width; spacing: 8
+                                        Rectangle {
+                                            width: 7; height: 7; radius: 3.5; anchors.verticalCenter: parent.verticalCenter
+                                            color: modelData.ci === "ok" ? theme.good : (modelData.ci === "fail" ? theme.bad : (modelData.ci === "running" ? theme.warn : theme.faint))
+                                        }
+                                        Text {
+                                            width: parent.width - 20
+                                            text: (modelData.repo || "") + " · " + (modelData.prs || 0) + " PR"
+                                            color: theme.text; font.pixelSize: 12; font.family: Tok.sans; elide: Text.ElideMiddle
+                                            anchors.verticalCenter: parent.verticalCenter
+                                            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                                                onClicked: if (modelData.url) Quickshell.execDetached(["xdg-open", modelData.url]) }
+                                        }
+                                    }
+                                }
+                            }
+                            Text {
+                                visible: !(root.github && root.github.ok)
+                                width: parent.width
+                                horizontalAlignment: Text.AlignHCenter
+                                text: (root.github && root.github.error) ? root.github.error : "Sign in with gh auth login"
+                                color: theme.sub; font.pixelSize: 11; font.family: Tok.sans; wrapMode: Text.WordWrap
+                            }
+                            // Focus profiles (scene presets)
+                            Column {
+                                width: parent.width; spacing: 6
+                                Text {
+                                    width: parent.width
+                                    text: "Focus"; color: theme.sub; font.pixelSize: 11; font.family: Tok.sans
+                                }
+                                Flow {
+                                    width: parent.width; spacing: 6
+                                    Repeater {
+                                        model: {
+                                            var p = root.focusProfiles || ({});
+                                            var keys = Object.keys(p);
+                                            if (keys.indexOf("clear") < 0) keys.push("clear");
+                                            return keys;
+                                        }
+                                        delegate: Rectangle {
+                                            required property var modelData
+                                            readonly property var prof: (root.focusProfiles && root.focusProfiles[modelData]) ? root.focusProfiles[modelData] : ({ label: modelData, icon: "circle" })
+                                            readonly property bool on: root.focusId === modelData || (modelData === "clear" && !root.focusId)
+                                            implicitWidth: focRow.implicitWidth + 14; height: 26; radius: 13
+                                            color: on ? theme.a(theme.iris, 0.18) : theme.a(theme.line, 0.35)
+                                            border.width: 1; border.color: on ? theme.iris : theme.a(theme.iris, 0.12)
+                                            Row {
+                                                id: focRow; anchors.centerIn: parent; spacing: 4
+                                                Text { text: prof.icon || "circle"; font.family: "Material Symbols Outlined"; font.pixelSize: 13; color: on ? theme.iris : theme.sub; anchors.verticalCenter: parent.verticalCenter }
+                                                Text { text: prof.label || modelData; color: on ? theme.text : theme.sub; font.pixelSize: 11; font.family: Tok.sans; anchors.verticalCenter: parent.verticalCenter }
+                                            }
+                                            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.applyFocus(modelData) }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } }
+
+
+                    LazyLoader { activeAsync: (root.openPop === "totem" && root.openBar === bar) || !!(item && item.visible); Drop { screen: bar.screen
+                        id: totemDrop; host: root.barVertical ? totemPillVert : totemPill; shown: root.openPop === "totem" && root.openBar === bar
+                        cardW: 320; cardH: totemCol.implicitHeight + 28
+                        onShownChanged: if (shown) { root.refreshTotemStatus(); root.refreshTotemAccounts(); root.totemQuery = ""; root.totemCode = "" }
+                        Column { id: totemCol; anchors.fill: totemDrop.card; anchors.margins: 14; spacing: 10
+                            DropHeader {
+                                title: "Totem"
+                                status: root.totemNotice
+                                tone: root.totemStatus && root.totemStatus.paired ? "ok" : "warn"
+                                actionIcon: "refresh"
+                                actionBusy: root.totemBusy
+                                onAction: { root.refreshTotemStatus(); root.refreshTotemAccounts() }
+                            }
+                            Rectangle {
+                                width: parent.width; height: 32; radius: 8
+                                color: Tok.alpha(Tok.ink, 0.07); border.width: 1; border.color: Tok.alpha(Tok.iris, 0.2)
+                                TextInput {
+                                    id: totemSearch
+                                    anchors.fill: parent; anchors.leftMargin: 10; anchors.rightMargin: 10
+                                    verticalAlignment: Text.AlignVCenter
+                                    color: theme.text; font.pixelSize: 12; font.family: Tok.sans
+                                    selectionColor: theme.iris; selectedTextColor: Tok.accentInk
+                                    onTextChanged: root.totemQuery = text
+                                    Keys.onReturnPressed: {
+                                        var list = root.totemFiltered;
+                                        if (list.length === 1 && list[0].policy !== "never") root.fetchTotemCode(list[0].id);
+                                    }
+                                    Text {
+                                        anchors.fill: parent; verticalAlignment: Text.AlignVCenter
+                                        visible: !totemSearch.text && !totemSearch.activeFocus
+                                        text: "Search accounts…"
+                                        color: theme.faint; font.pixelSize: 12; font.family: Tok.sans
+                                    }
+                                }
+                            }
+                            // Scroll when there are many accounts — card height follows this
+                            // Flickable's viewport, not the full list, so rows never paint outside.
+                            Flickable {
+                                id: totemFlick
+                                width: parent.width
+                                visible: root.totemFiltered.length > 0
+                                height: Math.min(300, totemListCol.implicitHeight)
+                                contentHeight: totemListCol.implicitHeight
+                                contentWidth: width
+                                clip: true
+                                boundsBehavior: Flickable.StopAtBounds
+                                flickableDirection: Flickable.VerticalFlick
+                                Column {
+                                    id: totemListCol
+                                    width: totemFlick.width; spacing: 4
+                                    Repeater {
+                                        model: root.totemFiltered.slice(0, 24)
+                                        delegate: Rectangle {
+                                            required property var modelData
+                                            width: totemListCol.width
+                                            height: (modelData.subtitle || modelData.label) ? 44 : 36
+                                            radius: 8
+                                            color: rowMa.containsMouse ? Tok.alpha(Tok.ink, 0.07) : "transparent"
+                                            opacity: modelData.policy === "never" ? 0.55 : 1
+                                            Behavior on color { ColorAnimation { duration: Tok.mFast } }
+                                            MouseArea {
+                                                id: rowMa; anchors.fill: parent; hoverEnabled: true
+                                                cursorShape: Qt.PointingHandCursor
+                                                onClicked: {
+                                                    if (modelData.policy === "never") { root.totemNotice = "Phone-only account"; return }
+                                                    root.fetchTotemCode(modelData.id)
+                                                }
+                                            }
+                                            TotemBrand {
+                                                id: brand
+                                                anchors.left: parent.left; anchors.leftMargin: 8
+                                                anchors.verticalCenter: parent.verticalCenter
+                                                logo: modelData.logo || null
+                                                fallback: (modelData.title || "?").charAt(0)
+                                            }
+                                            Column {
+                                                anchors.left: brand.right; anchors.leftMargin: 10
+                                                anchors.right: chipBox.visible ? chipBox.left : parent.right
+                                                anchors.rightMargin: 8
+                                                anchors.verticalCenter: parent.verticalCenter
+                                                spacing: 1
+                                                Text {
+                                                    width: parent.width; elide: Text.ElideRight
+                                                    text: modelData.title || modelData.issuer || "Account"
+                                                    color: Tok.ink2; font.family: Tok.sans; font.pixelSize: 12
+                                                }
+                                                Text {
+                                                    visible: !!(modelData.subtitle || modelData.label)
+                                                    width: parent.width; elide: Text.ElideRight
+                                                    text: modelData.subtitle || modelData.label || ""
+                                                    color: Tok.ink3; font.family: Tok.sans; font.pixelSize: 10
+                                                }
+                                            }
+                                            IndChip {
+                                                id: chipBox
+                                                anchors.right: parent.right; anchors.rightMargin: 10
+                                                anchors.verticalCenter: parent.verticalCenter
+                                                visible: modelData.policy === "ask" || modelData.policy === "never"
+                                                text: modelData.policy === "ask" ? "ASK" : "PHONE"
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            Text {
+                                visible: !root.totemBusy && root.totemFiltered.length === 0
+                                width: parent.width; wrapMode: Text.WordWrap
+                                text: root.totemStatus && root.totemStatus.missing
+                                    ? "Build the CLI: cargo build -p totem-cli --release"
+                                    : (root.totemStatus && root.totemStatus.paired ? "No matching accounts." : "Pair a phone in the Totem app.")
+                                color: theme.sub; font.pixelSize: 12; font.family: Tok.sans
+                            }
+                            Rectangle {
+                                visible: root.totemCode !== ""
+                                width: parent.width; height: 44; radius: 10
+                                color: Tok.alpha(theme.iris, 0.18); border.width: 1; border.color: theme.iris
+                                Row {
+                                    anchors.centerIn: parent; spacing: 10
+                                    Text {
+                                        text: root.totemCode.length === 6
+                                            ? (root.totemCode.slice(0, 3) + " " + root.totemCode.slice(3))
+                                            : root.totemCode
+                                        color: theme.text; font.pixelSize: 22; font.family: Tok.sans; font.bold: true
+                                        font.features: { "tnum": 1 }
+                                    }
+                                    Text {
+                                        visible: root.totemCodeLeft > 0
+                                        text: root.totemCodeLeft + "s"; color: theme.sub; font.pixelSize: 12; font.family: Tok.sans
+                                        anchors.verticalCenter: parent.verticalCenter
+                                    }
+                                }
+                            }
+                            Row {
+                                spacing: 8
+                                Rectangle {
+                                    height: 28; radius: 8; width: openLbl.implicitWidth + 16
+                                    color: Tok.alpha(Tok.ink, 0.08)
+                                    Text { id: openLbl; anchors.centerIn: parent; text: "Open Totem"; color: theme.sub; font.pixelSize: 11; font.family: Tok.sans }
+                                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.openTotemApp() }
+                                }
+                            }
+                        }
+                    } }
+                    LazyLoader { activeAsync: (root.openPop === "ai" && root.openBar === bar) || !!(item && item.visible); Drop { screen: bar.screen
+                        id: aiDrop; host: root.barVertical ? aiPillVert : aiPill; shown: root.openPop === "ai" && root.openBar === bar
+                        // Grow with the plan chips so a third account does not clip off the card edge.
+                        cardW: Math.max(320, Math.ceil(aiTabs.implicitWidth) + 28)
+                        cardH: aiCol.implicitHeight + 28
+                        Column { id: aiCol; anchors.fill: aiDrop.card; anchors.margins: 14; spacing: 12
+                            Row {
+                                id: aiTabs
+                                spacing: 6
+                                Repeater {
+                                    model: Math.min(4, root.aiTools.length)
+                                    delegate: Rectangle {
+                                        required property int index
+                                        readonly property var plan: root.aiTools[index]
+                                        readonly property bool on: root.aiShown && plan.id === root.aiShown.id
+                                        implicitWidth: aiChip.implicitWidth + 16
+                                        height: 28
+                                        radius: 14
+                                        color: on ? theme.a(theme.iris, 0.18) : theme.a(theme.line, 0.35)
+                                        border.width: 1
+                                        border.color: on ? theme.iris : theme.a(theme.iris, 0.12)
+                                        Row {
+                                            id: aiChip
+                                            anchors.centerIn: parent; spacing: 5
+                                            AiMark {
+                                                anchors.verticalCenter: parent.verticalCenter
+                                                width: plan.with ? 22 : 14; height: 14
+                                                tool: plan.id; also: plan.with || ""
+                                            }
+                                            Text {
+                                                anchors.verticalCenter: parent.verticalCenter
+                                                text: plan.name || ""
+                                                color: on ? theme.text : theme.sub
+                                                font.pixelSize: 11; font.family: Tok.sans
+                                                font.bold: on
+                                            }
+                                            Rectangle {
+                                                visible: root.aiIsLive(plan.id)
+                                                anchors.verticalCenter: parent.verticalCenter
+                                                width: 7; height: 7; radius: 3.5
+                                                color: "#1b7a4b"
+                                                border.width: 1; border.color: Tok.bg
+                                            }
+                                        }
+                                        MouseArea {
+                                            anchors.fill: parent
+                                            cursorShape: Qt.PointingHandCursor
+                                            onClicked: root.setAiFocus(plan.id)
+                                        }
+                                    }
+                                }
+                            }
+                            Column {
+                                width: parent.width; spacing: 10
+                                visible: aiMeters.count > 0
+                                Repeater {
+                                    id: aiMeters
+                                    model: (root.aiShown && root.aiShown.windows) ? root.aiShown.windows : []
+                                    delegate: Column {
+                                        required property var modelData
+                                        width: aiCol.width - 28
+                                        spacing: 3
+                                        Item {
+                                            width: parent.width; height: 16
+                                            Text { anchors.left: parent.left; anchors.verticalCenter: parent.verticalCenter
+                                                text: modelData.label || ""; color: theme.text; font.pixelSize: 12; font.family: Tok.sans }
+                                            Text { anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
+                                                text: root.aiPct(modelData.used)
+                                                color: (Number(modelData.used) || 0) >= 95 ? theme.bad
+                                                    : ((Number(modelData.used) || 0) >= 80 ? theme.warn : theme.text)
+                                                font.pixelSize: 12; font.family: Tok.sans; font.bold: true }
+                                        }
+                                        Rectangle {
+                                            width: parent.width; height: 6; radius: 3
+                                            color: theme.a(theme.line, 0.9)
+                                            Rectangle {
+                                                width: parent.width * Math.max(0, Math.min(1, (Number(modelData.used) || 0) / 100))
+                                                height: parent.height; radius: 3
+                                                color: (Number(modelData.used) || 0) >= 95 ? theme.bad
+                                                    : ((Number(modelData.used) || 0) >= 80 ? theme.warn : theme.iris)
+                                            }
+                                        }
+                                        Text {
+                                            width: parent.width
+                                            text: modelData.reset || ""
+                                            color: theme.sub; font.pixelSize: 11; font.family: Tok.sans
+                                            elide: Text.ElideRight
+                                        }
+                                        Text {
+                                            visible: (modelData.pace || "").length > 0
+                                            width: parent.width
+                                            text: modelData.pace || ""
+                                            color: theme.sub; font.pixelSize: 11; font.family: Tok.sans
+                                            wrapMode: Text.WordWrap
+                                        }
+                                    }
+                                }
+                            }
+                            Column {
+                                width: parent.width; spacing: 6
+                                visible: aiDays.count > 1
+                                Text { text: "This week"; color: theme.sub; font.pixelSize: 11; font.family: Tok.sans }
+                                Row {
+                                    width: parent.width
+                                    Repeater {
+                                        id: aiDays
+                                        model: (root.aiShown && root.aiShown.days) ? root.aiShown.days : []
+                                        delegate: Column {
+                                            required property var modelData
+                                            width: aiDays.count > 0 ? parent.width / aiDays.count : 0
+                                            spacing: 3
+                                            readonly property real share: {
+                                                var peak = 0;
+                                                var days = (root.aiShown && root.aiShown.days) ? root.aiShown.days : [];
+                                                for (var i = 0; i < days.length; i++)
+                                                    peak = Math.max(peak, Number(days[i].used) || 0);
+                                                var used = Number(modelData.used) || 0;
+                                                return peak > 0 ? used / peak : 0;
+                                            }
+                                            Text {
+                                                width: parent.width
+                                                horizontalAlignment: Text.AlignHCenter
+                                                text: (Number(modelData.used) || 0) > 0 ? root.aiPct(modelData.used) : ""
+                                                color: modelData.today ? theme.text : theme.sub
+                                                font.pixelSize: 9; font.family: Tok.sans
+                                                elide: Text.ElideRight
+                                            }
+                                            Item {
+                                                width: parent.width; height: 36
+                                                Rectangle {
+                                                    anchors.bottom: parent.bottom
+                                                    anchors.horizontalCenter: parent.horizontalCenter
+                                                    width: 10; radius: 2
+                                                    height: Math.max(2, 36 * share)
+                                                    color: modelData.today ? theme.iris : theme.a(theme.iris, 0.45)
+                                                }
+                                            }
+                                            Text {
+                                                width: parent.width
+                                                horizontalAlignment: Text.AlignHCenter
+                                                text: modelData.label || ""
+                                                color: modelData.today ? theme.text : theme.sub
+                                                font.pixelSize: 10; font.family: Tok.sans
+                                                font.bold: !!modelData.today
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            Text {
+                                visible: aiMeters.count === 0
+                                width: parent.width
+                                text: {
+                                    var all = (root.aiUsage && root.aiUsage.tools) ? root.aiUsage.tools : [];
+                                    if (root.aiShown)
+                                        return "Checking this plan.";
+                                    if (all.length === 0)
+                                        return "Sign in to Cursor, GPT, Claude or Antigravity.";
+                                    if (root.aiTools.length === 0)
+                                        return "No plans enabled — turn one on in Settings.";
+                                    return "Checking plan usage.";
+                                }
+                                color: theme.sub; font.pixelSize: 11; font.family: Tok.sans
+                            }
+                        }
+                    } }
+
+                    LazyLoader { activeAsync: (root.openPop === "upd" && root.openBar === bar) || !!(item && item.visible); Drop { screen: bar.screen
                         id: updDrop; host: root.barVertical ? updPillVert : updPill; shown: root.openPop === "upd" && root.openBar === bar
                         cardW: 340; cardH: updCol.implicitHeight + 30
                         Column { id: updCol; anchors.fill: updDrop.card; anchors.margins: 15; spacing: 10
@@ -4899,11 +7348,11 @@ ShellRoot {
                                 Text { text: "Updates"; color: theme.text; font.pixelSize: 15; font.family: Tok.sans; font.bold: true }
                                 Item { width: parent.width - 120; height: 1 }
                                 Text { text: root.updChecking ? "checking…" : (root.updRepo + " repo · " + root.updAur + " aur")
-                                    color: theme.sub; font.pixelSize: 10; font.family: Tok.mono } }
+                                    color: theme.sub; font.pixelSize: 11; font.family: Tok.mono } }
                             Rectangle { width: parent.width; height: 1; color: theme.a(theme.iris, 0.16) }
 
                             Text { visible: root.updTotal === 0 && !root.updChecking
-                                text: "everything is up to date"; color: theme.sub; font.pixelSize: 12; font.family: Tok.sans }
+                                text: "Everything is up to date"; color: theme.sub; font.pixelSize: 12; font.family: Tok.sans }
 
                             // Capped, but the footer says by how much — a list that silently stops
                             // at 12 reads as "12 updates" when it might be 90.
@@ -4926,13 +7375,13 @@ ShellRoot {
                                             text: u.name; color: theme.text; font.pixelSize: 11; font.family: Tok.mono }
                                         Text { anchors.verticalCenter: parent.verticalCenter
                                             width: 130; elide: Text.ElideLeft; horizontalAlignment: Text.AlignRight
-                                            text: u.nw; color: theme.sub; font.pixelSize: 10; font.family: Tok.mono }
+                                            text: u.nw; color: theme.sub; font.pixelSize: 11; font.family: Tok.mono }
                                     }
                                 }
                             }
                             Text { visible: root.updList.length > 12
                                 text: "+" + (root.updList.length - 12) + " more not shown"
-                                color: theme.sub; font.pixelSize: 10; font.family: Tok.mono }
+                                color: theme.sub; font.pixelSize: 11; font.family: Tok.mono }
 
                             Row { width: parent.width; spacing: 8
                                 Rectangle { width: (parent.width - 8) * 0.62; height: 34; radius: Tok.r
@@ -4942,139 +7391,48 @@ ShellRoot {
                                     Row { anchors.centerIn: parent; spacing: 7
                                         Sym { anchors.verticalCenter: parent.verticalCenter; text: "download"; sz: 15
                                             color: updGoMa.containsMouse ? Tok.accentInk : theme.frost }
-                                        Text { anchors.verticalCenter: parent.verticalCenter; text: "update now"
+                                        Text { anchors.verticalCenter: parent.verticalCenter; text: "Update now"
                                             color: updGoMa.containsMouse ? Tok.accentInk : theme.text; font.pixelSize: 12; font.family: Tok.sans } }
                                     MouseArea { id: updGoMa; anchors.fill: parent; hoverEnabled: true
                                         enabled: root.updTotal > 0
                                         cursorShape: Qt.PointingHandCursor; onClicked: root.updRun() } }
                                 Rectangle { width: (parent.width - 8) * 0.38; height: 34; radius: Tok.r
                                     color: updReMa.containsMouse ? theme.a(theme.iris, 0.18) : theme.a(theme.line, 0.4)
-                                    border.width: 1; border.color: theme.a(theme.iris, 0.16)
+                                    border.width: 0; border.color: theme.a(theme.iris, 0.16)
                                     Row { anchors.centerIn: parent; spacing: 6
                                         Sym { anchors.verticalCenter: parent.verticalCenter; text: "refresh"; sz: 15; color: theme.frost }
-                                        Text { anchors.verticalCenter: parent.verticalCenter; text: "check"; color: theme.sub; font.pixelSize: 11; font.family: Tok.sans } }
+                                        Text { anchors.verticalCenter: parent.verticalCenter; text: "Check"; color: theme.sub; font.pixelSize: 11; font.family: Tok.sans } }
                                     MouseArea { id: updReMa; anchors.fill: parent; hoverEnabled: true
                                         cursorShape: Qt.PointingHandCursor; onClicked: root.updRefresh() } }
                             }
                         }
                     }
+                    }
 
-                    // ---- CONTROL CENTER dropdown: quick toggles + power profile ----
-                    Drop { screen: bar.screen
+                    // ---- CONTROL CENTER dropdown (modularized into ControlCenterDrop.qml) ----
+                    LazyLoader { activeAsync: (root.openPop === "cc" && root.openBar === bar) || !!(item && item.visible); Drop { screen: bar.screen
                         id: ccDrop; host: root.barVertical ? ccPillVert : ccPill; shown: root.openPop === "cc" && root.openBar === bar
-                        cardW: 316; cardH: ccCol.implicitHeight + 30
-                        Column { id: ccCol; anchors.fill: ccDrop.card; anchors.margins: 15; spacing: 12
-                            Text { text: "Quick settings"; color: theme.text; font.pixelSize: 15; font.family: Tok.sans; font.bold: true }
-                            // toggle tiles
-                            Grid { width: parent.width; columns: 2; columnSpacing: 8; rowSpacing: 8
-                                Repeater {
-                                    model: [
-                                        { k: "dark", onI: "dark_mode",        offI: "light_mode",        l: "Dark mode" },
-                                        { k: "caf",  onI: "coffee",           offI: "coffee",            l: "Caffeine" },
-                                        { k: "dnd",  onI: "do_not_disturb_on", offI: "do_not_disturb_off", l: "Do not disturb" },
-                                        { k: "wifi", onI: "wifi",             offI: "wifi_off",          l: "Wi-Fi" },
-                                        { k: "bt",   onI: "bluetooth",        offI: "bluetooth_disabled", l: "Bluetooth" },
-                                        { k: "night", onI: "nightlight",      offI: "nightlight",        l: "Night light" },
-                                        { k: "game", onI: "sports_esports",   offI: "sports_esports",    l: "Game mode" }
-                                    ]
-                                    delegate: Rectangle {
-                                        required property var modelData
-                                        readonly property bool on: root.ccActive(modelData.k)
-                                        width: (parent.width - 8) / 2; height: 50; radius: Tok.r
-                                        color: on ? theme.a(theme.iris, 0.22) : theme.a(theme.line, 0.4)
-                                        border.width: 1; border.color: on ? theme.iris : theme.a(theme.iris, 0.14)
-                                        Behavior on color { ColorAnimation { duration: 120 } }
-                                        Row { anchors.left: parent.left; anchors.leftMargin: 11; anchors.right: parent.right; anchors.rightMargin: 8; anchors.verticalCenter: parent.verticalCenter; spacing: 8
-                                            Sym { anchors.verticalCenter: parent.verticalCenter; text: on ? modelData.onI : modelData.offI; sz: 18; color: on ? theme.iris : theme.sub }
-                                            Text { anchors.verticalCenter: parent.verticalCenter; width: parent.width - 26; text: modelData.l; color: on ? theme.text : theme.sub; font.pixelSize: 12; font.family: Tok.sans; elide: Text.ElideRight } }
-                                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.ccToggle(modelData.k) }
-                                    }
-                                }
-                            }
-                            // power profile
-                            Text { text: "power profile"; color: theme.sub; font.pixelSize: 10; font.family: Tok.sans }
-                            Row { width: parent.width; spacing: 6
-                                Repeater {
-                                    model: [ { k: "power-saver", i: "eco", l: "Saver" }, { k: "balanced", i: "balance", l: "Balanced" }, { k: "performance", i: "bolt", l: "Perf" } ]
-                                    delegate: Rectangle {
-                                        required property var modelData
-                                        readonly property bool sel: root.powerProfile === modelData.k
-                                        width: (parent.width - 12) / 3; height: 44; radius: Tok.r
-                                        color: sel ? theme.iris : theme.a(theme.line, 0.4); border.width: 1; border.color: sel ? theme.iris : theme.a(theme.iris, 0.14)
-                                        Behavior on color { ColorAnimation { duration: 120 } }
-                                        Column { anchors.centerIn: parent; spacing: 2
-                                            Sym { anchors.horizontalCenter: parent.horizontalCenter; text: modelData.i; sz: 16; color: sel ? theme.bg : theme.sub }
-                                            Text { anchors.horizontalCenter: parent.horizontalCenter; text: modelData.l; color: sel ? theme.bg : theme.sub; font.pixelSize: 10; font.family: Tok.sans; font.bold: sel } }
-                                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.setProfile(modelData.k) }
-                                    }
-                                }
-                            }
-                            // gaming fan preset: profile + fan curve in one click; game mode re-applies the last pick
-                            Text { visible: root.hasFanCurve; text: "gaming fans · used by game mode"; color: theme.sub; font.pixelSize: 10; font.family: Tok.sans }
-                            Row { visible: root.hasFanCurve; width: parent.width; spacing: 6
-                                Repeater {
-                                    model: [ { k: "auto", i: "auto_mode", l: "Auto" }, { k: "quiet", i: "mode_fan", l: "Quiet" }, { k: "max", i: "speed", l: "Max" } ]
-                                    delegate: Rectangle {
-                                        required property var modelData
-                                        readonly property bool sel: root.fanMode === modelData.k
-                                        width: (parent.width - 12) / 3; height: 44; radius: Tok.r
-                                        color: sel ? theme.iris : theme.a(theme.line, 0.4); border.width: 1; border.color: sel ? theme.iris : theme.a(theme.iris, 0.14)
-                                        Behavior on color { ColorAnimation { duration: 120 } }
-                                        Column { anchors.centerIn: parent; spacing: 2
-                                            Sym { anchors.horizontalCenter: parent.horizontalCenter; text: modelData.i; sz: 16; color: sel ? theme.bg : theme.sub }
-                                            Text { anchors.horizontalCenter: parent.horizontalCenter; text: modelData.l; color: sel ? theme.bg : theme.sub; font.pixelSize: 10; font.family: Tok.sans; font.bold: sel } }
-                                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.setFanMode(modelData.k) }
-                                    }
-                                }
-                            }
-                            // shortcut to full settings
-                            Rectangle { width: parent.width; height: 38; radius: Tok.r
-                                color: ccSetMa.containsMouse ? theme.a(theme.iris, 0.18) : theme.a(theme.line, 0.4)
-                                border.width: 1; border.color: theme.a(theme.iris, 0.16)
-                                Row { anchors.centerIn: parent; spacing: 8
-                                    Sym { anchors.verticalCenter: parent.verticalCenter; text: "settings"; sz: 16; color: theme.frost }
-                                    Text { anchors.verticalCenter: parent.verticalCenter; text: "all settings"; color: theme.text; font.pixelSize: 12; font.family: Tok.sans } }
-                                MouseArea { id: ccSetMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
-                                    onClicked: { root.openPop = ""; root.openSettings(0) } }
-                            }
+                        cardW: 326; cardH: ccCol.implicitHeight + 28
+                        ControlCenterDrop {
+                            id: ccCol
+                            anchors { left: ccDrop.card.left; right: ccDrop.card.right; top: ccDrop.card.top; margins: 14 }
+                            shellRoot: root
+                            audioSink: Pipewire.defaultAudioSink ? Pipewire.defaultAudioSink.audio : null
                         }
                     }
-                    Drop { screen: bar.screen
+                    }
+                    // ---- WEATHER dropdown (modularized into WeatherDrop.qml) ----
+                    LazyLoader { activeAsync: (root.openPop ==="wx" && root.openBar === bar) || !!(item && item.visible); Drop { screen: bar.screen
                         id: wxDrop; host: root.barVertical ? wxPillVert : wxPill; shown: root.openPop ==="wx" && root.openBar === bar
-                        cardW: 250; cardH: wxCol.implicitHeight + 32
-                        Column { id: wxCol; anchors.fill: wxDrop.card; anchors.margins: 14; spacing: 8
-                            Row { width: parent.width; spacing: 10
-                                Sym { anchors.verticalCenter: parent.verticalCenter; text: root.wxIcon(root.wxCond); sz: 30; color: theme.frost }
-                                Column { anchors.verticalCenter: parent.verticalCenter; spacing: 1; width: parent.width - 40
-                                    Text { text: root.wxTemp; color: theme.text; font.pixelSize: 20; font.family: Tok.sans; font.bold: true }
-                                    Text { width: parent.width; text: root.wxCond; color: theme.sub; font.pixelSize: 11; font.family: Tok.sans
-                                        wrapMode: Text.Wrap; maximumLineCount: 2; elide: Text.ElideRight } } }
-                            Rectangle { width: parent.width; height: 1; color: theme.a(theme.line,0.7) }
-                            Repeater { model: [{i:"thermostat",l:"feels like",v:root.wxFeels},{i:"humidity_percentage",l:"humidity",v:root.wxHumid},{i:"air",l:"wind",v:root.wxWind}]
-                                delegate: Item { required property var modelData; width: parent.width; height: 20
-                                    Sym { id: wxdIc; anchors.verticalCenter: parent.verticalCenter; text: modelData.i; sz: 15; color: theme.iris }
-                                    Text { anchors { left: wxdIc.right; leftMargin: 8; verticalCenter: parent.verticalCenter }
-                                        text: modelData.l; color: theme.sub; font.pixelSize: 12; font.family: Tok.sans }
-                                    Text { anchors { right: parent.right; verticalCenter: parent.verticalCenter }
-                                        width: Math.min(implicitWidth, parent.width - 110); elide: Text.ElideLeft; horizontalAlignment: Text.AlignRight
-                                        text: modelData.v; color: theme.text; font.pixelSize: 12; font.family: Tok.sans } } }
-                            // ---- 3-day forecast ----
-                            Rectangle { width: parent.width; height: 1; color: theme.a(theme.line,0.7); visible: root.wxForecast.length>0 }
-                            Text { visible: root.wxForecast.length>0; text: "forecast"; color: theme.sub; font.pixelSize: 10; font.family: Tok.sans }
-                            Repeater { model: root.wxForecast
-                                delegate: Row { required property var modelData; width: parent.width; height: 26; spacing: 8
-                                    Text { anchors.verticalCenter: parent.verticalCenter; text: modelData.day; color: theme.text; font.pixelSize: 12; font.family: Tok.sans; width: 46 }
-                                    Sym { anchors.verticalCenter: parent.verticalCenter; text: root.wxIcon(modelData.cond); sz: 17; color: theme.frost }
-                                    Text { anchors.verticalCenter: parent.verticalCenter; width: parent.width - 168; elide: Text.ElideRight; text: modelData.cond; color: theme.sub; font.pixelSize: 11; font.family: Tok.sans }
-                                    Text { anchors.verticalCenter: parent.verticalCenter; text: modelData.hi; color: theme.text; font.pixelSize: 12; font.family: Tok.sans }
-                                    Text { anchors.verticalCenter: parent.verticalCenter; text: modelData.lo; color: theme.sub; font.pixelSize: 12; font.family: Tok.sans } } }
-                            Rectangle { width: parent.width; height: 1; color: theme.a(theme.line,0.7) }
-                            Item { width: parent.width; height: 26
-                                Row { anchors.fill: parent; spacing: 8
-                                    Sym { anchors.verticalCenter: parent.verticalCenter; text: "settings"; sz: 15; color: theme.sub }
-                                    Text { anchors.verticalCenter: parent.verticalCenter; text: "set location / units"; color: theme.sub; font.pixelSize: 11; font.family: Tok.sans } }
-                                MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { root.openPop=""; root.openSettings(3) } } } } }
-                    Drop { screen: bar.screen
+                        cardW: 256; cardH: wxCol.implicitHeight + 28
+                        WeatherDrop {
+                            id: wxCol
+                            anchors { left: wxDrop.card.left; right: wxDrop.card.right; top: wxDrop.card.top; margins: 14 }
+                            shellRoot: root
+                        }
+                    }
+                    }
+                    LazyLoader { activeAsync: (root.openPop ==="tray" && root.openBar === bar && bar.trayHost !== null && bar.trayMenuSel !== null) || !!(item && item.visible); Drop { screen: bar.screen
                         id: trayDrop; host: bar.trayHost
                         shown: root.openPop ==="tray" && root.openBar === bar && bar.trayHost !== null && bar.trayMenuSel !== null
                         cardW: 230; cardH: Math.max(30, tmCol.implicitHeight + 12)
@@ -5088,7 +7446,7 @@ ShellRoot {
                                     try { return !trayMenu.children || !trayMenu.children.values || trayMenu.children.values.length === 0 }
                                     catch (e) { return true }
                                 }
-                                text: "no menu"; color: theme.sub; font.pixelSize: 11; font.family: Tok.sans; leftPadding: 6; topPadding: 4
+                                text: "No menu"; color: theme.sub; font.pixelSize: 11; font.family: Tok.sans; leftPadding: 6; topPadding: 4
                             }
                             Repeater { model: { try { return trayMenu.children ? trayMenu.children : [] } catch(e) { return [] } }
                                 delegate: Rectangle { required property var modelData
@@ -5100,336 +7458,47 @@ ShellRoot {
                                         Sym { anchors.verticalCenter: parent.verticalCenter; visible: !!(modelData && modelData.hasChildren); text: "chevron_right"; sz: 14; color: theme.sub } }
                                     MouseArea { id: em; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; enabled: !!(modelData && !modelData.isSeparator)
                                         onClicked: { try { if(modelData && !modelData.hasChildren){ modelData.triggered(); root.openPop="" } } catch(e) { root.openPop=""; } } } } } } }
-                    Drop { screen: bar.screen
+                    }
+                    // ---- NOTIFICATION CENTRE dropdown (modularized into NotifDrop.qml) ----
+                    LazyLoader { activeAsync: (root.openPop ==="notif" && root.openBar === bar) || !!(item && item.visible); Drop { screen: bar.screen
                         id: notifDrop; host: root.barVertical ? bellPillVert : bellPill; shown: root.openPop ==="notif" && root.openBar === bar
-                        cardW: 360; cardH: Math.min(480, notifCol.implicitHeight + 28)
-                        // the keys need the keyboard while the centre is open (see the list below)
+                        cardW: 364; cardH: Math.min(500, notifCol.implicitHeight + 28)
                         WlrLayershell.keyboardFocus: shown ? WlrKeyboardFocus.Exclusive : WlrKeyboardFocus.OnDemand
-                        Column { id: notifCol; anchors.fill: notifDrop.card; anchors.margins: 14; spacing: 4
-                            // Header
-                            Item { width: parent.width; height: 28
-                                Text { anchors.verticalCenter: parent.verticalCenter; anchors.left: parent.left
-                                    text: "Notifications"; color: theme.text; font.pixelSize: 15; font.family: Tok.sans; font.bold: true }
-                                Row { anchors.verticalCenter: parent.verticalCenter; anchors.right: parent.right; spacing: 6
-                                    // Do Not Disturb toggle
-                                    Rectangle { anchors.verticalCenter: parent.verticalCenter
-                                        width: dndRow.width + 16; height: 22; radius: Tok.r
-                                        color: root.dnd ? theme.a(theme.warn, 0.2) : (dndMa.containsMouse ? theme.a(theme.line, 0.75) : theme.a(theme.line, 0.5))
-                                        border.width: 1; border.color: root.dnd ? theme.a(theme.warn, 0.5) : "transparent"
-                                        Row { id: dndRow; anchors.centerIn: parent; spacing: 4
-                                            Sym { anchors.verticalCenter: parent.verticalCenter; text: root.dnd ? "do_not_disturb_on" : "do_not_disturb_off"; sz: 13; color: root.dnd ? theme.warn : theme.sub }
-                                            Text { anchors.verticalCenter: parent.verticalCenter; text: "DND"; color: root.dnd ? theme.warn : theme.sub; font.pixelSize: 10; font.family: Tok.sans; font.bold: root.dnd } }
-                                        MouseArea { id: dndMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.setDnd(!root.dnd) } }
-                                    // clear all
-                                    Rectangle { anchors.verticalCenter: parent.verticalCenter
-                                        visible: root.notes.length > 0
-                                        width: clrTxt.implicitWidth + 16; height: 22; radius: Tok.r
-                                        color: clrMa.containsMouse ? theme.a(theme.bad, 0.18) : theme.a(theme.line, 0.5)
-                                        Text { id: clrTxt; anchors.centerIn: parent; text: "clear all"; color: clrMa.containsMouse ? theme.bad : theme.sub; font.pixelSize: 10; font.family: Tok.sans }
-                                        MouseArea { id: clrMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.noteClear() } } } }
-                            Rectangle { width: parent.width; height: 1; color: theme.a(theme.line, 0.6) }
-                            Item { height: 2; width: 1 }
-                            // ---- muted apps (per-app DND) — chips you can tap to un-mute ----
-                            Column { width: parent.width; spacing: 5; visible: root.mutedApps.length > 0
-                                Text { text: "muted apps"; color: theme.sub; font.pixelSize: 10; font.family: Tok.sans; font.letterSpacing: 0.5 }
-                                Flow { width: parent.width; spacing: 5
-                                    Repeater { model: root.mutedApps
-                                        delegate: Rectangle { required property var modelData
-                                            height: 20; radius: Tok.r; width: mchip.implicitWidth + 16
-                                            color: mchMa.containsMouse ? theme.a(theme.warn,0.22) : theme.a(theme.warn,0.13)
-                                            border.width: 1; border.color: theme.a(theme.warn,0.35)
-                                            Row { id: mchip; anchors.centerIn: parent; spacing: 4
-                                                Sym { anchors.verticalCenter: parent.verticalCenter; text: "notifications_off"; sz: 11; color: theme.warn }
-                                                Text { anchors.verticalCenter: parent.verticalCenter; text: modelData; color: theme.sub; font.pixelSize: 10; font.family: Tok.sans }
-                                                Sym { anchors.verticalCenter: parent.verticalCenter; text: "close"; sz: 11; color: theme.sub } }
-                                            MouseArea { id: mchMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.toggleMute(modelData) } } } }
-                                Rectangle { width: parent.width; height: 1; color: theme.a(theme.line, 0.6) } }
-                            Rectangle { visible: !!root.noteUndo; width: parent.width; height: 32; radius: Tok.r
-                                color: Tok.sunken; border.width: 1; border.color: Tok.rule
-                                Text { anchors.left: parent.left; anchors.leftMargin: 12; anchors.verticalCenter: parent.verticalCenter
-                                    text: root.noteUndo ? root.noteUndo.label : ""; color: Tok.ink2; font.pixelSize: 11; font.family: Tok.sans }
-                                Text { anchors.right: parent.right; anchors.rightMargin: 12; anchors.verticalCenter: parent.verticalCenter
-                                    text: "Undo"; color: Tok.accent; font.pixelSize: 11; font.family: Tok.sans; font.weight: Font.DemiBold
-                                    MouseArea { anchors.fill: parent; anchors.margins: -8; cursorShape: Qt.PointingHandCursor; onClicked: root.noteUndoNow() } } }
-                            Text { visible: root.notes.length===0; text: "No notifications"; color: theme.sub; font.pixelSize: 12; font.family: Tok.sans; topPadding: 4 }
-                            // Grouped by app (NotifGroup.qml). Keys while the centre is open:
-                            // ↑↓ move between apps · ⏎/space show all · delete dismiss (undoable) · m mute
-                            Flickable { id: notifFlick
-                                width: parent.width; height: Math.min(400, listCol.implicitHeight); contentHeight: listCol.implicitHeight
-                                clip: true; boundsBehavior: Flickable.StopAtBounds; visible: root.notes.length>0
-                                focus: notifDrop.shown
-                                Keys.onPressed: (e) => {
-                                    var n = root.noteGroups.length, c = root.notifCursor;
-                                    if (e.key === Qt.Key_Z && (e.modifiers & Qt.ControlModifier)) { root.noteUndoNow(); e.accepted = true; return }
-                                    if (!n) return;
-                                    if (e.key === Qt.Key_Down) { root.notifCursor = c < 0 ? 0 : Math.min(n - 1, c + 1) }
-                                    else if (e.key === Qt.Key_Up) { root.notifCursor = c < 0 ? 0 : Math.max(0, c - 1) }
-                                    else if (c < 0) return;
-                                    else if (e.key === Qt.Key_Return || e.key === Qt.Key_Enter || e.key === Qt.Key_Space) {
-                                        var app = root.noteGroups[c].app, o = Object.assign({}, root.notifOpen); o[app] = !o[app]; root.notifOpen = o }
-                                    // Delete only: Backspace is what typing elsewhere sends, and it must never dismiss
-                                    else if (e.key === Qt.Key_Delete) {
-                                        root.noteRemoveApp(root.noteGroups[c].app); root.notifCursor = Math.min(c, root.noteGroups.length - 1) }
-                                    else if (e.key === Qt.Key_M) root.toggleMute(root.noteGroups[c].app)
-                                    else if (e.key === Qt.Key_Escape) root.openPop = ""
-                                    else return;
-                                    e.accepted = true;
-                                    var it = groupRep.itemAt(root.notifCursor);
-                                    if (it) notifFlick.contentY = Math.max(0, Math.min(it.y, it.y + it.height - notifFlick.height, notifFlick.contentHeight - notifFlick.height));
-                                }
-                                Connections { target: notifDrop; function onShownChanged() { root.notifCursor = -1; root.notifOpen = ({}) } }
-                                Column { id: listCol; width: parent.width; spacing: 8
-                                    Repeater { id: groupRep; model: root.noteGroups
-                                        delegate: NotifGroup {
-                                            required property var modelData
-                                            required property int index
-                                            width: listCol.width
-                                            group: modelData
-                                            expanded: !!root.notifOpen[modelData.app]
-                                            current: root.notifCursor === index
-                                            muted: root.isMuted(modelData.app)
-                                            isLive: k => root.noteLive(k)
-                                            onToggle: { var o = Object.assign({}, root.notifOpen); o[modelData.app] = !o[modelData.app]; root.notifOpen = o }
-                                            onDismissAll: root.noteRemoveApp(modelData.app)
-                                            onDismiss: k => root.noteRemove(k)
-                                            onMute: root.toggleMute(modelData.app)
-                                            onInvoke: (k, i) => root.noteInvoke(k, i)
-                                        } } } } } }
-                    Drop { screen: bar.screen
+                        NotifDrop {
+                            id: notifCol
+                            anchors { left: notifDrop.card.left; right: notifDrop.card.right; top: notifDrop.card.top; margins: 14 }
+                            shellRoot: root
+                            shown: notifDrop.shown
+                        }
+                    }
+                    }
+                    // ---- WI-FI, QR SHARE & VPN dropdown (modularized into WifiDrop.qml) ----
+                    LazyLoader { activeAsync: (root.openPop ==="wifi" && root.openBar === bar) || !!(item && item.visible); Drop { screen: bar.screen
                         id: wifiDrop; host: root.barVertical ? wifiPillVert : wifiPill; shown: root.openPop ==="wifi" && root.openBar === bar
                         cardW: 320; cardH: wifiCol.implicitHeight + 24
-                        property bool expanded: false
-                        Connections { target: wifiDrop; function onShownChanged() { if (!wifiDrop.shown && root.openPop !== "wifi") root.wifiCancelDraft() } }
-                        Column { id: wifiCol; anchors.fill: wifiDrop.card; anchors.margins: 12; spacing: 5
-                            // Header
-                            Item { width: parent.width; height: 28
-                                Text { anchors.verticalCenter: parent.verticalCenter; anchors.left: parent.left
-                                    text: "Wi-Fi"; color: theme.text; font.pixelSize: 16; font.family: Tok.sans; font.bold: true; font.letterSpacing: 0.8 }
-                                Rectangle { anchors.verticalCenter: parent.verticalCenter; anchors.right: parent.right
-                                    width: 26; height: 26; radius: Tok.r
-                                    color: rfm.containsMouse ? theme.a(theme.iris,0.18) : "transparent"
-                                    Sym { anchors.centerIn: parent; text: "refresh"; sz: 15; color: theme.sub }
-                                    MouseArea { id: rfm; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.wifiRescan(true) } } }
-                            Text { width: parent.width; elide: Text.ElideRight
-                                text: root.wifiBusy ? "Connecting to " + root.wifiConnectingTo + "…"
-                                    : root.wifiOn ? "Connected to " + root.ssid : "Choose a network to connect"
-                                color: root.wifiBusy ? theme.frost : root.wifiOn ? theme.good : theme.sub; font.pixelSize: 12; font.family: Tok.sans }
-                            Text { text: root.wifiScanning ? "Scanning for networks…" : "Available networks"; color: theme.sub
-                                font.pixelSize: 11; font.family: Tok.sans }
-                            // This editor is outside Repeater: scan replacement cannot destroy focus, cursor or draft.
-                            WifiJoinCard {
-                                width: parent.width; visible: root.wifiPwFor.length > 0
-                                ssid: root.wifiPwFor; draft: root.wifiDraft; busy: root.wifiJoining
-                                message: root.wifiJoinMessage; failed: root.wifiJoinFailed
-                                surface: theme.a(theme.iris, 0.07); ink: theme.text; muted: theme.sub
-                                accent: theme.iris; accentInk: Tok.accentInk; danger: theme.bad
-                                fontFamily: Tok.sans; rounding: Tok.rSmall
-                                onEdited: value => root.wifiDraft = value
-                                onSubmitted: value => root.wifiJoin(root.wifiPwFor, value)
-                                onCancelled: root.wifiCancelDraft()
-                            }
-                            Rectangle { width: parent.width; height: 1; color: theme.a(theme.line, 0.6) }
-                            Item { height: 2; width: 1 }
-                            Repeater { model: wifiDrop.expanded ? root.wifiList : root.wifiList.slice(0, 4)
-                                delegate: Column { id: netRow; required property var modelData; width: parent.width; spacing: 3
-                                    readonly property bool asking: root.wifiPwFor === netRow.modelData.ssid
-                                    readonly property bool joining: root.wifiConnectingTo === netRow.modelData.ssid
-                                    readonly property bool saved: root.wifiSaved.indexOf(netRow.modelData.ssid) >= 0
-                                    readonly property string secLbl: root.wifiSecLabel(netRow.modelData.sec)
-                                    // ONE chip per row, carrying whichever fact is worth the width here.
-                                    // An unencrypted or WEP network is a warning and always wins; past
-                                    // that, "remembered" is what explains the row's behaviour (it joins
-                                    // without asking), and only an unknown network needs its scheme named.
-                                    readonly property string chipText:
-                                          netRow.joining                                      ? "CONNECTING"
-                                        : netRow.secLbl === "OPEN" || netRow.secLbl === "WEP" ? netRow.secLbl
-                                        : netRow.modelData.active                             ? ""
-                                        : netRow.saved                                        ? "SAVED"
-                                        : netRow.secLbl
-                                    readonly property string chipTone:
-                                          netRow.joining                                      ? "accent"
-                                        : netRow.secLbl === "OPEN" || netRow.secLbl === "WEP" ? "warn"
-                                        : netRow.saved                                        ? "accent" : "neutral"
-                                    Rectangle { width: parent.width; height: 36; radius: Tok.rSmall
-                                        Behavior on color { ColorAnimation { duration: Tok.mFast } }
-                                        color: netRow.modelData.active ? theme.a(theme.iris,0.18) : (netRow.asking || netRow.joining ? theme.a(theme.iris,0.10) : (wm.containsMouse ? theme.a(theme.line,0.45) : "transparent"))
-                                        border.width: netRow.modelData.active ? 1 : 0; border.color: theme.a(theme.iris,0.3)
-                                        // base click zone sits UNDER the forget hitbox
-                                        MouseArea { id: wm; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
-                                            onClicked: { if(netRow.modelData.active || netRow.joining) return; if(netRow.asking) root.wifiCancelDraft(); else root.wifiConnect(netRow.modelData.ssid, netRow.modelData.secure) } }
-                                        // Anchored rather than laid out in a Row: the old row sized the
-                                        // SSID by subtracting magic numbers for whatever might sit to its
-                                        // right, and the forget button — anchored to the same right edge —
-                                        // was drawn straight over the trailing glyph.
-                                        Sym { id: sigIcon
-                                            anchors.left: parent.left; anchors.leftMargin: 10; anchors.verticalCenter: parent.verticalCenter
-                                            text: netRow.joining ? root.wifiIcon
-                                                : netRow.modelData.signal>66?"signal_wifi_4_bar":netRow.modelData.signal>33?"network_wifi_3_bar":"network_wifi_1_bar"
-                                            sz: 16; color: netRow.modelData.active || netRow.joining ? theme.iris : theme.faint }
-                                        Row { id: rightBits
-                                            anchors.right: parent.right; anchors.rightMargin: 10
-                                            anchors.verticalCenter: parent.verticalCenter; spacing: 6
-                                            // yields the right edge to the forget button rather than
-                                            // being overdrawn by it
-                                            visible: !(netRow.saved && (wm.containsMouse || fgm.containsMouse))
-                                            IndChip { anchors.verticalCenter: parent.verticalCenter
-                                                visible: netRow.chipText !== ""; text: netRow.chipText; tone: netRow.chipTone }
-                                            // The scan sorts on this and the dropdown re-probes the air
-                                            // every 8s to keep it moving — but it only ever reached the
-                                            // screen as one of three icon buckets, so the number that
-                                            // decides which network to join was the one thing the panel
-                                            // would not tell you. Mono and tabular so it cannot reflow
-                                            // the row from under the cursor between polls.
-                                            IndText { anchors.verticalCenter: parent.verticalCenter
-                                                mono: true; sz: 11; width: 18; horizontalAlignment: Text.AlignRight
-                                                text: netRow.modelData.signal
-                                                color: netRow.modelData.active ? theme.text : theme.sub } }
-                                        Text { anchors.left: sigIcon.right; anchors.leftMargin: 8
-                                            anchors.right: rightBits.left; anchors.rightMargin: 8
-                                            anchors.verticalCenter: parent.verticalCenter
-                                            elide: Text.ElideRight; text: netRow.modelData.ssid
-                                            color: netRow.modelData.active ? theme.text : theme.sub
-                                            font.pixelSize: 12; font.family: Tok.sans; font.bold: netRow.modelData.active }
-                                        // forget — only for remembered networks, and only on hover so it can't be hit by accident
-                                        Rectangle {
-                                            anchors.verticalCenter: parent.verticalCenter; anchors.right: parent.right; anchors.rightMargin: 6
-                                            width: 24; height: 24; radius: Tok.rSmall
-                                            visible: netRow.saved && wm.containsMouse || fgm.containsMouse
-                                            color: fgm.containsMouse ? theme.a(theme.bad, 0.22) : "transparent"
-                                            Sym { anchors.centerIn: parent; text: "delete"; sz: 14; color: fgm.containsMouse ? theme.bad : theme.faint }
-                                            MouseArea { id: fgm; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
-                                                onClicked: root.wifiForget(netRow.modelData.ssid) } } }
-                                } }
-                            Text { visible: root.wifiList.length===0
-                                text: root.wifiScanning ? "scanning…" : "no networks in range"
-                                color: theme.sub; font.pixelSize: 11; font.family: Tok.sans; topPadding: 4 }
-                            Rectangle {
-                                visible: root.wifiList.length > 4; width: parent.width; height: 28; radius: 7
-                                color: moreWifi.containsMouse ? Tok.accentWash : "transparent"
-                                Text { anchors.centerIn: parent; text: wifiDrop.expanded ? "Show fewer networks" : "Other networks…"
-                                    color: theme.sub; font.family: Tok.sans; font.pixelSize: 12 }
-                                MouseArea { id: moreWifi; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
-                                    onClicked: wifiDrop.expanded = !wifiDrop.expanded }
-                            }
-                            Text { visible: wifiDrop.expanded && root.wifiSeen > root.wifiList.length
-                                text: "+" + (root.wifiSeen - root.wifiList.length) + " more nearby"
-                                color: theme.sub; font.pixelSize: 11; font.family: Tok.sans }
-
-                            // ---- VPN Section ----
-                            Item { height: 2; width: 1 }
-                            Rectangle { width: parent.width; height: 1; color: theme.a(theme.line, 0.6) }
-                            Item { height: 4; width: 1 }
-
-                            // Cloudflare WARP row
-                            //
-                            // It sat at 11px sub-ink with a faint icon while the networks above it were
-                            // 12px — so the one row here that is a control read as a greyed-out caption,
-                            // and nothing but the switch said it could be pressed. It now carries the
-                            // same weight as a network row, and the shared IndToggle replaces the
-                            // hand-rolled switch that was the only one in the shell not using it.
-                            Item { width: parent.width; height: 30
-                                Row { anchors.verticalCenter: parent.verticalCenter; anchors.left: parent.left; spacing: 7
-                                    Sym { anchors.verticalCenter: parent.verticalCenter; text: "security"; sz: 15
-                                        color: root.warpConnected ? theme.good : theme.sub }
-                                    Text { anchors.verticalCenter: parent.verticalCenter
-                                        text: "Cloudflare WARP"
-                                        color: root.warpConnected ? theme.text : theme.sub
-                                        font.pixelSize: 12; font.family: Tok.sans }
-                                    Text { anchors.verticalCenter: parent.verticalCenter
-                                        visible: root.warpConnected
-                                        text: "· " + root.warpMode; color: theme.sub; font.pixelSize: 10; font.family: Tok.sans } }
-                                IndToggle { anchors.verticalCenter: parent.verticalCenter; anchors.right: parent.right
-                                    on: root.warpConnected; onToggled: root.warpToggle() } }
-
-                            // WARP mode chips (only when WARP is connected)
-                            Row { visible: root.warpConnected; spacing: 5; topPadding: 2
-                                Repeater { model: ["warp","doh","warp+doh","tunnel_only"]
-                                    delegate: Rectangle { required property var modelData
-                                        readonly property bool cur: root.warpMode === modelData
-                                        height: 20; radius: Tok.r; width: modeTxt.implicitWidth + 14
-                                        color: cur ? theme.a(theme.good,0.2) : (modeMa.containsMouse ? theme.a(theme.line,0.5) : theme.a(theme.line,0.3))
-                                        border.width: cur ? 1 : 0; border.color: theme.a(theme.good,0.4)
-                                        Text { id: modeTxt; anchors.centerIn: parent
-                                            text: modelData; color: cur ? theme.good : theme.faint
-                                            font.pixelSize: 9; font.family: Tok.sans; font.bold: cur }
-                                        MouseArea { id: modeMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
-                                            onClicked: root.warpSetMode(modelData) } } } }
-
-                            // NM VPN connections (if any saved)
-                            Repeater { model: root.vpnList
-                                delegate: Item { required property var modelData
-                                    readonly property bool connecting: modelData.state === "activating" || root.vpnActionName === modelData.name
-                                    readonly property bool failed: root.vpnFailedName === modelData.name
-                                    width: parent.width; height: 34
-                                    Column { anchors.left: parent.left; anchors.verticalCenter: parent.verticalCenter; spacing: 0
-                                        Row { spacing: 7
-                                            Sym { anchors.verticalCenter: parent.verticalCenter; text: "vpn_key"; sz: 14
-                                                color: modelData.active ? theme.iris : (connecting ? theme.frost : (failed ? theme.bad : theme.faint)) }
-                                            Text { anchors.verticalCenter: parent.verticalCenter
-                                                text: modelData.name; color: modelData.active ? theme.text : (connecting ? theme.frost : (failed ? theme.bad : theme.sub))
-                                                font.pixelSize: 11; font.family: Tok.sans; font.bold: modelData.active || connecting; elide: Text.ElideRight } }
-                                        Text {
-                                            visible: connecting || failed || modelData.active
-                                            text: connecting ? "connecting…" : (failed ? "connection failed" : "connected")
-                                            color: connecting ? theme.frost : (failed ? theme.bad : theme.good)
-                                            font.pixelSize: 9; font.family: Tok.sans; leftPadding: 21 } }
-                                    Rectangle { anchors.verticalCenter: parent.verticalCenter; anchors.right: parent.right
-                                        width: 36; height: 20; radius: Tok.r
-                                        color: modelData.active ? theme.iris : (connecting ? theme.a(theme.frost, 0.4) : theme.a(theme.line, 0.85))
-                                        border.width: 1; border.color: modelData.active ? theme.a(theme.iris,0.5) : (connecting ? theme.a(theme.frost,0.3) : theme.a(theme.iris,0.3))
-                                        Behavior on color { ColorAnimation { duration: 120 } }
-                                        Rectangle { width: 15; height: 15; radius: Tok.r; color: theme.frost; anchors.verticalCenter: parent.verticalCenter
-                                            x: modelData.active ? 19 : 2; Behavior on x { NumberAnimation { duration: 130 } } }
-                                        MouseArea { anchors.fill: parent; cursorShape: connecting ? Qt.ArrowCursor : Qt.PointingHandCursor
-                                            onClicked: if (!connecting) root.vpnToggle(modelData.name) } } } } } }
-                    Drop { screen: bar.screen
+                        WifiDrop {
+                            id: wifiCol
+                            anchors { left: wifiDrop.card.left; right: wifiDrop.card.right; top: wifiDrop.card.top; margins: 12 }
+                            shellRoot: root
+                            shown: wifiDrop.shown
+                        }
+                    }
+                    }
+                    // ---- BLUETOOTH dropdown (modularized into BluetoothDrop.qml) ----
+                    LazyLoader { activeAsync: (root.openPop ==="bt" && root.openBar === bar) || !!(item && item.visible); Drop { screen: bar.screen
                         id: btDrop; host: root.barVertical ? btPillVert : btPill; shown: root.openPop ==="bt" && root.openBar === bar
                         cardW: 320; cardH: btCol.implicitHeight + 24
-                        readonly property bool on: !!root.btAdapter && root.btAdapter.enabled
-                        readonly property var linked: root.btDevices.filter(d => d.connected)
-                        readonly property var paired: root.btDevices.filter(d => d.paired || d.bonded || d.connected)
-                        readonly property var nearby: root.btDevices.filter(d => !(d.paired || d.bonded || d.connected))
-                        Column { id: btCol; anchors.fill: btDrop.card; anchors.margins: 12; spacing: 3
-                            DropHeader {
-                                title: "Bluetooth"
-                                status: !btDrop.on ? "Off"
-                                      : btDrop.linked.length === 1 ? "Connected to " + root.btName(btDrop.linked[0])
-                                      : btDrop.linked.length > 1 ? btDrop.linked.length + " devices connected"
-                                      : root.btAdapter.discovering ? "Looking for devices…" : "On · nothing connected"
-                                tone: btDrop.linked.length ? "ok" : "neutral"
-                                actionIcon: btDrop.on ? (root.btAdapter.discovering ? "sync" : "search") : ""
-                                actionBusy: btDrop.on && root.btAdapter.discovering
-                                onAction: root.btAdapter.discovering = !root.btAdapter.discovering
-                                hasSwitch: !!root.btAdapter; switchOn: btDrop.on
-                                onSwitched: v => { if (root.btAdapter) root.btAdapter.enabled = v }
-                            }
-                            DropSection { visible: btDrop.on && btDrop.paired.length > 0; text: "My devices" }
-                            Repeater { model: btDrop.on ? btDrop.paired : []
-                                delegate: DropRow { required property var modelData
-                                    icon: root.btIcon(modelData); label: root.btName(modelData)
-                                    current: modelData.connected; busy: modelData.pairing || modelData.state === 2
-                                    value: modelData.batteryAvailable ? Math.round((modelData.battery || 0) * 100) + "%" : ""
-                                    chip: modelData.connected ? "" : "PAIRED"
-                                    hoverIcon: modelData.connected ? "link_off" : ""
-                                    onClicked: modelData.connected ? null : modelData.connect()
-                                    onHoverAction: modelData.disconnect() } }
-                            DropSection { visible: btDrop.on && btDrop.nearby.length > 0; text: "Nearby"; rule: btDrop.paired.length > 0
-                                note: root.btAdapter && root.btAdapter.discovering ? "searching" : "" }
-                            Repeater { model: btDrop.on ? btDrop.nearby.slice(0, 6) : []
-                                delegate: DropRow { required property var modelData
-                                    icon: root.btIcon(modelData); label: root.btName(modelData)
-                                    busy: modelData.pairing; chip: modelData.pairing ? "PAIRING" : ""
-                                    onClicked: modelData.pair() } }
-                            Text { visible: btDrop.on && root.btDevices.length === 0; width: parent.width; wrapMode: Text.Wrap
-                                text: root.btAdapter.discovering ? "Searching for nearby devices…" : "No devices yet. Press search to find one."
-                                color: Tok.ink3; font.pixelSize: 11; font.family: Tok.sans; topPadding: 4 }
-                            Text { visible: !btDrop.on; width: parent.width; wrapMode: Text.Wrap
-                                text: "Turn Bluetooth on to see your devices."
-                                color: Tok.ink3; font.pixelSize: 11; font.family: Tok.sans; topPadding: 4 } } }
+                        BluetoothDrop {
+                            id: btCol
+                            anchors { left: btDrop.card.left; right: btDrop.card.right; top: btDrop.card.top; margins: 12 }
+                            shellRoot: root
+                        }
+                    }
+                    }
                     // KDE Connect: the phone's state, then the things you actually open the
                     // widget for — ring, send a file, push the clipboard, browse its storage.
                     // The settings tab is one gear away rather than the only destination.
-                    Drop { screen: bar.screen
+                    LazyLoader { activeAsync: (root.openPop ==="kde" && root.openBar === bar) || !!(item && item.visible); Drop { screen: bar.screen
                         id: kdeDrop; host: root.barVertical ? kdePillVert : kdePill; shown: root.openPop ==="kde" && root.openBar === bar
                         cardW: 300; cardH: kdeCol.implicitHeight + 28
                         Column { id: kdeCol; anchors.fill: kdeDrop.card; anchors.margins: 14; spacing: 8
@@ -5437,7 +7506,7 @@ ShellRoot {
                             // Header
                             Item { width: parent.width; height: 26
                                 Text { anchors.verticalCenter: parent.verticalCenter; anchors.left: parent.left
-                                    text: "Kde connect"; color: theme.text; font.pixelSize: 15; font.family: Tok.sans; font.bold: true }
+                                    text: "KDE Connect"; color: theme.text; font.pixelSize: 15; font.family: Tok.sans; font.bold: true }
                                 Row { anchors.verticalCenter: parent.verticalCenter; anchors.right: parent.right; spacing: 2
                                     Rectangle { width: 26; height: 26; radius: Tok.r
                                         color: kdeRfMa.containsMouse ? theme.a(theme.iris,0.18) : "transparent"
@@ -5464,13 +7533,13 @@ ShellRoot {
                                             // capped so one long hostname can't push the switcher to three rows
                                             Text { id: chipTxt; anchors.verticalCenter: parent.verticalCenter; text: modelData.name
                                                 width: Math.min(implicitWidth, 104); elide: Text.ElideRight
-                                                color: sel ? theme.text : theme.sub; font.pixelSize: 10; font.family: Tok.sans } }
+                                                color: sel ? theme.text : theme.sub; font.pixelSize: 11; font.family: Tok.sans } }
                                         MouseArea { id: chipMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
                                             onClicked: root.kdeSel = modelData.id } } } }
                             // The device itself
                             Rectangle { width: parent.width; radius: Tok.r; visible: kdeCol.dev !== null
                                 implicitHeight: devCol.implicitHeight + 20
-                                color: theme.a(theme.line, 0.32); border.width: 1
+                                color: theme.a(theme.line, 0.32); border.width: 0
                                 border.color: root.kdeActive ? theme.a(theme.iris,0.35) : theme.a(theme.iris,0.12)
                                 Column { id: devCol; anchors.left: parent.left; anchors.right: parent.right
                                     anchors.top: parent.top; anchors.margins: 10; spacing: 9
@@ -5484,7 +7553,7 @@ ShellRoot {
                                                 color: theme.text; font.pixelSize: 13; font.family: Tok.sans; font.bold: true }
                                             Row { spacing: 6
                                                 Text { anchors.verticalCenter: parent.verticalCenter; text: root.kdeStatus(kdeCol.dev)
-                                                    color: root.kdeActive ? theme.frost : theme.faint; font.pixelSize: 10; font.family: Tok.sans }
+                                                    color: root.kdeActive ? theme.frost : theme.faint; font.pixelSize: 11; font.family: Tok.sans }
                                                 // cellular strength, 0–4 bars
                                                 Row { anchors.verticalCenter: parent.verticalCenter; spacing: 2; height: 11
                                                     visible: kdeCol.dev && kdeCol.dev.signal >= 0
@@ -5492,7 +7561,7 @@ ShellRoot {
                                                         delegate: Rectangle { required property int index
                                                             width: 3; height: 4 + index*2; radius: 1; anchors.bottom: parent.bottom
                                                             color: (kdeCol.dev && index < kdeCol.dev.signal) ? theme.frost : theme.a(theme.faint,0.35) } } } } } }
-                                    StatBar { width: parent.width; label: "battery"
+                                    StatBar { width: parent.width; label: "Battery"
                                         visible: kdeCol.dev && kdeCol.dev.charge >= 0
                                         value: kdeCol.dev ? kdeCol.dev.charge : 0
                                         barColor: !kdeCol.dev ? theme.iris : (kdeCol.dev.isCharging ? theme.good : (kdeCol.dev.charge <= 20 ? theme.bad : theme.iris))
@@ -5501,22 +7570,22 @@ ShellRoot {
                             Grid { id: kdeActs; width: parent.width; columns: 2; columnSpacing: 8; rowSpacing: 8
                                 visible: root.kdeActive
                                 readonly property real cw: (width - columnSpacing) / 2
-                                KdeAct { width: kdeActs.cw; icon: "ring_volume"; label: "ring"; tint: theme.warn
+                                KdeAct { width: kdeActs.cw; icon: "ring_volume"; label: "Ring"; tint: theme.warn
                                     enabled: kdeCol.dev !== null && kdeCol.dev.canRing
                                     onAct: root.kdeRun(["--ring", kdeCol.dev.id]) }
-                                KdeAct { width: kdeActs.cw; icon: "wifi_tethering"; label: "ping"
+                                KdeAct { width: kdeActs.cw; icon: "wifi_tethering"; label: "Ping"
                                     enabled: kdeCol.dev !== null && kdeCol.dev.canPing
                                     onAct: root.kdeRun(["--ping", kdeCol.dev.id]) }
                                 KdeAct { width: kdeActs.cw; icon: "upload_file"; label: "send file"
                                     enabled: kdeCol.dev !== null && kdeCol.dev.canShare
                                     onAct: { root.openPop = ""; root.kdeRun(["--send-file", kdeCol.dev.id]) } }
-                                KdeAct { width: kdeActs.cw; icon: "content_paste_go"; label: "clipboard"
+                                KdeAct { width: kdeActs.cw; icon: "content_paste_go"; label: "Clipboard"
                                     enabled: kdeCol.dev !== null && kdeCol.dev.canShare
                                     onAct: root.kdeRun(["--send-clipboard", kdeCol.dev.id]) }
-                                KdeAct { width: kdeActs.cw; icon: "folder_open"; label: "browse files"
+                                KdeAct { width: kdeActs.cw; icon: "folder_open"; label: "Browse files"
                                     enabled: kdeCol.dev !== null && kdeCol.dev.canBrowse
                                     onAct: { root.openPop = ""; root.kdeRun(["--browse", kdeCol.dev.id]) } }
-                                KdeAct { width: kdeActs.cw; icon: "sms"; label: "messages"
+                                KdeAct { width: kdeActs.cw; icon: "sms"; label: "Messages"
                                     enabled: kdeCol.dev !== null && kdeCol.dev.canSms
                                     onAct: { root.openPop = ""; root.kdeRun(["--sms", kdeCol.dev.id]) } } }
                             // Pairing — the only thing that matters until the handshake is done
@@ -5525,33 +7594,34 @@ ShellRoot {
                                 Text { width: parent.width; wrapMode: Text.WordWrap
                                     visible: kdeCol.dev && (kdeCol.dev.isPairRequestedByPeer || kdeCol.dev.isPairRequested)
                                     text: "check that your device shows the key " + (kdeCol.dev ? kdeCol.dev.verificationKey : "")
-                                    color: theme.sub; font.pixelSize: 10; font.family: Tok.sans }
+                                    color: theme.sub; font.pixelSize: 11; font.family: Tok.sans }
                                 Row { width: parent.width; spacing: 8
                                     visible: kdeCol.dev && kdeCol.dev.isPairRequestedByPeer
-                                    KdeAct { width: (kdeCol.width - 8)/2; icon: "check_circle"; label: "accept"; tint: theme.good
+                                    KdeAct { width: (kdeCol.width - 8)/2; icon: "check_circle"; label: "Accept"; tint: theme.good
                                         onAct: root.kdeRun(["--accept", kdeCol.dev.id]) }
-                                    KdeAct { width: (kdeCol.width - 8)/2; icon: "cancel"; label: "reject"; tint: theme.bad
+                                    KdeAct { width: (kdeCol.width - 8)/2; icon: "cancel"; label: "Reject"; tint: theme.bad
                                         onAct: root.kdeRun(["--reject", kdeCol.dev.id]) } }
-                                KdeAct { width: parent.width; icon: "link"; label: "pair with this device"; tint: theme.iris
+                                KdeAct { width: parent.width; icon: "link"; label: "Pair with this device"; tint: theme.iris
                                     visible: kdeCol.dev && kdeCol.dev.isReachable && !kdeCol.dev.isPairRequested && !kdeCol.dev.isPairRequestedByPeer
                                     onAct: root.kdeRun(["--pair", kdeCol.dev.id]) }
                                 Text { visible: kdeCol.dev && !kdeCol.dev.isReachable
-                                    text: "not on this network — open the app on the device"
-                                    color: theme.sub; font.pixelSize: 10; font.family: Tok.sans } }
+                                    text: "Not on this network — open the app on the device"
+                                    color: theme.sub; font.pixelSize: 11; font.family: Tok.sans } }
                             // Unpair sits at the bottom, small and out of the way of the shortcuts
                             Item { width: parent.width; height: 16; visible: kdeCol.dev !== null && kdeCol.dev.isPaired
                                 Text { anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
-                                    text: "unpair"; color: unpMa.containsMouse ? theme.bad : theme.a(theme.faint, 0.8)
-                                    font.pixelSize: 10; font.family: Tok.sans
+                                    text: "Unpair"; color: unpMa.containsMouse ? theme.bad : theme.a(theme.faint, 0.8)
+                                    font.pixelSize: 11; font.family: Tok.sans
                                     MouseArea { id: unpMa; anchors.fill: parent; anchors.margins: -6; hoverEnabled: true
                                         cursorShape: Qt.PointingHandCursor; onClicked: root.kdeRun(["--unpair", kdeCol.dev.id]) } } }
                             // Nothing at all — usually the daemon just hasn't seen the phone yet
                             Column { width: parent.width; spacing: 3; visible: root.kdeDevices.length === 0
-                                Text { text: "no devices"; color: theme.sub; font.pixelSize: 12; font.family: Tok.sans }
+                                Text { text: "No devices"; color: theme.sub; font.pixelSize: 12; font.family: Tok.sans }
                                 Text { width: parent.width; wrapMode: Text.WordWrap
                                     text: "open KDE Connect on your phone, make sure it's on the same network, then hit refresh"
-                                    color: theme.sub; font.pixelSize: 10; font.family: Tok.sans } } } }
-                    Drop { screen: bar.screen
+                                    color: theme.sub; font.pixelSize: 11; font.family: Tok.sans } } } }
+                    }
+                    LazyLoader { activeAsync: (root.openPop ==="sys" && root.openBar === bar) || !!(item && item.visible); Drop { screen: bar.screen
                         id: sysDrop; host: root.barVertical ? sysPillVert : sysPill; shown: root.openPop ==="sys" && root.openBar === bar
                         cardW: 250; cardH: sysCol.implicitHeight + 28
                         Column { id: sysCol; anchors.fill: sysDrop.card; anchors.margins: 14; spacing: 10
@@ -5561,7 +7631,7 @@ ShellRoot {
                                     text: "System"; color: theme.text; font.pixelSize: 15; font.family: Tok.sans; font.bold: true }
                                 Row { anchors.verticalCenter: parent.verticalCenter; anchors.right: parent.right; spacing: 4
                                     Sym { anchors.verticalCenter: parent.verticalCenter; text: "developer_board"; sz: 13; color: theme.sub }
-                                    Text { anchors.verticalCenter: parent.verticalCenter; text: "live"; color: theme.sub; font.pixelSize: 9; font.family: Tok.sans } } }
+                                    Text { anchors.verticalCenter: parent.verticalCenter; text: "Live"; color: theme.sub; font.pixelSize: 11; font.family: Tok.sans } } }
                             Rectangle { width: parent.width; height: 1; color: theme.a(theme.line, 0.6) }
                             // CPU
                             StatBar { width: parent.width; label: "CPU"
@@ -5576,11 +7646,11 @@ ShellRoot {
                                 Rectangle { width: parent.width; height: 1; color: theme.a(theme.line, 0.6) }
                                 Item { width: parent.width; height: 14
                                     Text { anchors.left: parent.left; anchors.verticalCenter: parent.verticalCenter
-                                        text: "GPU"; color: theme.frost; font.pixelSize: 10; font.family: Tok.sans; font.bold: true; font.letterSpacing: 0.6 }
+                                        text: "GPU"; color: theme.frost; font.pixelSize: 11; font.family: Tok.sans; font.bold: true; font.letterSpacing: 0.6 }
                                     Text { anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
                                         width: parent.width - 40; elide: Text.ElideLeft; horizontalAlignment: Text.AlignRight
-                                        text: root.gpuName; color: theme.sub; font.pixelSize: 10; font.family: Tok.sans } }
-                                StatBar { width: parent.width; label: "usage"
+                                        text: root.gpuName; color: theme.sub; font.pixelSize: 11; font.family: Tok.sans } }
+                                StatBar { width: parent.width; label: "Usage"
                                     value: root.gpuUsage; barColor: root.loadColor(root.gpuUsage, 70, 90)
                                     rightText: Math.round(root.gpuUsage)+"%  ·  "+Math.round(root.gpuTemp)+"°C" }
                                 StatBar { width: parent.width; label: "VRAM"; barColor: theme.frost
@@ -5588,107 +7658,39 @@ ShellRoot {
                                     rightText: root.gpuMemUsed.toFixed(1)+" / "+root.gpuMemTotal.toFixed(1)+" GB" }
                                 Item { width: parent.width; height: 15
                                     Text { anchors.left: parent.left; anchors.verticalCenter: parent.verticalCenter
-                                        text: "power draw"; color: theme.sub; font.pixelSize: 11; font.family: Tok.sans }
+                                        text: "Power draw"; color: theme.sub; font.pixelSize: 11; font.family: Tok.sans }
                                     Text { anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
                                         text: root.gpuPower.toFixed(1)+" W"; color: theme.text; font.pixelSize: 11; font.family: Tok.sans; font.bold: true } } } } }
-                    Drop { screen: bar.screen
+                    }
+                    // ---- SOUND & PER-APP MIXER dropdown (modularized into AudioDrop.qml) ----
+                    LazyLoader { activeAsync: (root.openPop ==="vol" && root.openBar === bar) || !!(item && item.visible); Drop { screen: bar.screen
                         id: volDrop; host: root.barVertical ? volPillVert : volPill; shown: root.openPop ==="vol" && root.openBar === bar
-                        cardW: 320; cardH: volCol.implicitHeight + 24
-                        Column { id: volCol; anchors.fill: volDrop.card; anchors.margins: 12; spacing: 5
-                            DropHeader {
-                                title: "Sound"
-                                status: (volPill.au && volPill.au.muted) ? "Muted" : (Pipewire.defaultAudioSink ? "Playing on " + root.sinkLabel(Pipewire.defaultAudioSink) : "No output")
-                                tone: (volPill.au && volPill.au.muted) ? "warn" : "neutral"
-                                value: volPill.vol + "%"
-                            }
-                            // Volume slider row
-                            Row { width: parent.width; spacing: 10; height: 32
-                                Rectangle { width: 28; height: 28; radius: Tok.r; anchors.verticalCenter: parent.verticalCenter
-                                    color: volMuteMa.containsMouse ? theme.a(theme.iris,0.15) : "transparent"
-                                    Sym { anchors.centerIn: parent; text: (volPill.au&&volPill.au.muted)?"volume_off":"volume_up"; sz: 17; color: (volPill.au&&volPill.au.muted)?theme.bad:theme.frost }
-                                    MouseArea { id: volMuteMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: if(volPill.au) volPill.au.muted=!volPill.au.muted } }
-                                Slider { anchors.verticalCenter: parent.verticalCenter; width: parent.width - 38
-                                    value: volPill.au ? volPill.au.volume : 0
-                                    onMoved: (v)=>{ if(volPill.au){ volPill.au.muted=false; volPill.au.volume=v } } } }
-                            DropSection { text: "Output"; rule: true; note: root.sinks.length > 1 ? root.sinks.length + " devices" : "" }
-                            Repeater { model: root.sinks
-                                delegate: DropRow { required property var modelData
-                                    readonly property string nm: (modelData.name || "").toLowerCase()
-                                    icon: nm.indexOf("bluez") >= 0 ? "headphones" : nm.indexOf("hdmi") >= 0 ? "tv" : nm.indexOf("usb") >= 0 ? "speaker" : "laptop_chromebook"
-                                    label: root.sinkLabel(modelData); sub: root.sinkCard(modelData)
-                                    current: !!Pipewire.defaultAudioSink && Pipewire.defaultAudioSink.id === modelData.id
-                                    value: root.audioFmtBadge(modelData.name)
-                                    onClicked: Pipewire.preferredDefaultAudioSink = modelData } }
-                            // ---- bluetooth codec — only when the current output is a BT device offering a choice ----
-                            DropSection { visible: root.audioBtSink !== null; text: "Bluetooth codec"; rule: true }
-                            Flow { visible: root.audioBtSink !== null; width: parent.width; spacing: 6
-                                Repeater { model: root.audioBtSink ? root.audioBtSink.bt_codecs : []
-                                    delegate: Rectangle { required property var modelData
-                                        readonly property bool on: modelData.active
-                                        implicitHeight: 24; implicitWidth: ccT.implicitWidth + 18; radius: Tok.r
-                                        color: on ? theme.a(theme.iris, 0.25) : (ccMa.containsMouse ? theme.a(theme.line, 0.55) : theme.a(theme.line, 0.32))
-                                        border.width: 1; border.color: on ? theme.a(theme.iris, 0.55) : theme.a(theme.iris, 0.14)
-                                        Text { id: ccT; anchors.centerIn: parent; text: modelData.codec; color: on ? theme.iris : theme.sub; font.pixelSize: 10; font.family: Tok.sans; font.bold: on }
-                                        MouseArea { id: ccMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.audioSetCodec(root.audioBtSink.name, modelData.profile) } }
-                                }
-                            }
-                            // ---- per-app mixer (sea-audio.py, 4.0): volume slider + click the chip to change output ----
-                            DropSection { visible: root.streams.length > 0; text: "Apps"; rule: true }
-                            Repeater { model: root.streams
-                                delegate: Column {
-                                    required property var modelData
-                                    width: parent.width; spacing: 3
-                                    // name + output chip
-                                    Row { width: parent.width; height: 20; spacing: 8
-                                        Sym { anchors.verticalCenter: parent.verticalCenter; text: "graphic_eq"; sz: 14; color: theme.sub }
-                                        Text { anchors.verticalCenter: parent.verticalCenter; width: parent.width - 22 - appChip.width - 16; elide: Text.ElideRight
-                                            text: root.streamName(modelData); color: theme.sub; font.pixelSize: 11; font.family: Tok.sans }
-                                        Rectangle { id: appChip; anchors.verticalCenter: parent.verticalCenter
-                                            implicitWidth: acRow.implicitWidth + 14; height: 20; radius: Tok.r
-                                            color: acMa.containsMouse ? theme.a(theme.iris, 0.28) : theme.a(theme.iris, 0.14); border.width: 1; border.color: theme.a(theme.iris, 0.28)
-                                            Row { id: acRow; anchors.centerIn: parent; spacing: 3
-                                                Sym { anchors.verticalCenter: parent.verticalCenter; text: "arrow_forward"; sz: 11; color: theme.frost }
-                                                Text { anchors.verticalCenter: parent.verticalCenter; text: root.audioSinkLabelOf(modelData.id); color: theme.frost; font.pixelSize: 10; font.family: Tok.sans } }
-                                            MouseArea { id: acMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.audioCycleRouteById(modelData.id) } } }
-                                    // volume slider + readout
-                                    Row { width: parent.width; height: 20; spacing: 8
-                                        Item { width: 22; height: 1 }
-                                        Slider { anchors.verticalCenter: parent.verticalCenter; width: parent.width - 22 - 44 - 16
-                                            value: modelData.audio ? modelData.audio.volume : 0
-                                            onMoved: (v) => { if (modelData.audio) { modelData.audio.muted = false; modelData.audio.volume = v } } }
-                                        Text { anchors.verticalCenter: parent.verticalCenter; width: 44; horizontalAlignment: Text.AlignRight
-                                            text: modelData.audio ? Math.round(modelData.audio.volume * 100) + "%" : "—"; color: theme.sub; font.pixelSize: 10; font.family: Tok.sans } }
-                                }
-                            }
-                        } }
-                    Drop { screen: bar.screen
-                        id: batDrop; host: root.barVertical ? batPillVert : batPill; shown: root.openPop ==="bat" && root.openBar === bar
-                        cardW: 280; cardH: batCol.implicitHeight + 24
-                        // "2 h 10 min left" / "full in 40 min": the one number a battery menu is opened for
-                        function span(sec) {
-                            if (!(sec > 0)) return "";
-                            var h = Math.floor(sec / 3600), m = Math.round((sec % 3600) / 60);
-                            return h > 0 ? h + " h " + m + " min" : m + " min";
+                        cardW: 332; cardH: volCol.implicitHeight + 24
+                        AudioDrop {
+                            id: volCol
+                            anchors { left: volDrop.card.left; right: volDrop.card.right; top: volDrop.card.top; margins: 12 }
+                            shellRoot: root
+                            audioSink: volPill.au
+                            volPct: volPill.vol
                         }
-                        readonly property var dev: UPower.displayDevice
-                        readonly property string eta: !dev ? "" : batPill.charging ? (dev.timeToFull > 0 ? "full in " + span(dev.timeToFull) : "")
-                                                                                  : (dev.timeToEmpty > 0 ? span(dev.timeToEmpty) + " left" : "")
-                        Column { id: batCol; anchors.fill: batDrop.card; anchors.margins: 12; spacing: 3
-                            DropHeader {
-                                title: "Battery"
-                                status: (batPill.charging ? (batPill.pct >= 100 ? "Fully charged" : "Charging") : "On battery") + (batDrop.eta ? " · " + batDrop.eta : "")
-                                tone: batPill.charging ? "ok" : batPill.pct <= 10 ? "crit" : batPill.pct <= 20 ? "warn" : "neutral"
-                                value: batPill.pct + "%"
-                            }
-                            DropSection { text: "Power profile" }
-                            Repeater { model: [{k:"performance",i:"speed",l:"Performance",d:"Fastest, fans and battery work harder"},
-                                               {k:"balanced",i:"balance",l:"Balanced",d:"The everyday default"},
-                                               {k:"power-saver",i:"eco",l:"Power saver",d:"Slower, quieter, longer on battery"}]
-                                delegate: DropRow { required property var modelData
-                                    icon: modelData.i; label: modelData.l; sub: modelData.d
-                                    current: root.powerProfile === modelData.k
-                                    onClicked: root.setProfile(modelData.k) } } } }
-                    Drop { screen: bar.screen
+                    }
+                    }
+                    // ---- BATTERY & HYBRID dGPU dropdown (modularized into BatteryDrop.qml) ----
+                    LazyLoader { activeAsync: (root.openPop ==="bat" && root.openBar === bar) || !!(item && item.visible); Drop { screen: bar.screen
+                        id: batDrop; host: root.barVertical ? batPillVert : batPill; shown: root.openPop ==="bat" && root.openBar === bar
+                        cardW: 296; cardH: batCol.implicitHeight + 24
+                        BatteryDrop {
+                            id: batCol
+                            anchors { left: batDrop.card.left; right: batDrop.card.right; top: batDrop.card.top; margins: 12 }
+                            shellRoot: root
+                            charging: batPill.charging
+                            pct: batPill.pct
+                            active: batDrop.visible
+                        }
+                        onVisibleChanged: if (visible && !batHealthProc.running) batHealthProc.running = true
+                    }
+                    }
+                    LazyLoader { activeAsync: (root.openPop ==="cal" && root.openBar === bar) || !!(item && item.visible); Drop { screen: bar.screen
                         id: calDrop; host: root.barVertical ? clockPillVert : clockPill; shown: root.openPop ==="cal" && root.openBar === bar
                         cardW: 280; cardH: calCol.implicitHeight + 32
                         onVisibleChanged: { if (visible) reloadEventsProc.running = true }
@@ -5728,7 +7730,7 @@ ShellRoot {
                                 }
                                 visible: weekN > 0
                                 text: [ todayN>0 ? todayN + " today" : "", weekN>0 ? weekN + " this week" : "" ].filter(Boolean).join("  ·  ")
-                                color: theme.sub; font.pixelSize: 9; font.family: Tok.sans }
+                                color: theme.sub; font.pixelSize: 11; font.family: Tok.sans }
                             Grid { anchors.horizontalCenter: parent.horizontalCenter; columns: 7; spacing: 4
                                 Repeater { model: ["S","M","T","W","T","F","S"]
                                     delegate: Text { required property var modelData; width: 34; horizontalAlignment: Text.AlignHCenter; text: modelData; color: theme.sub; font.pixelSize: 11; font.family: Tok.sans } }
@@ -5754,8 +7756,8 @@ ShellRoot {
                             Rectangle { width: parent.width; height: 1; color: theme.a(theme.iris, 0.15) }
                             Column {
                                 width: parent.width; spacing: 5
-                                CalHead { skey: "up"; title: "UPCOMING"
-                                    summary: root.calUpcoming.length === 0 ? "none"
+                                CalHead { skey: "up"; title: "Upcoming"
+                                    summary: root.calUpcoming.length === 0 ? "None"
                                            : root.calUpcoming.length + (root.calUpcoming.length > 4 ? " · +" + (root.calUpcoming.length - 4) + " more" : "") }
                                 Column { width: parent.width; spacing: 5; visible: !root.calFolded("up")
                                 Repeater {
@@ -5777,7 +7779,7 @@ ShellRoot {
                                             Column { anchors.verticalCenter: parent.verticalCenter; width: parent.width - 44; spacing: 1
                                                 Text { width: parent.width; text: evRow.modelData.title; color: theme.text; font.pixelSize: 11; font.family: Tok.sans; elide: Text.ElideRight }
                                                 Text { text: evRow.rel + "  ·  " + Qt.formatDate(root.calDate(evRow.modelData.date), "ddd") + (evRow.modelData.time ? "  ·  " + evRow.modelData.time : "")
-                                                    color: evRow.soon ? theme.frost : theme.faint; font.pixelSize: 9; font.family: Tok.sans } } } } } }
+                                                    color: evRow.soon ? theme.frost : theme.faint; font.pixelSize: 11; font.family: Tok.sans } } } } } }
 
                             }
                             // ================= TIMER · POMODORO =================
@@ -5785,7 +7787,7 @@ ShellRoot {
                             Column { width: parent.width; spacing: 6
                                 // A running countdown is the one thing that must survive folding: the
                                 // section is exactly where you look to find out how long is left.
-                                CalHead { skey: "tmr"; title: root.pomoActive ? "POMODORO" : "TIMER"
+                                CalHead { skey: "tmr"; title: root.pomoActive ? "Pomodoro" : "Timer"
                                     summary: root.tmrRunning ? root.tmrText
                                            : (root.pomoActive ? "session " + (root.pomoDone + (root.pomoPhase==="focus"?1:0)) : "off") }
                                 Column { width: parent.width; spacing: 6; visible: !root.calFolded("tmr")
@@ -5795,9 +7797,9 @@ ShellRoot {
                                     Row { width: parent.width; spacing: 10
                                         Text { anchors.verticalCenter: parent.verticalCenter; text: root.tmrText; color: root.tmrPaused?theme.warn:theme.frost; font.pixelSize: 30; font.family: Tok.sans; font.bold: true }
                                         Column { anchors.verticalCenter: parent.verticalCenter; spacing: 1
-                                            Text { text: root.pomoActive ? (root.pomoPhase==="focus"?"focus":(root.pomoPhase==="long"?"long break":"break")) : "timer"
+                                            Text { text: root.pomoActive ? (root.pomoPhase==="focus"?"Focus":(root.pomoPhase==="long"?"Long break":"Break")) : "Timer"
                                                 color: (root.pomoActive && root.pomoPhase!=="focus") ? theme.good : theme.iris; font.pixelSize: 12; font.family: Tok.sans; font.bold: true }
-                                            Text { visible: root.tmrPaused; text: "paused"; color: theme.warn; font.pixelSize: 9; font.family: Tok.sans } } }
+                                            Text { visible: root.tmrPaused; text: "Paused"; color: theme.warn; font.pixelSize: 11; font.family: Tok.sans } } }
                                     Rectangle { width: parent.width; height: 5; radius: 2.5; color: theme.a(theme.line,0.7)
                                         Rectangle { height: parent.height; radius: 2.5
                                             width: parent.width * (root.tmrTotal>0 ? Math.max(0,Math.min(1, 1 - root.tmrRemain/root.tmrTotal)) : 0)
@@ -5807,19 +7809,19 @@ ShellRoot {
                                             color: tpMa.containsMouse ? theme.a(theme.iris,0.25) : theme.a(theme.line,0.4); border.width:1; border.color: theme.a(theme.iris,0.2)
                                             Row { anchors.centerIn: parent; spacing: 5
                                                 Sym { anchors.verticalCenter: parent.verticalCenter; text: root.tmrPaused?"play_arrow":"pause"; sz: 14; color: theme.frost }
-                                                Text { anchors.verticalCenter: parent.verticalCenter; text: root.tmrPaused?"resume":"pause"; color: theme.text; font.pixelSize: 11; font.family: Tok.sans } }
+                                                Text { anchors.verticalCenter: parent.verticalCenter; text: root.tmrPaused?"Resume":"Pause"; color: theme.text; font.pixelSize: 11; font.family: Tok.sans } }
                                             MouseArea { id: tpMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.tmrToggle() } }
                                         Rectangle { visible: root.pomoActive; width: (parent.width - 12)/3; height: 30; radius: Tok.r
                                             color: tsMa.containsMouse ? theme.a(theme.iris,0.25) : theme.a(theme.line,0.4); border.width:1; border.color: theme.a(theme.iris,0.2)
                                             Row { anchors.centerIn: parent; spacing: 5
                                                 Sym { anchors.verticalCenter: parent.verticalCenter; text: "skip_next"; sz: 14; color: theme.frost }
-                                                Text { anchors.verticalCenter: parent.verticalCenter; text: "skip"; color: theme.text; font.pixelSize: 11; font.family: Tok.sans } }
+                                                Text { anchors.verticalCenter: parent.verticalCenter; text: "Skip"; color: theme.text; font.pixelSize: 11; font.family: Tok.sans } }
                                             MouseArea { id: tsMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.pomoSkip() } }
                                         Rectangle { width: root.pomoActive ? (parent.width-12)/3 : (parent.width-6)/2; height: 30; radius: Tok.r
                                             color: txMa.containsMouse ? theme.a(theme.bad,0.22) : theme.a(theme.line,0.4); border.width:1; border.color: theme.a(theme.bad,0.25)
                                             Row { anchors.centerIn: parent; spacing: 5
                                                 Sym { anchors.verticalCenter: parent.verticalCenter; text: "stop"; sz: 14; color: theme.bad }
-                                                Text { anchors.verticalCenter: parent.verticalCenter; text: "stop"; color: theme.text; font.pixelSize: 11; font.family: Tok.sans } }
+                                                Text { anchors.verticalCenter: parent.verticalCenter; text: "Stop"; color: theme.text; font.pixelSize: 11; font.family: Tok.sans } }
                                             MouseArea { id: txMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.tmrStop() } } } }
 
                                 // ---- idle: quick timers + pomodoro ----
@@ -5839,7 +7841,7 @@ ShellRoot {
                                     // compact config: focus / break steppers + DND toggle
                                     Row { width: parent.width; spacing: 8
                                         Row { spacing: 3
-                                            Text { anchors.verticalCenter: parent.verticalCenter; text: "focus"; color: theme.sub; font.pixelSize: 10; font.family: Tok.sans }
+                                            Text { anchors.verticalCenter: parent.verticalCenter; text: "Focus"; color: theme.sub; font.pixelSize: 11; font.family: Tok.sans }
                                             Rectangle { width: 20; height: 20; radius: Tok.r; color: fmMa.containsMouse?theme.a(theme.iris,0.2):theme.a(theme.line,0.4)
                                                 Sym { anchors.centerIn: parent; text: "remove"; sz: 12; color: theme.frost }
                                                 MouseArea { id: fmMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: { root.pomoFocusMin = Math.max(5, root.pomoFocusMin-5); root.tmrSaveCfg() } } }
@@ -5848,7 +7850,7 @@ ShellRoot {
                                                 Sym { anchors.centerIn: parent; text: "add"; sz: 12; color: theme.frost }
                                                 MouseArea { id: fpMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: { root.pomoFocusMin = Math.min(120, root.pomoFocusMin+5); root.tmrSaveCfg() } } } }
                                         Row { spacing: 3
-                                            Text { anchors.verticalCenter: parent.verticalCenter; text: "break"; color: theme.sub; font.pixelSize: 10; font.family: Tok.sans }
+                                            Text { anchors.verticalCenter: parent.verticalCenter; text: "Break"; color: theme.sub; font.pixelSize: 11; font.family: Tok.sans }
                                             Rectangle { width: 20; height: 20; radius: Tok.r; color: bmMa.containsMouse?theme.a(theme.iris,0.2):theme.a(theme.line,0.4)
                                                 Sym { anchors.centerIn: parent; text: "remove"; sz: 12; color: theme.frost }
                                                 MouseArea { id: bmMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: { root.pomoBreakMin = Math.max(1, root.pomoBreakMin-1); root.tmrSaveCfg() } } }
@@ -5866,8 +7868,8 @@ ShellRoot {
                             // ================= WORLD CLOCK =================
                             Rectangle { width: parent.width; height: 1; color: theme.a(theme.iris, 0.15) }
                             Column { width: parent.width; spacing: 5
-                                CalHead { skey: "wc"; title: "WORLD CLOCK"
-                                    summary: root.wcZones.length === 0 ? "none" : root.wcZones.length + " cities" }
+                                CalHead { skey: "wc"; title: "World clock"
+                                    summary: root.wcZones.length === 0 ? "None" : root.wcZones.length + " cities" }
                                 Column { width: parent.width; spacing: 5; visible: !root.calFolded("wc")
                                 Repeater { model: root.wcTimes
                                     delegate: Rectangle { required property var modelData; width: parent.width; height: 28; radius: Tok.r
@@ -5875,28 +7877,29 @@ ShellRoot {
                                         Row { anchors.fill: parent; anchors.leftMargin: 8; anchors.rightMargin: 8; spacing: 8
                                             Sym { anchors.verticalCenter: parent.verticalCenter; text: "public"; sz: 13; color: theme.sub }
                                             Text { anchors.verticalCenter: parent.verticalCenter; width: parent.width - 120; elide: Text.ElideRight; text: modelData.label; color: theme.text; font.pixelSize: 11; font.family: Tok.sans }
-                                            Text { anchors.verticalCenter: parent.verticalCenter; text: modelData.day; color: theme.sub; font.pixelSize: 9; font.family: Tok.sans }
+                                            Text { anchors.verticalCenter: parent.verticalCenter; text: modelData.day; color: theme.sub; font.pixelSize: 11; font.family: Tok.sans }
                                             Text { anchors.verticalCenter: parent.verticalCenter; text: modelData.time; color: theme.frost; font.pixelSize: 12; font.family: Tok.sans; font.bold: true } }
                                         MouseArea { id: wcm; anchors.fill: parent; hoverEnabled: true; acceptedButtons: Qt.NoButton }
                                         Rectangle { anchors.right: parent.right; anchors.rightMargin: 3; anchors.verticalCenter: parent.verticalCenter; visible: wcm.containsMouse
                                             width: 20; height: 20; radius: Tok.r; color: theme.a(theme.bad,0.22)
                                             Sym { anchors.centerIn: parent; text: "close"; sz: 12; color: theme.bad }
                                             MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.wcRemove(modelData.zone) } } } }
-                                Text { visible: root.wcTimes.length===0; text: "add a city below"; color: theme.sub; font.pixelSize: 10; font.family: Tok.sans }
+                                Text { visible: root.wcTimes.length===0; text: "Add a city below"; color: theme.sub; font.pixelSize: 11; font.family: Tok.sans }
                                 Flow { width: parent.width; spacing: 5; topPadding: 2
                                     Repeater { model: root.wcPresets
                                         delegate: Rectangle { required property var modelData
                                             visible: root.wcZones.indexOf(modelData.z) < 0
                                             height: 22; radius: Tok.r; width: visible ? (wcAddRow.implicitWidth + 14) : 0
-                                            color: wcaMa.containsMouse ? theme.a(theme.iris,0.2) : theme.a(theme.line,0.35); border.width: 1; border.color: theme.a(theme.iris,0.18)
+                                            color: wcaMa.containsMouse ? theme.a(theme.iris,0.2) : theme.a(theme.line,0.35); border.width: 0; border.color: theme.a(theme.iris,0.18)
                                             Row { id: wcAddRow; anchors.centerIn: parent; spacing: 3
                                                 Sym { anchors.verticalCenter: parent.verticalCenter; text: "add"; sz: 11; color: theme.frost }
-                                                Text { anchors.verticalCenter: parent.verticalCenter; text: modelData.l; color: theme.text; font.pixelSize: 9; font.family: Tok.sans } }
+                                                Text { anchors.verticalCenter: parent.verticalCenter; text: modelData.l; color: theme.text; font.pixelSize: 11; font.family: Tok.sans } }
                                             MouseArea { id: wcaMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.wcAdd(modelData.z) } } } } } } } }
+                    }
                     // Same rules as the full power menu (PowerMenu.qml): lock and suspend lose nothing
                     // and act at once; log out, restart and shut down are HELD, a fill sweeping the row
                     // while you keep the button down. "More" opens the full menu.
-                    Drop { screen: bar.screen
+                    LazyLoader { activeAsync: (root.openPop ==="pwr" && root.openBar === bar) || !!(item && item.visible); Drop { screen: bar.screen
                         id: pwrDrop; host: root.barVertical ? pwrPillVert : pwrPill; shown: root.openPop ==="pwr" && root.openBar === bar
                         cardW: 280; cardH: pwrCol.implicitHeight + 24
                         property string up: ""
@@ -5924,8 +7927,8 @@ ShellRoot {
                                 Repeater { model: [{i:"lock",l:"Lock",c:root.seaScripts + "sea-lock.sh"}, {i:"bedtime",l:"Suspend",c:"systemctl suspend"}]
                                     delegate: Rectangle { required property var modelData
                                         width: (pwrCol.width - 8) / 2; height: 58; radius: Tok.rCard
-                                        color: qma.pressed ? Tok.accentWash : qma.containsMouse ? Tok.sunken : Tok.surface
-                                        border.width: 1; border.color: qma.containsMouse ? Tok.accent : Tok.rule
+                                        color: qma.pressed ? Tok.alpha(Tok.accent, 0.2) : qma.containsMouse ? Tok.alpha(Tok.ink, 0.1) : Tok.alpha(Tok.ink, 0.06)
+                                        border.width: 0
                                         Column { anchors.centerIn: parent; spacing: 4
                                             Sym { anchors.horizontalCenter: parent.horizontalCenter; text: modelData.i; sz: 20; color: qma.containsMouse ? Tok.accent : Tok.ink2 }
                                             Text { anchors.horizontalCenter: parent.horizontalCenter; text: modelData.l; color: Tok.ink; font.pixelSize: 12; font.family: Tok.sans } }
@@ -5938,7 +7941,7 @@ ShellRoot {
                                 delegate: Rectangle { required property var modelData
                                     readonly property bool held: pwrDrop.holdL === modelData.l
                                     width: parent.width; height: 38; radius: Tok.r; clip: true
-                                    color: pw.containsMouse ? Tok.sunken : "transparent"
+                                    color: pw.containsMouse ? Tok.alpha(Tok.ink, 0.07) : "transparent"
                                     border.width: held ? 1 : 0; border.color: modelData.col
                                     Rectangle { width: parent.width * (held ? pwrDrop.holdP : 0); height: parent.height
                                         color: Qt.rgba(modelData.col.r, modelData.col.g, modelData.col.b, 0.22) }
@@ -5948,18 +7951,18 @@ ShellRoot {
                                             text: held ? "Keep holding to " + modelData.l.toLowerCase() : modelData.l
                                             color: held ? modelData.col : Tok.ink; font.pixelSize: 13; font.family: Tok.sans } }
                                     Text { anchors.right: parent.right; anchors.rightMargin: 12; anchors.verticalCenter: parent.verticalCenter
-                                        visible: pw.containsMouse && !held; text: "hold"; color: Tok.ink3; font.pixelSize: 10; font.family: Tok.sans }
+                                        visible: pw.containsMouse && !held; text: "Hold"; color: Tok.ink3; font.pixelSize: 11; font.family: Tok.sans }
                                     MouseArea { id: pw; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
                                         onPressed: { pwrDrop.holdL = modelData.l; pwrHold.cmd = modelData.c; pwrHold.restart() }
                                         onReleased: pwrDrop.release(); onCanceled: pwrDrop.release() } } }
-                            Rectangle { width: parent.width; height: 1; color: Tok.rule }
+                            Rectangle { width: parent.width; height: 1; color: Tok.alpha(Tok.ink, 0.08) }
                             Item { width: parent.width; height: 26
                                 Text { anchors.left: parent.left; anchors.verticalCenter: parent.verticalCenter
                                     text: pwrDrop.laterAt ? "Shutting down at " + pwrDrop.laterAt : ""
                                     color: Tok.warn; font.pixelSize: 11; font.family: Tok.sans }
                                 Rectangle { anchors.left: parent.left; anchors.leftMargin: 120; anchors.verticalCenter: parent.verticalCenter
                                     visible: pwrDrop.laterAt !== ""; width: cxT.implicitWidth + 16; height: 24; radius: 12
-                                    color: cxMa.containsMouse ? Tok.sunken : "transparent"; border.width: 1; border.color: Tok.rule
+                                    color: cxMa.containsMouse ? Tok.alpha(Tok.ink, 0.08) : Tok.alpha(Tok.ink, 0.04); border.width: 0
                                     Text { id: cxT; anchors.centerIn: parent; text: "Cancel"; color: Tok.ink; font.pixelSize: 11; font.family: Tok.sans }
                                     MouseArea { id: cxMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
                                         onClicked: { Quickshell.execDetached(["sh","-c","systemctl --user stop sea-shutdown.timer && notify-send -i system-shutdown 'Shutdown cancelled'"]); pwrDrop.laterAt = "" } } }
@@ -5967,6 +7970,7 @@ ShellRoot {
                                     text: "More options  ›"; color: moreMa.containsMouse ? Tok.accent : Tok.ink2; font.pixelSize: 11; font.family: Tok.sans
                                     MouseArea { id: moreMa; anchors.fill: parent; anchors.margins: -6; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
                                         onClicked: { root.openPop = ""; powerMenu.open() } } } } } }
+                    }
                 } // closes rightGroupDrops
                 } // closes horizontalBarLayout
 
@@ -6048,7 +8052,7 @@ ShellRoot {
                             spacing: 6
                             Layout.alignment: Qt.AlignHCenter
                             Repeater {
-                                model: Hyprland.workspaces
+                                model: root.stripWorkspaces
                                 delegate: Rectangle {
                                     required property var modelData
                                     readonly property bool foc: Hyprland.focusedWorkspace && Hyprland.focusedWorkspace.id === modelData.id
@@ -6200,6 +8204,29 @@ ShellRoot {
                             accent: root.updTotal > 0 ? theme.warn : theme.frost
                             vertValue: root.updTotal > 0 ? String(root.updTotal) : "" }
 
+                        Pill { owner: bar; vert: true; id: aiPillVert; key: "ai"
+                            wid: "wgAi"; Layout.alignment: Qt.AlignHCenter
+                            visible: root.cfgAi
+                            mark: root.aiShown ? root.aiShown.id : "claude"
+                            markAlso: (root.aiShown && root.aiShown.with) ? root.aiShown.with : ""
+                            accent: root.aiAccent
+                            vertValue: root.aiBarValue }
+
+                        Pill { owner: bar; vert: true; id: ghPillVert; key: "gh"
+                            wid: "wgGithub"; Layout.alignment: Qt.AlignHCenter
+                            visible: root.cfgGithub
+                            icon: root.githubPillIcon
+                            accent: root.githubPillAccent
+                            ember: root.githubSputter ? root.githubEmber : 1.0
+                            vertValue: root.githubBarValue }
+
+                        Pill { owner: bar; vert: true; id: totemPillVert; key: "totem"
+                            wid: "wgTotem"; Layout.alignment: Qt.AlignHCenter
+                            visible: root.cfgTotem
+                            icon: root.totemPillIcon
+                            accent: root.totemPillAccent
+                            vertValue: root.totemCode !== "" ? root.totemCode : "" }
+
                         Pill { owner: bar; vert: true; id: wifiPillVert; key: "wifi"
                             wid: "wgWifi"; Layout.alignment: Qt.AlignHCenter
                             visible: root.cfgWifi
@@ -6307,7 +8334,10 @@ ShellRoot {
                 // EVERY dropdown must be in this list. One left out is not "unregistered", it is
                 // treated as outside the grab — so it opens and is dismissed in the same frame,
                 // which looks exactly like a dead pill. (updDrop was missing and did precisely that.)
-                readonly property var myWins: [bar, ccDrop, wxDrop, wifiDrop, btDrop, kdeDrop, volDrop, batDrop, calDrop, pwrDrop, notifDrop, mprisDrop, trayDrop, sysDrop, updDrop, seaDrop]
+                // The dropdowns register themselves (Drop, below) as they are built — they are
+                // built lazily after the bar is up, so a list written here would name windows
+                // that do not exist yet.
+                readonly property var myWins: [bar]
                 Component.onCompleted: {
                     try { root.grabWins = root.grabWins.concat(myWins); } catch(e) {}
                 }
@@ -6344,7 +8374,12 @@ ShellRoot {
         id: notifWin
         readonly property real ui: root.uiFor(notifWin.screen)
         readonly property real baseW: 370
-        anchors { top: true; bottom: true; left: true; right: true }
+        // Sized to the notification stack instead of a full 1920x1080 surface: saves ~20+ MB
+        // of GPU/Wayland swapchain buffers while toasts are shown.
+        anchors { top: true; right: true }
+        margins { top: Math.round(42 * notifWin.ui); right: Math.round(4 * notifWin.ui) }
+        implicitWidth: Math.ceil((notifWin.baseW + 24) * notifWin.ui)
+        implicitHeight: Math.max(1, Math.ceil((popCol.implicitHeight + 24) * notifWin.ui))
         color: "transparent"
         WlrLayershell.layer: WlrLayer.Top
         WlrLayershell.namespace: "sea-shell:notif"
@@ -6356,63 +8391,107 @@ ShellRoot {
             id: popCol
             anchors.top: parent.top
             anchors.right: parent.right
-            anchors.topMargin: 50 * notifWin.ui
-            anchors.rightMargin: 12 * notifWin.ui
+            anchors.topMargin: 8 * notifWin.ui
+            anchors.rightMargin: 8 * notifWin.ui
             width: notifWin.baseW
             spacing: 8
             transformOrigin: Item.TopRight
             scale: notifWin.ui
-            // Notifications are the most dynamic thing the shell draws and they were the
-            // least animated: a card blinked into existence, and when one was dismissed the
-            // ones under it teleported up. A Column is a positioner, so it can transition its
-            // own children — `add` for arrivals, `move` for everyone shuffling afterwards.
-            // (There is no `remove` transition to write: by then the delegate is already gone.)
-            add: Transition {
-                NumberAnimation { property: "opacity"; from: 0; to: 1; duration: Tok.mFast }
-                NumberAnimation { property: "x"; from: popCol.width * 0.3
-                                  duration: Tok.mBase
-                                  easing.type: Easing.Bezier; easing.bezierCurve: Tok.mEnter }
-            }
+            // Notifications are the most dynamic thing the shell draws. `move` shuffles the cards
+            // when one comes or goes. Arriving is each card's own animation below, not the
+            // Column's `add`: a second arrival interrupted that one, and a burst left the earlier
+            // cards stuck nearly transparent for the rest of their time on screen.
             move: Transition {
                 NumberAnimation { properties: "x,y"; duration: Tok.mBase
                                   easing.type: Easing.Bezier; easing.bezierCurve: Tok.mMove }
             }
             Repeater {
                 model: popupModel
-                delegate: Rectangle {
+                // The app's icon large on the left and the details beside it: its name and "now",
+                // the title, the body, and the app's own buttons as pills; a round close button
+                // shows on hover. Glass like the bar and its menus.
+                delegate: Glass {
                     id: pcard
                     required property var model
                     readonly property var actList: {
                         try { return JSON.parse(pcard.model.acts || "[]"); } catch (e) { return []; }
                     }
-                    width: popCol.width; radius: Tok.rCard
-                    implicitHeight: pcc.implicitHeight + 22
+                    readonly property bool isShell: ("" + pcard.model.appName).toLowerCase() === "sea-shell"
+                    readonly property bool hasPhoto: !!pcard.model.image && pPhoto.status === Image.Ready
+                    readonly property string iconSrc: {
+                        var i = "" + (pcard.model.appIcon || "");
+                        if (i.indexOf("/") === 0) return "file://" + i;
+                        if (i.indexOf("file:") === 0 || i.indexOf("image:") === 0) return i;
+                        var p = i ? Quickshell.iconPath(i, true) : "";
+                        if (!p) { try { var e = DesktopEntries.heuristicLookup("" + pcard.model.appName); if (e && e.icon) p = Quickshell.iconPath(e.icon, true) } catch (err) {} }
+                        return p || Quickshell.iconPath(("" + pcard.model.appName).toLowerCase(), true);
+                    }
+                    width: popCol.width; radius: Tok.rCard + 4
+                    implicitHeight: Math.max(pcc.implicitHeight + 28, pIcon.height + 28)
                     height: implicitHeight
-                    color: Tok.surface
-                    border.width: 1; border.color: pcard.model.urg===2 ? theme.a(theme.bad,0.6) : Tok.ruleHard
-                    Column { id: pcc; anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top; anchors.margins: 12; anchors.rightMargin: 36; spacing: 3
-                        Row { width: parent.width
-                            Sym { anchors.verticalCenter: parent.verticalCenter; text: pcard.model.urg===2 ? "priority_high" : "notifications"; sz: 13; color: pcard.model.urg===2 ? theme.bad : theme.frost }
-                            Text { leftPadding: 6; anchors.verticalCenter: parent.verticalCenter; text: pcard.model.appName + (pcard.model.n > 1 ? "  ·  " + pcard.model.n + " new" : ""); color: theme.frost; font.pixelSize: 10; font.family: root.cfgFont; elide: Text.ElideRight; width: parent.width-24 } }
-                        Text { width: parent.width; visible: pcard.model.summary!==""; text: pcard.model.summary; color: theme.text; font.pixelSize: 13; font.family: root.cfgFont; font.bold: true; wrapMode: Text.WordWrap }
-                        Text { width: parent.width; visible: pcard.model.body!==""; text: pcard.model.body; color: theme.sub; font.pixelSize: 11; font.family: root.cfgFont; wrapMode: Text.WordWrap; maximumLineCount: 4; elide: Text.ElideRight; textFormat: Text.PlainText }
+                    border.color: pcard.model.urg === 2 ? Tok.alpha(Tok.crit, 0.7) : (Tok.glassy ? Tok.glassEdge : Tok.alpha(Tok.ink, 0.08))
+                    NumberAnimation on opacity { from: 0; to: 1; duration: Tok.mFast }
+                    transform: Translate { id: pEnter }
+                    NumberAnimation { running: true; target: pEnter; property: "x"; from: popCol.width * 0.3; to: 0
+                                      duration: Tok.mBase; easing.type: Easing.Bezier; easing.bezierCurve: Tok.mEnter }
+                    HoverHandler { id: pHover }
+                    // the app: the shell's own mark, the app's icon, or a tile with a bell
+                    Item {
+                        id: pIcon
+                        x: 14; width: 52; height: 52
+                        // beside the text it describes, until buttons make the card tall
+                        y: pcard.actList.length > 0 ? 14 : (pcard.height - height) / 2
+                        SeaLogo { anchors.centerIn: parent; visible: pcard.isShell && !pcard.hasPhoto; size: parent.width; accent: Tok.accent }
+                        IconImage { id: pIconImg; anchors.fill: parent; source: pcard.isShell ? "" : pcard.iconSrc
+                            visible: !pcard.isShell && !pcard.hasPhoto && status === Image.Ready; asynchronous: true }
+                        // the notification's own picture, with the app it came from as a badge
+                        ClippingRectangle { anchors.fill: parent; radius: 12; color: "transparent"; visible: pcard.hasPhoto
+                            Image { id: pPhoto; anchors.fill: parent; source: pcard.model.image || ""; fillMode: Image.PreserveAspectCrop
+                                sourceSize.width: 104; sourceSize.height: 104; asynchronous: true } }
+                        Rectangle { visible: pcard.hasPhoto && pBadge.status === Image.Ready
+                            x: parent.width - 16; y: parent.height - 16; width: 22; height: 22; radius: 7; color: Tok.surface
+                            IconImage { id: pBadge; anchors.centerIn: parent; implicitSize: 18; source: pcard.iconSrc; asynchronous: true } }
+                        Rectangle {
+                            anchors.fill: parent; radius: 14; visible: !pcard.isShell && !pcard.hasPhoto && !pIconImg.visible
+                            color: pcard.model.urg === 2 ? Tok.crit : Tok.accent
+                            Sym { anchors.centerIn: parent; text: pcard.model.urg === 2 ? "priority_high" : "notifications"; sz: 28
+                                color: pcard.model.urg === 2 ? "white" : Tok.accentInk }
+                        }
+                    }
+                    Column {
+                        id: pcc
+                        anchors.left: pIcon.right; anchors.leftMargin: 13
+                        anchors.right: parent.right; anchors.rightMargin: 14
+                        anchors.verticalCenter: parent.verticalCenter
+                        spacing: 2
+                        Item {
+                            width: parent.width; height: 16
+                            Text { anchors.left: parent.left; anchors.right: pWhen.left; anchors.rightMargin: 8; anchors.verticalCenter: parent.verticalCenter
+                                text: pcard.model.appName + (pcard.model.n > 1 ? " · " + pcard.model.n + " new" : "")
+                                color: Tok.ink2; font.pixelSize: 11; font.weight: Font.DemiBold; font.family: Tok.sans; elide: Text.ElideRight }
+                            Text { id: pWhen; anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
+                                text: "Now"; color: Tok.ink3; font.pixelSize: 11; font.family: Tok.sans }
+                        }
+                        Text { width: parent.width; visible: pcard.model.summary !== ""; text: pcard.model.summary
+                            color: Tok.ink; font.pixelSize: 13; font.weight: Font.DemiBold; font.family: Tok.sans; wrapMode: Text.WordWrap; maximumLineCount: 2; elide: Text.ElideRight }
+                        Text { width: parent.width; visible: pcard.model.body !== ""; text: pcard.model.body
+                            color: Tok.ink2; font.pixelSize: 12; font.family: Tok.sans; wrapMode: Text.WordWrap; maximumLineCount: 4; elide: Text.ElideRight; textFormat: Text.PlainText; lineHeight: 1.1 }
                         // action buttons the app supplied (Reply, Mark as read, …)
                         Row {
-                            spacing: 6; topPadding: 6
+                            spacing: 6; topPadding: 8
                             visible: pcard.actList.length > 0
                             Repeater {
                                 model: pcard.actList
                                 delegate: Rectangle {
                                     required property var modelData
-                                    height: 24; radius: Tok.r
-                                    width: alab.implicitWidth + 18
-                                    color: am.containsMouse ? theme.a(theme.iris, 0.25) : theme.a(theme.line, 0.5)
-                                    border.width: 1; border.color: theme.a(theme.iris, 0.3)
+                                    height: 26; radius: 13
+                                    width: alab.implicitWidth + 22
+                                    color: am.containsMouse ? Tok.alpha(Tok.ink, 0.13) : Tok.alpha(Tok.ink, 0.07)
                                     Behavior on color { ColorAnimation { duration: Tok.mFast } }
-                                    scale: am.pressed ? 0.94 : 1.0
+                                    scale: am.pressed ? 0.95 : 1.0
                                     Behavior on scale { NumberAnimation { duration: Tok.mMicro } }
                                     Text { id: alab; anchors.centerIn: parent; text: modelData.t
-                                        color: theme.text; font.pixelSize: 11; font.family: root.cfgFont }
+                                        color: Tok.ink; font.pixelSize: 12; font.weight: Font.Medium; font.family: Tok.sans }
                                     MouseArea { id: am; anchors.fill: parent; hoverEnabled: true
                                         cursorShape: Qt.PointingHandCursor
                                         onClicked: root.noteInvoke(pcard.model.key, modelData.i) }
@@ -6420,10 +8499,15 @@ ShellRoot {
                             }
                         }
                     }
-                    Rectangle { anchors.top: parent.top; anchors.right: parent.right; anchors.margins: 6; width: 22; height: 22; radius: Tok.r
-                        color: xm.containsMouse ? theme.a(theme.iris,0.2) : "transparent"
-                        Behavior on color { ColorAnimation { duration: Tok.mFast } }
-                        Sym { anchors.centerIn: parent; text: "close"; sz: 14; color: theme.sub }
+                    // close, top-left over the icon's corner, on hover only
+                    Rectangle {
+                        x: -6; y: -6; width: 22; height: 22; radius: 11
+                        opacity: pHover.hovered ? 1 : 0
+                        visible: opacity > 0
+                        Behavior on opacity { NumberAnimation { duration: Tok.mFast } }
+                        color: xm.containsMouse ? Tok.raised : Tok.surface
+                        border.width: 1; border.color: Tok.alpha(Tok.ink, 0.14)
+                        Sym { anchors.centerIn: parent; text: "close"; sz: 13; color: Tok.ink2 }
                         MouseArea { id: xm; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.popDismiss(pcard.model.key) } }
                     Timer { running: true; interval: pcard.model.urg===2 ? 12000 : 5000; onTriggered: root.popDismiss(pcard.model.key) }
                 }
@@ -6452,7 +8536,7 @@ ShellRoot {
         onOnChanged: { if (osdWin.on) { osdHold.stop(); osdWin.held = true } else osdHold.restart() }
         Timer { id: osdHold; interval: Tok.mFast + 30; onTriggered: osdWin.held = false }
         mask: Region { item: osdCard }
-        Rectangle {
+        Glass {
             id: osdCard
             anchors.centerIn: parent
             // authored native; scaled around its centre — and the last 6% of that scale is
@@ -6464,12 +8548,11 @@ ShellRoot {
                                                   easing.type: Easing.Bezier
                                                   easing.bezierCurve: Tok.mEnter } }
             width: 250; height: 54; radius: Tok.rCard
-            color: Tok.surface; border.width: 1; border.color: Tok.ruleHard
             Row { anchors.fill: parent; anchors.margins: 16; spacing: 13
                 Sym { anchors.verticalCenter: parent.verticalCenter; text: root.osdIcon; sz: 24; color: theme.frost }
                 Column { anchors.verticalCenter: parent.verticalCenter; width: parent.width-52; spacing: 6
                     Row { width: parent.width
-                        Text { text: root.osdKind==="vol" ? "volume" : (root.osdKind==="zoom" ? "magnifier" : "brightness"); color: theme.sub; font.pixelSize: 11; font.family: root.cfgFont }
+                        Text { text: root.osdKind==="vol" ? "Volume" : (root.osdKind==="zoom" ? "Magnifier" : "Brightness"); color: theme.sub; font.pixelSize: 11; font.family: root.cfgFont }
                         Item { width: parent.width - 80; height: 1 }
                         Text { text: root.osdKind==="zoom" ? (root.zoomFactor.toFixed(2).replace(/\.?0+$/,"")+"×") : (Math.round(root.osdVal*100)+"%"); color: theme.frost; font.pixelSize: 11; font.family: root.cfgFont } }
                     Rectangle { width: parent.width; height: 6; radius: Tok.r; color: theme.a(theme.line,0.85)
@@ -6480,377 +8563,18 @@ ShellRoot {
         }
     }
 
-    // (the alt-tab switcher HUD lives up top, next to its state + the `switcher` IPC —
-    //  a single thumbnail-based overlay; there is deliberately no second one here.)
-
-    // ===== Exposé — every workspace, as a map of where things actually are =====
-    //
-    // The version this replaces drew a fixed 280x180 card per workspace in a Flow, inside a
-    // box clamped to 1000x700 and centred — so on a 1080p screen three workspaces sat in the
-    // top-left eighth of a mostly empty page. Inside each card, the windows were 122x60 tiles
-    // laid out left to right in the order the compositor happened to list them.
-    //
-    // That last part is the real fault. An exposé is a MAP: its whole job is that the picture
-    // of a workspace matches the shape of the workspace, so you recognise the one you want by
-    // its layout rather than by reading three labels. Windows are now drawn at their true
-    // relative positions and sizes within the monitor, and a card is the monitor's own aspect
-    // ratio, so a workspace with a wide editor and a narrow terminal beside it LOOKS like that.
+    // ===== Exposé — every workspace (WorkspacesPanel.qml) =====
     property bool exposeActive: false
     // refresh on the way in: the tiles read titles/classes and focus by address out of
     // lastIpcObject, which goes empty on a long-lived shell until something asks for it.
     function toggleExpose() { if (!root.exposeActive) Hyprland.refreshToplevels(); root.exposeActive = !root.exposeActive }
-
-    PanelWindow {
-        id: exposeWin
-        readonly property real ui: root.uiFor(exposeWin.screen)
-        visible: root.exposeActive
-        anchors { top: true; bottom: true; left: true; right: true }
-        color: "transparent"
-        WlrLayershell.layer: WlrLayer.Overlay
-        WlrLayershell.namespace: "sea-shell:expose"
-        WlrLayershell.keyboardFocus: WlrKeyboardFocus.Exclusive
-        exclusionMode: ExclusionMode.Ignore
-
-        // Real workspaces first, in order. Hyprland numbers special workspaces from -98 down;
-        // the scratchpad is an overlay on wherever you already are, not a place to go — so it
-        // is not sorted in among them.
-        //
-        // But it goes on the END when it holds something, because this surface answers "where
-        // are my windows", and the windows in the stash are precisely the ones no other card
-        // can show you. Choosing it pulls it down rather than travelling to it; see go().
-        readonly property var wsList: {
-            var out = [];
-            var all = Hyprland.workspaces ? Hyprland.workspaces.values : [];
-            for (var i = 0; i < all.length; i++) if (all[i] && all[i].id > 0) out.push(all[i]);
-            out.sort(function (a, b) { return a.id - b.id });
-            if (root.scratchCount > 0) out.push(root.scratchWs);
-            return out;
-        }
-        // The monitor's shape, which is the shape every card takes.
-        readonly property real screenAspect: (exposeWin.screen && exposeWin.screen.height > 0)
-                                             ? exposeWin.screen.width / exposeWin.screen.height : 16 / 9
-        property int sel: 0
-        onVisibleChanged: if (visible) {
-            // open on the one you are standing in, so Enter is a no-op and the arrows start
-            // from where you are rather than from workspace 1
-            for (var i = 0; i < exposeWin.wsList.length; i++)
-                if (Hyprland.focusedWorkspace && exposeWin.wsList[i].id === Hyprland.focusedWorkspace.id)
-                    exposeWin.sel = i;
-        }
-        function go(i) {
-            if (i < 0 || i >= exposeWin.wsList.length) return;
-            var w = exposeWin.wsList[i];
-            // A special workspace cannot be focused — focus({ workspace = -98 }) does nothing
-            // at all. It is toggled over whichever workspace you are already standing on.
-            if (w.id < 0) Hyprland.dispatch("hl.dsp.workspace.toggle_special('scratch')");
-            else Hyprland.dispatch("hl.dsp.focus({ workspace = " + w.id + " })");
-            root.exposeActive = false;
-        }
-
-        Rectangle {
-            anchors.fill: parent
-            color: Tok.bg                       // opaque: a focus mode, no desktop bleed-through
-            MouseArea { anchors.fill: parent; onClicked: root.exposeActive = false }
-
-            FocusScope {
-                anchors.fill: parent; focus: exposeWin.visible
-                Keys.onPressed: (e) => {
-                    var n = exposeWin.wsList.length, cols = grid.cols;
-                    switch (e.key) {
-                    case Qt.Key_Escape: root.exposeActive = false; e.accepted = true; return;
-                    case Qt.Key_Left:   exposeWin.sel = Math.max(0, exposeWin.sel - 1); e.accepted = true; return;
-                    case Qt.Key_Right:  exposeWin.sel = Math.min(n - 1, exposeWin.sel + 1); e.accepted = true; return;
-                    case Qt.Key_Up:     exposeWin.sel = Math.max(0, exposeWin.sel - cols); e.accepted = true; return;
-                    case Qt.Key_Down:   exposeWin.sel = Math.min(n - 1, exposeWin.sel + cols); e.accepted = true; return;
-                    case Qt.Key_Return:
-                    case Qt.Key_Enter:
-                    case Qt.Key_Space:  exposeWin.go(exposeWin.sel); e.accepted = true; return;
-                    }
-                    // 1..9 jumps straight to that workspace — the same keys that switch to it
-                    // normally, doing the same thing here.
-                    if (e.key >= Qt.Key_1 && e.key <= Qt.Key_9) {
-                        var want = e.key - Qt.Key_0;
-                        for (var i = 0; i < n; i++)
-                            if (exposeWin.wsList[i].id === want) { exposeWin.go(i); e.accepted = true; return }
-                    }
-                }
-
-                // ---- header ----
-                Item {
-                    id: expHead
-                    anchors { top: parent.top; left: parent.left; right: parent.right
-                              margins: Math.round(40 * exposeWin.ui) }
-                    height: Math.round(30 * exposeWin.ui)
-                    Row {
-                        anchors.left: parent.left; anchors.verticalCenter: parent.verticalCenter
-                        spacing: Math.round(12 * exposeWin.ui)
-                        IndText {
-                            anchors.verticalCenter: parent.verticalCenter
-                            text: "workspaces"; mono: true
-                            sz: Math.round(Tok.tPanel * exposeWin.ui)
-                            font.weight: 700; color: Tok.ink
-                        }
-                        IndText {
-                            anchors.verticalCenter: parent.verticalCenter
-                            text: exposeWin.wsList.length + " · " + (Hyprland.toplevels ? Hyprland.toplevels.values.length : 0) + " windows"
-                            mono: true; sz: Math.round(Tok.tData * exposeWin.ui); color: Tok.ink3
-                        }
-                    }
-                    IndText {
-                        anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
-                        mono: true; sz: Math.round(Tok.tLabel * exposeWin.ui); color: Tok.ink2
-                        text: "← →  choose      1–9  jump      enter  go      esc  close"
-                    }
-                }
-                Rectangle {
-                    anchors { top: expHead.bottom; left: expHead.left; right: expHead.right
-                              topMargin: Math.round(12 * exposeWin.ui) }
-                    height: 1; color: Tok.ruleHard
-                }
-
-                // ---- the grid ----
-                // Sized to the space rather than to a constant: the cards are as large as the
-                // screen allows, which is the point of taking the whole screen.
-                Item {
-                    id: grid
-                    anchors {
-                        top: expHead.bottom; left: parent.left; right: parent.right; bottom: parent.bottom
-                        topMargin: Math.round(46 * exposeWin.ui)
-                        leftMargin: Math.round(40 * exposeWin.ui)
-                        rightMargin: Math.round(40 * exposeWin.ui)
-                        bottomMargin: Math.round(40 * exposeWin.ui)
-                    }
-                    readonly property int n: exposeWin.wsList.length
-                    readonly property real gap: Math.round(22 * exposeWin.ui)
-                    // Try every column count and keep whichever makes the biggest card that
-                    // still fits both ways. Four workspaces on a wide screen want one row;
-                    // twelve want three.
-                    readonly property int cols: {
-                        if (grid.n <= 0) return 1;
-                        var best = 1, bestW = 0;
-                        for (var c = 1; c <= grid.n; c++) {
-                            var rows = Math.ceil(grid.n / c);
-                            var w = (grid.width - grid.gap * (c - 1)) / c;
-                            var h = (grid.height - grid.gap * (rows - 1)) / rows;
-                            var fit = Math.min(w, h * exposeWin.screenAspect);
-                            if (fit > bestW) { bestW = fit; best = c }
-                        }
-                        return best;
-                    }
-                    readonly property real cardW: {
-                        var rows = Math.ceil(grid.n / grid.cols);
-                        var w = (grid.width - grid.gap * (grid.cols - 1)) / grid.cols;
-                        var h = (grid.height - grid.gap * (rows - 1)) / rows;
-                        return Math.max(120, Math.min(w, h * exposeWin.screenAspect));
-                    }
-                    readonly property real cardH: grid.cardW / exposeWin.screenAspect
-
-                    Grid {
-                        anchors.centerIn: parent
-                        columns: grid.cols
-                        spacing: grid.gap
-                        Repeater {
-                            model: exposeWin.wsList
-                            delegate: Rectangle {
-                                id: wsCard
-                                required property var modelData
-                                required property int index
-                                // The stash is never the "focused" workspace — it is drawn
-                                // over one. What reads as current for it is being pulled down.
-                                readonly property bool focused: modelData.id < 0
-                                                                ? root.scratchOpen
-                                                                : (Hyprland.focusedWorkspace
-                                                                   && Hyprland.focusedWorkspace.id === modelData.id)
-                                readonly property bool picked: exposeWin.sel === index
-                                width: grid.cardW; height: grid.cardH
-                                radius: Tok.rSmall
-                                clip: true
-                                color: Tok.surface
-                                border.width: wsCard.picked ? 2 : 1
-                                border.color: wsCard.picked ? Tok.accent
-                                            : (cardMa.containsMouse ? Tok.ink3 : Tok.ruleHard)
-                                Behavior on border.color { ColorAnimation { duration: Tok.mFast } }
-                                // compose captures into one FBO so a ScreencopyView texture node
-                                // can't leak a stray thumbnail outside the card
-                                layer.enabled: true
-
-                                // the workspace's own ground, so a window sitting on it reads as
-                                // a window on a desktop rather than a tile on a card
-                                Rectangle { anchors.fill: parent; anchors.margins: wsCard.border.width
-                                            color: Tok.sunken }
-
-                                // ---- the map ----
-                                Item {
-                                    id: map
-                                    anchors.fill: parent
-                                    anchors.margins: wsCard.border.width
-                                    readonly property real sx: exposeWin.screen ? map.width / exposeWin.screen.width : 0
-                                    readonly property real sy: exposeWin.screen ? map.height / exposeWin.screen.height : 0
-
-                                    Repeater {
-                                        // EMPTY while exposé is closed. The PanelWindow above is
-                                        // only `visible: false`, not destroyed — and in QML that
-                                        // keeps every child alive, so this used to hold one
-                                        // ScreencopyView per window on the system, permanently,
-                                        // each pinned to that window's wayland handle. When a
-                                        // window dies the capture outlives its source, which is a
-                                        // prime suspect for the fatal "Wayland connection …
-                                        // Invalid argument" that kills the whole bar.
-                                        model: {
-                                            if (!root.exposeActive) return [];
-                                            var m = Hyprland.toplevels ? Hyprland.toplevels.values : [];
-                                            var out = [];
-                                            for (var i = 0; i < m.length; i++) {
-                                                var t = m[i];
-                                                if (t && t.workspace && t.workspace.id === wsCard.modelData.id) out.push(t);
-                                            }
-                                            return out;
-                                        }
-                                        delegate: Rectangle {
-                                            id: winTile
-                                            required property var modelData
-                                            readonly property var ipc: (modelData && modelData.lastIpcObject) || null
-                                            readonly property string cls: {
-                                                try {
-                                                    if (!modelData) return "";
-                                                    var c = (winTile.ipc && winTile.ipc.class)
-                                                        || (modelData.wayland && modelData.wayland.appId) || "";
-                                                    return ("" + c).toLowerCase();
-                                                } catch (e) { return "" }
-                                            }
-                                            // Real geometry, mapped into the card. `at` is in
-                                            // layout coordinates across all monitors, so the
-                                            // screen's own origin comes off first.
-                                            readonly property var at: (winTile.ipc && winTile.ipc.at) || [0, 0]
-                                            readonly property var sz: (winTile.ipc && winTile.ipc.size) || [0, 0]
-                                            readonly property real ox: exposeWin.screen ? exposeWin.screen.x : 0
-                                            readonly property real oy: exposeWin.screen ? exposeWin.screen.y : 0
-                                            readonly property bool mapped: winTile.sz[0] > 0 && winTile.sz[1] > 0
-                                            x: winTile.mapped ? (winTile.at[0] - winTile.ox) * map.sx : 0
-                                            y: winTile.mapped ? (winTile.at[1] - winTile.oy) * map.sy : 0
-                                            width:  winTile.mapped ? Math.max(18, winTile.sz[0] * map.sx) : map.width
-                                            height: winTile.mapped ? Math.max(14, winTile.sz[1] * map.sy) : map.height
-                                            radius: Tok.rSmall
-                                            clip: true
-                                            color: Tok.raised
-                                            border.width: 1
-                                            border.color: winMa.containsMouse ? Tok.accent : Tok.ruleHard
-                                            Behavior on border.color { ColorAnimation { duration: Tok.mFast } }
-
-                                            ScreencopyView {
-                                                id: winScv
-                                                anchors.fill: parent
-                                                anchors.margins: 1
-                                                captureSource: (winTile.modelData && winTile.modelData.wayland)
-                                                               ? winTile.modelData.wayland : null
-                                                live: root.exposeActive
-                                                visible: hasContent
-                                            }
-                                            IconImage {
-                                                anchors.centerIn: parent
-                                                implicitSize: Math.min(40, Math.max(16, winTile.height * 0.4))
-                                                asynchronous: true
-                                                visible: !winScv.hasContent
-                                                source: Quickshell.iconPath(winTile.cls, "application-x-executable")
-                                            }
-                                            // The name, only when the tile is big enough to carry
-                                            // one. A 14px strip of 8px text is not a label.
-                                            Rectangle {
-                                                anchors { left: parent.left; right: parent.right; bottom: parent.bottom }
-                                                height: Math.round(16 * exposeWin.ui)
-                                                visible: winTile.height > 54 * exposeWin.ui
-                                                color: Tok.bg
-                                                IndText {
-                                                    anchors { fill: parent; leftMargin: 5; rightMargin: 5 }
-                                                    verticalAlignment: Text.AlignVCenter
-                                                    elide: Text.ElideRight
-                                                    text: winTile.cls || "window"
-                                                    mono: true; sz: Math.round(Tok.tLabel * exposeWin.ui)
-                                                    color: Tok.ink2
-                                                }
-                                            }
-                                            MouseArea {
-                                                id: winMa
-                                                anchors.fill: parent; hoverEnabled: true
-                                                cursorShape: Qt.PointingHandCursor
-                                                onClicked: {
-                                                    var o = winTile.ipc;
-                                                    if (o && o.address) Hyprland.dispatch("hl.dsp.focuswindow('address:" + o.address + "')");
-                                                    root.exposeActive = false;
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-
-                                // ---- the label plate ----
-                                // Bottom of the card, over the map: a workspace's number is the
-                                // thing you are scanning for, and it should not be competing for
-                                // space with the map it labels.
-                                Rectangle {
-                                    anchors { left: parent.left; right: parent.right; bottom: parent.bottom
-                                              margins: wsCard.border.width }
-                                    height: Math.round(26 * exposeWin.ui)
-                                    color: Tok.bg
-                                    Rectangle { anchors { left: parent.left; right: parent.right; top: parent.top }
-                                                height: 1; color: Tok.ruleHard }
-                                    Row {
-                                        anchors { left: parent.left; leftMargin: Math.round(9 * exposeWin.ui)
-                                                  verticalCenter: parent.verticalCenter }
-                                        spacing: Math.round(8 * exposeWin.ui)
-                                        Rectangle {
-                                            anchors.verticalCenter: parent.verticalCenter
-                                            width: Math.round(7 * exposeWin.ui); height: width; radius: width / 2
-                                            color: wsCard.focused ? Tok.accent : Tok.alpha(Tok.ink3, 0.4)
-                                        }
-                                        IndText {
-                                            anchors.verticalCenter: parent.verticalCenter
-                                            text: wsCard.modelData.id < 0 ? "stash"
-                                                                          : root.wsLabelFor(wsCard.modelData.id)
-                                            mono: true; sz: Math.round(Tok.tData * exposeWin.ui)
-                                            font.weight: 700
-                                            color: wsCard.focused ? Tok.accent : Tok.ink
-                                        }
-                                        IndText {
-                                            anchors.verticalCenter: parent.verticalCenter
-                                            // "special:scratch" is the internal name; the card
-                                            // already says stash, so only which one is left.
-                                            text: wsCard.modelData.id < 0
-                                                  ? ("" + wsCard.modelData.name).replace("special:", "")
-                                                  : (wsCard.modelData.name && ("" + wsCard.modelData.name) !== ("" + wsCard.modelData.id)
-                                                     ? ("" + wsCard.modelData.name) : "")
-                                            mono: true; sz: Math.round(Tok.tLabel * exposeWin.ui); color: Tok.ink3
-                                        }
-                                    }
-                                }
-
-                                // An empty workspace is still a place you can go, and saying so
-                                // beats an unexplained blank card.
-                                IndText {
-                                    anchors.centerIn: parent
-                                    visible: !(Hyprland.toplevels && Hyprland.toplevels.values.some(function (t) {
-                                        return t && t.workspace && t.workspace.id === wsCard.modelData.id }))
-                                    text: "empty"; mono: true
-                                    sz: Math.round(Tok.tLabel * exposeWin.ui)
-                                    font.letterSpacing: 1.4 * exposeWin.ui
-                                    font.capitalization: Font.AllUppercase
-                                    color: Tok.ink3
-                                }
-
-                                MouseArea {
-                                    id: cardMa
-                                    anchors.fill: parent; hoverEnabled: true
-                                    cursorShape: Qt.PointingHandCursor
-                                    acceptedButtons: Qt.LeftButton
-                                    z: -1                     // window tiles keep their own clicks
-                                    onEntered: exposeWin.sel = wsCard.index
-                                    onClicked: exposeWin.go(wsCard.index)
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
+    WorkspacesPanel {
+        active: root.exposeActive
+        uiFor: root.uiFor
+        labelFor: root.wsLabelFor
+        scratchWs: root.scratchWs
+        scratchCount: root.scratchCount
+        scratchOpen: root.scratchOpen
+        onDismiss: root.exposeActive = false
     }
 }

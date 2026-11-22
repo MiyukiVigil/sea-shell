@@ -5,9 +5,500 @@ All notable changes to **sea-shell** are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] - 7.1.0
+## [Unreleased]
+
+## [8.0.0] - 2026-11-22
+I was a bit busy for a while so most of these changes are stucked without a single commit (I hate myself). Hey atleast it's here now.
+
+The largest sea-shell release yet (jumping directly from `7.1.0` with weeks of stacked work):
+five native Rust daemons/apps (`sea-files`, `sea-appmenu`, `sea-fand`, `sea-gamepad`, `sea-panel`),
+a full-screen **Big Picture** console mode & dedicated **`sea-shell Gaming`** login session,
+a **~65% shell RAM reduction** (~715 MiB → ~250 MiB RSS), **two-tier zero-overhead Game Mode**,
+a **Wallpaper Picker & Video Wallpaper rework**, **Alt+Tab Window Switcher & Workspaces Expose**,
+a **34-page modular Control Center**, **GitHub / AI / DevHub / Totem 2FA**, and a full suite of
+lazy-loaded desktop power tools.
+
+### Native Rust Suite (`native/`)
+
+- **Native Files (`sea-files`, Rust/GTK4).** Replaces the retired 15,000-line QML/Python file
+  manager (`FileManager.qml` / `sea-fm.py`, archived under `legacy/quickshell-fm/`). Ships with
+  tags, duplicate finder, subfolder search, thumbnails, `FileManager1` D-Bus registration,
+  double-click AppImage installer (`sea-appimage.py`), and fast Unix-socket window handover.
+- **Native background daemons in Rust.** Added `native/sea-appmenu` (DBusMenu + AT-SPI fallback
+  global menu), `native/sea-fand` (fan-curve daemon for Acer Nitro / custom fan presets),
+  `native/sea-gamepad` (evdev controller reader for Big Picture), and `native/sea-panel`
+  (automatic laptop panel off/on on external display hotplug or lid close).
+
+### Wallpaper Picker & Video Wallpaper Rework
+
+- **Reworked Wallpaper Picker (`WallpaperPicker.qml`, `WallShelf.qml`, `WallStills.qml`).**
+  Cleaner gallery, day/night wallpaper pairing, lock-screen wallpaper shelf, and instant still
+  indexing without stalling the bar.
+- **Bottom Wallpaper Strip (`WallpaperStrip.qml`).** Appears along the foot of the screen when
+  cycling with `Super+N` / `Super+Shift+N` (or `qs -c sea-shell ipc call wallpaper strip`)
+  without stealing keyboard focus; click any thumbnail to switch.
+- **In-bar Video Wallpapers (`VideoWallpaper.qml`, `VideoWallpaperPlayer.qml`, `sea-wallpaper-optimize.py`).**
+  Replaces `mpvpaper` and `sea-wallpaper-autopause.sh` with a QtMultimedia background surface that
+  fades in over the full-res poster (zero black flash), re-encodes once in the background with
+  VAAPI to screen size & fps cap, and unloads cleanly in fullscreen, Game Mode, or on battery.
+
+### Window Management, Workspaces & Networking
+
+- **Alt+Tab Window Switcher (`WindowSwitcher.qml`).** MRU `Alt+Tab` and `Alt+\`` (same-app)
+  switcher driven by Hyprland global shortcuts with live `ScreencopyView` thumbnails, quick-tap
+  instant swap, hover preview, and middle-click close.
+- **Workspaces Expose (`WorkspacesPanel.qml`, `Super+W`).** True-scale monitor-layout cards with
+  live window thumbnails, drag-and-drop windows across workspaces (or onto `+ New workspace`),
+  Stash/scratchpad support, and **type-to-filter quick jump** (start typing any app/title and hit
+  `Enter` to jump straight to it).
+- **Enterprise Wi-Fi (802.1X / eduroam) & Wi-Fi Join QR (`WifiEnterprise.js`, `WifiJoinCard.qml`, `WifiDrop.qml`, `sea-wifi-qr.sh`).**
+  Full PEAP + MSCHAPv2 identity/password join flow (cleaning up failed profiles automatically),
+  plus 1-click scannable `WIFI:` QR code sharing for your active connection.
+- **Per-Display-Arrangement Desktop Setups (`sea-setups.py`).** Remembers separate widget, bar,
+  and dock arrangements per monitor configuration (keyed by display EDID description) and swaps
+  automatically when docking or undocking.
+- **Modular 34-Page Control Center (`SettingsPage*.qml`, `sea-sys-settings.py`).** Split the
+  monolithic `settings.qml` (-6,400 lines) into 34 lazy-loaded pages (~140 MB less RAM when
+  closed) with macOS-style System Settings (Date & Time, Language & Region, Hostname, Startup /
+  Login Items, Accessibility, Input/Gestures, Window Rules, Screen Time, Privacy, Default Apps,
+  Theme Profiles, Needs Attention, Disk Usage & Disk Cleaner, OTA Updates with automatic rollback,
+  and Pinned/Recent sidebar favourites).
+
+### Performance & Architecture
+
+- **~65% RAM reduction (~715 MiB → ~250 MiB RSS).**
+  - Replaced the in-process SilentSDDM preview `Loader` in `SddmPreview.qml` (which previously
+    permanently `dlopen`ed CUDA/FFmpeg/VAAPI/QtVirtualKeyboard plugins) with a pure QtQuick preview.
+  - Switched all 17 bar dropdown `LazyLoader`s from `loading:` to `activeAsync:` so closed
+    dropdown surfaces destroy cleanly instead of retaining Mesa GL contexts, shrank `notifWin`
+    from fullscreen to popup bounds, lazy-loaded `PolkitDialog.qml` and `WallpaperStrip.qml`,
+    gated `WallStills` on visibility, and added post-cool `gc()` sweeps.
+  - Tuned `libjemalloc` (`narenas:2,dirty_decay_ms:1000,muzzy_decay_ms:0,background_thread:true`)
+    in `sea-bar-supervisor.sh` and preferred `Inter Variable` (860 KB) over `Inter.ttc` (12.6 MiB)
+    in `fontconfig/60-sea-fonts.conf`.
+- **`seashell` process identity.** The bar now launches via `${XDG_RUNTIME_DIR}/seashell` so
+  process monitors (`btop`, `htop`, `ps`, Dashboard) display `seashell` instead of `qs`.
+- **Modularized `shell.qml` dropdowns.** Extracted `ControlCenterDrop.qml`, `AudioDrop.qml`,
+  `BatteryDrop.qml`, `WeatherDrop.qml`, `NotifDrop.qml`, `WifiDrop.qml`, and `BluetoothDrop.qml`
+  into standalone `Tok`-styled components.
+- **Automated health & lint checker (`sea-check.sh`).** Validates all shell scripts (`sh -n`),
+  Python scripts (`py_compile`), QML files (`qmllint`), and the full unit test suite in one command.
+
+### Gaming Mode (Two-Tier Zero-Overhead)
+
+- **Level 1 — Smart Hibernate (always active in Game Mode).** Freezes ~25 non-essential timers
+  and background subprocesses while gaming (`nvidia-smi` polling no longer grabs the NVML lock
+  every 3 s, 30 s `nmcli` Wi-Fi rescans stop to eliminate online ping spikes, `githubEmber` 9 Hz
+  repaints pause, `paru -Qua` / AI / weather / clipboard / camera polls pause, `sea-wallpaper-rotate.sh`
+  goes dormant). Immediately cools idle panels + runs `gc()`, disables the dock, unmaps the bar
+  surface when *Hide bar while playing* is enabled, and strips/restores Hyprland `rounding`,
+  `gaps_in`, `gaps_out`, `border_size`, and `inactive_opacity`.
+- **Level 2 — Ultra / Zero-Shell Mode (opt-in toggle).** Available in **Settings → Gaming**,
+  **Dashboard → Gaming** (`Hibernate` / `Zero-shell` pill), and **Control Center**. Cleanly
+  stops `sea-bar-supervisor`, `seashell`, `awww-daemon`, `sea-wallpaper-rotate`, and clipboard
+  watchers for 0 MB shell overhead while gaming, with native Hyprland toast notifications and
+  automatic restoration on game exit or `Super+Shift+G`.
+
+### Added
+
+- **Visual Clipboard Manager, Pinned Snippets & Emoji Picker (`ClipboardPanel.qml`, `sea-clipboard.py`).**
+  `Super+V` opens a searchable clipboard overlay with real image thumbnails for copied screenshots,
+  color swatches, URL badges, persistent pinned snippets (`~/.config/sea-shell/clipboard-pins.json`),
+  and a searchable Emoji & Symbols grid (`Super+.`).
+- **Instant Scratchpad / Markdown Notes (`ScratchNotes.qml`).** `Super+Alt+N` opens a multi-tab
+  markdown pad backed by `~/.config/sea-shell/notes/*.md` with debounced auto-save and clickable
+  `- [ ]` / `- [x]` checklist chips.
+- **File Drop Shelf & Instant LAN QR Share (`DropShelf.qml`, `sea-dropzone.py`).** `Super+Alt+S`
+  holds files/screenshots across workspaces, converts images (`→WEBP` / `→JPG` / `→PNG`), and
+  shares any file to your phone via a scannable QR code over an auto-expiring local LAN HTTP server.
+- **Color Studio & Eyedropper History (`ColorStudio.qml`, `sea-colorpick.sh`).** `Super+Alt+C`
+  tracks colors picked via `Super+Shift+C`, copies as HEX/RGB/HSL/OKLCH, builds a 5-step tint/shade
+  ramp, checks WCAG contrast (`AA`/`AAA`/`Fail`), and applies any color as sea-shell's live accent.
+- **Workspace App Sessions (`SessionsPanel.qml`, `sea-sessions.py`).** `Super+Alt+L` snapshots
+  currently open Hyprland apps per workspace and relaunches entire workspace setups in one click.
+- **Screen Ruler & Pixel Measurer (`ScreenRuler.qml`).** `Super+Alt+R` measures exact `W × H px`,
+  aspect ratio, diagonal length, and screen coordinates (`C` copies `WxH`).
+- **Screen OCR → Instant Translate (`TranslatePopup.qml`, `sea-translate.py`).** `Super+Shift+T`
+  captures a screen region with `slurp`+`grim`+`tesseract` (or reads clipboard/text) and translates
+  between EN / JA / ZH / MS / KO / ES with 1-click copy.
+- **Wi-Fi Join QR Code (`WifiDrop.qml`, `sea-wifi-qr.sh`).** One click in the Wi-Fi dropdown
+  renders a scannable `WIFI:` QR code for your active connection.
+- **Hybrid dGPU Wake Monitor & Auto Battery Saver (`BatteryDrop.qml`, `sea-dgpu.py`, `sea-power-auto.sh`).**
+  Zero-NVML-wake sysfs + `/proc` monitor showing whether the discrete GPU is sleeping (`0 W`) or
+  listing the exact apps keeping `/dev/nvidia*` awake, opt-in AC/Battery auto power-profile + 60 Hz
+  switching, and auto-detected battery charge-limit chips (`60%` / `80%` / `100%`).
+- **Live Localhost Ports, Containers & Systemd Services in `DevHub.qml` (`sea-ports.py`, `sea-services.py`).**
+  One-click browser launch or kill for listening local dev ports, Docker/Podman container stops,
+  failed/core systemd service status chips, and inline `journalctl` log peek.
+- **Screenshot Editor Power Tools (`screenshot-editor.qml`, `PinImage.qml`).** Added Redact/Mosaic
+  brush (`M`), auto-incrementing step-number badges (`N`), and **Pin to screen (`P`)** floating
+  reference windows.
+- **Quick Window PiP & Focus Snapper (`sea-win-layout.sh`).** `Super+Alt+P` toggles a pinned
+  16:9 bottom-right Picture-in-Picture window; `Super+Alt+F` toggles a centered 75% focus float.
+- **Per-App Audio Mixer & Notification Priority.** Added microphone gain/mute, per-app mute toggles,
+  and direct sink picker pills in `AudioDrop.qml`; added star (`★` / `P`) priority rules in
+  `NotifDrop.qml` & `NotifGroup.qml` so critical apps bypass DND.
+- **Workspaces Overview Type-to-Filter (`WorkspacesPanel.qml`).** Start typing any app or window
+  title in `Super+W` Overview to highlight matches across workspaces and press `Enter` to jump.
+- **Launcher Power Upgrades (`Launcher.qml`).** Redesigned with a mode bar, elevated detail card,
+  live `#hex`/`rgb()` swatch preview, `:kill` process killer, number-base (`255 to hex`), CSS
+  (`1920px to rem`), and timezone (`14:00 utc to myt`) conversions.
+
+### Changed & Redesigned
+
+- **Unified `Tok` UI refresh** across `DashboardPanel.qml` (interactive process focus/kill,
+  power profile switcher, now-playing strip, battery/network telemetry), `ControlCenterDrop.qml`
+  (2×4 quick-toggle grid + inline volume/brightness sliders), `DevHub.qml`, `GamingHub.qml`,
+  `ScreenshotPanel.qml` (Quick Copy `C`, OCR `O`, Recent strip), `RecorderPanel.qml`, `PowerMenu.qml`
+  (`Big Picture g` shortcut), `LockSurface.qml` (privacy-safe notification count pill),
+  `PolkitDialog.qml`, `keybinds.qml`, and `welcome.qml`.
+
+### Previous Unreleased Work Rolled Into 8.0.0
+
+- **Totem bar widget (`wgTotem`).** Search paired 2FA accounts and copy codes from the bar via
+  the Totem CLI (`sea-totem.sh` → `totem list|code --json`). Enable under Settings → Menu Bar
+  Widgets. Requires a built `totem` binary and a paired phone (desktop Totem app hosts the
+  relay). Account rows show brand badges (Simple Icons) or letter colours when no CC0 logo
+  exists (e.g. LinkedIn).
+
+### Fixed
+
+- **Focus profiles actually apply from Settings.** Chips call the bar’s `applyFocus` (DND, mutes,
+  caffeine, night light, game mode, open Dev/Gaming). Clear restores the previous mute list.
+  Mutes update in memory so the list does not wait for a bar restart.
+- **GitHub auth failure no longer leaves a green cache.** Rejected or missing tokens write the
+  error into the cache; the refresh control on the GitHub dropdown bypasses the cache.
+- **Theme export wallpaper path** no longer writes a doubled extension (`wallpaperjpg.jpg`).
+
+### Added (Earlier 7.x → 8.0.0)
+
+- **Antigravity in AI plans.** Bar, desktop widget and Dev hub show Antigravity quota —
+  Gemini Session/Weekly plus Claude/GPT third-party windows — from Antigravity / `agy`
+  sign-in (Linux keyring), a running language server, `~/.gemini/oauth_creds.json`, or
+  `~/.config/sea-shell/gemini-token`. Uses the Antigravity mark. Toggle under Settings →
+  Bar Widgets → AI plans.
+- **Tide pool desktop widget.** A rock pool that is secretly a sysmonitor: water level is
+  battery, chop is CPU, fish speed is network, bubbles are notifications (and bottles still at
+  sea), and the hermit crab hides while the mic or camera is on. Drag it from the widget tray
+  (Tide). Click opens the dashboard.
+- **Message in a bottle.** Launcher `!note` (or `:Cast a bottle`) throws a reminder into the
+  sea; it washes up 20 minutes to 6 hours later as a notification and on the lock screen.
+  `qs ipc call bottle cast "…"`.
+- **GitHub streak flame.** The bar pill becomes a fire icon while your streak is alive, and
+  sputters amber until you commit today.
+
+- **GitHub on the bar, desktop and Dev dashboard.** Contribution grid, streak and commits
+  today (via `gh` auth or `~/.config/sea-shell/github-token`), plus watched-repo CI and open PR
+  counts from `github-repos.json`. Desktop widget sizes small/medium/large; bar pill `wgGithub`.
+  Super+D → **Dev** tab; launcher `gh` / `gh …` searches your repos, PRs and issues.
+- **Focus profiles.** Coding, Gaming, Meeting and Clear in Settings → Notifications and the
+  GitHub bar dropdown: DND, mute apps, caffeine, and open the Dev or Gaming dashboard.
+- **Task due dates.** Dashboard todos accept ` @YYYY-MM-DD` or `due:YYYY-MM-DD`, sort by due,
+  and remind once when a task is due today.
+- **Desktop widgets:** GitHub, Pomodoro (mirrors the bar timer), Clipboard history (marks OCR
+  grabs), and a large media **Now playing** face.
+- **Settings favourites.** Pin pages with the star; Pinned and Recent chips sit above the
+  sidebar list.
+- **Theme export.** Actions → Export theme pack writes a tarball of appearance, desktop layout
+  and wallpaper under Downloads (`sea-theme-export.sh`).
+- **Calendar ICS copy** clarifies Google Calendar secret addresses work without OAuth.
+
+- **Gaming session.** "sea-shell Gaming" on the login screen starts Hyprland with big picture mode
+  and nothing else: no bar, wallpaper, blur, animations or idle daemon (`hypr/gaming.lua`,
+  `gaming.qml`). Power → Log out returns to the login screen to pick the desktop. install.sh adds
+  the session entry (one sudo step).
+- **Big picture can set everything up on its own.** An on-screen keyboard for the controller joins
+  Wi-Fi networks that need a password and hidden networks; Y forgets a saved network. New
+  Bluetooth page for headphones, speakers and pads (pair, connect, forget). Display gains
+  resolution, refresh rate, scale (kept only after you confirm, otherwise put back in 15 s) and
+  variable refresh rate. Sound gains the microphone. New Games page for the launch defaults every
+  game starts with, and a System page with screen sleep, keyboard layout (gaming session) and
+  free space. Heroic, Lutris and TwinTail open full screen in the gaming session, with Home to
+  come back.
+- **Log out from big picture.** Power → Log out, held like Restart, in both the desktop and the
+  gaming session.
+- **Prism Launcher instances in the Gaming tab and big picture.** Minecraft instances (native or
+  Flatpak) join the library with their icon, playtime, last played and size on disk, and Play
+  starts them through Prism. Game mode comes on with Minecraft and goes off when it closes: Play
+  turns on Prism's "Enable Feral GameMode" (so launches from Prism itself count too), and while
+  Prism is open, so that setting cannot be written, it watches the Java process instead.
+
+- **A second Cursor account in the AI usage widget.** A Cursor profile started with
+  `--user-data-dir ~/.cursor-alt/data` shows as its own "Cursor alt" meter beside the main one,
+  with its own on/off and "On top" choice in Settings → Bar Widgets → AI plans. More profiles can
+  be listed one per line in `~/.config/sea-shell/cursor-profiles`. A profile signed into the same
+  account as the main one is skipped.
+- **AI usage refreshes faster and holds steady.** Every plan is fetched at once (about 3 s instead
+  of 10+), and a plan whose fetch fails keeps showing its last good numbers for up to an hour
+  instead of dropping out until the next refresh.
+- **AI usage alerts at 80% and 95%.** Each window warns once per level per reset, alongside the
+  existing "running out before reset" pace warning.
+- **Hot corners.** Settings → Desktop → Hot corners sets each screen corner to Overview, Launcher,
+  Dashboard, Notifications or Widgets. Corners that touch another monitor are skipped, and none
+  fire during a game or fullscreen window.
+- **Battery health in the battery menu.** Shows how much of its original capacity the battery
+  still holds and its charge cycles, when the battery reports them.
+- **Colour picker.** Super+Shift+C, "Pick a colour" in the launcher, or the menu's Color Picker
+  copy the hex under the cursor and show a swatch. Needs `hyprpicker`.
+
+- **Lutris games in the Gaming tab and big picture.** Installed Lutris games (native or Flatpak)
+  join the library with their playtime, last played, size on disk and Lutris cover or icon. Play
+  starts them through Lutris, which keeps its own runner and launch settings.
+- **Game backgrounds.** Lutris and TwintailLauncher games without a background look one up in
+  the background: SteamGridDB when an API key is set in Settings → Gaming, then the Steam store
+  on an exact title match. Background on the dashboard banner sets your own picture for any game,
+  and Reset background goes back to the default.
+- **Lutris and TwintailLauncher games count in Last two weeks and Saved runs.** Their Wine/Proton
+  windows are matched to the library by install folder, so the bar times them and saves runs
+  with GPU stats like Steam games. Two-week time also follows the launchers' own totals, counted
+  from the first time sea-shell sees each game.
+- **Heroic games (Epic, GOG, Amazon and sideloaded).** Installed Heroic games, native or Flatpak,
+  join the library with Heroic's art and playtime, and Play starts them through Heroic.
+- **Wine and Proton games get the game window rules,** so `.exe` and `steam_proton` windows skip
+  blur, shadows and animations like Steam games do. The dashboard's Playing now shows them too.
+- **Big picture sound effects.** Moving, opening, going back, toggles, putting a game in, launching,
+  start-up and exit each have their own sound. Settings → Sound → Sound effects sets them to On,
+  Quiet or Off.
+- **Favourites and launcher filter in big picture.** Add to favourites on a game's Manage tab puts
+  a star on its cover and adds a Favourites first sort. X in All games shows one launcher's games
+  at a time. Each game page shows which launcher it's from and has a button to open that launcher.
+- **Big picture mode.** A full-screen console view for the couch, in the shell's own look: games
+  are cartridges on a shelf, and Play pushes one into the dock. Opens with a sea-shell startup
+  screen, from the Gaming tab or a controller's home button, and works with a controller or the
+  keyboard.
+  - **Game pages** with tabs for an overview, launch options and runs. Launch options cover
+    MangoHud and its limit, look and corner, Gamescope (mode, output size, render size, upscaling,
+    frame limit), game mode, gamemoderun, and Proton's Wayland and HDR switches.
+  - **Stats** with tabs for playtime, the library, every saved run, and hardware.
+  - **All games** as a grid, sorted by recent, most played or name.
+  - **Menus** for sound and output, screens, Wi-Fi, controllers with battery and Bluetooth pairing,
+    fans and power, suspend, restart and shut down.
+  - Game mode comes on with it and goes back off when you leave, unless it was already on. Other
+    screens go black, or can be left on.
+  - Starting a game no longer cuts to a separate page. The slot's light runs out along the footer
+    and rises off it, showing the game's own title screen (its hero art and Steam logo, or its
+    name) while it starts. The footer's "Starting" and Cancel stay on screen, and cancelling runs
+    the light back down into the slot.
+  - Steam stays out of sight. Opening big picture starts Steam in the tray if it is not running,
+    Play waits until Steam is actually ready, and any Steam window that opens meanwhile is
+    tucked away. Leaving closes the library window to the tray and brings back any Steam prompt.
+    The game goes full screen before the launch screen drops, so the desktop and a split layout
+    with Steam no longer flash past.
+- **TwintailLauncher games in the Gaming tab** and launcher search, with their art, play time and
+  last played. Play opens them through Twintail, which keeps their launch settings.
+- **MangoHud look and FPS cap.** Settings → Gaming and the game banner set the cap (60 / 120 / 144 / uncapped), overlay (FPS only, compact, full) and corner. “File” keeps `~/.config/MangoHud/MangoHud.conf`. Left Shift+F1 still toggles the cap in game.
+- **Gaming hub in the dashboard.** Super+D → **Gaming**: banner for the selected game, a cover shelf that
+  opens into a searchable, sortable **All games** grid once there are more than four, a one-line
+  **preflight** status, per-game **launch options** behind a button on the banner (MangoHud,
+  gamemoderun, game mode on play, Gamescope presets), and a full-height **saved runs** list with
+  aligned FPS and GPU columns, for all games or the selected one, plus a notification when a
+  session ends.
+- **Gaming pill on the bar.** Elapsed time and live GPU % while a game window is open; stats are
+  recorded for the whole play session, not only when game mode toggles off.
+- **Settings → Gaming.** Global launch defaults (GameMode, MangoHud, Gamescope), hide the bar
+  while playing, and the fan preset game mode applies.
+- **Launcher `g` prefix.** Search installed Steam games and play from the bar launcher; `g` alone
+  lists recent titles.
+- **Double-click an AppImage to install it.** Files moves it to `~/Applications`, adds it to your
+  apps with its own name and icon, and offers Open. Nothing runs until you say so. Installing a newer
+  version replaces the old one, and Uninstall sits with the app's other actions in the launcher.
+- **Native Files (`sea-files`).** Rust/GTK4 file manager: Super+E and the global menu prefer it when `~/.config/quickshell/sea-shell/sea-files` is installed. Includes tags, duplicate finder, subfolder search, thumbnails, FileManager1, and a Unix-socket handover so repeat launches stay fast.
+- **Needs attention.** The top of Settings → System is now one short list of anything that needs
+  you: a failing or very full drive, a bar that keeps crashing, a kernel waiting on a restart, a
+  background service that failed, fans that aren't set up. When nothing's wrong it says so. Urgent
+  ones show a count in the sidebar and send one notification, even with Settings closed.
+- **See what an update changes before you take it.** The update panel shows the changelog for the
+  new version and warns about config files you've changed.
+- **Updates can be undone.** Each update saves the version you were on. If the bar won't stay up
+  afterwards, that version goes back by itself, and Go back does the same whenever you like.
+- **A map of your bar** at the top of Bar Widgets, following every switch and drag.
+- **Test buttons in Audio.** Play a sound on the current output, or watch a level meter to see
+  whether the microphone hears you.
 
 ### Changed
+
+- **Video wallpapers are drawn by the bar, not mpvpaper.** Each monitor gets a background-layer
+  QtMultimedia player that starts behind the still poster and fades in on its first frame, so a
+  switch never flashes black. Clips are re-encoded once, in the background, to the largest
+  screen's size and the frame cap (30 fps unless set), cached in `~/.cache/sea-shell/wallvideo/`
+  (VAAPI on the iGPU when available). A fullscreen window, game mode, or battery (if enabled)
+  unloads the player and leaves the poster. `sea-wallpaper-autopause.sh` and the mpvpaper
+  dependency are gone; the frame cap chips are now 30/60/24 fps. New IPC verbs:
+  `wallpaper pause|play|status|remap`.
+- **Less background work while idle.** The system monitor only polls while something shows it,
+  the mic follows PipeWire directly, and the recorder and camera checks spawn far fewer processes
+  (about 5 per second down to under 1; idle CPU about 3.2% to 2.4%).
+- **Super+E is native Files only.** Legacy PySide6 FM moved to `legacy/quickshell-fm/`; `sea-files-launch.sh` errors clearly if the binary is missing.
+- **Settings uses much less memory.** About 140 MB less while it's closed, because each page is now
+  built the first time you open it. The slowest page takes about a tenth of a second the first time.
+- **Appearance has three tabs instead of six.** Look holds the preview, theme, accent, font and
+  icons on one page; Wallpaper stays; Advanced has colour targets, app preference and stickers.
+- **Audio makes sense at a glance.** Devices are called what they are ("Speaker", "HDMI / DisplayPort
+  3") with the chip as a footnote. Each app is one row with its volume and its output together.
+- **Updating no longer stops itself.** It runs separately from the bar, so restarting the bar can't
+  interrupt it, and it no longer tries to run the package manager with nobody there to answer.
+- **Installing swaps the shell in whole,** so a running bar never sees a half-written copy.
+
+### Fixed
+
+- **Desktop widgets no longer keep idle threads.** Every widget started a folder watcher that only
+  the photo widget uses; now only a photo widget reading a folder has one. The clock dial and the
+  system gauges are drawn as shapes instead of canvases, so the clock no longer redraws a picture
+  of itself every second.
+- **The test suite passes again.** Several tests had fallen behind the code (the launcher's
+  settings list, the Files desktop entry, two Settings ids sharing a name), the window switcher's
+  tests never ran under `unittest`, and the retired file manager's smoke test is now skipped.
+  Run them from `tests/`.
+
+- **Panels no longer stack.** The dashboard, Settings, launcher, power menu, recorder and tour
+  close each other, and a bar dropdown or the widgets drawer closes them too. The screenshot
+  picker leaves what is open alone so it can be captured, and only big picture opening closes
+  the rest, never the other way round.
+- **The Gaming tab's banner kept the previous game's art** behind a game that has none.
+- **Restarting the bar from Cursor's terminal blanked the launcher's icons.** Cursor sets
+  `XDG_DATA_DIRS` to its own folder only, hiding `/usr/share`; the supervisor now drops editor
+  entries from it and from `PATH`.
+- **Files (Super+E) would not open after installing.** The installer's build of `native/sea-files`
+  sat in a function nothing called, so the program was never built or copied into place. It is
+  now built on every install, into the repo's own target folder even when an editor sets
+  `CARGO_TARGET_DIR`. gtk4 is in the package list, and rust is installed when there is no cargo.
+- **Games launched with a sea-shell profile died within a second.** The launch wrapper removed every
+  `--` from Steam's command, including the ones Steam's own launch chain needs. Gamescope works
+  on Hyprland again now that this is fixed, so the option is no longer skipped there.
+- **Game options did nothing.** The banner chips were ignored until a cover had been clicked; the
+  second of two quick clicks was lost; "1080p window" passed Gamescope a broken `-w`; "Game mode on
+  play" off was overridden by gamemoderun's hook; and options written to Steam's config while it
+  was running were discarded. The first Play of a game now restarts Steam once to install the
+  wrapper, and never while a game is running.
+- **MangoHud ignored `MangoHud.conf`** when a game went through the launch wrapper, so the layout,
+  FPS cap and hotkeys set there were replaced by MangoHud's default box.
+- **A hung Gamescope no longer stays over the desktop** after its game exits.
+- **First open of the dashboard jumped.** It now has its readings before it opens, and Gaming shows
+  nothing rather than "No games installed" until the library has loaded.
+- **Bar workspaces out of order** (2 1 3) when a workspace was created in the middle of the list.
+
+- **Gaming dashboard playtime bars** no longer animate past their track on the first open of the
+  Gaming tab.
+- **The global menu could show another app's menu.** After switching from an X11 app like VS Code to
+  a Wayland app like Firefox, the top row stayed right but the open menu showed VS Code's rows, and
+  clicking one acted in VS Code. A menu now only ever comes from the window it's drawn for.
+- **Switches you could barely see.** On switches in Bar Widgets, Colour targets and Calendar had a
+  dark knob on a dark track.
+- **Colour target switches** sat in the middle of their row instead of at the end.
+- **"Up to date" could be wrong.** After a manual `git pull` with no install, Settings said you were
+  current while still running the old version. It now says the new one isn't installed yet.
+
+## [7.1.0] - 2026-11-03
+
+### Added
+
+- **Disks can free up space now.** Settings → Disks lists what could go and what clearing each
+  thing costs: caches, old packages, the Trash, build folders. Only the free ones start ticked,
+  and when it's done it tells you what the drive actually got back, not an estimate. You can also
+  walk down through your home folder to see what's taking the room, and send your biggest files
+  to the Trash from the same page. Each drive now shows its health, temperature, how much of its
+  life is used and how much it has written, with no password needed.
+- **Quiet hours.** A new Notifications page in Settings silences popups on a schedule and while
+  the screen is shared or recorded. Everything still reaches the notification list, urgent ones
+  still come through, and the DND button lifts it until that stretch of quiet ends.
+- **See what is using your mic, camera or screen.** A pill appears in the bar, naming the app, only
+  while something is.
+- **Notifications show their own pictures.** A sender's photo or a song's cover fills the big icon
+  space, with the app's icon as a small badge.
+- **Files opens real windows.** Super+E, New Window (Ctrl+Alt+N) and folders opened from other
+  apps now give you another window instead of a tab in the one you had. They share one process,
+  so a new window takes about a third of a second and about 30 MB, and closing it gives that back.
+- **The fans have their own controller now.** A small service, `sea-fand`, replaces both the
+  firmware's curve and fancontrol. Auto speeds up sooner than the firmware did (which ran
+  about 3,300 rpm at 89°C), and every speed change is a slow ramp, so a short burst of CPU
+  use no longer sets the fans off. Quiet is actually quiet now: it was louder than Auto
+  (about 5,500 rpm against 4,000 under the same load), and it also lowers the power profile
+  to power saver. Max is only flat out once the machine is hot. If the service stops or fails,
+  the fans go back to the firmware. It needs one setup step:
+  `sudo sh quickshell/scripts/system/sea-fan-setup.sh`.
+- **Alt+Tab now works like Windows.** Hold Alt, press Tab to move through your windows,
+  and let go of Alt to switch to the one you stopped on. It never switched before: Hyprland
+  dropped the Alt release as soon as Tab had been pressed, so the switcher just stayed open.
+  A quick tap swaps to your previous window without showing anything, right Alt works too,
+  and a pointer resting where the switcher opens no longer changes your pick.
+- **Workspaces (Super+W) in the new design.** Frosted over the wallpaper, each workspace is a
+  rounded picture of its monitor with your wallpaper behind the windows, named underneath.
+  It opens on the monitor you are using, and windows on your other monitors now sit where
+  they really are. Clicking a window goes straight to it, which did nothing before.
+- **Move windows between workspaces from Super+W.** Drag a window onto another workspace, or
+  onto the New workspace strip to start one (N does the same without a window). Hover a
+  window for its name and a close button; a middle click closes it too.
+- **Alt+` cycles the windows of the app you are in,** and Alt+Tab tiles can be closed the same
+  way, with the cross or a middle click.
+- **One voice across the shell.** Settings pages and the wallpaper picker were still in
+  monospace with lowercase labels, and bar menus mixed lowercase, tracked capitals and tiny
+  text. All of it now uses the interface font and sentence case. Monospace stays where it
+  helps: window classes, file names, and the wallpaper number. Settings no longer repeats a
+  page's name as a heading right under it.
+- **Four new desktop widgets: network, notifications, photo and quote.** Network shows
+  the connection and its signal, the download and upload rates, a minute of traffic and,
+  large, each interface. Notifications shows how many are waiting and the newest ones.
+  Photo shows a picture that changes every fifteen minutes or on a click, from your
+  wallpapers (videos use their poster frame), Pictures or Screenshots. Quote shows a quote
+  a day; click for another. All four come in small, medium and large, in the widget
+  drawer, whose tabs show their names only for the chosen one now that there are ten.
+- **Alignment guides while arranging widgets.** A dragged widget is pulled onto other
+  widgets’ edges and centres, the middle of the screen and a margin from each side, and a
+  line shows what it has locked onto. Hold Shift to place it freely.
+- **The lock screen shows the weather and your next events.** They sit in small pills
+  under the date. An event’s name is hidden when notifications are set to app names only.
+  Turn them off under Idle & lock → lock screen.
+- **A layout for each set of displays.** sea-shell remembers your widgets, the dock and the
+  bar’s edge for every combination of displays, so docking and undocking bring back how
+  each one was arranged. A combination seen for the first time keeps what you have. It is
+  under Settings → Display → layouts, on by default.
+- **A wallpaper strip.** Super+N and Super+Shift+N now show your wallpapers in a row along
+  the foot of the screen for a moment, with the current one ringed, so you can see where
+  you are in the collection; click any of them to switch to it. It never takes the
+  keyboard. `qs -c sea-shell ipc call wallpaper strip` shows it on its own.
+- **A What’s new page for 7.1**, shown once after updating, as 7.0’s was.
+
+### Changed
+
+- **The notification list matches the popups,** with the app's icon large on the left and the details
+  beside it.
+- **Settings gained Do not disturb and Muted apps** on its Notifications page, so a muted app can
+  be found and unmuted.
+- **Tidier wording and larger small text.** Settings' remaining lowercase sentences are now proper
+  ones, 9-10 px text is 11 px across Settings, the bar and Files, and the launcher and Dashboard
+  keep monospace only where figures need to line up.
+- **The Files preview panel follows your accent and theme** like the rest of Files.
+- **The media panel no longer names a character** next to your sticker.
+- **Notifications lead with a big icon.** The app's icon sits large on the left with the details
+  beside it, and the shell's own notifications carry the sea-shell logo and its name instead of
+  a bell and "notify-send".
+- **Quiet also caps the CPU.** The firmware will not let the fans run below its own curve, so less
+  heat is what makes Quiet quieter. Auto and Max leave the CPU alone.
+- **Game mode waits before turning off.** Steam's launch steps made it switch off and back on
+  several times per launch; it now only turns off if nothing is using it 8 seconds later.
+- **Less memory on hybrid laptops.** The bar and Files no longer load NVIDIA's graphics libraries
+  when they draw on the integrated GPU, about 30-40 MB each.
+- **The media panel is tighter.** Shuffle and repeat are icon buttons beside the transport
+  rather than bare words below it, and a progress bar with times takes up the empty space.
+- **The bar, its menus, notifications and the dock are glass now, done properly.** The old
+  see-through setting let whatever app was underneath show straight through, so the bar
+  went dark over a dark window and text was hard to read in places. Now Hyprland blurs the
+  wallpaper behind them (never the app under a menu), the tint never goes below what keeps
+  text readable on any picture, and a hairline edge and a soft sheen along the top give
+  them the lit edge macOS's materials have. The blur no longer dims what it blurs. Settings
+  → Appearance → material picks solid, frosted (the default) or clearer.
+- **The bar's pills and every dropdown were redrawn to match.** Pills are quiet fills
+  instead of outlined boxes (an "outline" widget style keeps its rim), and the rows,
+  headers, chips and tiles inside the dropdowns and Control Center use see-through tints
+  rather than solid grey steps that looked like patches on the glass.
+- **Notifications look like macOS's.** Each popup shows the app's icon, its name and
+  “now”, the title, the message and the app's buttons as pills, with a round close button
+  on hover. The notification list uses soft cards without outlines.
+- **The rest of the old outlined style is gone.** Files' dialogs (new folder, rename,
+  properties, conflicts, batch rename, Preferences) get a lighter dim, filled fields that
+  outline only when focused, pill buttons and the shell's switch. Arranging widgets (the
+  gear menu, sizes, the gallery's buttons) and the lock-screen and login-screen settings
+  pages lost their grey boxes and outlines too.
 
 - **A new launcher.** Results sit on the left in groups (open windows, apps, files,
   clipboard, system), and the right side shows the selected one: a capture of the window,
@@ -16,12 +507,137 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   answer in large type. The frame keeps one size while you type, the footer names what
   Enter will do, and the prefixes are buttons along the bottom. One click selects a row,
   a second click opens it.
+- **The wallpaper picker is the sea now.** The frames float on a waterline along the
+  bottom of the screen, bobbing out of step, each with a rippled reflection, and the name
+  and details are printed on the water. Choosing one sinks it, a tide rises up the screen
+  in your accent colour and drains away to leave the new wallpaper. This replaces the
+  cartridge-and-console animation; search, filters, sorting, import and video previews
+  work as before.
+- **The dashboard matches Settings and the widgets.** It opens as a sheet over the
+  dimmed desktop instead of blanking the screen. CPU, memory, disk and GPU are ring
+  gauges, as on the System widget, with the last minute on one chart. Wi-Fi, Bluetooth,
+  Caffeine and Sound are Control Center tiles you click anywhere to switch. Today’s app
+  time is shown as bars, and tasks have round checkboxes, with delete on hover. It now
+  opens instantly: the shell keeps it ready instead of starting a new program on every
+  Super+D, and it checks nothing in the background while closed.
+- **Keyboard shortcuts (Super+K) are grouped.** Apps, Shell, Windows, Workspaces, Capture
+  and Media each have their own panel. An action with two shortcuts is one row (Terminal:
+  Super Enter or Super T), Workspace 1–10 is one row until you search, and keys are drawn
+  as key caps. Unnamed helper binds no longer show up as “HL.Dispatcher(exec_cmd) 67”.
+  Changing a shortcut happens in a bar along the bottom, and New shortcut opens a form
+  at the top.
+- **Screenshots and recording match the rest of the shell.** The screenshot picker is a
+  capture bar near the bottom of the screen, with each target’s key on its button. The
+  editor’s toolbar has round tools and swatches and named Copy and Save buttons, and pen
+  text uses the shell’s font. The recorder uses segmented controls for audio, frame
+  rate, format, encoder and countdown, shows capture targets as tiles, draws the
+  countdown as a ring, and opens instantly. The screenshot picker’s “save to ~/Pictures”
+  switch is gone: it never did anything, and the editor’s Save button does the job. The
+  screenshot picker now stays loaded in the shell like the dashboard, so Print opens it
+  at once.
+- **A new look for the dock.** A rounder shelf, a dot under each running app (in your
+  accent for the app you are in), a divider between kept and running apps, an icon that
+  dips when pressed and bounces while an app launches, and a two-line label with the
+  app’s name. The dock now follows the panel opacity setting, which it ignored before.
+- **The welcome tour, password prompts and Wi-Fi password card match Settings.** Sans
+  type in sentence case, quiet filled controls instead of outlines, pill buttons, round
+  colour swatches and step dots that stretch for the current step. The password prompt is
+  a centred sheet with your picture, the program in full, and two equal buttons.
+- **Files looks like the rest of the shell.** The toolbar is soft capsules, the search and
+  filter boxes are filled, the sidebar headings are in sentence case, and the tab strip
+  only appears once there is a second tab (Ctrl+T or File → New Tab opens one). The path
+  starts at Home inside your home folder, and when it is too long for the bar its start
+  fades out instead of being cut mid-word.
+- **Files opens instantly after the first time.** Closing the window now hides it, and the
+  next Super+E (or any app asking to open a folder) hands over to it and shows it
+  again, in about a tenth of a second instead of nearly a second. It comes back as a
+  new window would: one tab, nothing selected. It quits by itself after 20 minutes
+  unused, File → Quit Files (Ctrl+Q) quits at once, and Preferences → “Keep Files ready
+  after closing” turns it off. The hidden split-view pane no longer scans your home
+  folder at start-up.
+- **Files works from the keyboard.** Arrow keys move the selection (Shift extends it),
+  Home and End jump to the ends, Enter opens, Backspace goes to the enclosing folder,
+  and typing a name jumps to it.
 - **The lock screen is set under Idle & lock.** Its preview, the notification choice and
   the clock options moved from Your profile to Idle & lock → lock screen, next to the
   other locking settings. Your profile keeps the picture and name.
 
+- **Widgets keep clear of the wallpaper’s subject, and line up when they move.** A
+  widget now needs a little room around it, not just the space under it, so cards no
+  longer sit flush against a face or a strand of hair. A widget that has to move goes
+  somewhere comfortably clear, so the next wallpaper doesn't move it again, and it snaps
+  into line with a nearby widget with an even gap.
+- **Tidy up.** A new button in the widget drawer lays every unpinned widget out as one
+  aligned block in the calmest part of the wallpaper: even gaps, small widgets side by
+  side. It only runs when you ask; wallpaper changes still nudge widgets one at a time.
+  Pinned widgets stay where you put them.
+
+- **The shell starts more than twice as fast.** In testing, the bar appeared after about 2.4 seconds
+  instead of about 6. Settings and the welcome tour used to load during startup, and
+  the shell showed nothing until they were finished. They now load after the bar is up,
+  at the first moment you are not using the keyboard or mouse, followed by the widget
+  drawer. The bar’s dropdowns are also built in the background instead of at startup.
+  Opening Settings before it has finished loading opens it as soon as it is ready.
+- **The laptop screen can step aside for an external display.** Settings → Display has a
+  new laptop screen section: turn the laptop panel off whenever an external display is
+  connected, or only while the lid is closed (on by default). Its windows move to the
+  external screen, and it comes back on at its own refresh rate when the external display
+  is unplugged or the lid opens. The laptop panel is never turned off when it is the only
+  screen.
+
 ### Fixed
 
+- **Disks showed no root usage on btrfs.** "Root used" stayed blank and the system partition was
+  labelled `/var/tmp`, because a partition mounted once per subvolume only reported one of them.
+- **Notifications arriving together stay visible.** In a burst, the earlier cards were left stuck
+  nearly transparent.
+- **No more of the last app's menu under the new app's name.** Switching from an app with a global
+  menu to one without showed its File, Edit, View for up to a quarter of a second before the
+  workspaces came back. The strip now fades out as soon as focus moves.
+- **Switching between an app with a menu and one without is quicker and stays smooth at speed.**
+  Apps with no menu no longer wait on a slow lookup at every visit, interrupted fades carry on
+  instead of blinking, and an app's raw class name no longer flashes before its menu.
+- **The shell's password prompt is actually used.** `hyprpolkitagent.service` could take the only
+  agent slot at login, so the styled prompt never appeared. The installer now disables the service.
+- **Super+S works straight after login.** It used to do nothing until Settings had loaded.
+- **Game mode switched on by hand now includes Feral gamemode.** The tile and Super+Shift+G
+  only changed the desktop side; the CPU governor and process priority were left out unless a
+  game had asked for them.
+  Leaving also retries the power profile for a while, since the CPU driver refuses the change
+  until Feral has let go of the governor.
+- **A fan preset no longer comes back by surprise.** After a reboot the row showed Auto while
+  the saved preset could still be Max, so the next game launched through game mode went to
+  full speed. The preset now survives a reboot, so what the row shows is what is used.
+- **Choosing Auto no longer reports "sea-fancurve not set up"** when it had in fact worked.
+- **Restoring a saved display layout turns a switched-off display back on.** The layout
+  was applied without saying the display should be on, so one that was off stayed off.
+
+- **The health check no longer says the bar is not running when it is.** It only
+  recognised the bar’s old command line, not the one the supervisor uses now.
+- **The power menu, Settings, the dashboard, the screenshot bar and the recorder open after
+  a display is switched off.** Each one sat on the display it last opened on, so when that
+  display went away (lid shut, monitor unplugged) it had nothing left to draw on and the key
+  did nothing. They now open on the display you are using, where the cursor is, and are
+  rebuilt there whenever the old one is gone. The recorder also opens there now, instead
+  of on whichever display came first.
+- **A switched-off display stays listed in Settings → Display.** The laptop screen used to
+  vanish from the page while an external display had it turned off. It now shows as off,
+  says why, and has a button to turn it back on.
+- **Previews in Files work for many more files, and big pictures load quickly.** PDFs
+  showed no pages unless the optional PyMuPDF was installed, and Word, Excel and other
+  Office files (previewed by way of a PDF) failed the same way; both now render with
+  poppler, which nearly every desktop has. WebP, TIFF, AVIF, HEIC, JPEG XL, PSD and camera
+  RAW files get a thumbnail and a preview through ImageMagick, since Qt here cannot read
+  them. Archives list what is inside, and EPUBs show their cover and first page. Files
+  with no preview no longer leave the panel loading forever, a name with #, ? or % in it
+  no longer stops its picture loading, and large photos are decoded at the size they are
+  shown rather than in full. Pages render at 200 DPI instead of 300, which is quicker
+  and still sharp. The inspector’s heading and buttons now match the rest of the window,
+  and it no longer lists the size twice.
+- **The calendar widget lists your events.** Its medium and large sizes read the battery
+  list by mistake and showed blank “Event” rows.
+- **The bar’s log no longer fills with desktop widget errors.** A widget removed just after
+  it was created threw an error each time.
 - **Desktop widgets glide when the wallpaper moves them.** A widget nudged out of the way
   of a new wallpaper used to jump; it now travels there, and a dropped widget no longer
   flickers back to its old spot first.

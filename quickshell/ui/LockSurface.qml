@@ -31,6 +31,7 @@ Item {
     property bool showContent: true
     property var player: null
     property var battery: null              // { pct, charging } or null on a desktop
+    property var glance: ({})               // { wxTemp, wxCond, events: [{ title, date, time }] } from the bar
     property bool leaving: false
     // ---- out ----
     signal key(var event)
@@ -146,6 +147,35 @@ Item {
                 text: Qt.formatDate(clock.date, lk.dateFormat)
                 font.family: lk.textFont; font.weight: Font.DemiBold; font.pixelSize: 24 * lk.u
                 color: Qt.rgba(1, 1, 1, 0.9)
+            }
+
+            // At a glance, as a phone's lock screen: the weather and what is next, in small glass
+            // pills under the date. Only what the bar has handed over (lk.glance), so a desktop
+            // without weather or a calendar shows nothing here rather than empty pills.
+            Flow {
+                id: glanceRow
+                visible: lk.glanceItems.length > 0
+                width: parent.width
+                topPadding: 18 * lk.u
+                spacing: 8 * lk.u
+                Repeater {
+                    model: lk.glanceItems
+                    delegate: Rectangle {
+                        required property var modelData
+                        width: gRow.implicitWidth + 26 * lk.u; height: 38 * lk.u; radius: height / 2
+                        color: lk.glass; border.width: 1; border.color: lk.glassLine
+                        Row {
+                            id: gRow
+                            anchors.centerIn: parent; spacing: 8 * lk.u
+                            Text { text: modelData.i; font.family: "Material Symbols Rounded"; font.pixelSize: 18 * lk.u
+                                color: "white"; anchors.verticalCenter: parent.verticalCenter }
+                            Text { text: modelData.t; font.family: lk.textFont; font.weight: Font.DemiBold; font.pixelSize: 14 * lk.u
+                                color: "white"; anchors.verticalCenter: parent.verticalCenter }
+                            Text { visible: !!modelData.s; text: modelData.s || ""; font.family: lk.textFont; font.pixelSize: 13 * lk.u
+                                color: lk.dim; anchors.verticalCenter: parent.verticalCenter }
+                        }
+                    }
+                }
             }
 
             Item { width: 1; height: notesCol.visible ? 40 * lk.u : 0 }
@@ -394,12 +424,23 @@ Item {
             }
         }
 
-        // status, bottom right: layout · battery · power
+        // status, bottom right: notifications count · layout · battery · power
         Row {
             id: status
             anchors.right: parent.right; anchors.rightMargin: 36 * lk.u
             anchors.bottom: parent.bottom; anchors.bottomMargin: 36 * lk.u + (64 - 44) / 2 * lk.u
             spacing: 10 * lk.u
+            Rectangle {
+                visible: lk.notes.length > 0 && (lk.login || !lk.showContent)
+                anchors.verticalCenter: parent.verticalCenter
+                width: ncRow.implicitWidth + 22 * lk.u; height: 34 * lk.u; radius: height / 2
+                color: lk.glass; border.width: 1; border.color: lk.glassLine
+                Row {
+                    id: ncRow; anchors.centerIn: parent; spacing: 5 * lk.u
+                    Text { anchors.verticalCenter: parent.verticalCenter; text: "notifications"; font.family: "Material Symbols Rounded"; font.pixelSize: 16 * lk.u; color: "white" }
+                    Text { anchors.verticalCenter: parent.verticalCenter; text: "" + lk.notes.length; font.family: Tok.mono; font.pixelSize: 12 * lk.u; font.weight: Font.DemiBold; color: "white" }
+                }
+            }
             Rectangle {
                 visible: lk.layout !== ""
                 anchors.verticalCenter: parent.verticalCenter
@@ -494,6 +535,40 @@ Item {
     }
 
     // ---------- grouping ----------
+    function wxGlyph(c) {
+        c = ("" + (c || "")).toLowerCase();
+        var night = clock.date.getHours() >= 19 || clock.date.getHours() < 6;
+        return c.indexOf("thunder") >= 0 ? "thunderstorm" : /snow|sleet|ice/.test(c) ? "weather_snowy"
+             : /rain|drizzle|shower/.test(c) ? "rainy" : /fog|mist|haze/.test(c) ? "foggy"
+             : c.indexOf("overcast") >= 0 ? "cloud" : /cloud|partly/.test(c) ? (night ? "nights_stay" : "partly_cloudy_day")
+             : /clear|sunny/.test(c) ? (night ? "clear_night" : "sunny") : "cloud";
+    }
+    function whenOf(e) {
+        var p = ("" + e.date).split("-"), d = new Date(+p[0], (+p[1] || 1) - 1, +p[2] || 1);
+        var t = new Date(clock.date.getFullYear(), clock.date.getMonth(), clock.date.getDate());
+        var days = Math.round((d - t) / 86400000);
+        var w = days <= 0 ? "" : days === 1 ? "Tomorrow" : days < 7 ? Qt.formatDate(d, "dddd") : Qt.formatDate(d, "d MMM");
+        return [w, e.time || ""].filter(x => x).join(" ");
+    }
+    readonly property var glanceItems: {
+        var g = lk.glance || {}, out = [];
+        if (g.wxTemp) out.push({ i: lk.wxGlyph(g.wxCond), t: g.wxTemp, s: g.wxCond || "" });
+        var ev = g.events || [];
+        for (var i = 0; i < Math.min(ev.length, 2); i++)
+            // an event's name is as private as a message's: hidden with them
+            if (ev[i].title) out.push({ i: "event", t: lk.showContent ? ev[i].title : "Next event", s: lk.whenOf(ev[i]) });
+        // Messages in a bottle that washed up while you were away
+        var bottles = g.bottles || [];
+        for (var bi = 0; bi < Math.min(bottles.length, 2); bi++) {
+            if (!bottles[bi].text) continue;
+            out.push({
+                i: "sailing",
+                t: lk.showContent ? bottles[bi].text : "A bottle washed up",
+                s: "from the sea"
+            });
+        }
+        return out;
+    }
     readonly property var groups: {
         var by = {}, order = [];
         for (var i = 0; i < notes.length; i++) {
